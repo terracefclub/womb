@@ -1,0 +1,22 @@
+hetzner: ENC[AES256_GCM,data:r7NIW0BdmlQXiDCxbp7aoxZRVYoAyv/TXxO4/HaGkw36pn5ma6Wb0LUAws5oePvdcIkaq6UU7cdlYSvxxbd7zw==,iv:/ChOPBgVOvKaavyr10AbzETAEn9wMt5axc+ifGqNeSk=,tag:3zGOI1VG7mcvRuX7EkYycQ==,type:str]
+opentofu_pw: ENC[AES256_GCM,data:nHLLWdEac0cKSqsLxTdp9E+3q0H2Q/6v,iv:Gm5e1EmWDX/JqdMoJ7BToYcv4KL2iD4B2QUhXBM8XYU=,tag:yzkuXyMhx/CURQFWzz1yIg==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age198yu3najdv79x087fa9qnl9x0pctugcl08ccc3cjpxd6h8ygp57sjglj0k
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB3QlNlb3VoUGNNOWZ2aFlE
+            d1RQWWhjVVBqUm9wZnp1REVDR2VoV08zWkFvCkJUdkZ1dUt3MHg3UTRZY0ZYMXlQ
+            Nng5dHNzNXJaVGp6OFdnZzhZa0JqNk0KLS0tIHNPbVlkLy9NSk8rUGljbi9LN21V
+            QnVabFZXVFlRZlVRT3NnK0ViL0NnQncK1vK2rPaKeuJ/1hLeLaCZpBSOfYcKUSjJ
+            ZTRVNdHWkQZR6gK0aJLg4wRrcyKC3tzLwNT9RTpo8TBojFfqRu2hiA==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2025-03-02T21:43:32Z"
+    mac: ENC[AES256_GCM,data:GQiikZOYSnNMXQQUReG0kBfUS2+q4YPB3n/nW3T3vX4AIpS5IruFj8Rp5jFK1snN77Gw0uYbCGzKp6ELbJ1CJLOcKRJPHIMZ0re2pFfv+TM4TtxADkN2cuFgXOA869VbuoxjmPnIInX5L+vp3ldzF+UJNlwUfChwQ73w2mYni0A=,iv:1v/xuaQfKj59HzlvRbayfUr8SoFWKb15GFdcNHuxtQg=,tag:S+gbDviSfcWwvsWSRJz5ng==,type:str]
+    pgp: []
+    unencrypted_suffix: _unencrypted
+    version: 3.9.4

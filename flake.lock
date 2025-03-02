@@ -80,11 +80,11 @@
         "systems-default": "systems-default"
       },
       "locked": {
-        "lastModified": 1740675090,
-        "narHash": "sha256-wymQZfH7s36BZrM/drR5iPqUh+gJbVxm1lGIRtmC4LA=",
+        "lastModified": 1740952263,
+        "narHash": "sha256-ORXOMNRinUyVulOcfrkOVIPbEFVqmJJO02dfT5gDMeA=",
         "owner": "schradert",
         "repo": "canivete",
-        "rev": "a9767aa4ca07bd4a430f9da68de7ddae1381cb5e",
+        "rev": "bb642748b9fa17a5f1cbdf657e180bb223d6fee0",
         "type": "github"
       },
       "original": {
@@ -1024,6 +1024,22 @@
         "type": "gitlab"
       }
     },
+    "opentofu-registry": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1740950477,
+        "narHash": "sha256-aP70Ga+KG/Jlf4DseSAlu2cFBsL+GErIoBJVhYl5igw=",
+        "owner": "opentofu",
+        "repo": "registry",
+        "rev": "a16ff8adb8b347eda8c03f7e98618058619abd35",
+        "type": "github"
+      },
+      "original": {
+        "owner": "opentofu",
+        "repo": "registry",
+        "type": "github"
+      }
+    },
     "pre-commit": {
       "inputs": {
         "flake-compat": "flake-compat_2",
@@ -1079,6 +1095,7 @@
         "nixos-anywhere": "nixos-anywhere_2",
         "nixos-generators": "nixos-generators_2",
         "nixpkgs": "nixpkgs_6",
+        "opentofu-registry": "opentofu-registry",
         "sops-nix": "sops-nix",
         "systems": "systems_3",
         "terranix": "terranix"
