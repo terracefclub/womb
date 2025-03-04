@@ -1,27 +1,64 @@
-{config, ...}: let
+{
+  config,
+  inputs,
+  lib,
+  ...
+}: let
   inherit (config.canivete.meta) domain people root;
 in {
   # FIXME build this on remote root
   canivete.deploy.nixos.nodes.${root}.profiles.system.module = {
-    security.acme = {
-      defaults.acceptTerms = true;
-      defaults.email = people.users.tristan.profiles.default.email;
-      certs."vaultwarden.${domain}".group = "vaultwarden";
+    imports = [
+      inputs.disko.nixosModules.disko
+      inputs.srvos.nixosModules.hardware-hetzner-cloud
+      inputs.srvos.nixosModules.mixins-nginx
+      inputs.srvos.nixosModules.server
+    ];
+
+    disko.devices.disk.base = {
+      device = "/dev/sda";
+      type = "disk";
+      content.type = "gpt";
+      content.partitions = {
+        boot = {
+          priority = 1;
+          type = "EF02";
+          size = "1M";
+        };
+        ESP = {
+          priority = 2;
+          type = "EF00";
+          size = "512M";
+          content.type = "filesystem";
+          content.format = "vfat";
+          content.mountpoint = "/boot";
+        };
+        root = {
+          priority = 3;
+          size = "100%";
+          content.type = "filesystem";
+          content.format = "ext4";
+          content.mountpoint = "/";
+        };
+      };
     };
 
-    services.nginx = {
-      enable = true;
-      recommendedGzipSettings = true;
-      recommendedOptimisation = true;
-      recommendedProxySettings = true;
-      recommendedTlsSettings = true;
-      virtualHosts."vaultwarden.${domain}" = {
-        enableACME = true;
-        forceSSL = true;
-        locations."/" = {
-          proxyPass = "http://127.0.0.1:8000";
-          proxyWebsockets = true;
-        };
+    system.stateVersion = "25.05";
+    users.users.root.openssh.authorizedKeys.keys = [(lib.fileContents ./ssh/tristan.pub)];
+
+    security.acme = {
+      acceptTerms = true;
+      defaults.email = people.users.tristan.profiles.default.email;
+      defaults.server = "https://acme-staging-v02.api.letsencrypt.org/directory";
+      # certs."vaultwarden.${domain}".group = "vaultwarden";
+    };
+
+    services.nginx.virtualHosts."vaultwarden.${domain}" = {
+      enableACME = true;
+      forceSSL = true;
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:8000";
+        proxyWebsockets = true;
       };
     };
 
