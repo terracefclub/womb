@@ -1,27 +1,29 @@
 {
   inputs = {
+    deploy-rs.url = "github:serokell/deploy-rs";
+    devenv.url = "github:cachix/devenv";
     disko.url = "github:nix-community/disko";
-    git-hooks.url = "github:cachix/git-hooks.nix";
     nixos-anywhere.url = "github:nix-community/nixos-anywhere";
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     sops-nix.url = "github:Mic92/sops-nix";
     srvos.url = "github:nix-community/srvos";
-    systems.url = "github:nix-systems/default";
-    terranix.url = "github:terranix/terranix";
-    opentofu-registry.url = "github:opentofu/registry";
-    opentofu-registry.flake = false;
+    treefmt-nix.url = "github:numtide/treefmt-nix";
 
     canivete.url = "github:schradert/canivete";
   };
   outputs = inputs:
-    inputs.canivete.lib.mkFlake {inherit inputs;} [./nix] {
+    inputs.canivete.lib.mkFlake {inherit inputs;} {
+      imports = [./devenv ./nixos];
       canivete.meta = {
         domain = "terracefclub.org";
-        root = "servery";
-        people.users.tristan.profiles.default.email = "tristan.schrader@terracefclub.org";
-      };
-      perSystem = {pkgs, ...}: {
-        canivete.devShells.shells.default.packages = [pkgs.hcloud];
+        people.me = "tristan";
+        people.users.tristan = {
+          name = "Tristan Schrader";
+          profiles.default = {
+            email = "tristan.schrader@terracefclub.org";
+            sshPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC0NBh1tPsY2hs3qW8BEZ2wn+eaOL33blaaQBKI27YZu";
+          };
+        };
       };
     };
 }

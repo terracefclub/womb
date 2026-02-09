@@ -1,3 +1,9 @@
+/.devenv*
 /.direnv/
-result
+/.helix/
+/.zed/
 /.pre-commit-config.yaml
+/secrets/
+__pycache__/
+devenv.local.nix
+result

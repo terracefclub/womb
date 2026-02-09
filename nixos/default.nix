@@ -1,20 +1,16 @@
 {
   config,
   inputs,
-  lib,
   ...
 }: let
-  inherit (config.canivete.meta) domain people root;
+  inherit (config.canivete.meta) domain people;
 in {
-  # FIXME build this on remote root
-  canivete.deploy.nixos.nodes.${root}.profiles.system.module = {
+  canivete.deploy.canivete.modules.nixos = {
     imports = [
       inputs.disko.nixosModules.disko
       inputs.srvos.nixosModules.hardware-hetzner-cloud
-      inputs.srvos.nixosModules.mixins-nginx
       inputs.srvos.nixosModules.server
     ];
-
     disko.devices.disk.base = {
       device = "/dev/sda";
       type = "disk";
@@ -42,13 +38,16 @@ in {
         };
       };
     };
-
-    system.stateVersion = "25.05";
-    users.users.root.openssh.authorizedKeys.keys = [(lib.fileContents ./ssh/tristan.pub)];
-
+    system.stateVersion = "26.05";
+    users.users = builtins.mapAttrs (_: person: {
+      openssh.authorizedKeys.keys = [person.profiles.default.sshPubKey];
+    }) (people // {root = people.me;});
+  };
+  canivete.deploy.nodes.servery.profiles.system.canivete.configuration = {
+    imports = [inputs.srvos.nixosModules.mixins-nginx];
     security.acme = {
       acceptTerms = true;
-      defaults.email = people.users.tristan.profiles.default.email;
+      defaults.email = people.my.profiles.default.email;
       defaults.server = "https://acme-staging-v02.api.letsencrypt.org/directory";
       # certs."vaultwarden.${domain}".group = "vaultwarden";
     };
@@ -57,7 +56,7 @@ in {
       enableACME = true;
       forceSSL = true;
       locations."/" = {
-        proxyPass = "http://127.0.0.1:8000";
+        proxyPass = "http" + "://127.0.0.1:8000";
         proxyWebsockets = true;
       };
     };
@@ -65,7 +64,7 @@ in {
     services.vaultwarden = {
       enable = true;
       config = {
-        DOMAIN = "https://vaultwarden.${domain}";
+        DOMAIN = "https" + "://vaultwarden.${domain}";
         SIGNUPS_ALLOWED = false;
         SIGNUPS_DOMAIN_WHITELIST = domain;
         EMAIL_CHANGE_ALLOWED = false;
