@@ -1,0 +1,7 @@
+description: ''
+value:
+  branch: ''
+  folder: windmill
+  is_github_app: false
+  url: '$var:f/Membership/gitlab'
+resource_type: git_repository

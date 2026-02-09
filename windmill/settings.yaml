@@ -1,5 +1,9 @@
 name: Terrace F Club
+auto_invite_as: developer
+auto_invite_enabled: false
+auto_invite_mode: invite
 color: '#17a12e'
+error_handler_muted_on_cancel: false
 git_sync:
   repositories:
     - exclude_types_override: []
