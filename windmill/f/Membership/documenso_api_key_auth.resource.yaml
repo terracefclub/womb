@@ -1,0 +1,5 @@
+description: ''
+value:
+  api_key_header: X-Documenso-Secret
+  api_key_secret: '$var:f/Membership/documenso_api_key_auth'
+resource_type: api_key_auth

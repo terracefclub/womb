@@ -1,0 +1,22 @@
+defaultTs: bun
+includes:
+  - f/**
+excludes: []
+codebases: []
+skipVariables: false
+skipResources: false
+skipResourceTypes: false
+skipSecrets: true
+skipScripts: false
+skipFlows: false
+skipApps: false
+skipFolders: false
+includeSchedules: true
+includeTriggers: true
+includeUsers: true
+includeGroups: true
+includeSettings: true
+includeKey: true
+gitBranches:
+  trunk:
+    overrides: {}

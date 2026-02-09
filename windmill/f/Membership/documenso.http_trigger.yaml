@@ -1,0 +1,17 @@
+summary: ''
+description: ''
+authentication_method: api_key
+authentication_resource_path: f/Membership/documenso_api_key_auth
+email: tristan.schrader@terracefclub.org
+http_method: post
+is_flow: true
+is_static_website: false
+mode: enabled
+raw_string: true
+request_type: async
+route_path: f/Membership/documenso
+route_path_key: f/Membership/documenso
+script_path: f/Membership/documenso_document_completed
+static_asset_config: null
+workspaced_route: false
+wrap_body: false

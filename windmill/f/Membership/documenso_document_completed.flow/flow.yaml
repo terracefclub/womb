@@ -1,0 +1,141 @@
+summary: Documenso Document Completed
+description: ''
+value:
+  modules:
+    - id: b
+      summary: ''
+      value:
+        type: branchall
+        branches:
+          - summary: Google Sheets
+            modules:
+              - id: d
+                summary: Update data in Google Sheet
+                value:
+                  type: rawscript
+                  content: '!inline update_data_in_google_sheet.inline_script.py'
+                  input_transforms:
+                    column_mappings:
+                      type: static
+                      value: null
+                    payload:
+                      type: static
+                      value: null
+                    row_identifier_column:
+                      type: static
+                      value: ''
+                    row_identifier_value:
+                      type: static
+                      value: ''
+                    service_account_file:
+                      type: static
+                      value: ''
+                    spreadsheet_id:
+                      type: static
+                      value: ''
+                    worksheet_name:
+                      type: static
+                      value: ''
+                  lock: '!inline update_data_in_google_sheet.inline_script.lock'
+                  language: python3
+            expr: ''
+            parallel: true
+            skip_failure: false
+          - summary: Quickbooks
+            modules:
+              - id: c
+                summary: Email Quickbooks Payment Link
+                value:
+                  type: rawscript
+                  content: '!inline email_quickbooks_payment_link.inline_script.py'
+                  input_transforms:
+                    member:
+                      type: static
+                      value: null
+                  lock: '!inline email_quickbooks_payment_link.inline_script.lock'
+                  language: python3
+            expr: 'false'
+            parallel: true
+            skip_failure: false
+        parallel: true
+  chat_input_enabled: false
+  preprocessor_module:
+    id: preprocessor
+    value:
+      type: rawscript
+      content: >
+        # Trigger preprocessor
+
+        #
+
+        # It processes raw trigger data from various sources (webhook, custom
+        HTTP route, SQS, WebSocket, Kafka, NATS, MQTT, Postgres, or email) 
+
+        # before passing it to the flow. This separates the trigger logic from
+        the flow logic and keeps the auto-generated UI clean.
+
+        # 
+
+        # The returned object determines the parameter values passed to the
+        flow.
+
+        # e.g., `{ b: 1, a: 2 }` → Calls the flow with `a = 2` and `b = 1`,
+        assuming the flow has two inputs called `a` and `b`.
+
+        # Ensure that the input names of the flow match the keys in the returned
+        object.
+
+        #
+
+        # Learn more: https://www.windmill.dev/docs/core_concepts/preprocessors
+
+
+        import typing
+
+
+        class HttpEvent(typing.TypedDict):
+            kind: typing.Literal["http"]
+            body: dict
+            raw_string: str | None
+            route: str
+            path: str
+            method: str
+            params: dict[str, str]
+            query: dict[str, str]
+            headers: dict[str, str]
+
+        Membership = typing.Literal["standard", "rca", "abroad", "sophomore"]
+
+        Installments = typing.Literal[1, 2]
+
+
+        class Member(typing.TypedDict):
+            name: str
+            email: str
+            membership: Membership
+            installments: Installments
+
+        def preprocessor(event: HttpEvent) -> Member:
+            print(event)
+            payload = event["body"]["payload"]["payload"]
+            signer = payload["Recipient"][0]
+            return {
+                "name": signer["name"],
+                "email": signer["email"],
+                # TODO implement field fetching for these values
+                "membership": signer[""],
+                "installments": 1,
+            }
+      input_transforms:
+        event:
+          type: static
+          value: null
+      lock: |
+        # py: 3.12
+      language: python3
+schema:
+  $schema: 'https://json-schema.org/draft/2020-12/schema'
+  type: object
+  order: []
+  properties: {}
+  required: []
