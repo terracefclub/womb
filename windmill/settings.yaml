@@ -1,9 +1,31 @@
 name: Terrace F Club
-auto_invite_as: developer
-auto_invite_enabled: false
-auto_invite_mode: invite
 color: '#17a12e'
-error_handler_muted_on_cancel: false
+git_sync:
+  repositories:
+    - exclude_types_override: []
+      git_repo_resource_path: '$res:u/tristanschrader/gitlab'
+      group_by_folder: false
+      script_path: hub/28131/sync-script-to-git-repo-windmill
+      settings:
+        exclude_path: []
+        extra_include_path: []
+        include_path:
+          - f/**
+        include_type:
+          - script
+          - flow
+          - app
+          - folder
+          - variable
+          - resourcetype
+          - schedule
+          - group
+          - settings
+          - key
+          - trigger
+          - user
+          - resource
+      use_individual_branch: false
 operator_settings:
   audit_logs: true
   folders: true
