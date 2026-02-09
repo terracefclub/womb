@@ -3,7 +3,7 @@ color: '#17a12e'
 git_sync:
   repositories:
     - exclude_types_override: []
-      git_repo_resource_path: '$res:u/tristanschrader/gitlab'
+      git_repo_resource_path: '$res:f/Membership/gitlab'
       group_by_folder: false
       script_path: hub/28131/sync-script-to-git-repo-windmill
       settings:
@@ -17,14 +17,14 @@ git_sync:
           - app
           - folder
           - variable
+          - resource
           - resourcetype
           - schedule
+          - trigger
+          - user
           - group
           - settings
           - key
-          - trigger
-          - user
-          - resource
       use_individual_branch: false
 operator_settings:
   audit_logs: true
