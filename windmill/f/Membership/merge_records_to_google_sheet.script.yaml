@@ -5,5 +5,31 @@ kind: script
 schema:
   $schema: 'https://json-schema.org/draft/2020-12/schema'
   type: object
-  properties: {}
-  required: []
+  properties:
+    records:
+      type: array
+      description: ''
+      default: null
+      items:
+        type: string
+      originalType: 'string[]'
+    service_account_json:
+      type: object
+      description: ''
+      default: null
+      properties: {}
+    sheet_name:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    spreadsheet_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - records
+    - spreadsheet_id
+    - sheet_name
+    - service_account_json
