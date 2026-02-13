@@ -1,11 +1,12 @@
+# workspace-dependencies-mode: manual
 # py: 3.12
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
-cryptography==46.0.4
+cryptography==46.0.5
 google-auth==2.48.0
 google-auth-oauthlib==1.2.4
-gspread==6.2.1
+gspread==6.1.4
 httplib2==0.31.2
 idna==3.11
 oauth2client==4.1.3
