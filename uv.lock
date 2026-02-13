@@ -231,6 +231,20 @@ wheels = [
 ]
 
 [[package]]
+name = "google-api-python-client-stubs"
+version = "1.31.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-python-client" },
+    { name = "types-httplib2" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/56/6a/20282998fc576456c24a34a8fe03fad92d8b3db1ab492bef09f99a9ceadb/google_api_python_client_stubs-1.31.0.tar.gz", hash = "sha256:219e1033dc440f4742008b4f2aab228c77a5175fd5724b5d2763221d3b01199a", size = 2416728, upload-time = "2025-10-31T18:40:53.983Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/ea/7133e60899a198c7cfc99d0a6afe2c39421e8c394a0516e85fdddfc704fc/google_api_python_client_stubs-1.31.0-py3-none-any.whl", hash = "sha256:3cf1c119372c747322bfad75048cdd3159ac53df305804c5dbfa13988b027aa9", size = 3393156, upload-time = "2025-10-31T18:40:52.425Z" },
+]
+
+[[package]]
 name = "google-auth"
 version = "2.48.0"
 source = { registry = "https://pypi.org/simple" }
@@ -565,6 +579,15 @@ wheels = [
 ]
 
 [[package]]
+name = "types-httplib2"
+version = "0.31.2.20260125"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/15/6a1b0c6e873af63f6fb5e3f12574e918d015887a9e164c36cbaf0fb4acae/types_httplib2-0.31.2.20260125.tar.gz", hash = "sha256:5bb567525c0a2cc3209c9c80016d43a8e69543090c8433993488a4637dc30300", size = 10646, upload-time = "2026-01-25T03:43:56.635Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/80/ec/f7a78d2cedf127a02b8a63bc634262a624fb614d904cf68db8a01d4af7fc/types_httplib2-0.31.2.20260125-py3-none-any.whl", hash = "sha256:dfec71909f7d624d25dfd1962fc543f9924337c39e5b24db6f7c300d686b7f65", size = 10651, upload-time = "2026-01-25T03:43:55.792Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -607,6 +630,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "google-api-python-client-stubs" },
     { name = "ty" },
 ]
 
@@ -622,4 +646,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ty", specifier = ">=0.0.15" }]
+dev = [
+    { name = "google-api-python-client-stubs", specifier = ">=1.29.0" },
+    { name = "ty", specifier = ">=0.0.15" },
+]

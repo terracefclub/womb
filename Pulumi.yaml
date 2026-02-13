@@ -1,3 +1,8 @@
 ---
 name: womb
 runtime: python
+config:
+  windmill:workspace:
+    value: terrace-f-club
+  gcp:project:
+    value: tfc-womb

@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ty>=0.0.15"]
+dev = ["ty>=0.0.15", "google-api-python-client-stubs>=1.29.0"]
 
 [tool.ruff]
 line-length = 120

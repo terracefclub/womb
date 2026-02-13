@@ -10,34 +10,25 @@ value:
           - summary: Google Sheets
             modules:
               - id: d
-                summary: Update data in Google Sheet
+                summary: Merge records to Google Sheet
                 value:
-                  type: rawscript
-                  content: '!inline update_data_in_google_sheet.inline_script.py'
+                  type: script
+                  path: f/Membership/merge_records_to_google_sheet
                   input_transforms:
-                    column_mappings:
-                      type: static
-                      value: null
-                    payload:
-                      type: static
-                      value: null
-                    row_identifier_column:
-                      type: static
-                      value: ''
-                    row_identifier_value:
-                      type: static
-                      value: ''
-                    service_account_file:
-                      type: static
-                      value: ''
+                    records:
+                      type: javascript
+                      expr: |-
+                        // Convert the member object to a list with one record
+                        [results.preprocessor]
                     spreadsheet_id:
                       type: static
-                      value: ''
-                    worksheet_name:
+                      value: $var:f/Membership/membership_spreadsheet_id
+                    sheet_name:
                       type: static
-                      value: ''
-                  lock: '!inline update_data_in_google_sheet.inline_script.lock'
-                  language: python3
+                      value: Sophomores 2026
+                    service_account_json:
+                      type: static
+                      value: $var:f/Membership/gdrive_creds
             expr: ''
             parallel: true
             skip_failure: false

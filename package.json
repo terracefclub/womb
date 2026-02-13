@@ -1,0 +1,10 @@
+{
+	"name": "womb",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"devDependencies": {
+		"@types/bun": "latest",
+		"windmill-cli": "^1.630.2"
+	}
+}
