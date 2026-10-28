@@ -53,6 +53,35 @@ human-facing file integration and is **not** assumed to be the backup target.
 No application data should be placed on this server until the DB, media and
 K3s token backup/restore gates have passed.
 
+## Existing project evidence and preservation gate
+
+Verified in Hetzner Console on 2026-10-28: the **existing Womb project** has
+one running Ashburn CPX11 (2 vCPU, 2 GB RAM, 40 GB disk). Provider backups are
+disabled; no project firewalls, volumes or object storage were shown. A
+pre-existing write token is present. This is not the selected dedicated
+Terrace project, and Console inventory does not establish what workloads or
+data are on the server, whether separate backups exist, or whether it can be
+restored. Do not repurpose its credential or change the server.
+
+Before any replacement, inventory the existing server's OS, running services,
+databases, volumes, application files, DNS dependencies and credential consumers
+through approved protected access. Obtain independently recoverable copies of
+its data and configuration, then validate an isolated restore and a rollback
+path. The original server stays intact until those checks and application
+reconciliation pass.
+
+The US$20 guard is for total retained cloud spending. Obtain the actual
+billing currency and itemized account charges before filling the quote: include
+the existing server, its IPv4 and any other retained charges in
+`otherMonthlyUsd`, along with the new server, its IPv4, provider backups,
+off-site allowance and tax. No account-specific amount or currency has been
+verified yet. A zero `otherMonthlyUsd` is unjustified while the old server
+remains billable; public list prices are not a substitute for the account
+quote. If billed in another currency, record the conversion rate, date and a
+conservative USD margin outside Git before entering the USD fields. If the
+combined amount exceeds US$20, defer provisioning until a safe
+retirement plan or a revised owner-approved budget exists.
+
 ## Review and recovery sequence
 
 1. Obtain the dedicated project token through a protected channel. Verify

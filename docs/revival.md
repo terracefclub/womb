@@ -1,7 +1,8 @@
 # Terrace revival
 
-Source audit: 2026-10-27. Owner decisions updated: 2026-10-28. No existing Terrace host or application was verified
-healthy in this audit. Source evidence is not evidence of a live deployment.
+Source audit: 2026-10-27. Owner decisions and provider inventory updated:
+2026-10-28. A running existing server is visible in Hetzner Console, but its
+OS, applications, data and recovery state have not been verified healthy.
 
 ## Agreed scope
 
@@ -39,8 +40,10 @@ an existing member database or functioning community product.
 
 Womb declares Vaultwarden at `vaultwarden.terracefclub.org`, staging ACME, and
 incomplete credential wiring. Old Pulumi declares an Ashburn `cpx11` with a
-Debian bootstrap image. Neither proves live state. Its Nix EFI disk layout must
-not be carried over without testing the actual Hetzner boot requirements.
+Debian bootstrap image. Hetzner Console now shows one running Ashburn CPX11 in
+the existing Womb project; this does not prove the declared OS, workload,
+data, or backup state. Its Nix EFI disk layout must not be carried over without
+testing the actual Hetzner boot requirements.
 
 ## Service decisions
 
