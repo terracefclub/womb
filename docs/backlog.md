@@ -1,6 +1,6 @@
 # Delivery backlog
 
-Updated 2026-10-27. Delivery is tracked in the [Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1)
+Updated 2026-10-28. Delivery is tracked in the [Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1)
 and [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1).
 Each issue carries acceptance criteria; a merged foundation or preview does not
 establish a live deployment. Link each small MR to its issue.
@@ -10,8 +10,8 @@ establish a live deployment. Link each small MR to its issue.
 | 1 | [Contributor workflow](https://gitlab.com/terrace/tech/womb/-/issues/1) | Credential-free devenv, local CLI state, installed hooks, shell contract | Merged in Womb !1 |
 | 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in Womb !2; capacity/recovery follow-up remains |
 | 3 | [Website design](https://gitlab.com/terrace/tech/tfc-website/-/issues/1) | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | Preview merged in website !1; design review remains |
-| 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) | Publish/revise/preview; roles; export/import; memory measurement | Selection pending |
-| 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) | Targeted plan, within $20 total, isolated resources, closure diff/health | Account scope pending |
+| 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) | Publish/revise/preview; roles; export/import; memory measurement | Payload implementation in progress |
+| 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) | Targeted plan, within $20 total, isolated resources, closure diff/health | Dedicated project selected; provider access pending |
 | 6 | [Backup and restore](https://gitlab.com/terrace/tech/womb/-/issues/4) | Encrypted DB/media backup; isolated restore; reconciliation; cost | Planned |
 | 7 | [WordPress preservation](https://gitlab.com/terrace/tech/tfc-website/-/issues/3) | Full protected DB/files backup, plugin/table inventory, restore | Access pending |
 | 8 | [Membership hardening](https://gitlab.com/terrace/tech/womb/-/issues/5) | Contract tests, authenticated webhook, idempotency, retry/replay, email outbox | Access pending |
@@ -21,7 +21,7 @@ establish a live deployment. Link each small MR to its issue.
 | 12 | [CDN](https://gitlab.com/terrace/tech/womb/-/issues/7) | Public cache; preview/admin/member bypass; cookie/invalidation tests | After origin acceptance |
 | 13 | [Documenso/Windmill](https://gitlab.com/terrace/tech/womb/-/issues/8) | Per-user access, signing/email/storage, workflow parity, restore | After capacity check |
 | 14 | [On premises](https://gitlab.com/terrace/tech/womb/-/issues/9) | Hardware/disks/network inventory; HA/Frigate integration | Hardware/access pending |
-| 15 | [Community pilot](https://gitlab.com/terrace/tech/tfc-website/-/issues/6) | Platform, invitation/privacy/moderation, opt-in mentorship | Decision pending |
+| 15 | [Community pilot](https://gitlab.com/terrace/tech/tfc-website/-/issues/6) | Platform, invitation/privacy/moderation, opt-in mentorship | Profiles/stories/groups/mentorship selected; HumHub pilot proposed |
 
 ## Release gates
 
