@@ -8,3 +8,9 @@ __pycache__/
 node_modules/
 devenv.local.nix
 result
+result-*
+/HANDOFF.md
+/private/
+/.env
+/.env.*
+!/.env.example
