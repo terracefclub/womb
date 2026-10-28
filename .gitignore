@@ -10,6 +10,9 @@ devenv.local.nix
 result
 result-*
 /HANDOFF.md
+/infra/cloud/Pulumi.*.yaml
+/infra/cloud/.env*
+/infra/cloud/.pulumi/
 /private/
 /.env
 /.env.*
