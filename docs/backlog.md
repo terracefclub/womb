@@ -1,26 +1,27 @@
 # Delivery backlog
 
-Updated 2026-10-27. These are issue-ready work items; planned items are not
-delivered. Create GitLab issues once authenticated API access is available and
-link each small MR to its issue.
+Updated 2026-10-27. Delivery is tracked in the [Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1)
+and [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1).
+Each issue carries acceptance criteria; a merged foundation or preview does not
+establish a live deployment. Link each small MR to its issue.
 
 | Order | Work item | Acceptance criteria | State |
 | --- | --- | --- | --- |
-| 1 | Contributor workflow | Credential-free devenv, local CLI state, installed hooks, clean-shell test | In progress |
-| 2 | Single-node platform | Pinned NixOS/K3s, private API, retained storage, VM test | In progress |
-| 3 | Website design | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | In progress in TFC Website |
-| 4 | CMS spike | Publish/revise/preview; roles; export/import; memory measurement | Selection pending |
-| 5 | Hetzner bootstrap | Targeted plan, within $20 total, isolated resources, closure diff/health | Account scope pending |
-| 6 | Backup and restore | Encrypted DB/media backup; isolated restore; reconciliation; cost | Planned |
-| 7 | WordPress preservation | Full protected DB/files backup, plugin/table inventory, restore | Access pending |
-| 8 | Membership hardening | Contract tests, authenticated webhook, idempotency, retry/replay, email outbox | Planned |
-| 9 | Credential remediation | Map consumers, verified backup, rotation, old credentials rejected | Access pending |
-| 10 | CMS import | Stable IDs, repeatable import, count/hash reconciliation, redirects | Depends on 4, 7 |
-| 11 | Public cutover | Content review, integration parity, accessibility/performance, rollback | Depends on 5, 6, 10 |
-| 12 | CDN | Public cache; preview/admin/member bypass; cookie/invalidation tests | After origin acceptance |
-| 13 | Documenso/Windmill | Per-user access, signing/email/storage, workflow parity, restore | After capacity check |
-| 14 | On premises | Hardware/disks/network inventory; HA/Frigate integration | Hardware/access pending |
-| 15 | Community pilot | Platform, invitation/privacy/moderation, opt-in mentorship | Decision pending |
+| 1 | [Contributor workflow](https://gitlab.com/terrace/tech/womb/-/issues/1) | Credential-free devenv, local CLI state, installed hooks, shell contract | Merged in Womb !1 |
+| 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in Womb !2; capacity/recovery follow-up remains |
+| 3 | [Website design](https://gitlab.com/terrace/tech/tfc-website/-/issues/1) | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | Preview merged in website !1; design review remains |
+| 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) | Publish/revise/preview; roles; export/import; memory measurement | Selection pending |
+| 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) | Targeted plan, within $20 total, isolated resources, closure diff/health | Account scope pending |
+| 6 | [Backup and restore](https://gitlab.com/terrace/tech/womb/-/issues/4) | Encrypted DB/media backup; isolated restore; reconciliation; cost | Planned |
+| 7 | [WordPress preservation](https://gitlab.com/terrace/tech/tfc-website/-/issues/3) | Full protected DB/files backup, plugin/table inventory, restore | Access pending |
+| 8 | [Membership hardening](https://gitlab.com/terrace/tech/womb/-/issues/5) | Contract tests, authenticated webhook, idempotency, retry/replay, email outbox | Access pending |
+| 9 | [Credential remediation](https://gitlab.com/terrace/tech/womb/-/issues/6) | Map consumers, verified backup, rotation, old credentials rejected | Access pending |
+| 10 | [CMS import](https://gitlab.com/terrace/tech/tfc-website/-/issues/4) | Stable IDs, repeatable import, count/hash reconciliation, redirects | Depends on 4, 7 |
+| 11 | [Public cutover](https://gitlab.com/terrace/tech/tfc-website/-/issues/5) | Content review, integration parity, accessibility/performance, rollback | Depends on 5, 6, 10 |
+| 12 | [CDN](https://gitlab.com/terrace/tech/womb/-/issues/7) | Public cache; preview/admin/member bypass; cookie/invalidation tests | After origin acceptance |
+| 13 | [Documenso/Windmill](https://gitlab.com/terrace/tech/womb/-/issues/8) | Per-user access, signing/email/storage, workflow parity, restore | After capacity check |
+| 14 | [On premises](https://gitlab.com/terrace/tech/womb/-/issues/9) | Hardware/disks/network inventory; HA/Frigate integration | Hardware/access pending |
+| 15 | [Community pilot](https://gitlab.com/terrace/tech/tfc-website/-/issues/6) | Platform, invitation/privacy/moderation, opt-in mentorship | Decision pending |
 
 ## Release gates
 
