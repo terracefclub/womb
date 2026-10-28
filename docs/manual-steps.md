@@ -4,7 +4,7 @@ Updated 2026-10-27. Record completion evidence; never credentials or exports.
 
 | Prerequisite | Completion criterion | Resume |
 | --- | --- | --- |
-| GitLab API | `glab api user` succeeds inside project shell with Terrace access | Issues/labels and MR management |
+| GitLab API | Verified 2026-10-27; future sessions must verify authentication again because credentials are short-lived | Issues/labels and MR management |
 | Hetzner scope | Owner chooses isolated resources in existing account or dedicated project; credential available | Stock/pricing and targeted plan |
 | CMS choice | Payload/SvelteKit, Wagtail/SvelteKit, or bounded comparison selected | CMS spike |
 | WordPress access | Protected complete DB/files backup and restore; plugin inventory | Preservation/import |
