@@ -1,6 +1,6 @@
 # Terrace revival
 
-Source audit: 2026-10-27. No existing Terrace host or application was verified
+Source audit: 2026-10-27. Owner decisions updated: 2026-10-28. No existing Terrace host or application was verified
 healthy in this audit. Source evidence is not evidence of a live deployment.
 
 ## Agreed scope
@@ -11,12 +11,17 @@ healthy in this audit. Source evidence is not evidence of a live deployment.
   are unknown; do not invent a disk layout. Single-node downtime is acceptable.
 - Cloud recovery resources stay outside its cluster. No quorum or storage
   replication stretched across the WAN; backups and a CDN do not create HA.
-- Keep Documenso, Home Assistant, Frigate, Windmill, shared storage and future
-  Google Workspace integration. Windmill is the only planned pipeline platform.
+- Keep Documenso, Home Assistant, Frigate, Windmill and Vaultwarden. Windmill is
+  the only planned pipeline platform. Prioritize Google Workspace/Drive for
+  shared files, with local storage for services and backups.
+- Use a dedicated Terrace Hetzner project/account; never provision into the
+  personal homelab project. Payload with SvelteKit is the selected CMS/frontend.
 - Website: warm, colorful, welcoming, events first; emphasize newsletters,
   club/alumni events, initiatives and donations.
-- Community: current members and alumni together. Product and moderation model
-  remain open. Keep private member data separate from public publishing.
+- Community: current members and alumni together, with profiles, stories, groups
+  and opt-in mentorship. Keep private member data separate from public publishing.
+  Evaluate HumHub for the pilot; membership approval and moderation owners remain
+  prerequisites for real invitations.
 - Enable CDN only after origin behavior, authentication and cache exclusions
   pass tests.
 
@@ -41,16 +46,16 @@ not be carried over without testing the actual Hetzner boot requirements.
 
 | Service | Treatment | Remaining evidence/decision |
 | --- | --- | --- |
-| Website/CMS | First hosted workload | CMS choice and complete WordPress inventory |
+| Website/CMS | Payload + SvelteKit; first hosted workload | Editorial/security spike and complete WordPress inventory |
 | PostgreSQL | One instance, separate roles/databases | App compatibility and restore test |
 | Identity | Per-user OIDC and roles | CMS adapter; independent emergency access |
 | Documenso | Keep, after website platform | Existing endpoint; signing/storage/email requirements |
 | Windmill | Keep one bounded worker initially | Preserve membership flow; synthetic tests |
 | Home Assistant | Keep on premises | Device inventory and LAN access |
 | Frigate | Keep on premises | Cameras, accelerator, storage/retention; no cloud inference |
-| Vaultwarden | Decision pending | Confirm use and backup before retirement |
-| Human-facing file sharing | Decision pending | Drive first, self-hosted sharing or both |
-| Community | Separate evaluation | Profiles/groups, discussion/chat or virtual clubhouse |
+| Vaultwarden | Keep | Confirm live endpoint, data and backup before migration |
+| Human-facing file sharing | Google Workspace/Drive first | Integration identity and existing permissions |
+| Community | Profiles, stories, groups, opt-in mentorship | HumHub pilot; see [community plan](community-pilot.md) |
 | Monitoring | Health, certificates, capacity, backup age, external probe | Bounded retention and actionable alerts |
 | Backups | Encrypted, off-site, independently recoverable | Credentials, cost cap, isolated restore |
 
@@ -90,8 +95,8 @@ An EU preview may fit; measure US latency and introduce a CDN later.
 | Directus | Strong data UI | Current MSCL license is not an unrestricted FLOSS choice |
 | WordPress | Production content and integrations already exist | Preserve as migration source and rollback until reconciliation passes |
 
-Proposed spike: Payload/SvelteKit, with Wagtail as the serious alternative. Owner
-selection is pending. Compare editing an event, illustrated newsletter,
+Selected 2026-10-28: Payload with SvelteKit. The comparison above is retained
+as decision context. Compare editing an event, illustrated newsletter,
 initiative and redirect; preview, roles, export/import and memory. AI assistance
 is optional and must not receive private member content by default.
 
