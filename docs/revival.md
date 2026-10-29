@@ -6,8 +6,10 @@ OS, applications, data and recovery state have not been verified healthy.
 
 ## Agreed scope
 
-- Temporary hosting plus backups: target **US$20/month**, including IPv4, taxes,
-  and storage. Confirm actual account pricing and stock before provisioning.
+- Temporary hosting plus backups: original **US$20/month** target is under
+  review. Owner requests Hetzner with separate access and application hosts and
+  a higher budget proposal; no replacement spending ceiling is approved yet.
+  See [access and recovery plan](access-relay.md); confirm account pricing/stock.
 - One x86_64 server on premises later. Hardware, disks, accelerators and network
   are unknown; do not invent a disk layout. Single-node downtime is acceptable.
 - Cloud recovery resources stay outside its cluster. No quorum or storage
@@ -17,12 +19,14 @@ OS, applications, data and recovery state have not been verified healthy.
   shared files, with local storage for services and backups.
 - Use a dedicated Terrace Hetzner project/account; never provision into the
   personal homelab project. Payload with SvelteKit is the selected CMS/frontend.
-- Website: warm, colorful, welcoming, events first; emphasize newsletters,
-  club/alumni events, initiatives and donations.
+- Website: accepting, gritty and countercultural; expressive real media,
+  newsletters readable in the page, events, initiatives, donations and Redbubble
+  merchandise. Stripe Checkout is selected; receiving account is not connected.
 - Community: current members and alumni together, with profiles, stories, groups
   and opt-in mentorship. Keep private member data separate from public publishing.
-  Evaluate HumHub for the pilot; membership approval and moderation owners remain
-  prerequisites for real invitations.
+  Use the Payload/SvelteKit pilot with dedicated Keycloak. Every new account
+  requires approval; profile-directory visibility and mentorship are opt-in.
+  Moderation ownership remains a prerequisite for real invitations.
 - Enable CDN only after origin behavior, authentication and cache exclusions
   pass tests.
 
@@ -58,7 +62,7 @@ testing the actual Hetzner boot requirements.
 | Frigate | Keep on premises | Cameras, accelerator, storage/retention; no cloud inference |
 | Vaultwarden | Keep | Confirm live endpoint, data and backup before migration |
 | Human-facing file sharing | Google Workspace/Drive first | Integration identity and existing permissions |
-| Community | Profiles, stories, groups, opt-in mentorship | HumHub pilot; see [community plan](community-pilot.md) |
+| Community | Payload/SvelteKit with dedicated Keycloak | Approval required; moderation and retention before real invitations |
 | Monitoring | Health, certificates, capacity, backup age, external probe | Bounded retention and actionable alerts |
 | Backups | Encrypted, off-site, independently recoverable | Credentials, cost cap, isolated restore |
 
@@ -111,9 +115,11 @@ Sources: [Payload license](https://github.com/payloadcms/payload/blob/main/LICEN
 [Ghost headless limits](https://ghost.org/docs/jamstack/),
 [Strapi plans](https://strapi.io/pricing-cms), [Directus license](https://directus.com/license).
 
-## Community shortlist
+## Earlier community shortlist
 
-HumHub best matches profiles, groups and a member directory; review commercial
+The selected implementation is now the custom Payload/SvelteKit pilot above.
+This earlier comparison is retained as research context. HumHub matches
+profiles, groups and a member directory; review commercial
 module dependencies. Discourse best matches searchable stories, moderation,
 discussion and chat. Mobilizon centers events/groups. WorkAdventure resembles
 a virtual clubhouse, but its Commons Clause license and video infrastructure
