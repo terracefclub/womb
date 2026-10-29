@@ -12,10 +12,17 @@
   in {
     nixosModules.single-node = import ./single-node.nix;
     nixosModules.hetzner = import ./hetzner.nix;
+    nixosModules.relay = import ./relay.nix;
 
-    checks.${system}.single-node = pkgs.testers.runNixOSTest (import ./test.nix {
-      inherit pkgs;
-      module = self.nixosModules.single-node;
-    });
+    checks.${system} = {
+      single-node = pkgs.testers.runNixOSTest (import ./test.nix {
+        inherit pkgs;
+        module = self.nixosModules.single-node;
+      });
+      relay = pkgs.testers.runNixOSTest (import ./relay-test.nix {
+        inherit pkgs;
+        module = self.nixosModules.relay;
+      });
+    };
   };
 }
