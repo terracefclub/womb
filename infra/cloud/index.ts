@@ -4,7 +4,14 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import * as hcloud from "@pulumi/hcloud";
 import * as pulumi from "@pulumi/pulumi";
-import { assessQuote, percentBasisPoints, usdCents } from "./budget";
+import {
+  DEFAULT_PLAN,
+  assessQuote,
+  euLocation,
+  percentBasisPoints,
+  serverType,
+  usdCents,
+} from "./budget";
 
 const config = new pulumi.Config();
 
@@ -18,10 +25,14 @@ if (!/^[a-f0-9]{64}$/.test(expectedTokenSha256) ||
   throw new Error("runtime Hetzner token does not match the pinned Terrace-project token fingerprint");
 }
 
-const location = config.require("location");
-if (!["fsn1", "nbg1", "hel1"].includes(location)) {
-  throw new Error("bootstrap location must be an EU x86_64 CX location");
-}
+// Defaults encode the reviewed plan in docs/access-relay.md. Overrides are
+// allowed but must still pass the strict US$80 budget gate below.
+const location = euLocation("location", config.get("location") ?? DEFAULT_PLAN.appLocation);
+const relayLocation = euLocation("relayLocation", config.get("relayLocation") ?? DEFAULT_PLAN.relayLocation);
+const relayType = serverType("relayServerType", config.get("relayServerType") ?? DEFAULT_PLAN.relayServerType);
+const appType = serverType("appServerType", config.get("appServerType") ?? DEFAULT_PLAN.appServerType);
+const relayProviderBackups = config.getBoolean("relayProviderBackups") ?? DEFAULT_PLAN.relayProviderBackups;
+const appProviderBackups = config.getBoolean("appProviderBackups") ?? DEFAULT_PLAN.appProviderBackups;
 const bootstrapImage = config.require("bootstrapImage");
 if (!/^debian-[0-9]+$/.test(bootstrapImage)) {
   throw new Error("bootstrapImage must be a current Debian image name checked in the project");
@@ -55,9 +66,13 @@ if (!/^(ssh-ed25519|ecdsa-sha2-[^ ]+) [A-Za-z0-9+/=]+(?: .*)?$/.test(publicKey))
 
 const quote = assessQuote({
   date: config.require("quoteDate"),
-  serverCents: usdCents(config.require("serverMonthlyUsd"), "serverMonthlyUsd"),
+  relayServerCents: usdCents(config.require("relayServerMonthlyUsd"), "relayServerMonthlyUsd"),
+  appServerCents: usdCents(config.require("appServerMonthlyUsd"), "appServerMonthlyUsd"),
+  relayProviderBackups,
+  appProviderBackups,
   ipv4Cents: usdCents(config.require("ipv4MonthlyUsd"), "ipv4MonthlyUsd"),
   offsiteBackupCents: usdCents(config.require("offsiteBackupMonthlyUsd"), "offsiteBackupMonthlyUsd"),
+  existingServerCents: usdCents(config.require("existingServerMonthlyUsd"), "existingServerMonthlyUsd"),
   otherCents: usdCents(config.require("otherMonthlyUsd"), "otherMonthlyUsd"),
   taxBasisPoints: percentBasisPoints(config.require("taxPercent")),
 });
@@ -73,19 +88,32 @@ const sshKey = new hcloud.SshKey("operator", {
   publicKey,
   labels,
 });
-const server = new hcloud.Server("bootstrap-server", {
-  name: "terrace-bootstrap-1",
-  location,
+const baseServer = {
   image: bootstrapImage,
-  serverType: "cx33",
-  backups: true,
   deleteProtection: true,
   rebuildProtection: true,
   firewallIds: [firewall.id.apply(Number)],
   sshKeys: [sshKey.name],
   publicNets: [{ ipv4Enabled: true, ipv6Enabled: false }],
-  labels,
+};
+const relay = new hcloud.Server("relay-server", {
+  ...baseServer,
+  name: "terrace-relay-1",
+  location: relayLocation,
+  serverType: relayType,
+  backups: relayProviderBackups,
+  labels: { ...labels, role: "relay" },
+}, { protect: true });
+const app = new hcloud.Server("app-server", {
+  ...baseServer,
+  name: "terrace-app-1",
+  location,
+  serverType: appType,
+  backups: appProviderBackups,
+  labels: { ...labels, role: "app" },
 }, { protect: true });
 
-export const quotedMonthlyUsd = (quote.totalCents / 100).toFixed(2);
-export const serverId = server.id;
+export const quotedSteadyMonthlyUsd = (quote.steadyCents / 100).toFixed(2);
+export const quotedOverlapMonthlyUsd = (quote.overlapCents / 100).toFixed(2);
+export const relayServerId = relay.id;
+export const appServerId = app.id;

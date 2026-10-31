@@ -10,5 +10,6 @@ fi
 pulumi preview --stack bootstrap --suppress-permalink --suppress-outputs \
   --target 'urn:pulumi:bootstrap::terrace-cloud::hcloud:index/firewall:Firewall::bootstrap-firewall' \
   --target 'urn:pulumi:bootstrap::terrace-cloud::hcloud:index/sshKey:SshKey::operator' \
-  --target 'urn:pulumi:bootstrap::terrace-cloud::hcloud:index/server:Server::bootstrap-server' \
+  --target 'urn:pulumi:bootstrap::terrace-cloud::hcloud:index/server:Server::relay-server' \
+  --target 'urn:pulumi:bootstrap::terrace-cloud::hcloud:index/server:Server::app-server' \
   2>/dev/null

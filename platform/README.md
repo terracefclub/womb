@@ -76,8 +76,10 @@ VM while K3s is stopped, then verify the API and workloads. Restore PV data
 from the application backups. Record a successful restore drill; until then the
 production restore gate remains open.
 
-The target is one temporary Hetzner server with backups included in a total
-budget of $20/month or less. No size, disk layout, or price is asserted here:
-those must be checked against the live account before purchase. On-premise
+The target is a relay plus one application host with backups included in a
+total budget strictly below $80/month, including the temporary overlap with the
+existing server; see [the hosting plan](../docs/access-relay.md). No disk layout
+or account price is asserted here: those must be checked against the live
+account before purchase. On-premise
 hardware later uses the same `single-node.nix` module with a separate host
 profile; it does not imply a WAN-spanned cluster.
