@@ -6,10 +6,11 @@ OS, applications, data and recovery state have not been verified healthy.
 
 ## Agreed scope
 
-- Temporary hosting plus backups: original **US$20/month** target is under
-  review. Owner requests Hetzner with separate access and application hosts and
-  a higher budget proposal; no replacement spending ceiling is approved yet.
-  See [access and recovery plan](access-relay.md); confirm account pricing/stock.
+- Temporary hosting plus backups: owner ceiling (2026-10-29) is **strictly below
+  US$80/month** including backups, tax and temporary overlap with the existing
+  server; the original US$20 target is superseded. Hetzner with separate access
+  and application hosts. See [access and recovery plan](access-relay.md) for the
+  priced options and recommendation; confirm account pricing/stock first.
 - One x86_64 server on premises later. Hardware, disks, accelerators and network
   are unknown; do not invent a disk layout. Single-node downtime is acceptable.
 - Cloud recovery resources stay outside its cluster. No quorum or storage
@@ -86,9 +87,10 @@ Initially run the public site, CMS, database, identity essentials and backups.
 Build artifacts elsewhere. Measure memory and load before adding Documenso and
 Windmill; the entire wishlist is not promised to fit the temporary VM.
 
-Checked 2026-10-27: Hetzner lists EU CX33 at $9.99/month excluding IPv4/tax, while
-US CPX11 is $20.49 before extras. Public listings do not prove stock availability.
-An EU preview may fit; measure US latency and introduce a CDN later.
+Checked 2026-10-31: Hetzner lists EU CX43 at $18.49/month excluding IPv4/tax, while
+US CPX11 is $20.49 before extras and the CX line is reported unorderable. Public
+listings do not prove stock availability. The recommended EU pair fits the
+US$80 ceiling; measure US latency and introduce a CDN later.
 [Provider pricing](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/).
 
 ## CMS shortlist
