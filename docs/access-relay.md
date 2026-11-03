@@ -60,12 +60,11 @@ backup restore or a deployed health check. Those remain explicit release gates.
 ## Application host and synthetic demonstrations
 
 Start with website, Payload, PostgreSQL and Keycloak. Add bounded demos of the
-kept services after measuring capacity. Home Assistant's built-in `demo:`
-integration can provide synthetic sensors. A low-resolution black video source
-can exercise Frigate/go2rtc ingest with detection and recording disabled.
-Never connect demonstration automations to real devices, email, signing requests
-or payment delivery. Label all synthetic records. The detailed demo manifests
-and tests are a separate increment; none are deployed by this module.
+kept services after measuring capacity. [Synthetic Home Assistant and Frigate
+demos](demos.md) provide template sensors and a generated black video source
+with detection and recording disabled, in `platform/demos.nix` (optional,
+default off, not deployed). Never connect demonstration automations to real
+devices, email, signing requests or payment delivery. Label all synthetic records.
 
 ## Hosting plan under the US$80/month ceiling
 
@@ -226,5 +225,4 @@ in addition later.
 ## Sources for the platform design
 
 [Headscale requirements](https://headscale.net/stable/setup/requirements/),
-[OIDC](https://headscale.net/stable/ref/oidc/),
-[Home Assistant demo integration](https://www.home-assistant.io/integrations/demo/).
+[OIDC](https://headscale.net/stable/ref/oidc/).
