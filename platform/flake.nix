@@ -39,6 +39,11 @@
         inherit pkgs;
         module = self.nixosModules.identity;
       });
+      identity-restore = pkgs.testers.runNixOSTest (import ./identity-restore-test.nix {
+        inherit pkgs;
+        identityModule = self.nixosModules.identity;
+        backupModule = self.nixosModules.backup;
+      });
     };
   };
 }

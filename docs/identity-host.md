@@ -124,8 +124,10 @@ backup and disappear on service/runtime cleanup; no retention claim is made.
 
 **Backup exclusion in this increment:** enabling identity does not enable or
 schedule `terrace.backup`. The existing [backup module](backups.md) can include
-`terrace.backup.postgresql.databases = [ "keycloak" ];`, but its earlier synthetic
-table test is not a Keycloak restore drill. Before deployment, approve owners
+`terrace.backup.postgresql.databases = [ "keycloak" ];`. The separate
+[identity recovery check](identity-recovery.md) exercises actual user-free
+Keycloak schema and signing-key continuity; the original generic backup test's
+dummy table is not that evidence. Before deployment, approve owners
 and retention, configure encrypted off-site backup and protected credential
 recovery, restore the real Keycloak schema into an isolated instance, and verify
 issuer/signing keys, accounts, client secrets and revocation behavior. Keep the
