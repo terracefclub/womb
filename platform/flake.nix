@@ -13,6 +13,7 @@
     nixosModules.single-node = import ./single-node.nix;
     nixosModules.hetzner = import ./hetzner.nix;
     nixosModules.relay = import ./relay.nix;
+    nixosModules.backup = ./backup.nix;
 
     checks.${system} = {
       single-node = pkgs.testers.runNixOSTest (import ./test.nix {
@@ -22,6 +23,11 @@
       relay = pkgs.testers.runNixOSTest (import ./relay-test.nix {
         inherit pkgs;
         module = self.nixosModules.relay;
+      });
+      backup = pkgs.testers.runNixOSTest (import ./backup-test.nix {
+        inherit pkgs;
+        module = self.nixosModules.backup;
+        relayModule = self.nixosModules.relay;
       });
     };
   };

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || {
+  echo 'Run platform checks on the x86_64 Linux builder.' >&2
+  exit 1
+}
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# -gt 0 ]] || { echo 'usage: platform/check CHECK...' >&2; exit 2; }
+checks=()
+for check in "$@"; do
+  [[ $check =~ ^[a-z][a-z0-9-]*$ ]] || { echo 'Invalid check name.' >&2; exit 2; }
+  checks+=("path:.#checks.x86_64-linux.$check")
+done
+cd "$(dirname "$0")"
+exec flock -w "${BUILD_LOCK_TIMEOUT:-28800}" "$BUILD_LOCK" \
+  nix build "${checks[@]}" --no-write-lock-file --max-jobs 1 --cores 2 \
+  --option builders '' --option post-build-hook '' -L --print-out-paths --no-link
