@@ -30,6 +30,12 @@ No cloud resource or existing Womb infrastructure is changed by this directory.
 - No GitOps controller, applications, DNS, ingress, certificate issuer,
   secrets integration, cloud purchase, or production restore is configured yet.
 
+The optional native [identity host](../docs/identity-host.md)
+(`nixosModules.identity`, default off) adds PostgreSQL-backed Keycloak, a limited
+HTTPS proxy, runtime-only inputs and local readiness/resource bounds. It seeds no
+accounts and requires a reviewed production artifact from TFC's identity contract.
+No install profile enables it; enrollment and Keycloak restore remain release gates.
+
 ## Evaluate and test
 
 From this directory on the configured Linux build host, with the shared build
