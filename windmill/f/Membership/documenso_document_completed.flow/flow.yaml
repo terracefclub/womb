@@ -107,7 +107,6 @@ value:
             installments: Installments
 
         def preprocessor(event: HttpEvent) -> Member:
-            print(event)
             payload = event["body"]["payload"]["payload"]
             signer = payload["Recipient"][0]
             return {
