@@ -15,6 +15,7 @@
     nixosModules.relay = import ./relay.nix;
     nixosModules.backup = ./backup.nix;
     nixosModules.demos = import ./demos.nix;
+    nixosModules.identity = import ./identity.nix;
 
     checks.${system} = {
       single-node = pkgs.testers.runNixOSTest (import ./test.nix {
@@ -33,6 +34,10 @@
       demos = pkgs.testers.runNixOSTest (import ./demos-test.nix {
         inherit pkgs;
         module = self.nixosModules.demos;
+      });
+      identity = pkgs.testers.runNixOSTest (import ./identity-test.nix {
+        inherit pkgs;
+        module = self.nixosModules.identity;
       });
     };
   };
