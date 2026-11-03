@@ -87,6 +87,13 @@ Initially run the public site, CMS, database, identity essentials and backups.
 Build artifacts elsewhere. Measure memory and load before adding Documenso and
 Windmill; the entire wishlist is not promised to fit the temporary VM.
 
+The first application host now has an optional [native website/CMS module](website-host.md)
+using the accepted immutable Linux bundles, explicit migrations and existing
+PostgreSQL/restic tooling. This keeps the initial recovery path small while
+preserving the single-node K3s foundation for later workloads. Neither module
+selection enables a deployed host; public activation and combined capacity remain
+separate gates.
+
 Checked 2026-10-31: Hetzner lists EU CX43 at $18.49/month excluding IPv4/tax, while
 US CPX11 is $20.49 before extras and the CX line is reported unorderable. Public
 listings do not prove stock availability. The recommended EU pair fits the
