@@ -16,6 +16,7 @@
     nixosModules.backup = ./backup.nix;
     nixosModules.demos = import ./demos.nix;
     nixosModules.identity = import ./identity.nix;
+    nixosModules.website = import ./website.nix;
 
     checks.${system} = {
       single-node = pkgs.testers.runNixOSTest (import ./test.nix {
