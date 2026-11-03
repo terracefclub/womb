@@ -34,7 +34,8 @@ definition or DNS record is implied by this module. The application-specific
    ports. Validate both an allowed operator path and a denied member path with
    real Tailscale clients, including DERP fallback across the WAN.
 5. Back up a consistent SQLite snapshot, Noise/DERP identity keys and recovery
-   configuration to encrypted off-site storage. Preserve keys during recovery;
+   configuration to encrypted off-site storage (`terrace.backup`, see
+   [backups](backups.md)). Preserve keys during recovery;
    do not casually reset the network identity. Restore to an isolated host and
    prove client reconnection before calling recovery ready.
 6. Supply a repo-local userspace Tailscale client and connection commands. Do
@@ -219,7 +220,8 @@ in addition later.
    `hcloud` datacenter and server-type listings with the read-only token). Enter
    dated quote values as Pulumi stack config (see `infra/cloud/README.md`).
 5. **Backup targets.** Storage Box sub-account and B2 credentials created and held
-   outside Git; encrypted restic repository initialised; restore drill passed.
+   outside Git; encrypted restic repository initialised (`terrace-backup init`);
+   restore drill passed (`terrace-backup-restore`, see [backups](backups.md)).
 
 ## Sources for the platform design
 

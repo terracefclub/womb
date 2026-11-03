@@ -5,6 +5,9 @@
 }: let
   cfg = config.terrace.singleNode;
 in {
+  # Optional encrypted off-site backups (terrace.backup.enable, default off).
+  imports = [./backup.nix];
+
   options.terrace.singleNode = {
     enable = lib.mkEnableOption "Terrace single-node Kubernetes platform";
   };

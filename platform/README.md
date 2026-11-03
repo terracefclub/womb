@@ -20,8 +20,12 @@ No cloud resource or existing Womb infrastructure is changed by this directory.
   A Hetzner cloud firewall must also allow only SSH from approved sources.
 - Production deployment requires an off-host backup of the SQLite datastore
   (`/var/lib/rancher/k3s/server/db`) and server token, plus application-aware
-  backups of local PV data under `/var/lib/rancher/k3s/storage`. No backup job
-  is configured yet. A Retain policy is deletion protection, not a backup.
+  backups of local PV data under `/var/lib/rancher/k3s/storage`. The optional
+  `terrace.backup` module (`backup.nix`, default off, imported by `single-node.nix`
+  and exported as `nixosModules.backup`) backs up PostgreSQL dumps, media and Headscale
+  state with an isolated restore tool, see [docs/backups.md](../docs/backups.md); it does
+  not cover the K3s datastore or PV data unless listed in `extraPaths`/`media`, and no
+  job is enabled. A Retain policy is deletion protection, not a backup.
   A one-node outage is downtime.
 - No GitOps controller, applications, DNS, ingress, certificate issuer,
   secrets integration, cloud purchase, or production restore is configured yet.
@@ -45,6 +49,24 @@ verifies the retained StorageClass and firewall, starts an offline test pod
 with a PVC, writes a marker, restarts K3s, recreates the pod, and checks
 the marker remains. It then deletes the PVC and checks the PV and data
 remain. It does not exercise off-host backup or restore.
+
+For a long check that must outlive the SSH session, run from the remote checkout:
+
+```sh
+mkdir -p .devenv
+umask 077
+BUILD_LOCK="$HOME/.falcon-heavy.lock" setsid nohup bash -c \
+  'platform/check backup; result=$?; echo "EXIT $result"; exit "$result"' \
+  > .devenv/backup-check.log 2>&1 < /dev/null &
+echo $! > .devenv/backup-check.pid
+```
+
+`platform/check` requires x86_64 Linux and the explicit shared lock path. It
+accepts one or more flake check names (for example `backup single-node`), takes
+the lock for the whole build, and uses one job/two cores. It disables cache-upload
+post-build hooks for this invocation only; validation and Git hooks still run.
+Inspect the recorded PID before stopping it; never stop unrelated builder jobs. Local detached SSH
+wrappers may be reaped by an agent harness, so detach on the builder itself.
 
 Verified on 2026-10-27 (America/Los_Angeles) on falcon with Nixpkgs revision
 `31ecbaca1bdefa45dffc409f0250bd8039ea0010`: the VM check passed in
