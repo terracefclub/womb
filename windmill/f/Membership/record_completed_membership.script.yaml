@@ -1,0 +1,33 @@
+summary: Record one completed membership without duplicating its roster row
+description: Restricted roster step for a mapped completion from an authenticated source.
+kind: script
+lock: '!inline f/Membership/merge_records_to_google_sheet.script.lock'
+schema:
+  type: object
+  properties:
+    document_id:
+      type: integer
+      minimum: 1
+      maximum: 2147483647
+    member:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        membership:
+          type: string
+          enum: [standard, rca, abroad, sophomore]
+        installments:
+          type: integer
+          enum: [1, 2]
+      required: [name, email, membership, installments]
+      additionalProperties: false
+    spreadsheet_id:
+      type: string
+    sheet_name:
+      type: string
+    service_account_json:
+      type: object
+  required: [document_id, member, spreadsheet_id, sheet_name, service_account_json]

@@ -36,6 +36,8 @@ choices, and branches into a Google Sheets update and an email containing a
 QuickBooks payment link. Preserve the sheet schema/ownership, service-account
 permissions and downstream contracts.
 
+The [opt-in roster step](membership-roster.md) can reconcile a repeated or interrupted Sheets write using the Documenso document ID. The live flow still needs contract verification and cutover.
+
 Use synthetic identities and an email sink to test:
 
 1. Missing/invalid authentication, unexpected event types and malformed schemas.
