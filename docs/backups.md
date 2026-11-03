@@ -32,7 +32,7 @@ before real data is loaded.** Until then "TBD" means nobody is responsible.
 | --- | --- | --- | --- | --- | --- |
 | CMS database (`cms`, Payload) | PostgreSQL on the application host | `pg_dump -Fc` in a `REPEATABLE READ` snapshot | TBD | Primary and optional secondary | Row counts per table vs counts taken in the same snapshot |
 | Community database (`community`) | same cluster | same | TBD (also moderator ownership, see [community pilot](community-pilot.md)) | same | same |
-| Keycloak database (`keycloak`) | same cluster | same | TBD | same | same |
+| Keycloak database (`keycloak`) | same cluster | same | TBD | same | Table counts plus a separate [actual schema/issuer/signing-key recovery check](identity-recovery.md), with no real accounts |
 | PostgreSQL roles | same cluster | `pg_dumpall --globals-only` (contains password hashes; protected by repository encryption) | TBD | same | Roles restored first; database owners checked in the VM test |
 | CMS and community media | `terrace.backup.media` paths (default budget: 5 GB, see community pilot) | restic file backup, taken after the database dump; sha256 manifest | TBD | same | sha256 and file count per directory |
 | Headscale SQLite | `/var/lib/headscale/db.sqlite` on the relay | `sqlite3 .backup` (consistent), `integrity_check`, table counts | TBD | same | integrity check plus table counts |
@@ -280,6 +280,12 @@ restrictions), a real B2 bucket and the S3 code path (no S3 server was available
 in the pinned Nixpkgs, so the secondary target in the test is a second SFTP
 repository), production secret delivery, an off-site restore drill from a different
 host and network, the K3s datastore and PV data, large-data runtime/memory (the VM
-dataset is a few hundred kilobytes), the real CMS/Keycloak schemas, and whether a
+dataset is a few hundred kilobytes), the real CMS schema, populated Keycloak accounts/sessions and whether a
 restored Headscale lets real clients reconnect. Recovery time and data loss are
 therefore still unmeasured; the issue's measured-RTO criterion is open.
+
+The separate [identity recovery VM drill](identity-recovery.md) restores the
+actual, user-free Keycloak schema and protected input files on a different guest,
+then starts Keycloak and verifies issuer, realm ID and public signing-key continuity
+while the source remains running. It uses the same backup/restore tooling and does
+not enable production backups or establish a real off-site recovery guarantee.

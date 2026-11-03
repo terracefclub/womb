@@ -35,6 +35,10 @@ The optional native [identity host](../docs/identity-host.md)
 HTTPS proxy, runtime-only inputs and local readiness/resource bounds. It seeds no
 accounts and requires a reviewed production artifact from TFC's identity contract.
 No install profile enables it; enrollment and Keycloak restore remain release gates.
+The separate [identity recovery drill](../docs/identity-recovery.md),
+`platform/check identity-restore`, checks actual user-free Keycloak schema and
+signing-key continuity on a disposable recovery guest using the existing encrypted
+backup/restore tooling; production/off-site recovery remains unverified.
 
 ## Evaluate and test
 
