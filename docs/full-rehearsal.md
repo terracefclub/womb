@@ -257,3 +257,30 @@ synthetic purge removed seven disks, repository and escrow, retaining evidence,
 its unrelated sentinel and earlier failed state. These observations establish
 synthetic signed-envelope recovery, not production certificate trust, real mail
 or legal signing, remaining-app composition or actual provider installation.
+
+
+### All-services composition under development
+
+The `--all-services` source variant is currently fail-closed while the accepted
+Windmill Python/roster and shared-input companion is integrated. It is not an
+accepted rehearsal result. It extends the existing signed-document and real
+private-network proof with one shared synthetic identity realm, distinct
+Windmill and Vaultwarden clients, individual native sign-in, worker jobs and
+client-encrypted vault attachments. The driver deadline for this explicit mode
+is 2700 seconds; the existing variants retain their 1800-second deadline.
+
+The composition uses the existing four disposable guests for test isolation.
+Extra memory and disk capacity in this test do not define a production host
+requirement. App PostgreSQL connection limits total 42 within a 64-connection
+server, with separate maintenance and superuser capacity. The receipt will
+report sampled connections (including the sampler's own connection), container
+kernel memory counters and representative simultaneous native requests. These
+are measured test observations rather than production sizing claims.
+
+The fixture's browser credentials, including synthetic vault master passwords,
+are test inputs retained on the disposable client. After verifying the copied
+bytes and real client encryption/decryption, the server-side fixture copy is
+removed before backup; absence is asserted again on the replacement. Production Vaultwarden inputs
+do not escrow each person's master password; the private administrator cannot
+use this test recovery path to decrypt real users' vaults. Native read-only
+administrator recovery and user-side decryption are separate assertions.

@@ -6,13 +6,28 @@
   withDocumenso ? false,
   withRelayPeers ? false,
   withDocumensoSigning ? false,
-}: let
+  withApplications ? false,
+}:
+# Fail closed while the source-only all-service writer/restore hooks are wired.
+assert !withApplications; let
   documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
+  applicationFixture = import ./fixture-package.nix {inherit pkgs contract;};
+  windmillRoster = import ../windmill-functional/roster-package.nix {inherit pkgs;};
   gateway = import ../website-gateway-test.nix {
     inherit pkgs release contract;
-    extraDnsNames = pkgs.lib.optional withDocumenso "documents.terrace.invalid";
+    extraDnsNames = pkgs.lib.optional withDocumenso "documents.terrace.invalid" ++ pkgs.lib.optionals withApplications ["windmill.terrace.invalid" "vault.terrace.invalid"];
+    tlsFixture =
+      if withApplications
+      then
+        import ./certificate.nix {
+          inherit pkgs;
+          hostnames = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid" "documents.terrace.invalid" "windmill.terrace.invalid" "vault.terrace.invalid"];
+        }
+      else null;
     fixtureProgram =
-      if withDocumenso
+      if withApplications
+      then "${applicationFixture}/full/fixture.ts"
+      else if withDocumenso
       then "${documensoFixture}/functional-fixture.ts"
       else "${contract}/fixture.ts";
   };
@@ -28,6 +43,12 @@
   '';
   documensoBrowser = pkgs.writeShellScriptBin "rehearsal-documenso-browser" ''
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../documenso/functional-browser.py} "$@"
+  '';
+  windmillBrowser = pkgs.writeShellScriptBin "rehearsal-windmill-browser" ''
+    exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../windmill-functional/functional-browser.py} "$@"
+  '';
+  vaultwardenBrowser = pkgs.writeShellScriptBin "rehearsal-vaultwarden-browser" ''
+    exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../vaultwarden/browser.py} "$@"
   '';
   cgroupCheck = pkgs.writeShellApplication {
     name = "rehearsal-cgroups-empty";
@@ -58,7 +79,12 @@
         go2rtc = pkgs.go2rtc.version;
         headscale = pkgs.headscale.version;
       }
-      // lib.optionalAttrs withDocumenso {documenso = (builtins.fromJSON (builtins.readFile ../documenso/image.json)).version;});
+      // lib.optionalAttrs withDocumenso {documenso = (builtins.fromJSON (builtins.readFile ../documenso/image.json)).version;}
+      // lib.optionalAttrs withApplications {
+        windmill = (builtins.fromJSON (builtins.readFile ../windmill/release.json)).version;
+        vaultwarden = (builtins.fromJSON (builtins.readFile ../vaultwarden/release.json)).version;
+        vaultwardenWebVault = (builtins.fromJSON (builtins.readFile ../vaultwarden/release.json)).webvaultVersion;
+      });
     systemd.tmpfiles.rules = ["f /var/lib/unrelated-synthetic-sentinel 0600 root root - retained"];
   };
   backup = {lib, ...}: {
@@ -86,9 +112,19 @@ in {
       lib,
       ...
     }: {
-      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix ++ lib.optional withDocumensoSigning ../documenso/mailpit-test.nix;
-      virtualisation.memorySize = lib.mkForce 8192;
-      virtualisation.diskSize = 8192;
+      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix ++ lib.optional withDocumensoSigning ../documenso/mailpit-test.nix ++ lib.optional withApplications ./applications.nix;
+      # Test isolation capacity, not a production hardware requirement. Both
+      # pinned OCI images are imported again on the blank replacement disk.
+      virtualisation.memorySize = lib.mkForce (
+        if withApplications
+        then 12288
+        else 8192
+      );
+      virtualisation.cores = lib.mkIf withApplications (lib.mkForce 4);
+      virtualisation.diskSize =
+        if withApplications
+        then 24576
+        else 8192;
       terrace.singleNode.enable = true;
       terrace.documenso = lib.mkIf withDocumenso {
         enable = true;
@@ -97,7 +133,11 @@ in {
         identityHostname = "identity.terrace.invalid";
         certificateFile = "/var/lib/terrace-gateway-test/cert.pem";
         certificateKeyFile = "/var/lib/terrace-gateway-test/key.pem";
-        identityCaFile = "/var/lib/terrace-gateway-test/cert.pem";
+        identityCaFile = "/var/lib/terrace-gateway-test/${
+          if withApplications
+          then "ca.pem"
+          else "cert.pem"
+        }";
       };
       services.k3s.images = [pkgs.k3s.airgap-images image];
       networking.firewall.allowedTCPPorts = lib.optional withDocumenso 13050;
@@ -136,6 +176,37 @@ in {
           ''}";
           gateway-test-inputs.path = lib.optional withDocumenso pkgs.openssl;
         }
+        // lib.optionalAttrs withApplications {
+          # Keep runtime client demand below the shared64-slot server limit.
+          # The upstream identity init must create its password-bearing role
+          # before applying this cap; pre-creating it would skip that setup.
+          keycloakPostgreSQLInit.postStart = ''
+            psql -X -w -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE keycloak CONNECTION LIMIT 10; ALTER ROLE terrace_cms CONNECTION LIMIT 10;' >/dev/null 2>&1
+          '';
+          rehearsal-pg-sample = {
+            after = ["postgresql.target"];
+            requires = ["postgresql.target"];
+            path = [config.services.postgresql.package];
+            serviceConfig = {
+              Type = "exec";
+              User = "postgres";
+              Group = "postgres";
+              RuntimeDirectory = "rehearsal-pg-sample";
+              RuntimeDirectoryMode = "0700";
+              RuntimeDirectoryPreserve = "yes";
+              ExecStart = "${pkgs.python3}/bin/python3 ${./pg-sample.py}";
+              RuntimeMaxSec = 360;
+              TimeoutStopSec = 10;
+              KillMode = "control-group";
+              StandardOutput = "null";
+              StandardError = "null";
+              UMask = "0077";
+              MemoryMax = "64M";
+              TasksMax = 8;
+              NoNewPrivileges = true;
+            };
+          };
+        }
         // lib.optionalAttrs withDocumenso {
           terrace-documenso.wantedBy = lib.mkForce [];
         };
@@ -161,6 +232,12 @@ in {
         // lib.optionalAttrs withDocumensoSigning {
           "documenso-signing-proof.py".source = ../documenso/signing-proof.py;
           "documenso-smtp-probe.cjs".source = ../documenso/smtp-probe.cjs;
+        }
+        // lib.optionalAttrs withApplications {
+          "vaultwarden-attachments.py".source = ../vaultwarden/attachment-files.py;
+          "windmill-evidence/capture.py".source = ../windmill/capture.py;
+          "windmill-evidence/diagnostics.py".source = ../windmill/diagnostics.py;
+          "windmill-evidence/vaultwarden-capture.py".source = ../vaultwarden/capture.py;
         };
     };
     automation = {
@@ -219,13 +296,19 @@ in {
       systemd.services = lib.genAttrs ["headscale" "nginx"] (_: {wantedBy = lib.mkForce [];});
     };
     client = {
+      config,
       nodes,
       lib,
       ...
     }: {
       imports = [gateway.nodes.client common] ++ lib.optional withRelayPeers ./relay-peers.nix;
-      environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser ++ lib.optional withDocumensoSigning pkgs.openssl;
-      virtualisation.memorySize = lib.mkForce 2048;
+      environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser ++ lib.optional withDocumensoSigning pkgs.openssl ++ lib.optionals withApplications [windmillBrowser vaultwardenBrowser];
+      virtualisation.memorySize = lib.mkForce (
+        if withApplications
+        then 6144
+        else 2048
+      );
+      virtualisation.cores = lib.mkIf withApplications (lib.mkForce 4);
       virtualisation.diskSize = 8192;
       services.openssh = {
         enable = true;
@@ -241,11 +324,38 @@ in {
       security.pki.certificateFiles = [nodes.relay.services.nginx.virtualHosts.relay.sslCertificate];
       environment.etc =
         {"rehearsal-browser-ca.pem".source = builtins.head nodes.gateway.security.pki.certificateFiles;}
-        // lib.optionalAttrs withDocumensoSigning {"documenso-signing-proof.py".source = ../documenso/signing-proof.py;};
+        // lib.optionalAttrs withDocumensoSigning {"documenso-signing-proof.py".source = ../documenso/signing-proof.py;}
+        // lib.optionalAttrs withApplications {"windmill-roster".source = windmillRoster;};
+      systemd.services.rehearsal-concurrent = lib.mkIf withApplications {
+        description = "Bounded simultaneous synthetic native browser checks";
+        path = config.environment.systemPackages;
+        environment = {
+          TERRACE_BROWSER_BINARY = config.environment.variables.TERRACE_BROWSER_BINARY;
+          HOME = "/root";
+        };
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${pkgs.python3}/bin/python3 ${./concurrent.py}";
+          KillMode = "control-group";
+          RuntimeMaxSec = 330;
+          TimeoutStopSec = 15;
+          StandardOutput = "null";
+          StandardError = "null";
+          UMask = "0077";
+          MemoryMax = "5G";
+          CPUQuota = "400%";
+          TasksMax = 1536;
+        };
+      };
     };
   };
   testScript =
-    "DOCUMENSO_ENABLED = ${
+    "APPLICATIONS_ENABLED = ${
+      if withApplications
+      then "True"
+      else "False"
+    }\n"
+    + "DOCUMENSO_ENABLED = ${
       if withDocumenso
       then "True"
       else "False"

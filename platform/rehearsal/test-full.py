@@ -93,6 +93,16 @@ class CliComposition(unittest.TestCase):
             args = execute.call_args.args[0]
             self.assertEqual((args.documenso, args.documenso_signing), expected)
             self.assertFalse(args.relay_peers)
+            self.assertFalse(args.all_services)
+
+    def test_all_services_includes_every_persistent_application_and_private_network(self):
+        required = ['--output', '/synthetic/private', '--webArchive', '/synthetic/web',
+                    '--cmsArchive', '/synthetic/cms', '--tfcSource', '/synthetic/source']
+        with patch.object(full.sys, 'argv', ['full-rehearsal', 'run', *required, '--all-services']), \
+                patch.object(full.signal, 'signal'), patch.object(full, 'execute') as execute:
+            full.main()
+        args = execute.call_args.args[0]
+        self.assertTrue(args.all_services and args.documenso and args.documenso_signing and args.relay_peers)
 
 
 class SyntheticPurge(unittest.TestCase):
