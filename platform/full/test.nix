@@ -3,8 +3,17 @@
   release,
   contract,
   runId,
+  withDocumenso ? false,
 }: let
-  gateway = import ../website-gateway-test.nix {inherit pkgs release contract;};
+  documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
+  gateway = import ../website-gateway-test.nix {
+    inherit pkgs release contract;
+    extraDnsNames = pkgs.lib.optional withDocumenso "documents.terrace.invalid";
+    fixtureProgram =
+      if withDocumenso
+      then "${documensoFixture}/functional-fixture.ts"
+      else "${contract}/fixture.ts";
+  };
   relay = import ../relay-test.nix {
     inherit pkgs;
     module = import ../relay.nix;
@@ -14,6 +23,9 @@
   '';
   browserTest = pkgs.writeShellScriptBin "rehearsal-browser" ''
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../website-gateway/browser.py}
+  '';
+  documensoBrowser = pkgs.writeShellScriptBin "rehearsal-documenso-browser" ''
+    exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../documenso/functional-browser.py} "$@"
   '';
   cgroupCheck = pkgs.writeShellApplication {
     name = "rehearsal-cgroups-empty";
@@ -37,13 +49,14 @@
     virtualisation.diskImage = "$TERRACE_REHEARSAL_RUN_DIR/state/${config.networking.hostName}.qcow2";
     virtualisation.qemu.options = ["-fw_cfg" "name=opt/terrace-rehearsal,string=${runId}"];
     environment.systemPackages = [pkgs.curl pkgs.jq pkgs.openssh pkgs.restic pkgs.python3 pkgs.netcat-openbsd cgroupCheck];
-    environment.etc."rehearsal-versions.json".text = builtins.toJSON {
-      keycloak = pkgs.keycloak.version;
-      homeAssistant = pkgs.home-assistant.version;
-      frigate = pkgs.frigate.version;
-      go2rtc = pkgs.go2rtc.version;
-      headscale = pkgs.headscale.version;
-    };
+    environment.etc."rehearsal-versions.json".text = builtins.toJSON ({
+        keycloak = pkgs.keycloak.version;
+        homeAssistant = pkgs.home-assistant.version;
+        frigate = pkgs.frigate.version;
+        go2rtc = pkgs.go2rtc.version;
+        headscale = pkgs.headscale.version;
+      }
+      // lib.optionalAttrs withDocumenso {documenso = (builtins.fromJSON (builtins.readFile ../documenso/image.json)).version;});
     systemd.tmpfiles.rules = ["f /var/lib/unrelated-synthetic-sentinel 0600 root root - retained"];
   };
   backup = {lib, ...}: {
@@ -71,11 +84,20 @@ in {
       lib,
       ...
     }: {
-      imports = [gateway.nodes.gateway ../single-node.nix backup];
+      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup];
       virtualisation.memorySize = lib.mkForce 8192;
       virtualisation.diskSize = 8192;
       terrace.singleNode.enable = true;
+      terrace.documenso = lib.mkIf withDocumenso {
+        enable = true;
+        hostname = "documents.terrace.invalid";
+        identityHostname = "identity.terrace.invalid";
+        certificateFile = "/var/lib/terrace-gateway-test/cert.pem";
+        certificateKeyFile = "/var/lib/terrace-gateway-test/key.pem";
+        identityCaFile = "/var/lib/terrace-gateway-test/cert.pem";
+      };
       services.k3s.images = [pkgs.k3s.airgap-images image];
+      networking.firewall.allowedTCPPorts = lib.optional withDocumenso 13050;
       services.postgresql = {
         package = lib.mkForce pkgs.postgresql_18;
         settings = {
@@ -104,13 +126,25 @@ in {
           gateway-test-inputs.serviceConfig.ExecCondition = "${pkgs.writeShellScript "rehearsal-inputs-create-only" ''
             test ! -e /var/lib/terrace-gateway-test/terrace-realm.json
           ''}";
+          gateway-test-inputs.path = lib.optional withDocumenso pkgs.openssl;
+        }
+        // lib.optionalAttrs withDocumenso {
+          terrace-documenso.wantedBy = lib.mkForce [];
         };
       systemd.targets.postgresql.wantedBy = lib.mkForce [];
       systemd.timers.terrace-identity-health.wantedBy = lib.mkForce [];
-      environment.etc."rehearsal-pg-directory".text = config.services.postgresql.dataDir;
-      environment.etc."rehearsal-probe.yaml".source = ./probe.yaml;
+      environment.etc =
+        {
+          "rehearsal-pg-directory".text = config.services.postgresql.dataDir;
+          "rehearsal-probe.yaml".source = ./probe.yaml;
+        }
+        // lib.optionalAttrs withDocumenso {"documenso-recovery.py".source = ../documenso/recovery-auth-test.py;};
     };
-    automation = {lib, ...}: {
+    automation = {
+      nodes,
+      lib,
+      ...
+    }: {
       imports = [../demos.nix backup];
       virtualisation = {
         memorySize = 4096;
@@ -129,6 +163,8 @@ in {
       # Upstream's target independently pulls in the service even when its own
       # wantedBy is empty. Neither initial nor replacement boot may start HA.
       systemd.targets.home-assistant.wantedBy = lib.mkForce [];
+      security.pki.certificateFiles = lib.optional withDocumenso (builtins.head nodes.gateway.security.pki.certificateFiles);
+      networking.hosts = lib.optionalAttrs withDocumenso {${nodes.gateway.networking.primaryIPAddress} = ["documents.terrace.invalid"];};
     };
     relay = {
       config,
@@ -150,7 +186,7 @@ in {
       ...
     }: {
       imports = [gateway.nodes.client common];
-      environment.systemPackages = [browserTest];
+      environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser;
       virtualisation.memorySize = lib.mkForce 2048;
       virtualisation.diskSize = 8192;
       services.openssh = {
@@ -168,5 +204,11 @@ in {
       environment.etc."rehearsal-browser-ca.pem".source = builtins.head nodes.gateway.security.pki.certificateFiles;
     };
   };
-  testScript = builtins.readFile ./scenario.py;
+  testScript =
+    "DOCUMENSO_ENABLED = ${
+      if withDocumenso
+      then "True"
+      else "False"
+    }\n"
+    + builtins.readFile ./scenario.py;
 }

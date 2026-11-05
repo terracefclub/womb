@@ -19,7 +19,7 @@ establish a live deployment. Link each small MR to its issue.
 | 10 | [CMS import](https://gitlab.com/terrace/tech/tfc-website/-/issues/4) | Stable IDs, repeatable import, count/hash reconciliation, redirects | Depends on 4, 7 |
 | 11 | [Public cutover](https://gitlab.com/terrace/tech/tfc-website/-/issues/5) | Content review, integration parity, accessibility/performance, rollback | Depends on 5, 6, 10 |
 | 12 | [CDN](https://gitlab.com/terrace/tech/womb/-/issues/7) | Public cache; preview/admin/member bypass; cookie/invalidation tests | After origin acceptance |
-| 13 | [Documenso/Windmill](https://gitlab.com/terrace/tech/womb/-/issues/8) | Per-user access, signing/email/storage, workflow parity, restore | After capacity check |
+| 13 | [Documenso/Windmill](https://gitlab.com/terrace/tech/womb/-/issues/8) | Per-user access, signing/email/storage, workflow parity, restore | Optional [Documenso fresh-node PDF/encrypted-account recovery](full-rehearsal.md) passed; signing recovery, Windmill SSO/restore and final combined capacity remain |
 | 14 | [On premises](https://gitlab.com/terrace/tech/womb/-/issues/9) | Hardware/disks/network inventory; HA/Frigate integration | Hardware/access pending |
 | 15 | [Community pilot](https://gitlab.com/terrace/tech/tfc-website/-/issues/6) | Approval, per-user Keycloak, privacy/moderation, opt-in mentorship | Payload/SvelteKit pilot; identity and permission-enforced collections merged; interface validation underway |
 
