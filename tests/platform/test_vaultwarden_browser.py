@@ -18,7 +18,7 @@ spec.loader.exec_module(module)
 
 class PrivateBrowser(unittest.TestCase):
     def empty_facts(self):
-        return {'profileStatus':None,'tokenSecondsRemaining':None,'refreshTokenPresent':None,'profileEmailMatches':None,'profileExpectedIdMatches':None,'tokenSubjectMatchesProfile':None}
+        return {'refreshRequests':0,'profileStatus':None,'nativeRefreshStatus':None,'nativeRefreshDenialMatches':None,'tokenSecondsRemaining':None,'refreshTokenPresent':None,'profileEmailMatches':None,'profileExpectedIdMatches':None,'tokenSubjectMatchesProfile':None}
 
     def test_network_summary_keeps_only_bounded_numeric_fields(self):
         value={'validatedOidcRequests':1,'blockedRequests':2,'pageErrors':3,'tokenStatus':200,'accountStatus':400,'token':'private-token','url':'https://private.invalid/?code=private-code'}
@@ -100,6 +100,22 @@ class PrivateBrowser(unittest.TestCase):
             module.require_cipher_denial((400,{**body,'message':"Cipher doesn't exist"}))
         with self.assertRaises(AssertionError):
             module.require_cipher_denial((400,{**body,'data':'unexpected-private-item'}))
+
+    def test_attachment_receipt_excludes_download_token_and_encrypted_key(self):
+        digest='a'*64
+        attachment={'id':'b'*20,'fileName':'2.synthetic-encrypted-name','key':'private-encrypted-key','url':'https://private.invalid/?token=private-value'}
+        value=module.attachment_record({'id':'cipher','attachments':[attachment]},module.ATTACHMENT_NAME,digest)
+        self.assertEqual(value,{'id':'b'*20,'sha256':digest})
+        self.assertNotIn('private',json.dumps(value))
+        for change in [{'id':'../escape'},{'fileName':module.ATTACHMENT_NAME},{'key':''}]:
+            with self.assertRaises(AssertionError):
+                module.attachment_record({'id':'cipher','attachments':[{**attachment,**change}]},module.ATTACHMENT_NAME,digest)
+
+    def test_exact_refresh_denial_requires_pinned_status_and_error_shape(self):
+        module.require_refresh_denial((400,{'error':'invalid_grant'}))
+        for value in [(200,{'error':'invalid_grant'}),(401,{'error':'invalid_grant'}),(400,{'error':'private-error'}),(400,{})]:
+            with self.assertRaises(AssertionError):
+                module.require_refresh_denial(value)
 
     def test_invalid_native_path_never_connects(self):
         with self.assertRaises(AssertionError):

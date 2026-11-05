@@ -62,7 +62,7 @@ export function validateRuntimePolicy(value: unknown) {
   const expected = {sso_enabled:true,sso_only:true,sso_pkce:true,sso_signups_allowed:false,sso_signups_match_email:true,sso_allow_unknown_email_verification:false,sso_debug_tokens:false,signups_allowed:false,signups_domains_whitelist:'',invitations_allowed:false,use_sendmail:false,smtp_host:null,push_enabled:false,disable_icon_download:true,disable_admin_token:false,database_max_conns:6,sso_audience_trusted:null,sso_auth_only_not_session:false}
   if (Object.entries(expected).some(([key,value]) => config[key] !== value)) throw rejected()
 }
-async function reconcile(input: VaultwardenInput, port: number) {
+async function privateAdmin(input: VaultwardenInput, port: number) {
   const deadline = performance.now() + 90000
   let cookie = ''
   const request = async (path: string, method = 'GET', body?: string, form = false) => {
@@ -86,6 +86,15 @@ async function reconcile(input: VaultwardenInput, port: number) {
   if (!match) throw rejected()
   cookie = `VW_ADMIN=${match[1]}`
   validateRuntimePolicy(JSON.parse((await request('/admin/diagnostics/config')).text))
+  return request
+}
+async function inspect(input: VaultwardenInput, port: number) {
+  const request = await privateAdmin(input, port)
+  const remaining = approvalActions(nativeUsers(JSON.parse((await request('/admin/users')).text)), input.approvedEmails)
+  if (remaining.invite.length || remaining.enable.length || remaining.disable.length) throw rejected()
+}
+async function reconcile(input: VaultwardenInput, port: number) {
+  const request = await privateAdmin(input, port)
   const list = async () => nativeUsers(JSON.parse((await request('/admin/users')).text))
   const actions = approvalActions(await list(), input.approvedEmails)
   for (const id of actions.disable) await request(`/admin/users/${id}/disable`, 'POST')
@@ -99,7 +108,8 @@ if (import.meta.main) {
   const [command, source, origin, issuer, portText] = process.argv.slice(2)
   const runtime = '/run/terrace-vaultwarden-inputs', ready = '/run/terrace-vaultwarden-state/ready'
   try {
-    if (!source || !origin || !issuer || !['prepare','check','bootstrap'].includes(command!) || process.argv.length !== (command === 'bootstrap' ? 7 : 6)) throw rejected()
+    const adminOperation = command === 'bootstrap' || command === 'inspect'
+    if (!source || !origin || !issuer || !['prepare','check','bootstrap','inspect'].includes(command!) || process.argv.length !== (adminOperation ? 7 : 6)) throw rejected()
     const bytes = protectedBytes(source), input = parseInput(bytes, origin, issuer)
     if (command === 'prepare') {
       mkdirSync(runtime, {recursive:true, mode:0o700})
@@ -111,17 +121,19 @@ if (import.meta.main) {
       }
     } else {
       sameInput(bytes, protectedBytes(`${runtime}/input.json`))
-      if (command === 'bootstrap') {
+      if (adminOperation) {
         const port = Number(portText)
         if (!Number.isInteger(port) || port < 1024 || port > 65535 || !ready) throw rejected()
-        await reconcile(input, port)
+        if (command === 'inspect') await inspect(input, port)
+        else await reconcile(input, port)
         sameInput(protectedBytes(source), protectedBytes(`${runtime}/input.json`))
-        writeFileSync(ready, fingerprint(bytes)+'\n', {mode:0o600,flag:'wx'})
+        if (command === 'inspect') console.log('Native Vaultwarden private admin readback passed.')
+        else writeFileSync(ready, fingerprint(bytes)+'\n', {mode:0o600,flag:'wx'})
       }
     }
   } catch {
     if (command === 'bootstrap') { try { rmSync(ready,{force:true}) } catch {} }
-    console.error('Vaultwarden private runtime operation rejected; ingress remains closed.')
+    console.error(command === 'inspect' ? 'Vaultwarden private inspection rejected; diagnostics suppressed.' : 'Vaultwarden private runtime operation rejected; ingress remains closed.')
     process.exitCode = 1
   }
 }

@@ -37,3 +37,11 @@ test('CLI failures suppress supplied path values and raw parser errors',()=>{
  expect(child.stderr.toString()).toBe('Vaultwarden private runtime operation rejected; ingress remains closed.\n')
  expect(child.stderr.toString()).not.toContain(sentinel)
 })
+test('read-only inspector rejects incomplete input without emitting credentials or starting a request',()=>{
+ const sentinel='private-inspect-canary-never-print'
+ const child=Bun.spawnSync([process.execPath,'--no-env-file','platform/vaultwarden/runtime.ts','inspect',sentinel],{cwd:import.meta.dir+'/../..',stdout:'pipe',stderr:'pipe'})
+ expect(child.exitCode).toBe(1)
+ expect(child.stdout.toString()).toBe('')
+ expect(child.stderr.toString()).toBe('Vaultwarden private inspection rejected; diagnostics suppressed.\n')
+ expect(child.stderr.toString()).not.toContain(sentinel)
+})

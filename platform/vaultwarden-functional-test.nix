@@ -4,13 +4,7 @@
 }: let
   directory = "/var/lib/terrace-gateway-test";
   browserPython = pkgs.python3.withPackages (ps: [ps.playwright]);
-  fixture = pkgs.runCommand "vaultwarden-functional-fixture" {} ''
-    mkdir $out
-    cp -R ${contract}/. $out/
-    chmod -R u+w $out
-    cp ${./vaultwarden/functional-fixture.ts} $out/functional-fixture.ts
-    cp ${./vaultwarden/policy.ts} $out/policy.ts
-  '';
+  fixture = import ./vaultwarden/fixture-package.nix {inherit pkgs contract;};
   certificate = pkgs.runCommand "vaultwarden-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -keyout $out/ca-key.pem -out $out/ca.pem -days 3650 \
@@ -66,6 +60,7 @@ in {
         certificateKeyFile = "${directory}/key.pem";
       };
       systemd.services.keycloak.serviceConfig.EnvironmentFile = "${directory}/keycloak.env";
+      environment.etc."vaultwarden-attachments.py".source = ./vaultwarden/attachment-files.py;
       systemd.services.vaultwarden.wantedBy = lib.mkForce [];
       systemd.services.vaultwarden-functional-inputs = {
         requiredBy = ["terrace-vaultwarden-inputs.service" "keycloak.service" "keycloakPostgreSQLInit.service" "nginx.service"];
@@ -122,7 +117,7 @@ in {
             client.succeed("cp /tmp/shared/"+name+"/credentials.json /root/vaultwarden-functional/credentials.json && chmod 0600 /root/vaultwarden-functional/credentials.json")
     def browser(mode):
         try:
-            assert client.succeed("${browserPython}/bin/python3 /etc/vaultwarden-browser.py "+mode,timeout=240).strip()=="Vaultwarden browser phase "+mode+" passed."
+            assert client.succeed("${browserPython}/bin/python3 /etc/vaultwarden-browser.py "+mode,timeout=420 if mode=="renew" else 240).strip()=="Vaultwarden browser phase "+mode+" passed."
             print("Vaultwarden browser phase "+mode+" passed.")
         except Exception:
             try:
@@ -138,7 +133,7 @@ in {
                 assert not Path(client.shared_dir).resolve().is_relative_to(Path("/nix/store"))
                 private=Path(client.shared_dir)/("vaultwarden-browser-failure-"+mode)
                 private.mkdir(mode=0o700)
-                for name in ["failure.png","failure-labels.json"]:
+                for name in ["failure.png","failure-labels.json","failure-network.json"]:
                     client.execute("test ! -f /root/vaultwarden-functional/"+name+" || (cp /root/vaultwarden-functional/"+name+" /tmp/shared/"+private.name+"/ && chmod 0600 /tmp/shared/"+private.name+"/"+name+")",timeout=10)
                 print("Private Vaultwarden browser artifacts retained; contents suppressed.")
             except Exception:
@@ -146,13 +141,20 @@ in {
             raise
     with subtest("approved native browser SSO, separate master password and encrypted item"):
         browser("create")
+        assert server.succeed("python3 /etc/vaultwarden-attachments.py capture").strip()=="Vaultwarden encrypted attachment inventory capture passed."
     with subtest("fresh browser decrypts retained data and denies unapproved identity"):
         server.succeed("systemctl restart vaultwarden.service && systemctl start terrace-vaultwarden-bootstrap.service",timeout=180)
         browser("verify")
+        assert server.succeed("python3 /etc/vaultwarden-attachments.py verify").strip()=="Vaultwarden encrypted attachment inventory verify passed."
+    with subtest("native web client renews its session and decrypts retained attachments"):
+        browser("renew")
     with subtest("revoked existing and fresh sessions denied while encrypted data retained"):
         server.succeed("systemctl stop vaultwarden.service && bun --no-env-file /etc/vaultwarden-functional-fixture/functional-fixture.ts revoke && systemctl restart terrace-vaultwarden-inputs.service && systemctl start vaultwarden.service && systemctl start terrace-vaultwarden-bootstrap.service",timeout=180)
         browser("disabled")
+        browser("revoked-renewal")
         assert server.succeed("runuser -u postgres -- psql -XAtw -d terrace_vaultwarden -c 'SELECT count(*) FROM ciphers' 2>/dev/null").strip()=="2"
+        assert server.succeed("runuser -u postgres -- psql -XAtw -d terrace_vaultwarden -c 'SELECT count(*) FROM attachments' 2>/dev/null").strip()=="2"
+        assert server.succeed("python3 /etc/vaultwarden-attachments.py verify").strip()=="Vaultwarden encrypted attachment inventory verify passed."
     with subtest("reenabled person decrypts the same retained encrypted vault"):
         # Four deliberate operator starts in this short test exceed the native
         # three-per-five-minutes restart guard. Keep that production guard and
@@ -164,6 +166,27 @@ in {
         assert server.succeed("systemctl show vaultwarden.service -p ControlGroup --value").strip()==""
         server.succeed("systemctl reset-failed vaultwarden.service && bun --no-env-file /etc/vaultwarden-functional-fixture/functional-fixture.ts restore && systemctl restart terrace-vaultwarden-inputs.service && systemctl start vaultwarden.service && systemctl start terrace-vaultwarden-bootstrap.service",timeout=180)
         browser("reenabled")
+        assert server.succeed("python3 /etc/vaultwarden-attachments.py verify").strip()=="Vaultwarden encrypted attachment inventory verify passed."
+    with subtest("fresh restore browser needs only credentials and token-free data receipt"):
+        client.succeed("rm /root/vaultwarden-functional/alumni-session.json /root/vaultwarden-functional/alumni-revocation-session.json")
+        browser("restore")
+    with subtest("identity-independent private admin readback preserves user vault encryption"):
+        server.succeed("systemctl stop terrace-identity-health.timer terrace-identity-health.service keycloak.service",timeout=90)
+        assert server.succeed("systemctl show keycloak.service -p ActiveState --value").strip()=="inactive"
+        for property in ["MainPID","ControlPID"]:
+            assert server.succeed("systemctl show keycloak.service -p "+property+" --value").strip()=="0"
+            assert server.succeed("systemctl show terrace-identity-health.service -p "+property+" --value").strip()=="0"
+        inspect_status,listeners=server.execute("ss -H -lnt")
+        assert inspect_status==0
+        import re
+        assert not re.search(r':(?:8088|9000)(?:\s|$)',listeners)
+        assert server.succeed("terrace-vaultwarden-inspect",timeout=120).strip()=="Native Vaultwarden private admin readback passed."
+        assert client.succeed("curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/admin").strip()=="403"
+        assert server.succeed("python3 /etc/vaultwarden-attachments.py verify").strip()=="Vaultwarden encrypted attachment inventory verify passed."
+        server.succeed("systemctl start keycloak.service",timeout=180)
+        server.wait_until_succeeds("curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null",timeout=90)
+        assert server.succeed("runuser -u postgres -- psql -XAtw -d keycloak -c \"select count(*) from user_entity where username='gateway-fixture-bootstrap'\" 2>/dev/null").strip()=="0"
+    with subtest("all exact application identity and database units and listeners stop"):
         server.succeed("systemctl stop terrace-identity-health.timer vaultwarden.service nginx.service keycloak.service postgresql.service postgresql.target",timeout=90)
         for unit in ["vaultwarden","nginx","keycloak","postgresql","terrace-vaultwarden-migration-server","terrace-vaultwarden-migrate","terrace-vaultwarden-bootstrap"]:
             assert server.succeed("systemctl show "+unit+".service -p ActiveState --value").strip()=="inactive"
