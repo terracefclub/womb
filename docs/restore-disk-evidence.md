@@ -69,3 +69,41 @@ Focused guards (no disk parser or VM launched):
 ```sh
 direnv exec . python tests/platform/test_restore_disk.py -v
 ```
+
+## Optional committed-journal recovery on a second copy
+
+The stopped synthetic gateway inspected on2026-11-05 had a valid EXT4
+superblock with `needs_recovery`, while the recent `/var/tmp` and recovery
+directory paths were absent from its visible directory tree. The first attempt
+therefore recovered no diagnostics and did not establish the restore cause.
+The original QCOW2 still equalled its verified private copy afterward.
+
+For this specific unclean-shutdown case, explicitly append both flags to the
+same bounded command, using `e2fsck` from the existing pinned1.47.4 closure:
+
+```sh
+  --replay-journal --e2fsck "$E2FSCK"
+```
+
+This opt-in creates an **additional exclusive** sparse raw copy and verifies its
+full hash equals the first raw image. Only that additional copy receives exact
+`e2fsck -p -E journal_only`; the original QCOW2, verified QCOW2 copy and first raw
+image never receive a checker or writable parser. The first raw image is hashed
+before/after and its inode/size/timestamps checked, while the final original
+QCOW2 hash check remains mandatory. An EXT4 internal journal is required;
+external journal UUID/device references are rejected before checking. No
+`-f`, `-D`, `-y`, general repair or mount is enabled. Files are then extracted
+read-only from the additional copy. Its resulting full hash and the exact
+checker status are recorded in the private receipt.
+
+The pinned [e2fsck1.47.4 manual](https://github.com/tytso/e2fsprogs/blob/v1.47.4/e2fsck/e2fsck.8.in)
+defines `journal_only` as journal replay without further checks/repairs. The
+[pinned exit definitions](https://github.com/tytso/e2fsprogs/blob/v1.47.4/e2fsck/e2fsck.h)
+give0 for clean and1 for corrected; only exact0/1 are accepted. Reboot/error
+bits, combinations, signals and timeouts fail. Checker stdin/stdout/stderr are
+discarded, host checker configuration is disabled, it runs unprivileged with a
+60-second timeout and32GiB file-size cap, and only its numeric status is printed.
+The additional raw-copy conversion has its own60-second bound. Keep the same
+active300/outer700 limits; a timeout preserves all partial copies as failure
+evidence. This mode requires free space for **two** virtual raw images, the
+QCOW2 copy and an additional1GiB. Every earlier attempt's copies remain retained.

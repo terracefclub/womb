@@ -4,8 +4,10 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import stat
 import struct
+import subprocess
 import sys
 
 support_path = Path(__file__).parents[1] / "documenso/inspect-mail-disk.py"
@@ -59,6 +61,60 @@ def source_info(info, owner):
         raise ValueError()
 
 
+def internal_journal(value):
+    # ext2_fs.h v1.47.4: reject external journals before invoking a checker.
+    if len(value) != 1024 or value[56:58] != b"\x53\xef" or not struct.unpack_from("<I", value, 92)[0] & 4:
+        raise ValueError()
+    if value[208:224] != bytes(16) or not struct.unpack_from("<I", value, 224)[0] or struct.unpack_from("<I", value, 228)[0]:
+        raise ValueError()
+
+
+def journal_arguments(tool, image):
+    return [tool, "-p", "-E", "journal_only", str(image)]
+
+
+def journal_status(status):
+    # e2fsck.h v1.47.4: exact clean/corrected only, no reboot/error bit masks.
+    if type(status) is not int or status not in [0, 1]:
+        raise ValueError()
+
+
+def replay_journal(options, raw, output, size):
+    descriptor = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        original = os.fstat(descriptor)
+        internal_journal(os.pread(descriptor, 1024, 1024))
+        before = support.stream_source(descriptor, size)
+        replayed = output / "gateway-replayed.raw"
+        # Exclusive sparse target; -n forbids qemu-img from recreating it.
+        with open(replayed, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+            stream.truncate(size)
+        support.command([options.qemu_img, "convert", "-n", "-f", "raw", "-O", "raw", str(raw), str(replayed)], 60, 32 * GIB)
+        with replayed.open("rb") as stream:
+            if support.stream_source(stream.fileno(), size) != before:
+                raise ValueError()
+        def limits():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (32 * GIB, 32 * GIB))
+        checked = subprocess.run(journal_arguments(options.e2fsck, replayed),
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 timeout=60, preexec_fn=limits, close_fds=True,
+                                 env={"PATH": "/nonexistent", "LC_ALL": "C", "E2FSCK_CONFIG": "/dev/null"})
+        print(json.dumps({"journalOnlyExitStatus": checked.returncode}), flush=True)
+        journal_status(checked.returncode)
+        after = support.stream_source(descriptor, size)
+        final = os.fstat(descriptor)
+        if before != after or (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns, original.st_ctime_ns) != (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns):
+            raise ValueError()
+        with replayed.open("rb") as stream:
+            replayed_hash = support.stream_source(stream.fileno(), size)
+        return replayed, {"exitStatus": checked.returncode, "firstRawSha256Before": before,
+                          "firstRawSha256After": after, "firstRawUnchanged": True,
+                          "firstRawDevice": original.st_dev, "firstRawInode": original.st_ino,
+                          "replayedRawSha256": replayed_hash}
+    finally:
+        os.close(descriptor)
+
+
 def inspect(options):
     image, output = Path(options.image), Path(options.output)
     if sys.platform != "linux" or image.resolve() != image or output.parent.resolve() != output.parent:
@@ -68,7 +124,12 @@ def inspect(options):
     parent = output.parent.stat()
     if parent.st_uid == 0 or parent.st_uid != options.source_uid or stat.S_IMODE(parent.st_mode) != 0o700 or os.geteuid() not in [0, parent.st_uid]:
         raise ValueError()
-    for path, name in [(options.qemu_img, "qemu-img"), (options.debugfs, "debugfs")]:
+    if bool(options.e2fsck) != options.replay_journal:
+        raise ValueError()
+    tools = [(options.qemu_img, "qemu-img"), (options.debugfs, "debugfs")]
+    if options.replay_journal:
+        tools.append((options.e2fsck, "e2fsck"))
+    for path, name in tools:
         resolved = Path(path).resolve()
         if not str(resolved).startswith("/nix/store/") or resolved.name != name or not os.access(resolved, os.X_OK):
             raise ValueError()
@@ -83,7 +144,7 @@ def inspect(options):
         source_info(original, options.source_uid)
         size = qcow_header(os.pread(descriptor, 104, 0))
         space = os.statvfs(output.parent)
-        if space.f_bavail * space.f_frsize < size + original.st_size + GIB:
+        if space.f_bavail * space.f_frsize < size * (2 if options.replay_journal else 1) + original.st_size + GIB:
             raise ValueError()
         output.mkdir(mode=0o700)
         before = support.stream_source(descriptor, original.st_size)
@@ -117,11 +178,16 @@ def inspect(options):
             raise ValueError()
         raw.chmod(0o600)
         support.require_absent(rows)
+        readable = raw
+        replay = None
+        if options.replay_journal:
+            readable, replay = replay_journal(options, raw, output, size)
+            support.require_absent(rows)
         files = []
         for name, source in FILES:
             target = output / name
             # debugfs reads an unmounted raw EXT4 filesystem; -w is never used.
-            support.command([options.debugfs, "-R", "dump " + source + " " + str(target), str(raw)], 10, 8 * 1024 * 1024)
+            support.command([options.debugfs, "-R", "dump " + source + " " + str(target), str(readable)], 10, 8 * 1024 * 1024)
             if target.exists():
                 info = target.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
@@ -138,6 +204,8 @@ def inspect(options):
         receipt = {"sourceSha256Before": before, "sourceSha256After": after, "sourceUnchanged": True,
                    "sourceDevice": original.st_dev, "sourceInode": original.st_ino, "virtualBytes": size,
                    "ownedProcessesAbsent": len(rows), "files": files}
+        if replay is not None:
+            receipt["journalOnlyReplay"] = replay
         with open(output / "receipt.json", "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
             json.dump(receipt, stream)
         print(json.dumps({"sourceUnchanged": True, "ownedProcessesAbsent": len(rows), "privateFiles": files}))
@@ -153,6 +221,8 @@ if __name__ == "__main__":
             parser.add_argument("--" + key, required=True)
         for key in ["source-uid", "process-count"]:
             parser.add_argument("--" + key, type=int, required=True)
+        parser.add_argument("--replay-journal", action="store_true")
+        parser.add_argument("--e2fsck")
         inspect(parser.parse_args())
     except Exception:
         print("Read-only retained restore inspection failed; private diagnostics suppressed.", file=sys.stderr)

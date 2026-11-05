@@ -112,6 +112,31 @@ class RetainedRestoreDiskTests(unittest.TestCase):
         self.assertNotIn(marker, result.stdout + result.stderr)
         self.assertEqual(result.stderr.strip(), "Read-only retained restore inspection failed; private diagnostics suppressed.")
 
+    def test_journal_mode_requires_internal_ext4_journal(self):
+        value = bytearray(1024)
+        value[56:58] = b"\x53\xef"
+        struct.pack_into("<I", value, 92, 4)
+        struct.pack_into("<I", value, 224, 8)
+        disk.internal_journal(value)
+        for offset in [56, 92, 208, 224, 228]:
+            bad = bytearray(value)
+            bad[offset] = 1 if offset != 224 else 0
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                disk.internal_journal(bad)
+        with self.assertRaises(ValueError):
+            disk.internal_journal(value[:100])
+
+    def test_journal_arguments_never_enable_general_repair(self):
+        self.assertEqual(disk.journal_arguments("/pinned/e2fsck", Path("/private/additional.raw")),
+                         ["/pinned/e2fsck", "-p", "-E", "journal_only", "/private/additional.raw"])
+
+    def test_only_clean_or_corrected_exit_is_accepted(self):
+        for status in [0, 1]:
+            disk.journal_status(status)
+        for status in [True, -15, 2, 3, 4, 8, 16, 32, 128, 129]:
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                disk.journal_status(status)
+
 
 if __name__ == "__main__":
     unittest.main()
