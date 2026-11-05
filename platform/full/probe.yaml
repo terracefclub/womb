@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rehearsal
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-retain
+  resources:
+    requests:
+      storage: 16Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rehearsal
+spec:
+  containers:
+    - name: probe
+      image: terrace-persistence-probe:v1
+      imagePullPolicy: Never
+      command: [/bin/busybox, sleep, '3600']
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: rehearsal

@@ -43,15 +43,19 @@ async def main():
             return
 
         token = TOKEN.read_text()
-        if action == "analytics":
+        if action in ("analytics", "identity"):
             async with session.ws_connect(ORIGIN + "/api/websocket") as socket:
                 assert (await socket.receive_json())["type"] == "auth_required"
                 await socket.send_json({"type": "auth", "access_token": token})
                 assert (await socket.receive_json())["type"] == "auth_ok"
-                await socket.send_json({"id": 1, "type": "analytics"})
+                await socket.send_json({"id": 1, "type": "analytics" if action == "analytics" else "auth/current_user"})
                 result = await socket.receive_json()
                 assert result["success"]
-                print(json.dumps(result["result"]))
+                value = result["result"]
+                if action == "identity":
+                    value = {key: value[key] for key in ["id", "name", "is_owner", "is_admin"]}
+                    assert value["is_owner"] and value["is_admin"]
+                print(json.dumps(value, sort_keys=True))
         elif action in ("states", "config"):
             async with session.get(
                 ORIGIN + "/api/" + action,

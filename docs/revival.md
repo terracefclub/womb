@@ -6,11 +6,12 @@ OS, applications, data and recovery state have not been verified healthy.
 
 ## Agreed scope
 
-- Temporary hosting plus backups: owner ceiling (2026-10-29) is **strictly below
-  US$80/month** including backups, tax and temporary overlap with the existing
-  server; the original US$20 target is superseded. Hetzner with separate access
-  and application hosts. See [access and recovery plan](access-relay.md) for the
-  priced options and recommendation; confirm account pricing/stock first.
+- Owner direction updated2026-11-04: complete a functional, repeatable
+  bootstrap/recovery/teardown rehearsal on disposable builder VMs, then validate
+  a dedicated provider environment when credentials exist. Earlier cost-ceiling
+  questions do not gate code or the authorized ephemeral rehearsal. No cloud
+  purchase or provider apply is authorized in the builder-only work. Preserve
+  existing server data; dedicated Terrace credentials remain unavailable.
 - One x86_64 server on premises later. Hardware, disks, accelerators and network
   are unknown; do not invent a disk layout. Single-node downtime is acceptable.
 - Cloud recovery resources stay outside its cluster. No quorum or storage
@@ -65,7 +66,7 @@ testing the actual Hetzner boot requirements.
 | Human-facing file sharing | Google Workspace/Drive first | Integration identity and existing permissions |
 | Community | Payload/SvelteKit with dedicated Keycloak | Approval required; moderation and retention before real invitations |
 | Monitoring | Health, certificates, capacity, backup age, external probe | Bounded retention and actionable alerts |
-| Backups | Encrypted, off-site, independently recoverable | Credentials, cost cap, isolated restore |
+| Backups | Encrypted, off-site, independently recoverable | Credentials, isolated restore and operator recovery |
 
 Omit Ceph, distributed metrics/logging/tracing stacks, data warehouses, extra ETL,
 desktop/home-manager modules, gaming/media hobbies, GPU model serving, and a
@@ -96,8 +97,9 @@ separate gates.
 
 Checked 2026-10-31: Hetzner lists EU CX43 at $18.49/month excluding IPv4/tax, while
 US CPX11 is $20.49 before extras and the CX line is reported unorderable. Public
-listings do not prove stock availability. The recommended EU pair fits the
-US$80 ceiling; measure US latency and introduce a CDN later.
+listings do not prove stock availability. This is historical planning evidence: the November4 direction above supersedes
+the earlier US$80 prerequisite. It is not current account pricing, stock or
+a provider order. Measure real latency and introduce a CDN after origin checks.
 [Provider pricing](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/).
 
 ## CMS shortlist
