@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run Vaultwarden checks on the x86-64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 0 ]] || { echo 'usage: platform/vaultwarden-check' >&2; exit 2; }
+cd "$(dirname "$0")"
+exec ./run-check --keep-failed --impure --file vaultwarden-check.nix
