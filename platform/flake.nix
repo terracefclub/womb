@@ -20,6 +20,7 @@
     nixosModules.windmill = import ./windmill.nix;
     nixosModules.website-gateway = import ./website-gateway.nix;
     nixosModules.documenso = import ./documenso.nix;
+    nixosModules.vaultwarden = import ./vaultwarden.nix;
 
     checks.${system} = {
       documenso = pkgs.testers.runNixOSTest (import ./documenso-test.nix {
