@@ -13,7 +13,7 @@ export type ApprovedUser = { email: string; name: string; role: 'admin' | 'opera
 export type Input = { adminPassword: string; origin: string; issuer: string; clientId: string; clientSecret: string; approvedUsers: ApprovedUser[] }
 // Match the pinned KeycloakSetting.svelte producer, including its realm URL.
 export function keycloakProvider(input: Input) {
-  return { id: input.clientId, secret: input.clientSecret, org: input.issuer, display_name: 'Keycloak', login_config: {
+  return { id: input.clientId, secret: input.clientSecret, org: input.issuer, display_name: 'Keycloak', pkce: true, login_config: {
     auth_url: input.issuer + '/protocol/openid-connect/auth', token_url: input.issuer + '/protocol/openid-connect/token',
     userinfo_url: input.issuer + '/protocol/openid-connect/userinfo', scopes: ['openid', 'profile', 'email', 'offline_access'],
   } }
@@ -28,7 +28,7 @@ export function providerReadbackSummary(input: unknown): string[] {
     `Windmill provider Keycloak object count: ${Math.min(objects.length, 1001)}`,
     ...[...new Set(kinds)].map(kind => `Windmill provider display-name kind: ${kind}.`)]
 }
-// v1.839 CE OpenAPI /oauth/list_logins returns objects, not the OSS stub's strings.
+// CE OpenAPI /oauth/list_logins returns objects, not the OSS stub's strings.
 export function isKeycloakProviderSet(input: unknown): boolean {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return false
   const value = input as Record<string, unknown>

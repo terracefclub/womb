@@ -47,6 +47,7 @@ test('provider input matches the pinned Keycloak UI realm URL and explicit displ
   const provider = keycloakProvider(input)
   expect(provider.org).toBe(input.issuer)
   expect(provider.display_name).toBe('Keycloak')
+  expect(provider.pkce).toBe(true)
   expect(provider.login_config).toEqual({
     auth_url: input.issuer + '/protocol/openid-connect/auth',
     token_url: input.issuer + '/protocol/openid-connect/token',
