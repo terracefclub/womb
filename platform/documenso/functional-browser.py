@@ -11,6 +11,7 @@ import os
 import re
 import struct
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,10 +63,17 @@ def pdf_fixture():
     return result + f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
 
 
+def mode_options(arguments):
+    if len(arguments) == 1 and arguments[0] in ["create", "sign", "verify", "disabled"]:
+        return arguments[0], False
+    if len(arguments) == 2 and arguments[0] in ["create", "verify"] and arguments[1] == "--signing":
+        return arguments[0], True
+    raise ValueError()
+
+
 def main():
     global stage
-    mode = sys.argv[1] if len(sys.argv) == 2 else ""
-    assert mode in ["create", "verify", "disabled"]
+    mode, signing = mode_options(sys.argv[1:])
     assert ROOT.stat().st_mode & 0o077 == 0
     users = {user["username"]: user for user in private_read(ROOT / "credentials.json")["users"]}
     from playwright.sync_api import sync_playwright
@@ -120,17 +128,93 @@ def main():
                 assert result["success"] is True
                 return result
 
-            def download(ctx, path):
-                assert re.fullmatch(r"/api/files/envelope/[A-Za-z0-9_-]+/envelopeItem/[A-Za-z0-9_-]+/download/original", path)
-                response = ctx.request.get(DOC + path)
+            def download(ctx, path, save=False):
+                assert re.fullmatch(r"/api/files/envelope/[A-Za-z0-9_-]+/envelopeItem/[A-Za-z0-9_-]+/download/(original|signed)", path)
+                for attempt in range(30):
+                    response = ctx.request.get(DOC + path, timeout=5000)
+                    if response.status != 404 or not save:
+                        break
+                    time.sleep(0.5)
                 assert response.status == 200
                 value = response.body()
                 assert 100 < len(value) <= 2 * 1024 * 1024 and value.startswith(b"%PDF-")
                 assert "no-store" in response.headers.get("cache-control", "")
                 assert "attachment" in response.headers.get("content-disposition", "")
+                if save:
+                    with open(ROOT / "signed.pdf", "xb", opener=lambda p, flags: os.open(p, flags, 0o600)) as output:
+                        output.write(value)
                 return hashlib.sha256(value).hexdigest()
 
-            if mode == "disabled":
+            def verify_signature():
+                result = subprocess.run([sys.executable, "/etc/documenso-signing-proof.py", "verify"],
+                                        capture_output=True, text=True, timeout=30)
+                assert result.returncode == 0 and result.stdout.strip() == "Native signed PDF verified against the fixture certificate; altered bytes rejected."
+                (ROOT / "signed.pdf").unlink()
+
+            def denied_download(ctx, path, status):
+                response = ctx.request.get(DOC + path)
+                assert response.status == status and len(response.body()) <= 65536
+                assert not response.body().startswith(b"%PDF-")
+                assert "application/pdf" not in response.headers.get("content-type", "")
+                assert "attachment" not in response.headers.get("content-disposition", "")
+
+            if mode == "sign":
+                stage = "native recipient email link"
+                recipient = private_read(ROOT / "recipient.json")
+                path = recipient["path"]
+                assert re.fullmatch(r"/sign/[A-Za-z0-9_-]{16,256}", path)
+                signer = context()
+                page = signer.new_page()
+                active_page[0] = page
+                page.goto(DOC + path)
+                # v2's h3 accessible name includes its remaining-field badge
+                # and sidebar button; the actual private page confirms both.
+                page.get_by_role("heading", name=re.compile(r"^Sign Document\b")).wait_for()
+                page.get_by_role("button", name="Next Field", exact=True).wait_for()
+                stage = "native typed signature and recipient field"
+                page.get_by_test_id("signature-pad-dialog-button").click()
+                page.get_by_role("tab", name="Type", exact=True).click()
+                page.get_by_test_id("signature-pad-type-input").fill("Synthetic Signature")
+                page.get_by_role("button", name="Next", exact=True).click()
+                page.get_by_role("dialog").wait_for(state="hidden")
+                # v2 renders fields on Konva, not v1 DOM field buttons. Its
+                # native Next Field action locates the exact unsigned field.
+                page.get_by_role("button", name="Next Field", exact=True).click()
+                field = page.locator("#field-tooltip")
+                field.wait_for(state="visible")
+                assert field.count() == 1
+                field.scroll_into_view_if_needed()
+                box = field.bounding_box()
+                assert box and 0 < box["width"] < 2048 and 0 < box["height"] < 2048
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                # The native completion action appears only after required
+                # fields are inserted; keep that assertion before completion.
+                page.get_by_role("button", name="Complete", exact=True).wait_for()
+                stage = "native recipient completion and sealing"
+                page.get_by_role("button", name="Complete", exact=True).click()
+                page.get_by_role("dialog").get_by_role("button", name="Sign", exact=True).click()
+                page.wait_for_url(lambda url: urlsplit(url).path == path + "/complete")
+                signer.close()
+                stage = "native sealed document download"
+                member, page = login("local-member")
+                original = private_read(ROOT / "receipt.json")["path"]
+                signed_path = original.removesuffix("original") + "signed"
+                fingerprint = download(member, signed_path, save=True)
+                stage = "independent sealed PDF signature verification"
+                verify_signature()
+                assert fingerprint != private_read(ROOT / "receipt.json")["sha256"]
+                private_write(ROOT / "signed-receipt.json", {"path": signed_path, "sha256": fingerprint})
+                stage = "sealed PDF anonymous and non-team denial"
+                anonymous = context()
+                denied_download(anonymous, signed_path, 401)
+                anonymous.close()
+                alumni = context(str(ROOT / "alumni-session.json"))
+                assert session(alumni)["user"]["email"] == users["local-alumni"]["email"]
+                denied_download(alumni, signed_path, 403)
+                alumni.close()
+                member.close()
+                (ROOT / "recipient.json").unlink()
+            elif mode == "disabled":
                 stage = "revoked existing session"
                 old = context(str(ROOT / "alumni-session.json"))
                 assert session(old)["user"] is None
@@ -231,9 +315,25 @@ def main():
                     assert baseline == download(member, path)
                     downloaded.delete()
                     private_write(ROOT / "receipt.json", {"path": path, "sha256": baseline, "totpSecret": secret, "backupCodesHash": digest(codes)})
+                    page.keyboard.press("Escape")
+                    page.get_by_role("dialog").wait_for(state="hidden")
+                    if signing:
+                        stage = "native signing recipient and signature field"
+                        page.get_by_role("button", name="Add Myself", exact=True).click()
+                        assert page.get_by_test_id("signer-email-input").first.input_value() == users["local-member"]["email"]
+                        page.get_by_test_id("envelope-editor-step-addFields").first.click()
+                        page.get_by_role("button", name="Signature", exact=True).click()
+                        page.locator(".konva-container canvas").first.click(position={"x": 120, "y": 140})
+                        page.get_by_text("1 Field", exact=True).wait_for()
+                        page.get_by_test_id("envelope-editor-step-upload").first.click()
+                        stage = "native synthetic signing request distribution"
+                        page.locator('button[title="Send Envelope"]').click()
+                        page.get_by_role("heading", name="Send Document", exact=True).wait_for()
+                        page.get_by_role("dialog").get_by_role("button", name="Send", exact=True).click()
+                        page.get_by_role("dialog").wait_for(state="hidden")
                     stage = "approved non-team user and private session receipt"
                     alumni, _ = login("local-alumni")
-                    assert alumni.request.get(DOC + path).status == 403
+                    denied_download(alumni, path, 403)
                     private_write(ROOT / "alumni-session.json", alumni.storage_state())
                     alumni.close()
                 else:
@@ -242,9 +342,14 @@ def main():
                     path = receipt["path"]
                     assert download(member, path) == receipt["sha256"]
                     assert digest(post(member, "view-recovery-codes", {"token": totp(receipt["totpSecret"])})["backupCodes"]) == receipt["backupCodesHash"]
+                    if signing:
+                        signed = private_read(ROOT / "signed-receipt.json")
+                        assert download(member, signed["path"], save=True) == signed["sha256"]
+                        stage = "independent retained PDF signature verification"
+                        verify_signature()
                 stage = "anonymous document denial"
                 anonymous = context()
-                assert anonymous.request.get(DOC + path).status == 401
+                denied_download(anonymous, path, 401)
                 anonymous.close()
                 member.close()
             print("Documenso functional browser phase " + mode + " passed.")

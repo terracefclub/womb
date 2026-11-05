@@ -207,14 +207,70 @@ BUILD_LOCK=/absolute/shared/build.lock platform/documenso-functional-check /sour
 direnv exec . python -m unittest discover -s tests/platform -p test_documenso_functional.py -v
 ```
 
-The test creates an organisation, team and synthetic unsigned PDF through the
+The test creates an organisation, team and synthetic PDF through the
 native interface. It tests approved member/admin login, closed signup for unknown
 and unapproved editorial identities, ordinary-member admin denial, anonymous and
 non-team document denial, and retrieval of the same document after database/app
 restart. It uses the native Download PDF → Original action in the v2 editor,
 checks downloaded bytes against the session-authenticated no-store endpoint and
 requires its native 401 refusal for anonymous requests and 403 refusal for
-users outside the team. Identity is stopped before the shared database restart
+users outside the team. It adds the synthetic member as a signing recipient,
+places a native signature field and distributes through a local Mailpit capture
+sink. The sink accepts only that `.invalid` recipient, binds SMTP to the private
+Podman bridge and exposes its API only on loopback. Relay/forwarding is absent,
+reverse DNS and version checks are disabled, and the client must be unable to
+reach either listener. The sink's database stays in its private retained state
+directory until the disposable guest is retired.
+
+Before any sender UI cycle, a seven-second probe runs inside the actual app
+container with its configured environment. It requires the native host alias to
+resolve to the bridge host, then completes SMTP greeting/EHLO/QUIT without sending
+a message. It also verifies the official image's installed Nodemailer transport
+with the same local configuration. The captured signing email must correspond to exactly one completed
+native `send.signing.requested.email` background job. The functional VM alone
+enables a capped 4 MiB root-private container log; SMTP or mail-capture failures
+export a bounded 0600 copy outside the Nix output and emit only fixed job-state
+counts. Raw errors, payloads and tokens remain private. Production logging stays
+disabled by this change.
+Configuration is checked against the pinned
+[SMTP transport](https://github.com/documenso/documenso/blob/8707e33c124e4b1a68dde92d5e05178c9aabd0be/packages/email/mailer.ts)
+and [local job provider](https://github.com/documenso/documenso/blob/8707e33c124e4b1a68dde92d5e05178c9aabd0be/packages/lib/jobs/client/local.ts):
+no SMTP username, no TLS for the local sink, and the container's own loopback job
+endpoint. The probe also requires that exact local provider and endpoint.
+The configured local SMTP destination is the default bridge's literal
+`10.88.0.1`, avoiding the SMTP library's
+[DNS-first hostname resolution](https://nodemailer.com/smtp#general-options)
+before its hosts-file fallback. The probe separately verifies the native host
+alias still identifies that bridge. This removes an unnecessary resolver
+dependency; it does not establish the historical cause of a processing job.
+The module permits the configured SMTP port only on the default `podman0`
+private bridge. It does not add that port to the host's public allowlist; a
+custom Podman network requires deliberate matching interface/bind review.
+
+On November 5, 2026, the first synthetic sender cycle reached Send successfully,
+but the copied retained Mailpit database contained zero messages. The read-only
+[disk evidence helper](documenso-mail-evidence.md) verified the original disk's
+unchanged hash. This establishes a delivery/job gap, not its SMTP cause; the
+subsequent complete check below supplies the signing acceptance evidence.
+Evaluation of that exact VM also confirmed an enabled input firewall with only
+public 443 and Podman DNS 53 allowed. The private SMTP rule closes this
+configuration gap; the actual protocol probe must still prove connectivity.
+
+Only a bounded, exact-origin `/sign/` link is extracted privately from captured
+HTML; links, images and scripts are never fetched by the capture helper. A fresh
+browser context completes the native typed signature, field and recipient
+confirmation. The v2 recipient heading includes its field-count/sidebar controls,
+and fields are rendered on Konva. The check uses the native Next Field tooltip's
+measured rectangle for its physical click, then requires the native Complete
+action before confirmation; it does not invoke internal signing functions.
+The sender downloads the native `signed` PDF version. Independent
+OpenSSL CMS verification must use the exact generated fixture certificate and
+reject altered signed bytes. The bounded PDF check requires one signature's
+ByteRange to cover the complete file outside its signature placeholder; it does
+not assert a public trust chain or timestamp authority. No test secret or
+signing token enters diagnostics.
+
+Identity is stopped before the shared database restart
 and started again with the temporary bootstrap credentials removed; its deleted
 master administrator must stay absent. It sets up native two-factor encryption, enables it with an actual TOTP,
 and decrypts the same recovery codes after restart. This tests encryption key
@@ -231,6 +287,9 @@ labels, script failures and HTTP status; arbitrary DOM/text, exceptions and HTTP
 bodies are suppressed. A failed browser phase also captures a private masked
 viewport screenshot and bounded button/heading names. Input values, scripts,
 links, PDF canvas and synthetic identities/content are excluded. The wrapper
+also retains a failed signature check's synthetic PDF and generated public
+certificate as private artifacts, so its exact bytes can be inspected without
+another guessed runtime attempt. These files are never printed. The wrapper
 uses Nix `--keep-failed`: artifacts remain mode0600 under the failed build's
 mode0700 shared subdirectory, outside the Nix store, after guests stop. Inspect
 and copy them to protected evidence storage on the builder, then remove only
@@ -241,12 +300,27 @@ is removed after the revocation test. No database/encryption/client secret is
 copied to the browser guest. All app/identity/database units and containers must
 stop before the VM driver finishes.
 
-`functional-browser.py create` and `verify` use a protected receipt containing a
+`functional-browser.py create` and `verify` retain their unsigned-only contract
+and do not require SMTP, a signing key or a signed receipt. The signing wrapper
+explicitly opts into `create --signing` and `verify --signing`; `sign` is the
+separate recipient step. The plain modes remain usable by the fresh-host restore
+check independently of the signing acceptance gate. Both variants use a protected receipt containing a
 relative document path, its download digest, a synthetic TOTP secret and a digest
-of recovery codes. This permits the same behavioral checks on a replacement
+of recovery codes. `signed-receipt.json` additionally retains the private signed
+download path/digest; the generated public `signing.crt` permits the same
+independent cryptographic check after recovery. This permits the same behavioral checks on a replacement
 host without retaining raw recovery codes or depending on old login cookies.
 The standalone check currently tests restart, **not replacement-host disaster
 recovery**. That requires a verified encrypted backup, originals stopped and a
-fresh replacement serving the same issuer/app origins. Synthetic signing with a
-generated fixture certificate and local SMTP capture remains a separate gate.
-No check publishes documents, sends real mail, or signs legal documents.
+fresh replacement serving the same issuer/app origins. On November 5, 2026, all
+four native functional subtests passed in 438.90 seconds: actual per-user SSO,
+local-only email delivery and one completed native email job, recipient typed
+signature/field/completion, signed PDF retrieval, exact-certificate CMS
+verification and altered-byte rejection, anonymous/non-team denials, retained
+signature/encryption checks after restart and offboarding, IdP-independent
+loopback recovery, and final service/port stop. All 14 recorded host controller,
+driver and guest processes were subsequently absent. This is synthetic
+standalone acceptance; replacement-host signing recovery and production use
+remain separate gates. Pure parser tests and certificate health alone do not
+establish the workflow. No check publishes
+documents, sends real mail, or signs legal documents.

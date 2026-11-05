@@ -13,6 +13,14 @@ SPEC.loader.exec_module(fixture)
 
 
 class FunctionalFixtureTests(unittest.TestCase):
+    def test_existing_unsigned_modes_require_explicit_signing_opt_in(self):
+        for mode in ["create", "verify"]:
+            self.assertEqual(fixture.mode_options([mode]), (mode, False))
+            self.assertEqual(fixture.mode_options([mode, "--signing"]), (mode, True))
+        for args in [[], ["other"], ["disabled", "--signing"], ["create", "--other"], ["verify", "--signing", "extra"]]:
+            with self.assertRaises(ValueError):
+                fixture.mode_options(args)
+
     def test_totp_rfc6238_six_digit_vector(self):
         with patch.object(fixture.time, "time", return_value=59):
             self.assertEqual(fixture.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"), "287082")

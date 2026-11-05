@@ -25,7 +25,9 @@
     NEXT_PUBLIC_UPLOAD_TRANSPORT = "database";
     NEXT_PRIVATE_JOBS_PROVIDER = "local";
     NEXT_PRIVATE_SMTP_TRANSPORT = "smtp-auth";
-    NEXT_PRIVATE_SMTP_HOST = "host.containers.internal";
+    # This relay is on the fixed default bridge. Avoid DNS-first SMTP clients
+    # waiting on an external resolver before consulting a container hosts alias.
+    NEXT_PRIVATE_SMTP_HOST = "10.88.0.1";
     NEXT_PRIVATE_SMTP_PORT = toString cfg.smtpPort;
     NEXT_PRIVATE_SMTP_FROM_NAME = "Terrace documents";
     NEXT_PRIVATE_SMTP_FROM_ADDRESS = "documents@terrace.invalid";
@@ -320,6 +322,9 @@ in {
       "terrace-documenso-key:${cfg.certificateKeyFile}"
     ];
     networking.firewall.allowedTCPPorts = [443];
+    # Only the default private Podman bridge may reach the local SMTP relay.
+    # A host bridge listener is still subject to the host input firewall.
+    networking.firewall.interfaces.podman0.allowedTCPPorts = [cfg.smtpPort];
     terrace.backup = lib.mkIf config.terrace.backup.enable {
       postgresql.databases = [role];
       extraPaths.documenso-inputs = cfg.inputsDirectory;
