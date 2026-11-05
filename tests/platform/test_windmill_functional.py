@@ -7,6 +7,9 @@ import tempfile
 import ast
 import textwrap
 import unittest
+import contextlib
+import io
+import re
 
 SPEC = importlib.util.spec_from_file_location('windmill_functional', Path(__file__).parents[2] / 'platform/windmill-functional/functional-browser.py')
 module = importlib.util.module_from_spec(SPEC)
@@ -14,6 +17,23 @@ SPEC.loader.exec_module(module)
 
 
 class FunctionalReceipt(unittest.TestCase):
+    def test_old_layout_observations_accept_numeric_facts_without_denial_assumptions(self):
+        source=(Path(__file__).parents[2]/'platform/windmill-test.nix').read_text()
+        tree=ast.parse(textwrap.dedent(source.split('testScript =',1)[1].split("''",1)[1].rsplit("'';",1)[0]))
+        loops=[node for node in ast.walk(tree) if isinstance(node,ast.For) and ast.unparse(node.target)=='(label, row)']
+        lengths=[node for node in ast.walk(tree) if isinstance(node,ast.Assert) and ast.unparse(node.test)=='len(old_parents) == 2']
+        self.assertEqual(len(loops),1);self.assertEqual(len(lengths),1)
+        code=compile(ast.Module(body=lengths+loops,type_ignores=[]),'<reviewed-old-layout-gate>','exec')
+        for values,accepted in [(['0 755 0','44123 700 1'],True),(['0 777 1','0 777 1'],True),
+                                (['0 0 0','999999 70 1'],True),(['4294967296 755 0','0 755 0'],False),(['0 888 0','0 755 0'],False),
+                                (['0 755 2','0 755 0'],False),(['PRIVATE_MARKER','0 755 0'],False),(['0 755 0'],False)]:
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output):
+                if accepted:exec(code,{'re':re,'old_parents':values})
+                else:
+                    with self.assertRaises(AssertionError):exec(code,{'re':re,'old_parents':values})
+            self.assertNotIn('PRIVATE_MARKER',output.getvalue())
+
     def receipt(self):
         return {'workspace':'terrace','script':'f/sso-rehearsal/proof','privateVariable':'u/operator/sso-private',
                 'privateDigest':'a'*64,'job':'11111111-1111-1111-1111-111111111111','resultDigest':'b'*64,

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run Windmill mount checks on the x86-64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 0 ]] || { echo 'usage: platform/windmill-mount-check' >&2; exit 2; }
+cd "$(dirname "$0")"
+exec ./run-check --keep-failed --impure --file windmill-mount-check.nix

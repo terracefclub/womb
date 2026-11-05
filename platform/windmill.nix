@@ -56,7 +56,12 @@
     FAVOR_UNSHARE_PID = "false";
     DISABLE_NSJAIL = "true";
   };
-  commonOptions = ["--network=host" "--userns=host" "--read-only" "--cap-drop=ALL" "--security-opt=no-new-privileges" "--pids-limit=256" "--cpus=1" "--memory=1536m" "--tmpfs=/tmp:rw,nodev,nosuid,mode=1777,size=512m,notmpcopyup"];
+  commonOptions = ["--network=host" "--userns=host" "--read-only" "--cap-drop=ALL" "--security-opt=no-new-privileges" "--pids-limit=256" "--cpus=1" "--memory=1536m"];
+  workerMounts = import ./windmill/worker-mounts.nix {inherit image;};
+  temporaryOptions = mode:
+    if mode == "worker"
+    then workerMounts
+    else ["--tmpfs=/tmp:rw,nodev,nosuid,mode=1777,size=512m,notmpcopyup"];
   container = mode: {
     inherit image imageFile;
     pull = "never";
@@ -64,7 +69,10 @@
     user = "${toString cfg.uid}:${toString cfg.uid}";
     privileged = false;
     volumes = ["/run/postgresql:/run/postgresql:ro" "/etc/ssl/certs/ca-certificates.crt:/run/terrace-ca.crt:ro"];
-    extraOptions = commonOptions ++ lib.optional (config.terrace.identity.enable or false) "--add-host=${config.terrace.identity.hostname}:127.0.0.1";
+    extraOptions =
+      commonOptions
+      ++ temporaryOptions mode
+      ++ lib.optional (config.terrace.identity.enable or false) "--add-host=${config.terrace.identity.hostname}:127.0.0.1";
     environment =
       commonEnvironment
       // {
@@ -106,7 +114,7 @@
     echo 'Windmill migration stage: original server start' >&2
     ${pkgs.podman}/bin/podman run --detach --rm --log-driver=journald --cidfile "$RUNTIME_DIRECTORY/id" \
       --name terrace-windmill-migration --pull=never \
-      ${lib.escapeShellArgs commonOptions} --user=${toString cfg.uid}:${toString cfg.uid} \
+      ${lib.escapeShellArgs (commonOptions ++ temporaryOptions "server")} --user=${toString cfg.uid}:${toString cfg.uid} \
       --volume /run/postgresql:/run/postgresql:ro \
       --env DATABASE_URL=${lib.escapeShellArg databaseURL} --env DATABASE_CONNECTIONS=6 \
       --env MODE=server --env PORT=${toString (cfg.port + 2)} --env SERVER_BIND_ADDR=127.0.0.1 \
