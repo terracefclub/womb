@@ -57,6 +57,13 @@ Passed 2026-10-28 via the shared Linux build queue. This is service isolation
 and persistence evidence, not live enrollment, DERP connectivity, OIDC, a
 backup restore or a deployed health check. Those remain explicit release gates.
 
+The November 5 [combined rehearsal](full-rehearsal.md) adds actual disposable
+Tailscale clients with `--relay-peers`. It passed scoped native sensor reads and
+denied peer/path/write checks before and after encrypted backup, original
+service guests off and fresh peer/Headscale restore with identical identities.
+This builder proof does not establish human enrollment, WAN/forced DERP,
+off-site operator recovery or a deployed relay; production defaults stay deny-all.
+
 ## Application host and synthetic demonstrations
 
 Start with website, Payload, PostgreSQL and Keycloak. Add bounded demos of the

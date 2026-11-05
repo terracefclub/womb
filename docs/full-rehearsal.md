@@ -38,6 +38,28 @@ repository/browser guest; it is separate from server backup contents. Signing
 and SMTP remain disabled, and actual profiles remain unchanged. This optional
 scenario requires its own source-matched native acceptance receipt.
 
+The separate optional `--relay-peers` switch adds three disposable Tailscale
+clients to the existing application, automation and browser guests. Private
+single-use tagged enrollment keys are expired before capture. The allow rule
+permits only the application client to reach one private sensor proxy port;
+the denied client must fail TCP connection, and another peer's live SSH port
+must remain unreachable. The approved client can read a native synthetic Home
+Assistant sensor, while other paths and writes are rejected by the separate
+test-only proxy. Its listener is allowed only on the tailnet interface; a LAN
+connection must fail. Production relay defaults remain deny-all.
+
+Client cryptographic state and protected fixture inputs join the application
+and automation encrypted backups. The browser guest represents a retained user
+device. After original service guests stop, replacements reconnect without an
+enrollment command; node IDs, public keys and addresses must match, and the
+same private-access/denial checks repeat against the recovered Headscale.
+This does not prove human OIDC enrollment, production HA user permissions or
+forced DERP/NAT traversal: transport remains selected by the native clients.
+No production or host network settings are changed. The key-file mechanism
+follows the [Tailscale CLI contract](https://tailscale.com/docs/reference/tailscale-cli/up)
+and [Headscale fixture enrollment](https://headscale.net/stable/ref/registration/).
+This extension remains unaccepted until its source-matched native run passes.
+
 The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
 build at 1200 seconds), and controller cleanup at 70 seconds. VM execution uses
 the independently validated transient system service/cgroup: queue 1200 seconds,
@@ -56,9 +78,9 @@ explicit bootstrap twice and checks stable identities/inputs/migration ledger. I
 immutable application archives, real HTTPS native code/PKCE SSO, Chromium's
 native denied-account switch, public/private content and image-cache checks.
 Application requests and synthetic automation checks run concurrently. K3s
-runs an actual PVC-mounted container; Headscale's first composition check is
-control-plane/key/database recovery only. Real tailnet clients/ACL/DERP and
-human relay enrollment remain separate follow-ups.
+runs an actual PVC-mounted container. Without `--relay-peers`, Headscale covers
+control-plane/key/database recovery only. Human relay enrollment and forced
+DERP/NAT traversal remain separate follow-ups.
 
 Before capture it scales K3s controllers down, terminates pods, stops its
 server/runtime and verifies no pod/runtime processes remain. Every cgroup read
@@ -115,8 +137,8 @@ This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
 public DNS/certificate issuance, CDN behavior, off-site operator recovery,
 real invitations or final simultaneous capacity approval. Windmill and
 Vaultwarden are not part of this scenario. Documenso is included only with
-`--documenso`; the baseline observed acceptance below does not cover that
-optional extension.
+`--documenso`; the original baseline acceptance below is separate from the
+optional-extension results.
 A passing source-matched native receipt is required before claiming this
 scenario accepted.
 
@@ -150,3 +172,17 @@ and helper process identities were subsequently absent, with the exact guard
 unit and cgroup off. Explicit synthetic purge removed seven disks, repository
 and escrow while preserving its unrelated sentinel, an earlier failed receipt
 and all evidence. This does not establish signing recovery or real relay peers.
+
+Source `870c5672e43f5fb925bf22e4a9b1f4ed32f8a971` passed the combined
+`--documenso --relay-peers` scenario on November 5 in 825.39 seconds. Native
+Tailscale 1.104.2 and Headscale 0.29.6 preserved the three client identities;
+the gateway and automation clients were restored onto new service guests,
+while the browser client retained its original disk. Initial and restored
+private-access/denial checks took 15.54 and 15.49 seconds. All existing
+198-assertion/browser, PDF/encrypted-2FA, PVC and automation checks also passed.
+The driver asserted every final QEMU PID absent; independent host checks
+confirmed the exact recursive cgroup/unit off and all 26 captured process
+identities absent. Those live snapshots covered the originals and fresh
+gateway, not independent fingerprints for both later replacements. Explicit
+synthetic purge preserved its unrelated sentinel and earlier failed receipt.
+DERP transport, human enrollment and final production capacity remain unproved.
