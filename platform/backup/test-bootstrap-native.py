@@ -86,19 +86,25 @@ def restored(sql, metadata, dump, label):
     return item
 
 
-def proof():
-    assert re.search(rb"PostgreSQL\) 18[.]", command(["postgres", "--version"]))
-    source = cluster("source", "postgres")
+def source_fixture(label, name, identifier):
+    source = cluster(label, name)
     password = secrets.token_hex(24)
-    psql(source, "CREATE ROLE windmill_user NOLOGIN; CREATE ROLE windmill_admin NOLOGIN; "
+    psql(source, "CREATE ROLE windmill_user NOLOGIN; CREATE ROLE windmill_admin NOLOGIN BYPASSRLS; "
          "CREATE ROLE terrace_windmill LOGIN CREATEROLE CONNECTION LIMIT 10 PASSWORD '" + password + "'; "
          "CREATE ROLE zz_auditor LOGIN NOINHERIT; CREATE ROLE zz_audited NOLOGIN; "
-         "GRANT windmill_user TO windmill_admin WITH ADMIN FALSE, INHERIT TRUE, SET TRUE GRANTED BY postgres; "
-         "GRANT windmill_admin,windmill_user TO terrace_windmill WITH ADMIN FALSE, INHERIT TRUE, SET TRUE GRANTED BY postgres; "
-         "GRANT zz_audited TO zz_auditor WITH ADMIN TRUE, INHERIT FALSE, SET FALSE GRANTED BY postgres; "
-         "ALTER ROLE postgres SET work_mem='2MB'; ALTER ROLE postgres PASSWORD '" + secrets.token_hex(24) + "'; "
+         "GRANT windmill_user TO windmill_admin WITH ADMIN FALSE, INHERIT TRUE, SET TRUE GRANTED BY " + identifier + "; "
+         "GRANT windmill_admin,windmill_user TO terrace_windmill WITH ADMIN FALSE, INHERIT TRUE, SET TRUE GRANTED BY " + identifier + "; "
+         "GRANT zz_audited TO zz_auditor WITH ADMIN TRUE, INHERIT FALSE, SET FALSE GRANTED BY " + identifier + "; "
+         "ALTER ROLE " + identifier + " SET work_mem='2MB'; ALTER ROLE " + identifier + " PASSWORD '" + secrets.token_hex(24) + "'; "
          "CREATE DATABASE saved OWNER terrace_windmill;")
     psql(source, "CREATE TABLE retained (value text); INSERT INTO retained VALUES ('synthetic-retained'); ALTER TABLE retained OWNER TO terrace_windmill;", "saved")
+    psql(source, "ALTER DATABASE saved SET work_mem='4MB';")
+    return source
+
+
+def proof():
+    assert re.search(rb"PostgreSQL\) 18[.]", command(["postgres", "--version"]))
+    source = source_fixture("source", "postgres", "postgres")
     sql, metadata, dump = backup(source, "source")
     old = cluster("old", "terrace-restore")
     before = errors.tell()
@@ -140,13 +146,11 @@ def proof():
     helper(["capture", sql, work / "nologin.json"], (unsupported + "\n").encode(), expect=1)
     print("Native PostgreSQL18 genuine errors and unsupported metadata rejected.", flush=True)
 
-    # Renaming preserves OID10, but forces actual quoted-space/quote dump syntax.
-    renamed = 'Source "Root'
-    psql(source, 'ALTER ROLE postgres RENAME TO "Source ""Root";')
-    source["name"] = renamed
-    sql2, metadata2, dump2 = backup(source, "quoted")
+    # A separate source exercises actual quoted-space/quote bootstrap syntax.
+    quoted_source = source_fixture("quoted-source", 'Source "Root', '"Source ""Root"')
+    sql2, metadata2, dump2 = backup(quoted_source, "quoted")
     quoted = restored(sql2, metadata2, dump2, "quoted-restored")
-    assert signature(quoted) == signature(source)
+    assert signature(quoted) == signature(quoted_source)
     print("Native PostgreSQL18 quoted bootstrap identity restored.", flush=True)
 
 
