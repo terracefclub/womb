@@ -107,3 +107,33 @@ The additional raw-copy conversion has its own60-second bound. Keep the same
 active300/outer700 limits; a timeout preserves all partial copies as failure
 evidence. This mode requires free space for **two** virtual raw images, the
 QCOW2 copy and an additional1GiB. Every earlier attempt's copies remain retained.
+
+If those eight paths recover only empty initial files, the committed restore
+script has two additional fixed early-stage logs: `initdb.log` and
+`pgdata/postgres.log` under `/var/lib/rehearsal-recovery`. They may be checked on
+the **already-replayed** private raw copy with the existing pinned `debugfs`;
+do not reconvert, replay again or boot a guest. After reviewing the exact owned
+copy/output paths, create a new owner0700 `$FOLLOWUP` directory and run as its
+nonroot owner under the same shared lock. Keep `$FOLLOWUP` canonical and free
+of spaces or shell/debugfs metacharacters; both output leaves must be absent.
+
+```sh
+umask 077
+flock --exclusive --timeout 5 "$BUILD_LOCK" \
+  prlimit --fsize=8388608:8388608 -- \
+  timeout --signal=TERM --kill-after=2 10 "$DEBUGFS" \
+  -R "dump /var/lib/rehearsal-recovery/initdb.log $FOLLOWUP/initdb.log" \
+  "$REPLAYED_RAW" >/dev/null 2>&1
+flock --exclusive --timeout 5 "$BUILD_LOCK" \
+  prlimit --fsize=8388608:8388608 -- \
+  timeout --signal=TERM --kill-after=2 10 "$DEBUGFS" \
+  -R "dump /var/lib/rehearsal-recovery/pgdata/postgres.log $FOLLOWUP/postgres.log" \
+  "$REPLAYED_RAW" >/dev/null 2>&1
+```
+
+Require command success, private regular output files when present, and the
+8MiB cap; debugfs can return0 for a missing path, so report presence/size
+separately. These commands use neither `-w` nor an arbitrary guest path. If the
+files remain absent/empty, that is an evidence limit, not a SQL failure
+diagnosis. Preserve the copies and use bounded failure capture in a future
+rehearsal rather than inventing a restore fix.
