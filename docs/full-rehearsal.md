@@ -33,7 +33,13 @@ protected runtime inputs and migration markers join the quiescent backup. After
 the original service QEMU is absent, the replacement imports the pinned image
 into a fresh container runtime, restores those inputs and database, then uses
 fresh SSO to download the identical PDF and decrypt the retained 2FA/recovery
-code data. The private browser receipt models a retained user device in the
+code data. After that fresh SSO check, the replacement stops Keycloak and its
+health timer, verifies its HTTP/management listeners are absent, and authenticates
+the restored native loopback recovery administrator. Public password login must
+remain denied. Keycloak then restarts without the removed temporary bootstrap
+administrator. Earlier results below did not exercise this recovery-access
+check; the final dated result records its separate source-matched acceptance.
+The private browser receipt models a retained user device in the
 repository/browser guest; it is separate from server backup contents. Signing
 and SMTP remain disabled, and actual profiles remain unchanged. This optional
 scenario requires its own source-matched native acceptance receipt.
@@ -186,3 +192,23 @@ identities absent. Those live snapshots covered the originals and fresh
 gateway, not independent fingerprints for both later replacements. Explicit
 synthetic purge preserved its unrelated sentinel and earlier failed receipt.
 DERP transport, human enrollment and final production capacity remain unproved.
+
+
+Source `fcbc136e6e4387721f8264a2dbbaf36883aa760c` passed the same combined
+`--documenso --relay-peers` rehearsal on November 5 in 847.26 seconds. After
+fresh SSO downloaded the original PDF and decrypted the retained 2FA data,
+the replacement stopped Keycloak and its health timer and verified empty
+HTTP/management listeners. The restored native recovery administrator then
+authenticated through loopback while public password login remained denied.
+Keycloak restarted with the trusted issuer and no temporary administrator;
+the test-only bootstrap environment had been emptied before backup. This
+additional recovery-access phase took 18.85 seconds.
+
+Both 198-assertion HTTPS/browser phases, K3s retained-PVC new write, automation
+and real tailnet access/identity recovery also passed. All seven original and
+replacement QEMU identities and 35 total recorded host identities were verified
+absent, with the exact unit collected and recursive cgroup empty. Explicit
+completed synthetic purge removed seven disks, the encrypted repository and
+separate escrow while preserving its unrelated sentinel, earlier failed-run
+receipt and evidence. The deployment, transport and remaining-application
+limits above still apply; no actual profile is enabled.
