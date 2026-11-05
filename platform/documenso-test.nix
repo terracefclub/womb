@@ -10,7 +10,7 @@
       -addext 'subjectAltName=DNS:documents.terrace.invalid' 2>/dev/null
   '';
   prepare = pkgs.writeText "documenso-synthetic-inputs.py" ''
-    import json, os, secrets
+    import json, os, secrets, subprocess
     destination = "${inputs}"
     os.makedirs(destination, mode=0o700, exist_ok=True)
     value = {key: secrets.token_urlsafe(40) for key in ["authSecret", "encryptionKey", "encryptionSecondaryKey", "oidcClientSecret", "databasePassword"]}
@@ -18,6 +18,17 @@
     value["approvedUsers"] = [{"email": "approved@terrace.invalid", "name": "Synthetic Approved", "role": "USER"}]
     with open(destination + "/secrets.json", "x") as output: json.dump(value, output)
     os.chmod(destination + "/secrets.json", 0o400)
+    passphrase = destination + "/signing-passphrase"
+    with open(passphrase, "x") as output: output.write(secrets.token_urlsafe(40))
+    os.chmod(passphrase, 0o400)
+    subprocess.run(["${pkgs.openssl}/bin/openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "365", "-nodes",
+      "-keyout", destination + "/signing.key", "-out", destination + "/signing.crt", "-subj", "/CN=Synthetic Rehearsal Signing Only",
+      "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature,nonRepudiation"],
+      check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    subprocess.run(["${pkgs.openssl}/bin/openssl", "pkcs12", "-export", "-inkey", destination + "/signing.key", "-in", destination + "/signing.crt",
+      "-out", destination + "/signing.p12", "-passout", "file:" + passphrase],
+      check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    for name in ["signing.key", "signing.crt", "signing.p12"]: os.chmod(destination + "/" + name, 0o400)
   '';
 in {
   name = "terrace-documenso";
@@ -31,6 +42,7 @@ in {
       };
       terrace.documenso = {
         enable = true;
+        enableSigning = true;
         hostname = "documents.terrace.invalid";
         identityHostname = "identity.terrace.invalid";
         certificateFile = "${inputs}/cert.pem";
@@ -79,7 +91,7 @@ in {
         return documents.succeed("runuser -u postgres -- psql -X -A -t -d terrace_documenso -c " + shlex.quote(query)).strip()
     def start():
         documents.succeed("systemctl reset-failed terrace-documenso.service && systemctl start terrace-documenso.service", timeout=180)
-        documents.wait_until_succeeds("curl --fail --silent --max-time 5 http://127.0.0.1:13050/api/health | jq -e '.checks.database.status == \"ok\"' >/dev/null", timeout=90)
+        documents.wait_until_succeeds("curl --fail --silent --max-time 5 http://127.0.0.1:13050/api/health | jq -e '.checks.database.status == \"ok\" and .checks.certificate.status == \"ok\"' >/dev/null", timeout=90)
     def stop():
         documents.succeed("systemctl stop terrace-documenso.service")
         assert documents.succeed("systemctl show terrace-documenso.service -p ExecMainStatus --value").strip() in ["0", "143"]
@@ -117,6 +129,24 @@ in {
         documents.succeed("systemctl restart postgresql.service")
         start()
         assert sql('SELECT md5(string_agg(row_to_json(u)::text,\'\' ORDER BY id)) FROM "User" u') == before
+    with subtest("signing inputs are private, current and validated before the writer starts"):
+        stop()
+        documents.succeed("cp -p ${inputs}/signing-passphrase ${inputs}/original-signing-passphrase && cp -p ${inputs}/signing.p12 ${inputs}/original-signing.p12")
+        documents.succeed("python -c 'from pathlib import Path; import secrets; p=Path(\"${inputs}/signing-passphrase\"); p.chmod(0o600); p.write_text(secrets.token_urlsafe(40)); p.chmod(0o400)'")
+        # A changed source cannot reuse the previous prepared signer.
+        documents.fail("systemctl start terrace-documenso.service")
+        # Nor may preparation authorize a certificate with the wrong passphrase.
+        documents.fail("systemctl restart terrace-documenso-inputs.service", timeout=180)
+        documents.fail("systemctl start terrace-documenso.service")
+        documents.succeed("cp -p ${inputs}/original-signing-passphrase ${inputs}/signing-passphrase")
+        documents.succeed("python -c 'from pathlib import Path; import secrets; p=Path(\"${inputs}/signing.p12\"); p.chmod(0o600); p.write_bytes(secrets.token_bytes(256)); p.chmod(0o400)'")
+        documents.fail("systemctl restart terrace-documenso-inputs.service", timeout=180)
+        documents.fail("systemctl start terrace-documenso.service")
+        documents.succeed("cp -p ${inputs}/original-signing.p12 ${inputs}/signing.p12 && systemctl reset-failed terrace-documenso-inputs.service terrace-documenso.service && systemctl restart terrace-documenso-inputs.service", timeout=180)
+        start()
+        documents.succeed("test $(stat -c %u:%a /run/terrace-documenso-inputs/signing.p12) = 1001:400 && test $(stat -c %a /run/terrace-documenso-inputs/signing.env) = 600")
+        documents.fail("runuser -u nobody -- test -r /run/terrace-documenso-inputs/signing.p12")
+        documents.succeed("podman exec terrace-documenso node -e 'require(\"node:fs\").accessSync(\"/run/terrace-signing.p12\", 4)'")
     with subtest("failed reconciliation cannot authorize stale inputs or adopt unrelated accounts"):
         stop()
         sql('INSERT INTO "User" (name,email,"updatedAt") VALUES (\'Unmanaged Fixture\',\'unmanaged@terrace.invalid\',now())')

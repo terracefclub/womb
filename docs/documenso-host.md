@@ -67,6 +67,39 @@ identities. See the upstream
 [service-user migration](https://github.com/documenso/documenso/blob/v2.21.1/packages/prisma/migrations/20230830053354_add_service_user/migration.sql)
 and [deleted-account migration](https://github.com/documenso/documenso/blob/v2.21.1/packages/prisma/migrations/20240205120648_create_delete_account/migration.sql).
 
+## Optional local signing certificate
+
+`terrace.documenso.enableSigning` defaults to false. Enable it only with explicit
+runtime files in the existing root-owned mode 0700 inputs directory:
+
+| File | Owner/mode | Contents |
+| --- | --- | --- |
+| `signing.p12` | root/0400 | PKCS#12 signing certificate and private key, 256–65536 bytes |
+| `signing-passphrase` | root/0400 | 32–256 ASCII letters, digits, `_+/=-`, with an optional final newline |
+
+Keep both files in the protected component backup. The module does not generate,
+replace or rotate them. Stop the writer before changing them, restart
+`terrace-documenso-inputs.service`, then start `terrace-documenso.service`.
+Preparation validates the certificate and passphrase with the pinned image's
+native `P12Signer` in a resource-bounded container without network access. An
+invalid, expired or not-yet-valid certificate prevents writer startup. The
+application's native certificate health check must also pass. A source or
+prepared-file change invalidates startup until preparation succeeds again.
+
+The passphrase stays in private runtime files and the container environment;
+neither it nor the private key enters Nix, command arguments or diagnostics.
+Only the prepared certificate is bound read-only into the application as its
+non-root UID. Signing uses the native local transport, with no timestamp
+authority configured. Native sealing can resolve certificate intermediates, so
+the isolated test uses a generated self-signed certificate without AIA URLs.
+That certificate is a test fixture, not a publicly trusted identity or a claim
+about a signature's legal status.
+
+The runtime VM check covers valid certificate health, wrong passphrase,
+malformed PKCS#12, changed source files and restored valid files before the
+writer starts. Completing a recipient workflow and recovering signed PDFs on a
+replacement host remain separate acceptance checks.
+
 ## Per-user identity and recovery boundary
 
 Compose `documensoClient(origin, secret)` from
