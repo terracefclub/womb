@@ -200,6 +200,14 @@ address. A real browser uses the canonical HTTPS origins and trusted test CA;
 certificate verification, PKCE and the ordinary app authorization code flow stay
 enabled.
 
+Disposable multi-service checks can import `writeDocumensoInputs()` from
+`platform/documenso/write-inputs.ts` with the result of the shared identity
+fixture and its `documenso` extra secret. This writes app inputs and the limited
+browser credentials without creating another realm. Its default signing
+preparation preserves the standalone check; `{ signing: false }` omits the
+synthetic signing files for unsigned-only fixtures. This test helper does not
+provision real accounts or reconcile an existing production realm.
+
 ```sh
 # x86_64 Linux builder only; TFC source must match test-identity-contract.nix.
 BUILD_LOCK=/absolute/shared/build.lock platform/documenso-functional-check /source/tfc

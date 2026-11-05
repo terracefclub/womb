@@ -9,4 +9,5 @@ pkgs.runCommand "documenso-functional-fixture" {} ''
   cp ${./functional-fixture.ts} $out/functional-fixture.ts
   cp ${./client.ts} $out/client.ts
   cp ${./inputs.ts} $out/inputs.ts
+  cp ${./write-inputs.ts} $out/write-inputs.ts
 ''
