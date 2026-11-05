@@ -571,7 +571,15 @@ def connection_limits():
 
 def windmill_role_policy():
     assert sql("SELECT count(*)=2 AND bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolpassword IS NULL AND rolbypassrls=(rolname='windmill_admin')) FROM pg_authid WHERE rolname IN ('windmill_user','windmill_admin')", 'postgres') == 't'
-    assert sql("SELECT count(*)=5 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND NOT rolbypassrls) FROM pg_roles WHERE rolname IN ('keycloak','terrace_cms','terrace_documenso','terrace_windmill','terrace_vaultwarden')", 'postgres') == 't'
+    # Public role names/flags only; retain a precise witness before assertion.
+    role_flags = sql("SELECT rolname,rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls FROM pg_roles WHERE rolname IN ('keycloak','terrace_cms','terrace_documenso','terrace_windmill','terrace_vaultwarden') ORDER BY rolname", 'postgres').splitlines()
+    expected_roles = ['keycloak', 'terrace_cms', 'terrace_documenso', 'terrace_vaultwarden', 'terrace_windmill']
+    assert len(role_flags) == 5
+    for name, row in zip(expected_roles, role_flags):
+        columns = row.split('|')
+        assert len(columns) == 7 and columns[0] == name and all(value in ['t', 'f'] for value in columns[1:])
+    print('Application role flags: ' + json.dumps(role_flags), flush=True)
+    assert role_flags == [name + '|t|f|f|f|f|f' for name in expected_roles]
     expected = ['terrace_windmill:windmill_admin:false', 'terrace_windmill:windmill_user:false', 'windmill_admin:windmill_user:false']
     grants = sql("SELECT member.rolname||':'||group_role.rolname||':'||m.admin_option::text FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member JOIN pg_roles group_role ON group_role.oid=m.roleid WHERE group_role.rolname IN ('windmill_user','windmill_admin') ORDER BY 1", 'postgres').splitlines()
     assert grants == expected

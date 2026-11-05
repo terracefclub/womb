@@ -178,8 +178,9 @@ in {
           # Keep runtime client demand below the shared64-slot server limit.
           # The upstream identity init must create its password-bearing role
           # before applying this cap; pre-creating it would skip that setup.
+          # Its CREATEDB setup privilege is unnecessary after DB creation.
           keycloakPostgreSQLInit.postStart = ''
-            psql -X -w -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE keycloak CONNECTION LIMIT 10; ALTER ROLE terrace_cms CONNECTION LIMIT 10;' >/dev/null 2>&1
+            psql -X -w -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE keycloak NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 10; ALTER ROLE terrace_cms CONNECTION LIMIT 10;' >/dev/null 2>&1
           '';
           rehearsal-pg-sample = {
             after = ["postgresql.target"];
