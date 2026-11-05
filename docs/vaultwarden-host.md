@@ -167,3 +167,64 @@ The positive marker additionally requires a live/running server immediately
 before stop and a clean exit0 or expected SIGTERM15 with successful unit result
 after stop. A server that fails after HTTP/ledger readiness is cleaned up but
 leaves the release unmarked.
+
+
+## Per-user functional acceptance
+
+The optional companion check composes the same reviewed TFC initial user-free
+realm with `vaultwardenClient`, then separately enrolls synthetic people through
+the private identity API and removes its temporary master administrator. No
+production realm import seeds a user or changes the four website/CMS clients.
+Run on the Linux builder with the reviewed TFC source available:
+
+```sh
+BUILD_LOCK=/path/to/shared-heavy.lock platform/vaultwarden-functional-check /path/to/reviewed/tfc-source
+```
+
+On November5,2026, native source `b66b7f8` passed all five subtests in197.54s,
+with output `/nix/store/7c4p99h50qra2avyrg9k9mq4jkadmfxk-vm-test-run-terrace-vaultwarden-functional`.
+All15 recorded host process fingerprints were absent afterward; the test also
+requires exact application/identity/PostgreSQL units and listeners stopped.
+The fixture serves a separate signed SAN/server-auth leaf and trusts only its
+synthetic CA; certificate verification stays enabled.
+It exercises real trusted HTTPS/Keycloak code/S256 browser sign-in, individual
+master-password creation and fresh-browser unlock, actual web-vault encryption
+and clipboard decryption of two separate users' items, reciprocal private-item
+API denial, an unapproved identity, a previously valid/unexpired revoked session,
+fresh disabled-account denial, and re-enabled-user decryption of retained data.
+It preserves all native runtime policy, checks signatures through the actual
+server/API, and uses JWT expiry parsing only to exclude expiration as a false
+revocation result. The pinned upstream [SSO browser tests](https://github.com/dani-garcia/vaultwarden/blob/1.37.5/playwright/tests/setups/sso.ts)
+provide the UI entry contract; identity credentials and vault master passwords
+are separate. Browser traffic to other hosts is denied; no real provider is used.
+The synthetic enrollment explicitly deselects the optional external password-breach
+lookup, while retaining the strong-password and third-party-request denial checks.
+It dismisses only the native optional extension-install introduction and its
+explicit skip confirmation, then still
+requires the authenticated vault, actual profile and decrypted-item checks.
+Fresh synthetic contexts also explicitly skip the exact native first-use welcome
+tour. Item creation selects the native Login type through the pinned client picker.
+
+The reproducible Vaultwarden client sets `access.token.lifespan=600`; the shared
+realm's website/CMS lifetime remains60 seconds. With native IdP session coupling
+enabled, [Vaultwarden1.37.5](https://github.com/dani-garcia/vaultwarden/blob/1.37.5/src/sso.rs)
+carries the IdP expiry into its own token, while its web client refresh window is
+[five minutes](https://github.com/dani-garcia/vaultwarden/blob/1.37.5/src/auth.rs).
+The browser requires a real refresh token and more than300 seconds remaining,
+native profile200, expected email/UUID and token-subject equality. Failure
+evidence retains only bounded lifetime/status numbers and equality booleans.
+Changing this initial client artifact requires deliberate reconciliation for an
+existing realm; startup import still skips existing realms. Approval, PKCE,
+IdP session coupling and both existing/fresh revoked-session denials remain
+mandatory. Before its deliberate fourth rapid operator start, the test clears
+only the exact stopped unit's restart counter after proving inactive state,
+zero main/control PIDs and no control group. The native three-starts-per-five-
+minutes guard remains unchanged.
+
+Each phase prints a fixed result. Failed checks retain bounded private labels
+plus fixed numeric network/status counters (never URL, token or error text)
+and screenshots in the kept build's0700/0600 shared directory, outside the
+published result; cookies/tokens/passwords/response bodies are never printed.
+The synthetic browser receipt is reusable by a later create/verify recovery
+companion. Actual attachment decryption and original-node-off encrypted fresh
+restore remain follow-ups; a same-node restart is not that restore evidence.

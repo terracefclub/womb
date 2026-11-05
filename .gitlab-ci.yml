@@ -9,7 +9,7 @@ check-supervision:
   script:
     - python platform/test-run-check.py -v
     - python tests/platform/test_windmill_diagnostics.py -v
-    - python tests/platform/test_vaultwarden_migration.py -v
+    - python -m unittest discover -s tests/platform -p 'test_vaultwarden_*.py' -v
     - python platform/rehearsal/test-host.py -v
     - python -m unittest discover -s tests/platform -p 'test_documenso_*.py' -v
     - python platform/rehearsal/test-full.py -v

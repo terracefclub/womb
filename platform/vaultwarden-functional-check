@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run the Vaultwarden functional check on the x86-64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 1 && -d $1 ]] || { echo 'usage: platform/vaultwarden-functional-check TFC_SOURCE' >&2; exit 2; }
+tfc_source=$(realpath "$1")
+cd "$(dirname "$0")"
+exec ./run-check --keep-failed --impure --file vaultwarden-functional-check.nix --argstr tfcSource "$tfc_source"

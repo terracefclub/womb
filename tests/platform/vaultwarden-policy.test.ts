@@ -10,7 +10,7 @@ test('approved input is bounded and preserves separate operator and OIDC secrets
 test('initial user-free client uses confidential code/S256 and exact callback without alternate grants', () => {
   const client = vaultwardenClient(valid().origin,valid().clientSecret)
   expect(client.redirectUris).toEqual(['https://vault.terrace.invalid/identity/connect/oidc-signin'])
-  expect(client.attributes).toEqual({'pkce.code.challenge.method':'S256'})
+  expect(client.attributes).toEqual({'pkce.code.challenge.method':'S256','access.token.lifespan':'600'})
   expect(client.publicClient).toBe(false)
   expect(client.fullScopeAllowed).toBe(false)
   expect(client.directAccessGrantsEnabled).toBe(false)
