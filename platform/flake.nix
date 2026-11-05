@@ -17,6 +17,7 @@
     nixosModules.demos = import ./demos.nix;
     nixosModules.identity = import ./identity.nix;
     nixosModules.website = import ./website.nix;
+    nixosModules.windmill = import ./windmill.nix;
     nixosModules.website-gateway = import ./website-gateway.nix;
     nixosModules.documenso = import ./documenso.nix;
 
