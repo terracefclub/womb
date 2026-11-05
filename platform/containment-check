@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run containment checks on the x86-64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared heavy-build lock path}"
+[[ $# == 1 ]] || { echo 'usage: platform/containment-check PRIVATE_PROOF_PARENT' >&2; exit 2; }
+export PYTHONDONTWRITEBYTECODE=1
+exec python3 "$(dirname "$0")/rehearsal/test-containment.py" "$1"
