@@ -378,9 +378,9 @@ The same final snapshot evaluates to the exact successful functional artifact
 above. The functional check uses a 1,500-second wall/1,200-second per-build bound;
 the baseline regression uses 900 seconds for both. Each uses the existing shared
 queue and supervisor, and all test services stop before the next lease.
-Actual Python membership-flow
-execution, encrypted originals-off recovery, production load and live provider
-integration remain separate acceptance gates.
+Live membership/webhook/payment-email integration, encrypted originals-off
+Windmill recovery and production load remain separate acceptance gates. The
+original roster contract is exercised by the expanded proof below.
 
 ## Persistence and remaining gates
 
@@ -450,8 +450,9 @@ baseline command documented above retains its 900s wall/per-build limits.
 
 This prototype permits only loopback egress for its dedicated UID, including
 before telemetry settings are reconciled. Live Sheets, mail and payment access
-remain disabled. Actual original roster/SDK execution and encrypted originals-off
-Windmill recovery are separate acceptance gates. General worker code requires
+remain disabled. Encrypted originals-off Windmill recovery and live provider-backed workflow
+integration remain separate acceptance gates; original roster/SDK execution is
+covered below. General worker code requires
 trusted approved authors; privileged namespace/nested-container jobs,
 Docker-in-Docker, LSP/multiplayer and hostile multi-tenant code isolation are not
 provided. Other languages' hidden caches are unproved. Per-user login does not
@@ -463,3 +464,109 @@ this is version provenance, not a general security certification. Production
 profiles, DNS/provider actions, complete membership/payment-email integration,
 real-user enrollment, fresh-host restore, pressure/alert delivery and cloud
 deployment remain disabled or unverified until their own acceptance passes.
+
+## Offline roster worker
+
+The synthetic workload uses the original roster source and its real SDK, with
+fake Sheets transport and forbidden sockets. Its native proof below covers
+execution and retained job/source/result receipts after restart. It does not
+activate legacy email/payment delivery or any live provider. Originals-off
+Windmill recovery remains the next combined acceptance gate.
+
+Regenerate the public wheel metadata from the existing exact Python 3.12 lock:
+
+```bash
+direnv exec . bun platform/windmill-functional/wheel-pins.ts > platform/windmill-functional/membership-wheels.json
+```
+
+This bounded tool reads only public PyPI metadata, four requests at a time,
+with per-request byte/deadline limits. It chooses universal or compatible Linux
+amd64 CPython wheels, rejects yanked or other-host artifacts, and emits exact
+filenames, sizes and SHA256 values. Review the resulting public pin diff before
+committing it. No package is installed or imported by the metadata tool.
+
+`writeWindmillInputs(sharedFixture)` in `windmill-functional/write-inputs.ts`
+prepares exclusive root-private component inputs from one shared user-free
+realm producer. Standalone fixture generation remains supported; importing the
+writer performs no IO, and browser credentials exclude server/recovery secrets.
+
+The `terrace-windmill-inspect` command uses only protected component
+inputs and native loopback login/readback/logout. The installed command has a 45-second total deadline plus 5-second KILL grace. Run it after stopping and verifying Keycloak and its health timer; callers
+must separately verify the public password route remains 403 and restart the
+identity service cleanly. It reads workspace/account state without changing
+approval, passwords or application data; its own native login/logout creates
+and removes a temporary session. Tokens remain in memory. This is private
+operator recovery, not daily shared administration. The native proof below
+exercises it with identity stopped and verifies its additional persisted native
+token row is removed; token-cache invalidation is not inferred.
+
+### Original roster worker proof
+
+`terrace.windmill.membershipRuntime` defaults off. Its opt-in immutable SDK closure
+contains only hash-pinned Python 3.12 wheels for the exact existing membership lock;
+Nix fetches/verifies each archive and the wheel installer validates RECORDs.
+The worker receives the closure read-only at `/run/terrace-membership-python`.
+Native `ADDITIONAL_PYTHON_PATHS` and exact anchored `PIP_LOCAL_DEPENDENCIES` entries
+skip only these preprovided versions; no runtime package download or writable
+code mount is introduced. The original lock stays attached to the saved script.
+
+The explicit `--roster` option on existing browser `create`/`verify` modes preserves
+their exact stdout and canonical `receipt.json`. It adds
+`/root/windmill-functional/roster-receipt.json`, containing only stable operator/job
+identities and code/contract/lock/result digests. It executes the eleven existing
+roster tests with the real pinned Sheets/auth/HTTP SDK and synthetic transport in
+the native Python 3.12 worker as the individual operator. The administrator stores
+the reviewed source; the operator runs it. Verify checks retained code, original
+job/result and a new job after restart, suitable for an originals-off restore.
+The SDK and native extension imports must resolve inside the immutable closure.
+
+From a clean checkout on the Linux builder, with the locked tools available:
+
+```sh
+BUILD_LOCK=/private/shared-heavy.lock BUILD_LOCK_TIMEOUT=1200 CHECK_TIMEOUT=1500 CHECK_BUILD_TIMEOUT=1200 CHECK_STOP_GRACE=30 platform/windmill-roster-check /private/reviewed-tfc-source
+```
+
+This retains the existing S256, unknown/revoked-user, private-value, operator-role,
+Bash job, original-cookie continuity, bounded warm revocation and shutdown gates.
+It additionally stops the exact identity units/listeners, runs the bounded private
+`terrace-windmill-inspect` read-only recovery command, checks public password 403,
+then restores identity without the deleted temporary administrator before verify.
+The shared no-IO `writeWindmillInputs(fixture, directory?)` writer uses one reviewed
+identity fixture; the standalone entrypoint still creates exactly one realm.
+
+On November 5, 2026 exact source `4e6f87e` passed the expanded native test in
+**732.58 seconds**, including all create/verify/disabled phases. It assembled the SDK closure from
+twenty pinned wheels, imported real native extensions from the read-only
+closure, and executed the eleven original roster cases as the individual
+operator. The retained source/lock/old job/result and a new operator job passed
+after application/PostgreSQL/identity restart. Private recovery passed while
+identity and its listeners were stopped, without adding a persisted recovery-token row or
+opening public password login. The original pre-restart alumni cookie remained
+valid before removal; warm denial followed in **3862 milliseconds**, then fresh
+revoked login failed while the remaining approved users still succeeded.
+Final services/ports stopped, retained state checks passed and all fifteen
+recorded host identities were absent; source/tag/former-namespace scans were
+empty. Both exported-module and expanded-test evaluations passed, with all 140
+frozen source files’ bytes and execution modes rechecked after the run. Result:
+
+```text
+/nix/store/y36kn3s8ihkdzz4mflwvrp3rp3j8c2f5-vm-test-run-terrace-windmill-functional
+```
+
+This proves the synthetic original roster contract and retained restart behavior.
+Fresh-host recovery, live webhook authentication, deployment/cutover, legacy
+payment-email parity and real provider integration remain separate gates.
+
+The exported platform module consumes its own exact lock copy, checked byte-for-byte
+against the original workflow lock by pure tests and the roster assembler. It does
+not depend on files outside the platform flake source. Verify this exported-module
+closure on the Linux builder without building or starting services:
+
+```sh
+flock --timeout 300 /private/shared-heavy.lock timeout --kill-after=15 180 nix eval --raw --impure --file platform/windmill-sdk-module-check.nix
+```
+
+The check forces the real exported NixOS module with the optional SDK enabled,
+asserting its immutable worker-only mount, twenty exact local dependencies and
+default-off option. The expanded native test still consumes the original source
+and lock and requires actual package import and original roster execution.

@@ -11,6 +11,7 @@ check-supervision:
     - python tests/platform/test_windmill_diagnostics.py -v
     - python -m unittest discover -s tests/platform -p 'test_vaultwarden_*.py' -v
     - python tests/platform/test_windmill_functional.py -v
+    - python tests/platform/test_windmill_recovery.py -v
     - python platform/rehearsal/test-host.py -v
     - python -m unittest discover -s tests/platform -p 'test_documenso_*.py' -v
     - python platform/rehearsal/test-full.py -v
@@ -21,6 +22,7 @@ oci-metadata:
     - bun test tests/platform/oci-image.test.ts tests/platform/windmill-policy.test.ts
     - bun test tests/platform/fixture-clients.test.ts
     - bun test tests/platform/windmill-functional.test.ts
+    - bun test tests/platform/windmill-wheels.test.ts
 
 documenso-contract:
   image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a

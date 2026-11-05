@@ -25,7 +25,8 @@
     check-added-large-files.enable = true;
     end-of-file-fixer = {
       enable = true;
-      excludes = ["^windmill/"];
+      # Preserve the mirrored workflow lock byte-for-byte, including its EOF.
+      excludes = ["^windmill/" "^platform/windmill-functional/membership-script[.]lock$"];
     };
     trim-trailing-whitespace = {
       enable = true;
