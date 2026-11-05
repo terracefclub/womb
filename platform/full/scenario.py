@@ -332,7 +332,9 @@ def documenso_recovery_access():
     assert gateway.succeed('python /etc/documenso-recovery.py', timeout=60).strip() == 'Native loopback recovery administrator authenticated without identity.'
     assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize", timeout=10).strip() == '403'
     if APPLICATIONS_ENABLED:
+        recovery_sessions = sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill')
         assert gateway.succeed('terrace-windmill-inspect', timeout=55).strip() == 'Native Windmill private admin readback passed.'
+        assert sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill') == recovery_sessions
         assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == '403'
         results['checks']['windmillRestoredIdentityIndependentAdminRecovery'] = True
         assert gateway.succeed('terrace-vaultwarden-inspect', timeout=120).strip() == 'Native Vaultwarden private admin readback passed.'
@@ -1034,12 +1036,22 @@ with subtest('fresh empty disks restore the exact node identity and functional s
 with subtest('verified recovery and final stop of every guest'):
     timed('finalQuiesceWriters', quiesce_writers)
     stop_units(gateway, ['postgresql'])
+    final_guests = []
     for machine in [gateway, automation, relay, client]:
         assert machine.process is not None
         pid = machine.process.pid
+        assert Path(f'/proc/{pid}/comm').read_text().startswith('qemu-system')
+        start = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+        assert start.isascii() and start.isdigit()
         machine.execute('systemctl poweroff --no-block', check_return=False, check_output=False, timeout=10)
         machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=90))
+        assert machine.process.poll() is not None
         assert not Path(f'/proc/{pid}').exists()
+        final_guests.append({'name': machine.name, 'pid': pid, 'start': start,
+                             'role': 'retained-device' if machine.name == 'client' else 'replacement',
+                             'absentAfterShutdown': True})
+    results['finalGuests'] = final_guests
+    assert len({(item['pid'], item['start']) for item in results['originalGuests'] + final_guests}) == 7
     results['checks']['allGuestsStopped'] = True
     results['timings']['scenarioTotal'] = round(time.monotonic() - started, 2)
     temporary = run / 'evidence' / 'scenario-result.json.new'

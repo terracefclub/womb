@@ -7,9 +7,7 @@
   withRelayPeers ? false,
   withDocumensoSigning ? false,
   withApplications ? false,
-}:
-# Fail closed while the source-only all-service writer/restore hooks are wired.
-assert !withApplications; let
+}: let
   documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
   applicationFixture = import ./fixture-package.nix {inherit pkgs contract;};
   windmillRoster = import ../windmill-functional/roster-package.nix {inherit pkgs;};
