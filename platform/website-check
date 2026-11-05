@@ -6,8 +6,5 @@ set -euo pipefail
 web_archive=$(realpath "$1")
 cms_archive=$(realpath "$2")
 cd "$(dirname "$0")"
-exec flock -w "${BUILD_LOCK_TIMEOUT:-28800}" "$BUILD_LOCK" \
-  nix build --impure --file website-check.nix \
-    --argstr webArchive "$web_archive" --argstr cmsArchive "$cms_archive" \
-    --max-jobs 1 --cores 2 --option builders '' --option post-build-hook '' \
-    -L --print-out-paths --no-link
+exec ./run-check --impure --file website-check.nix \
+  --argstr webArchive "$web_archive" --argstr cmsArchive "$cms_archive"
