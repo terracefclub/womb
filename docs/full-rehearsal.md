@@ -18,7 +18,7 @@ dot and hyphen:
 
 ```sh
 install -d -m 0700 /absolute/private/terrace-rehearsals
-BUILD_LOCK=/absolute/shared-heavy.lock platform/full-rehearsal run \
+direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
   --webArchive /protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
   --cmsArchive /protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
@@ -41,8 +41,29 @@ administrator. Earlier results below did not exercise this recovery-access
 check; the final dated result records its separate source-matched acceptance.
 The private browser receipt models a retained user device in the
 repository/browser guest; it is separate from server backup contents. Signing
-and SMTP remain disabled, and actual profiles remain unchanged. This optional
+and SMTP remain disabled in this plain mode, and actual profiles remain unchanged. This optional
 scenario requires its own source-matched native acceptance receipt.
+
+The explicit `--documenso-signing` variant implies `--documenso` and reuses its
+same approved people and encrypted backup scope. It additionally enables the
+accepted runtime signer and private local Mailpit sink. Before any sender UI,
+the native container must pass the existing SMTP/image-mailer probe while
+remote SMTP/UI access stays denied. A synthetic `.invalid` recipient completes
+the native signing interface; independent OpenSSL CMS verification requires the
+exact fixture certificate and rejects changed bytes. Before capture, the app
+and sink stop. The disposable test mailbox is excluded from application backup;
+its original disk remains protected until explicit synthetic purge.
+
+After original service guests are absent, the fresh application must start with
+the same restored P12/passphrase hashes. Fresh SSO retrieves the exact signed PDF
+and repeats certificate/ByteRange verification alongside original PDF and
+encrypted-account checks. The signing-request ledger must still contain exactly one completed request;
+the replacement sink must remain inactive with no main/control process. The browser receipt and public fixture
+certificate stay on the retained test-user device, separate from server escrow.
+Bounded private failure artifacts stay outside the store. This variant requires
+its own passing source-matched native receipt; signing restart acceptance alone
+does not prove this replacement-host recovery. No production transport,
+certificate authority, signature trust or actual profile is enabled.
 
 The separate optional `--relay-peers` switch adds three disposable Tailscale
 clients to the existing application, automation and browser guests. Private
@@ -212,3 +233,27 @@ completed synthetic purge removed seven disks, the encrypted repository and
 separate escrow while preserving its unrelated sentinel, earlier failed-run
 receipt and evidence. The deployment, transport and remaining-application
 limits above still apply; no actual profile is enabled.
+
+
+The explicit signed-document variant at source
+`378691a03dd664281a8af124577c39f3fc05c589` passed on November 5 in
+927.93 seconds. Use `--documenso-signing --relay-peers` on the clean-checkout
+command above; the signing switch includes Documenso automatically. Native
+SMTP/image-mailer preflight took 9.93 seconds. Document/account creation took
+83.60 seconds; recipient completion and certificate/tamper checks took 30.75
+seconds. After
+the original service QEMUs were absent, fresh SSO retrieved the identical
+original and signed PDFs and decrypted the retained account data in 39.85 seconds.
+The P12/passphrase hashes matched; the single signing-request job remained
+COMPLETED and the replacement mail sink had no active/main/control process.
+Identity-independent recovery after replacement also passed in 21.23 seconds.
+
+The two phases each passed 198 HTTPS assertions and the browser check. Retained
+PVC writes, automation and private-tailnet identity/access recovery also passed.
+All 36 recorded host identities,
+including all seven original/replacement QEMUs, were independently absent or
+reused; the exact unit was collected and recursive cgroup empty. The explicit
+synthetic purge removed seven disks, repository and escrow, retaining evidence,
+its unrelated sentinel and earlier failed state. These observations establish
+synthetic signed-envelope recovery, not production certificate trust, real mail
+or legal signing, remaining-app composition or actual provider installation.

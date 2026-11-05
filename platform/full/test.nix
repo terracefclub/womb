@@ -5,6 +5,7 @@
   runId,
   withDocumenso ? false,
   withRelayPeers ? false,
+  withDocumensoSigning ? false,
 }: let
   documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
   gateway = import ../website-gateway-test.nix {
@@ -85,12 +86,13 @@ in {
       lib,
       ...
     }: {
-      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix;
+      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix ++ lib.optional withDocumensoSigning ../documenso/mailpit-test.nix;
       virtualisation.memorySize = lib.mkForce 8192;
       virtualisation.diskSize = 8192;
       terrace.singleNode.enable = true;
       terrace.documenso = lib.mkIf withDocumenso {
         enable = true;
+        enableSigning = withDocumensoSigning;
         hostname = "documents.terrace.invalid";
         identityHostname = "identity.terrace.invalid";
         certificateFile = "/var/lib/terrace-gateway-test/cert.pem";
@@ -137,6 +139,17 @@ in {
         // lib.optionalAttrs withDocumenso {
           terrace-documenso.wantedBy = lib.mkForce [];
         };
+      # Only the synthetic signing variant retains bounded private app errors.
+      virtualisation.oci-containers.containers = lib.optionalAttrs withDocumensoSigning {
+        terrace-documenso = {
+          log-driver = lib.mkForce "k8s-file";
+          extraOptions = lib.mkAfter ["--log-opt=path=/var/lib/documenso-test-evidence/app.log" "--log-opt=max-size=4194304"];
+        };
+      };
+      systemd.tmpfiles.rules = lib.optionals withDocumensoSigning [
+        "d /var/lib/documenso-test-evidence 0700 root root -"
+        "f /var/lib/documenso-test-evidence/app.log 0600 root root -"
+      ];
       systemd.targets.postgresql.wantedBy = lib.mkForce [];
       systemd.timers.terrace-identity-health.wantedBy = lib.mkForce [];
       environment.etc =
@@ -144,7 +157,11 @@ in {
           "rehearsal-pg-directory".text = config.services.postgresql.dataDir;
           "rehearsal-probe.yaml".source = ./probe.yaml;
         }
-        // lib.optionalAttrs withDocumenso {"documenso-recovery.py".source = ../documenso/recovery-auth-test.py;};
+        // lib.optionalAttrs withDocumenso {"documenso-recovery.py".source = ../documenso/recovery-auth-test.py;}
+        // lib.optionalAttrs withDocumensoSigning {
+          "documenso-signing-proof.py".source = ../documenso/signing-proof.py;
+          "documenso-smtp-probe.cjs".source = ../documenso/smtp-probe.cjs;
+        };
     };
     automation = {
       nodes,
@@ -207,7 +224,7 @@ in {
       ...
     }: {
       imports = [gateway.nodes.client common] ++ lib.optional withRelayPeers ./relay-peers.nix;
-      environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser;
+      environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser ++ lib.optional withDocumensoSigning pkgs.openssl;
       virtualisation.memorySize = lib.mkForce 2048;
       virtualisation.diskSize = 8192;
       services.openssh = {
@@ -222,12 +239,19 @@ in {
       };
       users.users.restic.isNormalUser = true;
       security.pki.certificateFiles = [nodes.relay.services.nginx.virtualHosts.relay.sslCertificate];
-      environment.etc."rehearsal-browser-ca.pem".source = builtins.head nodes.gateway.security.pki.certificateFiles;
+      environment.etc =
+        {"rehearsal-browser-ca.pem".source = builtins.head nodes.gateway.security.pki.certificateFiles;}
+        // lib.optionalAttrs withDocumensoSigning {"documenso-signing-proof.py".source = ../documenso/signing-proof.py;};
     };
   };
   testScript =
     "DOCUMENSO_ENABLED = ${
       if withDocumenso
+      then "True"
+      else "False"
+    }\n"
+    + "DOCUMENSO_SIGNING_ENABLED = ${
+      if withDocumensoSigning
       then "True"
       else "False"
     }\n"

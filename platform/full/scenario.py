@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import tempfile
 import time
 from typing import Any
@@ -40,6 +41,8 @@ BLANK_WRITERS = {
 }
 if DOCUMENSO_ENABLED:
     BLANK_WRITERS['gateway'] += ['terrace-documenso.service', 'terrace-documenso-migrate.service', 'terrace-documenso-bootstrap.service', 'terrace-documenso-database.service']
+if DOCUMENSO_SIGNING_ENABLED:
+    BLANK_WRITERS['gateway'].append('documenso-test-mailpit.service')
 if RELAY_PEERS_ENABLED:
     BLANK_WRITERS['gateway'].append('tailscaled.service')
     BLANK_WRITERS['automation'] += ['tailscaled.service', 'rehearsal-private-sensor.service']
@@ -102,29 +105,99 @@ def app_signature():
             'accounts': sql('SELECT md5(string_agg(id::text||email||coalesce(source,\x27\x27)||disabled::text||roles::text||coalesce("twoFactorSecret",\x27\x27)||coalesce("twoFactorBackupCodes",\x27\x27),chr(10) ORDER BY id)) FROM "User"', 'terrace_documenso'),
             'inputs': gateway.succeed('sha256sum ' + DOCUMENSO_INPUTS + '/secrets.json').strip(),
         }
+    if DOCUMENSO_SIGNING_ENABLED:
+        signature['documenso']['signingInputs'] = gateway.succeed('cd ' + DOCUMENSO_INPUTS + ' && sha256sum signing.p12 signing-passphrase').strip()
     return signature
 
 
-def documenso_browser(mode):
-    assert mode in ['create', 'verify']
+def retain_private_artifact(source, destination, limit):
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        assert client.succeed('rehearsal-documenso-browser ' + mode, timeout=240).strip() == 'Documenso functional browser phase ' + mode + ' passed.'
+        info = os.fstat(descriptor)
+        assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0 and info.st_size <= limit
+        value = os.read(descriptor, limit + 1)
+        assert len(value) == info.st_size and len(value) <= limit
+        # Shared socket scratch and durable evidence can be different filesystems.
+        with destination.open('xb') as output:
+            destination.chmod(0o600)
+            output.write(value)
+    finally:
+        os.close(descriptor)
+
+
+def documenso_browser(mode):
+    assert mode in ['create', 'sign', 'verify']
+    signing_option = ' --signing' if DOCUMENSO_SIGNING_ENABLED and mode in ['create', 'verify'] else ''
+    try:
+        assert client.succeed('rehearsal-documenso-browser ' + mode + signing_option, timeout=240).strip() == 'Documenso functional browser phase ' + mode + ' passed.'
     except Exception:
+        if DOCUMENSO_SIGNING_ENABLED:
+            documenso_signing_evidence(mode)
         try:
             destination = run / 'evidence' / ('documenso-failure-' + mode)
             destination.mkdir(mode=0o700)
             with tempfile.TemporaryDirectory(prefix='documenso-failure-', dir=client.shared_dir) as private:
                 name = Path(private).name
-                for filename in ['failure-' + mode + '-labels.json', 'failure-' + mode + '.png']:
+                for filename in ['failure-' + mode + '-labels.json', 'failure-' + mode + '.png'] + (['signed.pdf', 'signing.crt'] if DOCUMENSO_SIGNING_ENABLED else []):
                     client.execute('test ! -f ' + DOCUMENSO_BROWSER + '/' + filename + ' || cp --preserve=mode ' + DOCUMENSO_BROWSER + '/' + filename + ' /tmp/shared/' + name + '/', timeout=10)
                     artifact = Path(private) / filename
                     if artifact.exists():
-                        assert artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_mode & 0o077 == 0
-                        artifact.rename(destination / filename)
+                        retain_private_artifact(artifact, destination / filename, 3 * 1024 * 1024)
             print('Private Documenso failure artifacts retained; contents suppressed.')
         except Exception:
             print('Private Documenso failure evidence unavailable; original failure preserved.')
         raise
+
+
+def documenso_signing_evidence(phase):
+    # Fixed labels/counts only; raw native errors stay in bounded private files.
+    try:
+        for state in ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED']:
+            query = 'SELECT count(*) FROM "BackgroundJob" WHERE "jobId"=\'send.signing.requested.email\' AND status=' + "'" + state + "'"
+            count = gateway.succeed('runuser -u postgres -- psql -w -XAt -d terrace_documenso -c ' + shlex.quote(query) + ' 2>/dev/null', timeout=10).strip()
+            assert count.isascii() and count.isdigit() and len(count) <= 10
+            print('Synthetic signing-email job ' + state + ' count:', int(count))
+        assert gateway.succeed('python /etc/documenso-signing-proof.py evidence', timeout=10).strip() == 'Private bounded signing runtime evidence retained.'
+        destination = run / 'evidence' / ('documenso-signing-server-' + phase)
+        destination.mkdir(mode=0o700)
+        with tempfile.TemporaryDirectory(prefix='documenso-server-', dir=gateway.shared_dir) as private:
+            name = Path(private).name
+            gateway.succeed('cp --preserve=mode /var/lib/documenso-test-evidence/runtime-copy.log /tmp/shared/' + name + '/runtime-copy.log', timeout=10)
+            artifact = Path(private) / 'runtime-copy.log'
+            retain_private_artifact(artifact, destination / artifact.name, 4 * 1024 * 1024)
+        print('Private bounded signing runtime evidence retained; contents suppressed.')
+    except Exception:
+        print('Private signing runtime evidence unavailable; original failure preserved.')
+
+
+def documenso_signing_prepare():
+    try:
+        assert gateway.succeed("podman network inspect podman | jq -er '.[0].subnets[0].gateway'", timeout=10).strip() == '10.88.0.1'
+        gateway.succeed('systemctl start documenso-test-mailpit.service', timeout=30)
+        gateway.wait_until_succeeds('curl --fail --silent --max-time 2 http://127.0.0.1:8025/api/v1/info >/dev/null', timeout=15)
+        assert gateway.succeed('podman exec --interactive terrace-documenso node - </etc/documenso-smtp-probe.cjs', timeout=12).strip() == 'Native container SMTP alias, protocol and image mailer verified without sending mail.'
+        for port in [1025, 8025]:
+            client.fail('nc -z -w 2 gateway ' + str(port), timeout=5)
+        # Public fixture certificate only; no private key/passphrase reaches client.
+        transfer(gateway, DOCUMENSO_INPUTS + '/signing.crt', client, DOCUMENSO_BROWSER + '/signing.crt')
+    except Exception:
+        documenso_signing_evidence('smtp')
+        raise
+
+
+def documenso_sign():
+    try:
+        assert gateway.succeed('python /etc/documenso-signing-proof.py mail', timeout=90).strip() == 'Synthetic signing request captured in the local mail sink.'
+        query = 'SELECT count(*) FROM "BackgroundJob" WHERE "jobId"=\'send.signing.requested.email\' AND status=\'COMPLETED\''
+        gateway.wait_until_succeeds('runuser -u postgres -- psql -w -XAt -d terrace_documenso -c ' + shlex.quote(query) + ' 2>/dev/null | grep -qx 1', timeout=10)
+        assert sql('SELECT count(*) FROM "BackgroundJob" WHERE "jobId"=\'send.signing.requested.email\'', 'terrace_documenso') == '1'
+        transfer(gateway, '/var/lib/terrace-documenso-mail-test/recipient.json', client, DOCUMENSO_BROWSER + '/recipient.json')
+    except Exception:
+        documenso_signing_evidence('mail')
+        raise
+    documenso_browser('sign')
+    assert sql('SELECT count(*) FROM "Envelope" WHERE status=\'COMPLETED\'', 'terrace_documenso') == '1'
+    return True
 
 
 def documenso_recovery_access():
@@ -279,6 +352,9 @@ def quiesce_writers():
         assert gateway.succeed('systemctl show terrace-documenso.service -p ExecMainStatus --value').strip() in ['0', '143']
         assert gateway.succeed('systemctl show terrace-documenso.service -p ActiveState --value').strip() == 'inactive'
         assert gateway.succeed('podman ps -q').strip() == ''
+    if DOCUMENSO_SIGNING_ENABLED:
+        stop_units(gateway, ['documenso-test-mailpit'])
+        assert gateway.succeed('systemctl show documenso-test-mailpit.service -p ActiveState --value', timeout=10).strip() == 'inactive'
     deployments = json.loads(gateway.succeed('k3s kubectl get deployments --all-namespaces -o json'))['items']
     deployment_replicas = [(item['metadata']['namespace'], item['metadata']['name'], item['spec']['replicas']) for item in deployments]
     for namespace, name, _replicas in deployment_replicas:
@@ -413,7 +489,11 @@ if DOCUMENSO_ENABLED:
     with subtest('native Documenso SSO, unsigned PDF and encrypted account data'):
         client.succeed('install -d -m 0700 ' + DOCUMENSO_BROWSER)
         transfer(gateway, GATEWAY_INPUTS + '/documenso-browser.json', client, DOCUMENSO_BROWSER + '/credentials.json')
+        if DOCUMENSO_SIGNING_ENABLED:
+            timed('documensoSyntheticSmtp', documenso_signing_prepare)
         timed('documensoCreate', lambda: documenso_browser('create'))
+        if DOCUMENSO_SIGNING_ENABLED:
+            results['checks']['documensoNativeSignedEnvelope'] = timed('documensoSyntheticSign', documenso_sign)
         assert sql('SELECT count(*) FROM "User" WHERE "twoFactorEnabled" AND length("twoFactorSecret") > 80 AND length("twoFactorBackupCodes") > 80', 'terrace_documenso') == '1'
         assert sql("SELECT count(*) FROM \"User\" WHERE email IN ('local-unapproved@terrace.invalid','local-editorial-editor@terrace.invalid')", 'terrace_documenso') == '0'
         documenso_identity = documenso_container_identity()
@@ -546,6 +626,13 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         timed('documensoFreshVerify', lambda: documenso_browser('verify'))
         results['checks']['documensoFreshContainer'] = True
         results['checks']['documensoRestoredPdfAndEncrypted2FA'] = True
+        if DOCUMENSO_SIGNING_ENABLED:
+            sink = dict(line.split('=', 1) for line in gateway.succeed('systemctl show documenso-test-mailpit.service -p ActiveState,MainPID,ControlPID', timeout=10).splitlines())
+            assert sink == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
+            assert sql('SELECT count(*) FROM "BackgroundJob" WHERE "jobId"=\'send.signing.requested.email\'', 'terrace_documenso') == '1'
+            assert sql('SELECT count(*) FROM "BackgroundJob" WHERE "jobId"=\'send.signing.requested.email\' AND status=\'COMPLETED\'', 'terrace_documenso') == '1'
+            results['checks']['documensoRestoredSignedEnvelopeAndCertificate'] = True
+            results['checks']['documensoRestoredSigningRequestCompleteAndSinkOff'] = True
         results['checks']['documensoRestoredIdentityIndependentRecovery'] = timed('documensoFreshRecoveryAccess', documenso_recovery_access)
     automation_paths = ['/var/lib/terrace-demo-hass', '/var/lib/terrace-demo-frigate', '/var/lib/rehearsal-demo-token']
     if RELAY_PEERS_ENABLED:
