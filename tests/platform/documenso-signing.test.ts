@@ -23,3 +23,15 @@ test('invalid passphrases have static errors without private excerpts', () => {
   try { signingPassphrase(Buffer.from(marker)); throw new Error('Expected rejection') }
   catch (error) { expect((error as Error).message).toBe('Documenso signing inputs rejected.'); expect((error as Error).message).not.toContain(marker) }
 })
+
+test('SMTP probe rejects unexpected configuration without reflecting private values', () => {
+  const marker = 'synthetic-private-smtp-marker'
+  const result = Bun.spawnSync([process.execPath, new URL('../../platform/documenso/smtp-probe.cjs', import.meta.url).pathname], {
+    env: { ...process.env, NEXT_PRIVATE_SMTP_HOST: marker }, timeout: 3000,
+    stdout: 'pipe', stderr: 'pipe',
+  })
+  expect(result.exitCode).toBe(1)
+  const stdout = result.stdout.toString(), stderr = result.stderr.toString()
+  expect(stdout + stderr).not.toContain(marker)
+  expect(stderr.trim()).toBe('Synthetic container SMTP probe failed at configuration: unspecified.')
+})
