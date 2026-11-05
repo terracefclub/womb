@@ -155,3 +155,65 @@ encrypted data, unsigned PDF creation/retrieval and replacement-host restore
 remain functional companion gates; signing additionally requires a generated
 test-only key/certificate and local mail capture. None of these gates authorizes
 real signing, live email, publishing or deployment.
+
+
+## Functional acceptance companion
+
+The disposable functional check composes the reviewed TFC identity producer with
+`documensoClient()` using the shared, user-free realm fixture. Its private seed
+then enrolls synthetic people through Keycloak's private bootstrap interface and
+removes that temporary administrator. It never enrolls the reserved recovery
+address. A real browser uses the canonical HTTPS origins and trusted test CA;
+certificate verification, PKCE and the ordinary app authorization code flow stay
+enabled.
+
+```sh
+# x86_64 Linux builder only; TFC source must match test-identity-contract.nix.
+BUILD_LOCK=/absolute/shared/build.lock platform/documenso-functional-check /source/tfc
+# Small protocol fixtures, also in CI:
+direnv exec . python -m unittest discover -s tests/platform -p test_documenso_functional.py -v
+```
+
+The test creates an organisation, team and synthetic unsigned PDF through the
+native interface. It tests approved member/admin login, closed signup for unknown
+and unapproved editorial identities, ordinary-member admin denial, anonymous and
+non-team document denial, and retrieval of the same document after database/app
+restart. It uses the native Download PDF → Original action in the v2 editor,
+checks downloaded bytes against the session-authenticated no-store endpoint and
+requires its native 401 refusal for anonymous requests and 403 refusal for
+users outside the team. Identity is stopped before the shared database restart
+and started again with the temporary bootstrap credentials removed; its deleted
+master administrator must stay absent. It sets up native two-factor encryption, enables it with an actual TOTP,
+and decrypts the same recovery codes after restart. This tests encryption key
+continuity; generic OIDC relies on the identity provider for MFA and does not
+thereby enforce Documenso's native password-login second factor.
+
+Removing the source-managed alumni approval must revoke its existing browser
+session and deny a fresh OIDC login while retaining its account. Finally the
+check stops Keycloak and exercises the local recovery administrator through the
+loopback interface; the same password endpoint remains forbidden publicly.
+The browser fixes the locale and uses the pinned rendered English labels.
+Failure diagnostics contain only counts for a fixed allowlist of accessible
+labels, script failures and HTTP status; arbitrary DOM/text, exceptions and HTTP
+bodies are suppressed. A failed browser phase also captures a private masked
+viewport screenshot and bounded button/heading names. Input values, scripts,
+links, PDF canvas and synthetic identities/content are excluded. The wrapper
+uses Nix `--keep-failed`: artifacts remain mode0600 under the failed build's
+mode0700 shared subdirectory, outside the Nix store, after guests stop. Inspect
+and copy them to protected evidence storage on the builder, then remove only
+that run's disposable synthetic build state when it is no longer needed. Private fixture credentials,
+TOTP/receipt data and one temporary session-state file remain in the disposable
+guest's root-only directory, outside test outputs and the Nix store. The latter
+is removed after the revocation test. No database/encryption/client secret is
+copied to the browser guest. All app/identity/database units and containers must
+stop before the VM driver finishes.
+
+`functional-browser.py create` and `verify` use a protected receipt containing a
+relative document path, its download digest, a synthetic TOTP secret and a digest
+of recovery codes. This permits the same behavioral checks on a replacement
+host without retaining raw recovery codes or depending on old login cookies.
+The standalone check currently tests restart, **not replacement-host disaster
+recovery**. That requires a verified encrypted backup, originals stopped and a
+fresh replacement serving the same issuer/app origins. Synthetic signing with a
+generated fixture certificate and local SMTP capture remains a separate gate.
+No check publishes documents, sends real mail, or signs legal documents.

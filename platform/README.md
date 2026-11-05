@@ -165,3 +165,5 @@ on failure, which never converts failure into acceptance. Keep supervising the
 controller and inspect its private proof on any failure. The full-stack
 [service lifecycle matrix](../docs/service-lifecycle.md) lists what this does
 and does not establish.
+
+Documenso real-browser acceptance: `BUILD_LOCK=/absolute/shared/build.lock platform/documenso-functional-check /source/tfc` on the x86_64 Linux builder; see [the functional contract](../docs/documenso-host.md#functional-acceptance-companion).
