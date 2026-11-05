@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unicodedata
 
-QUERY = "SELECT json_build_object('oid',oid,'name',rolname,'create','CREATE ROLE '||quote_ident(rolname)||';','serverVersionNum',current_setting('server_version_num')::int,'login',rolcanlogin,'superuser',rolsuper) FROM pg_authid WHERE oid=10"
+QUERY = "SELECT json_build_object('oid',oid::int,'name',rolname,'create','CREATE ROLE '||quote_ident(rolname)||';','serverVersionNum',current_setting('server_version_num')::int,'login',rolcanlogin,'superuser',rolsuper) FROM pg_authid WHERE oid=10"
 MAX_SQL = 64 * 1024 * 1024
 FIELDS = {"schema", "sourceOid", "name", "create", "globalsSha256", "serverVersionNum", "login", "superuser"}
 
