@@ -123,12 +123,20 @@ empty replacement boots. Declared host/node identity is retained, while the
 container runtime and image imports are fresh. Restore reconciles DB counts,
 file hashes and SQLite integrity, then adopts the stopped isolated PostgreSQL
 copy under the declared native HBA/config (not isolated trust authentication).
-PostgreSQL requires its bootstrap catalog owner to remain SUPERUSER; see
-[PG18 ALTER ROLE](https://www.postgresql.org/docs/18/sql-alterrole.html).
-This internal role is made NOLOGIN, has no password, no direct or inherited
-membership path, and no client sessions. Actual fresh peer-login and app-role
-assumption attempts must fail; normal managed `postgres` remains the login
-administrator. The recovered PVC must
+The isolated restore preserves the recorded source bootstrap name at OID10.
+PG18 attaches role-grant dependencies to that identity; importing its grants
+under a differently named bootstrap account fails even when both accounts are
+superusers. See the [upstream PG18 report](https://www.postgresql.org/message-id/CA%2BC_kKWHMP4c56jx1BPvP1jmjp2pmBu0Cw07fPVECUmkJSnT4w%40mail.gmail.com)
+and [pg_dumpall bootstrap notes](https://www.postgresql.org/docs/18/app-pg-dumpall.html#APP-PG-DUMPALL-NOTES).
+The operating-system restore owner remains separate and gains no SQL role.
+This declared native source uses `postgres` as the login administrator; its
+flags, password, settings and every membership/grantor/option are compared
+before resumed writers. The operating-system restore user cannot connect as
+itself or impersonate `postgres`, and app credentials cannot assume that role.
+Native peer HBA and fsync remain mandatory. The narrow restore contract requires
+hash-bound bootstrap metadata and a source bootstrap with LOGIN and SUPERUSER;
+legacy metadata-free or NOLOGIN-bootstrap snapshots fail closed and retain their
+original artifacts/pinned tooling. The recovered PVC must
 read its original marker and persist a new write. Native SSO/private-content,
 automation auth/sensors, relay keys/users and unrelated sentinels are checked.
 All replacement guests and the repository/browser guest stop before success.

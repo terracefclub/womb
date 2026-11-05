@@ -131,6 +131,11 @@ def app_signature():
             'users': sql('select md5(string_agg(id||username,chr(10) order by id)) from user_entity', 'keycloak'),
             'migrations': sql('select name||batch from payload_migrations order by id'),
             'inputs': gateway.succeed('cd ' + WEB_INPUTS + ' && sha256sum *.env').strip()}
+    # Passwords and role settings stay inside these private one-way witnesses.
+    # Compare semantic names, not newly assigned ordinary-role/database OIDs.
+    signature['postgresGlobalRoles'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.rolname),'')) FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,rolpassword,rolvaliduntil,rolbypassrls FROM pg_authid) r", 'postgres')
+    signature['postgresGlobalMemberships'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.member,r.role,r.grantor),'')) FROM (SELECT m.rolname AS member,g.rolname AS role,b.rolname AS grantor,a.admin_option,a.inherit_option,a.set_option FROM pg_auth_members a JOIN pg_roles m ON m.oid=a.member JOIN pg_roles g ON g.oid=a.roleid JOIN pg_roles b ON b.oid=a.grantor) r", 'postgres')
+    signature['postgresRoleSettings'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.role,r.database),'')) FROM (SELECT p.rolname AS role,d.datname AS database,a.setconfig FROM pg_db_role_setting a LEFT JOIN pg_roles p ON p.oid=a.setrole LEFT JOIN pg_database d ON d.oid=a.setdatabase) r", 'postgres')
     if DOCUMENSO_ENABLED:
         signature['documenso'] = {
             'migrations': sql('SELECT migration_name||checksum FROM "_prisma_migrations" ORDER BY migration_name', 'terrace_documenso'),
@@ -580,8 +585,8 @@ def windmill_role_policy():
         assert len(columns) == 7 and columns[0] == name and all(value in ['t', 'f'] for value in columns[1:])
     print('Application role flags: ' + json.dumps(role_flags), flush=True)
     assert role_flags == [name + '|t|f|f|f|f|f' for name in expected_roles]
-    expected = ['terrace_windmill:windmill_admin:false', 'terrace_windmill:windmill_user:false', 'windmill_admin:windmill_user:false']
-    grants = sql("SELECT member.rolname||':'||group_role.rolname||':'||m.admin_option::text FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member JOIN pg_roles group_role ON group_role.oid=m.roleid WHERE group_role.rolname IN ('windmill_user','windmill_admin') ORDER BY 1", 'postgres').splitlines()
+    expected = ['terrace_windmill:windmill_admin:postgres:false:true:true', 'terrace_windmill:windmill_user:postgres:false:true:true', 'windmill_admin:windmill_user:postgres:false:true:true']
+    grants = sql("SELECT member.rolname||':'||group_role.rolname||':'||grantor.rolname||':'||m.admin_option::text||':'||m.inherit_option::text||':'||m.set_option::text FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member JOIN pg_roles group_role ON group_role.oid=m.roleid JOIN pg_roles grantor ON grantor.oid=m.grantor WHERE group_role.rolname IN ('windmill_user','windmill_admin') ORDER BY 1", 'postgres').splitlines()
     assert grants == expected
     assert sql("SELECT count(*)=4 AND bool_and(NOT pg_has_role(oid,'windmill_admin','MEMBER') AND NOT pg_has_role(oid,'windmill_admin','SET') AND NOT pg_has_role(oid,'windmill_user','MEMBER') AND NOT pg_has_role(oid,'windmill_user','SET')) FROM pg_roles WHERE rolname IN ('keycloak','terrace_cms','terrace_documenso','terrace_vaultwarden')", 'postgres') == 't'
     assert sql("SELECT pg_has_role('terrace_windmill','windmill_admin','SET') AND pg_has_role('terrace_windmill','windmill_user','SET')", 'postgres') == 't'
@@ -940,18 +945,19 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     gateway.succeed('test ! -L ' + pg_dir + ' && { test ! -e ' + pg_dir + ' || { entries="$(ls -A ' + pg_dir + ')" && test -z "$entries"; }; }')
     gateway.succeed('install -d -m 0700 -o postgres -g postgres ' + pg_dir + ' && cp -a ' + RESTORE + '/pgdata/. ' + pg_dir + '/ && chown -R postgres:postgres ' + pg_dir)
     gateway.succeed('systemctl start postgresql.target')
-    # PG18 requires its bootstrap OID10 to remain superuser/catalog owner.
-    # Retain no authentication or membership path to that internal identity.
-    sql('alter role "terrace-restore" nologin password null', 'postgres')
-    assert sql("select rolsuper and not rolcanlogin and rolpassword is null from pg_authid where oid=10 and rolname='terrace-restore'", 'postgres') == 't'
+    # Preserve the source bootstrap identity: PG18 role-grant dependencies
+    # attach to OID10. The native peer administrator remains postgres.
+    assert sql("select rolsuper and rolcanlogin from pg_authid where oid=10 and rolname='postgres'", 'postgres') == 't'
+    assert sql("select count(*) from pg_roles where rolname='terrace-restore'", 'postgres') == '0'
     assert sql('select count(*) from pg_auth_members where roleid=10 or member=10', 'postgres') == '0'
     managed_roles = ['terrace_cms', 'keycloak'] + (['terrace_documenso'] if DOCUMENSO_ENABLED else [])
     if APPLICATIONS_ENABLED:
         managed_roles += ['terrace_vaultwarden', 'terrace_windmill']
     names = ','.join("'" + role + "'" for role in managed_roles)
     assert sql("select count(*)=" + str(len(managed_roles)) + " and bool_and(not pg_has_role(oid,10::oid,'MEMBER') and not pg_has_role(oid,10::oid,'SET')) from pg_roles where rolname in (" + names + ')', 'postgres') == 't'
-    assert sql("select count(*) from pg_stat_activity where usesysid=10 and backend_type='client backend'", 'postgres') == '0'
+    assert sql("select count(*) from pg_stat_activity where usesysid=10 and backend_type='client backend' and pid<>pg_backend_pid()", 'postgres') == '0'
     gateway.fail('runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U terrace-restore -d postgres -c \x27select 1\x27 >/dev/null 2>&1')
+    gateway.fail('runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U postgres -d postgres -c \x27select 1\x27 >/dev/null 2>&1')
     cms_peer = 'runuser -u terrace_cms -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_cms -d terrace_cms'
     identity_password = 'PGPASSWORD="$(cat /var/lib/terrace-gateway-test/db-password)" psql -X -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U keycloak -d keycloak'
     app_credentials = [cms_peer, identity_password]
@@ -962,7 +968,7 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         app_credentials.append('runuser -u vaultwarden -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_vaultwarden -d terrace_vaultwarden')
     for credentials in app_credentials:
         gateway.succeed(credentials + ' -c \x27select 1\x27 >/dev/null 2>&1')
-        gateway.fail(credentials + ' -c \x27set role "terrace-restore"\x27 >/dev/null 2>&1')
+        gateway.fail(credentials + ' -c \x27set role postgres\x27 >/dev/null 2>&1')
     if APPLICATIONS_ENABLED:
         assert windmill_role_policy()
         # Prove native credentials also enforce the role-membership boundary.
@@ -974,7 +980,9 @@ with subtest('fresh empty disks restore the exact node identity and functional s
                 for role in ['windmill_admin', 'windmill_user']:
                     gateway.fail(credentials + ' -c ' + shlex.quote('set role ' + role) + ' >/dev/null 2>&1')
         results['checks']['restoredWindmillDatabaseRoleIsolation'] = True
-    results['checks']['bootstrapOwnerLoginAndAssumptionDenied'] = True
+    results['checks']['sourceBootstrapIdentityAndGlobalRolesPreserved'] = True
+    results['checks']['restoreOperatingUserLoginDenied'] = True
+    results['checks']['managedAppBootstrapRoleAssumptionDenied'] = True
     assert sql('show hba_file', 'postgres').startswith('/nix/store/')
     assert sql('show fsync', 'postgres') == 'on'
     if APPLICATIONS_ENABLED:
