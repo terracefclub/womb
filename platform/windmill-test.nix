@@ -1,13 +1,24 @@
 {
   pkgs,
   contract,
+  fixtureProgram ? null,
+  tlsFixture ? null,
 }: let
   directory = "/var/lib/terrace-windmill-inputs";
-  certificate = pkgs.runCommand "windmill-public-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
-    mkdir -p $out
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes -keyout $out/key.pem -out $out/cert.pem \
-      -subj '/CN=windmill.terrace.invalid' -addext 'subjectAltName=DNS:windmill.terrace.invalid,DNS:identity.terrace.invalid' 2>/dev/null
-  '';
+  certificate =
+    if tlsFixture != null
+    then tlsFixture
+    else
+      pkgs.runCommand "windmill-public-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+        mkdir -p $out
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes -keyout $out/key.pem -out $out/cert.pem \
+          -subj '/CN=windmill.terrace.invalid' -addext 'subjectAltName=DNS:windmill.terrace.invalid,DNS:identity.terrace.invalid' 2>/dev/null
+      '';
+  trustedCertificate = "${certificate}/${
+    if tlsFixture == null
+    then "cert.pem"
+    else "ca.pem"
+  }";
   fixture = pkgs.runCommand "windmill-runtime-fixture" {} ''
     mkdir -p $out
     cp -R ${contract}/. $out/
@@ -25,7 +36,7 @@ in {
         diskSize = 16384;
         qemu.options = ["-fw_cfg" "name=opt/terrace-workload,string=windmill-runtime"];
       };
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
+      security.pki.certificateFiles = [trustedCertificate];
       networking.hosts."127.0.0.1" = ["windmill.terrace.invalid" "identity.terrace.invalid"];
       terrace.identity = {
         enable = true;
@@ -52,7 +63,11 @@ in {
           StandardError = "null";
         };
         script = ''
-          ${pkgs.bun}/bin/bun --no-env-file ${fixture}/windmill-fixture.ts
+          ${pkgs.bun}/bin/bun --no-env-file ${
+            if fixtureProgram == null
+            then "${fixture}/windmill-fixture.ts"
+            else fixtureProgram
+          }
           cp ${certificate}/{cert,key}.pem ${directory}/
           chmod 0400 ${directory}/{cert,key}.pem
           install -m 0600 /dev/null /var/lib/windmill-test-launcher.log
@@ -110,7 +125,7 @@ in {
     };
     client = {nodes, ...}: {
       networking.hosts.${nodes.host.networking.primaryIPAddress} = ["windmill.terrace.invalid" "identity.terrace.invalid"];
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
+      security.pki.certificateFiles = [trustedCertificate];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
       networking.firewall.allowedTCPPorts = [18080];
       systemd.services.synthetic-peer = {
