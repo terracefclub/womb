@@ -17,6 +17,7 @@
     nixosModules.demos = import ./demos.nix;
     nixosModules.identity = import ./identity.nix;
     nixosModules.website = import ./website.nix;
+    nixosModules.website-gateway = import ./website-gateway.nix;
 
     checks.${system} = {
       single-node = pkgs.testers.runNixOSTest (import ./test.nix {
