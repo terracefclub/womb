@@ -108,3 +108,35 @@ The protocol proof is not browser hydration/UI coverage or an external sign-in
 availability check. Live-write backup consistency, whole-host/off-site recovery,
 production enrollment, load, public DNS, certificate renewal and cloud deployment
 remain gates documented in [native hosting](website-host.md).
+
+## Shared disposable identity fixture
+
+`platform/test-identity-contract.nix { pkgs; tfcSource; }` verifies the three
+accepted TFC producer-file hashes before copying them into its small test
+package. It exports `fixture.ts` with `createIdentityFixture(options)`. No
+private checkout state enters the store. Running the default fixture inside a
+disposable guest preserves the accepted four-client realm and existing paths.
+
+A companion service may pass `extraSecretNames = ["documenso"]` and
+`extraClientFactories = [secrets => documensoClient(origin, secrets.documenso)]`
+using its reviewed pure client factory. In TypeScript these are array-valued
+object properties. The helper returns private `extraSecrets`, `users`, `issuer`,
+`directory` and `inputs`; never print or serialize these into a build output.
+Names/factories are bounded to eight, identities must be unique, and extension
+clients require enabled OIDC, distinct generated confidential secrets, bounded
+HTTPS callbacks/exact origins, code flow, S256 PKCE and scoped
+roles with password/implicit/service-account grants disabled. This test-only
+composition does not reconcile clients in an existing realm.
+
+The initial realm remains user-free. The separate private fixture enrollment
+uses the accepted five synthetic role identities, with verified addresses
+`<username>@terrace.invalid`; it deletes its temporary master administrator.
+Use `local-member@terrace.invalid` as an approved account and
+`local-unapproved@terrace.invalid` as unknown. App-specific approval or denial
+is the app's own contract, not an assumed role mapping. Reserve
+`recovery@terrace.invalid` outside all fixture IdP enrollment. Production
+account enrollment and ongoing client reconciliation remain separate gates.
+
+Pure regression tests: `direnv exec . bun test tests/platform/fixture-clients.test.ts`.
+The existing native gateway check exercises the default fixture against actual
+Keycloak and both accepted application bundles.
