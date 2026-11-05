@@ -69,6 +69,7 @@
   }: {
     virtualisation.diskImage = "$TERRACE_REHEARSAL_RUN_DIR/state/${config.networking.hostName}.qcow2";
     virtualisation.qemu.options = ["-fw_cfg" "name=opt/terrace-rehearsal,string=${runId}"];
+    environment.etc."rehearsal-restore-evidence.py".source = ./restore-evidence.py;
     environment.systemPackages = [pkgs.curl pkgs.jq pkgs.openssh pkgs.restic pkgs.python3 pkgs.netcat-openbsd cgroupCheck];
     environment.etc."rehearsal-versions.json".text = builtins.toJSON ({
         keycloak = pkgs.keycloak.version;

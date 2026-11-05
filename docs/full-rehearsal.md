@@ -342,3 +342,9 @@ claimed by this mode. Website/CMS, identity, Vaultwarden, automation and relay
 use native services; Documenso and Windmill use managed Podman with native
 PostgreSQL. K3s recovery covers its actual persistent-volume probe, not placement
 of every application in Kubernetes. Actual profiles remain disabled.
+
+A failed restore exports only fixed restore/globals/per-database error files and
+reconciliation output, each bounded to 1MiB, into its private evidence directory
+before teardown. Export failures preserve the original restore failure; failed
+disks and the early encrypted repository/escrow remain retained. No diagnostic
+contents are printed by this export.

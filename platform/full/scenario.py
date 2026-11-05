@@ -711,7 +711,19 @@ def fresh_restore(machine, snapshot, paths):
     assert_blank_writers(machine)
     machine.succeed('test ! -e ' + BACKUP_SECRETS)
     transfer(client, '/root/escrow/' + machine.name, machine, BACKUP_SECRETS)
-    machine.succeed('umask 077; terrace-backup-restore --target primary --snapshot ' + snapshot + ' --dest ' + RESTORE + ' >/var/tmp/rehearsal-restore.log 2>&1', timeout=300)
+    try:
+        machine.succeed('umask 077; terrace-backup-restore --target primary --snapshot ' + snapshot + ' --dest ' + RESTORE + ' >/var/tmp/rehearsal-restore.log 2>&1', timeout=300)
+    except Exception:
+        try:
+            destination = run / 'evidence' / ('restore-failure-' + machine.name)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='restore-failure-', dir=machine.shared_dir) as private:
+                machine.succeed('python /etc/rehearsal-restore-evidence.py /tmp/shared/' + Path(private).name + '/files', timeout=15)
+                for artifact in (Path(private) / 'files').iterdir():
+                    retain_private_artifact(artifact, destination / artifact.name, 1024 * 1024)
+        except Exception:
+            print('Private restore evidence could not be exported.', flush=True)
+        raise
     machine.succeed("grep -qx 'RECONCILIATION OK' " + RESTORE + '/reconciliation.txt')
     for path in paths:
         # NixOS tmpfiles installs this one immutable manifest before K3s starts.

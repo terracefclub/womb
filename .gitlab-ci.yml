@@ -18,6 +18,7 @@ check-supervision:
     - python tests/platform/test_bootstrap_identity.py -v
     - python tests/platform/test_pg_sample.py -v
     - python tests/platform/test_full_concurrent.py -v
+    - python platform/full/test_restore_evidence.py -v
 
 oci-metadata:
   image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
