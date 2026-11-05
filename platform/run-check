@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Run trusted Nix build arguments with a private lock descriptor and deadlines."""
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import time
+
+
+def bounded(name, default, maximum):
+    value = os.environ.get(name, str(default))
+    if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= maximum:
+        raise ValueError()
+    return int(value)
+
+
+def group_alive(pid):
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def live_group(pgid):
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            fields = open(f"/proc/{name}/stat").read().rsplit(") ", 1)[1].split()
+            if int(fields[2]) == pgid and fields[0] != "Z":
+                return True
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return False
+
+
+def stop_group(child, grace):
+    # Popen created this session/group; never select a process by name or cwd.
+    if group_alive(child.pid):
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + grace
+        while group_alive(child.pid) and time.monotonic() < deadline:
+            child.poll()  # reap the leader, including graceful exit0 after timeout
+            time.sleep(0.05)
+        if group_alive(child.pid):
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    child.wait(timeout=5)
+    # Zombies await their parent/reaper; they consume no compute. Live members
+    # after KILL mean cleanup is uncertain and must never return success.
+    deadline = time.monotonic() + 5
+    while live_group(child.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if live_group(child.pid):
+        raise RuntimeError()
+
+
+def main():
+    if sys.platform != "linux" or not sys.argv[1:]:
+        raise ValueError()
+    seconds = bounded("CHECK_TIMEOUT", 1800, 14400)
+    build_seconds = bounded("CHECK_BUILD_TIMEOUT", min(900, seconds), seconds)
+    grace = bounded("CHECK_STOP_GRACE", 30, 60)
+    lock_seconds = bounded("BUILD_LOCK_TIMEOUT", 3600, 28800)
+    lock_path = os.environ.get("BUILD_LOCK", "")
+    if not os.path.isabs(lock_path):
+        raise ValueError()
+    cancelled = 0
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, cancel)
+    # close_fds also prevents detached descendants from keeping this lock alive.
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    child = None
+    try:
+        deadline = time.monotonic() + lock_seconds
+        while True:
+            if cancelled:
+                return 128 + cancelled
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print("Terrace check lock wait expired; no build started.", file=sys.stderr)
+                    return 75
+                time.sleep(0.1)
+        if cancelled:
+            return 128 + cancelled
+        command = ["nix", "build", *sys.argv[1:], "--timeout", str(build_seconds),
+                   "--max-jobs", "1", "--cores", "2", "--option", "builders", "",
+                   "--option", "post-build-hook", "", "-L", "--print-out-paths", "--no-link"]
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        deadline = time.monotonic() + seconds
+        while True:
+            if cancelled:
+                print("Terrace check cancelled; stopping its owned client group.", file=sys.stderr)
+                return 128 + cancelled
+            if time.monotonic() >= deadline:
+                print("Terrace check deadline expired; stopping its owned client group.", file=sys.stderr)
+                return 124
+            code = child.poll()
+            if code is not None:
+                return code if code >= 0 else 128 - code
+            time.sleep(0.1)
+    finally:
+        try:
+            if child is not None:
+                stop_group(child, grace)
+        finally:
+            os.close(fd)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # Arguments, environment and build errors may contain private inputs.
+        print("Terrace check supervisor failed; inspect the private check log and documented limits.", file=sys.stderr)
+        sys.exit(2)

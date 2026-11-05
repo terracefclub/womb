@@ -13,6 +13,4 @@ for check in "$@"; do
   checks+=("path:.#checks.x86_64-linux.$check")
 done
 cd "$(dirname "$0")"
-exec flock -w "${BUILD_LOCK_TIMEOUT:-28800}" "$BUILD_LOCK" \
-  nix build "${checks[@]}" --no-write-lock-file --max-jobs 1 --cores 2 \
-  --option builders '' --option post-build-hook '' -L --print-out-paths --no-link
+exec ./run-check "${checks[@]}" --no-write-lock-file

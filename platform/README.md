@@ -48,13 +48,12 @@ lock path supplied as `BUILD_LOCK`:
 ```sh
 nix flake show --no-write-lock-file
 : "${BUILD_LOCK:?set the shared build lock path}"
-flock "$BUILD_LOCK" nix build .#checks.x86_64-linux.single-node --no-write-lock-file \
-  --max-jobs 1 --cores 2 --option builders "" --option use-build-hook false
+./check single-node
 ```
 
 Never run this build on a developer's Mac. When using the shared falcon builder,
-use the homelab's `tools/falcon-heavy` wrapper and its shared lock; do not start
-an unlocked parallel job. The VM check boots K3s, waits for a Ready node,
+supply the same shared lock used by the homelab's `tools/falcon-heavy` wrapper;
+`platform/check` takes it itself, so do not wrap it in a second lock. The VM check boots K3s, waits for a Ready node,
 verifies the retained StorageClass and firewall, starts an offline test pod
 with a PVC, writes a marker, restarts K3s, recreates the pod, and checks
 the marker remains. It then deletes the PVC and checks the PV and data
@@ -115,3 +114,49 @@ or account price is asserted here: those must be checked against the live
 account before purchase. On-premise
 hardware later uses the same `single-node.nix` module with a separate host
 profile; it does not imply a WAN-spanned cluster.
+
+
+## Check supervision
+
+`check` and `website-check` use the Linux Python standard-library `run-check`
+supervisor. Queue timeout `BUILD_LOCK_TIMEOUT` defaults to 3600 seconds (max
+28800); active wall deadline `CHECK_TIMEOUT` defaults to 1800 (max 14400);
+per-derivation Nix `CHECK_BUILD_TIMEOUT` defaults to the smaller of 900 and the
+wall deadline, and cannot exceed it. `CHECK_STOP_GRACE` defaults to 30 seconds
+(max 60), followed by KILL and a bounded cleanup check. Explicit bounds must be
+positive whole seconds. A build timeout may abort a slow initial dependency
+build: warm the driver/closure in a separate bounded run if appropriate.
+
+The lock descriptor is not inherited by the build. Cancellation returns 130/143,
+wall timeout 124, queue timeout 75 and invalid inputs/uncertain cleanup 2. A child
+returning zero after a timeout is still rejected. Completion also stops stray
+members of the owned child group; no process-name or cwd kill is used. Nix's
+per-build timeout remains a fallback if the supervisor dies, not a guarantee
+against host failure/SIGKILL or escaped sessions. Do not leave detached checks
+unattended. Verify exact owned VM/client PIDs absent before reporting idle.
+
+Run synthetic regressions on Linux (no Nix/provider/network calls):
+
+```sh
+python3 platform/test-run-check.py -v
+```
+
+Run the actual timeout/cancellation regression from a clean remote checkout.
+The proof directory must not exist. Root is needed only to inspect and, on
+failure, stop uniquely marked Nix-sandbox QEMU processes; the script takes the
+shared lock separately for each bounded build. Never wrap this in another lock.
+It creates private synthetic-only logs and two ready disposable guests, then
+requires each observed guest PID/start-time absent after timeout/cancellation:
+
+```sh
+sudo env BUILD_LOCK="$HOME/.falcon-heavy.lock" python3 \
+  platform/test-run-check-native.py "$PWD/.devenv/runner-proof-$(date +%s)"
+```
+
+Each driver warm-up has a 900-second active/build bound; each deliberate VM
+hang a 120-second wall/35-second Nix build bound, plus a bounded queue and cleanup.
+The controller handles TERM/INT/HUP and performs exact-owned fallback cleanup
+on failure, which never converts failure into acceptance. Keep supervising the
+controller and inspect its private proof on any failure. The full-stack
+[service lifecycle matrix](../docs/service-lifecycle.md) lists what this does
+and does not establish.

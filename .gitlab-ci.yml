@@ -3,3 +3,8 @@ membership-contract:
   script:
     - python -m pip install --disable-pip-version-check --requirement windmill/f/Membership/merge_records_to_google_sheet.script.lock
     - python -m unittest discover -s tests/membership -v
+
+check-supervision:
+  image: python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+  script:
+    - python platform/test-run-check.py -v
