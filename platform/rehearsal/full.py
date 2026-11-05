@@ -82,6 +82,8 @@ def warm(run, run_id, args, lock):
                '--argstr', 'runId', run_id]
     for key in ['webArchive', 'cmsArchive', 'tfcSource']:
         command.extend(['--argstr', key, str(Path(getattr(args, key)).resolve(strict=True))])
+    if args.documenso:
+        command.extend(['--arg', 'withDocumenso', 'true'])
     command.append('driver')
     child = None
     with (run / 'build.log').open('xb') as log, (run / 'build-output.txt').open('xb') as output:
@@ -147,6 +149,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run')
     run.add_argument('--output', required=True)
+    run.add_argument('--documenso', action='store_true', help='Include the optional native Documenso recovery checks.')
     for key in ['webArchive', 'cmsArchive', 'tfcSource']:
         run.add_argument('--' + key, required=True)
     delete = sub.add_parser('purge')

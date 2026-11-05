@@ -26,11 +26,16 @@ RESTORE = '/var/lib/rehearsal-recovery'
 GATEWAY_INPUTS = '/var/lib/terrace-gateway-test'
 WEB_INPUTS = '/var/lib/terrace-website-inputs'
 MEDIA = '/var/lib/terrace-cms-media'
+DOCUMENSO_INPUTS = '/var/lib/terrace-documenso-inputs'
+DOCUMENSO_STATE = '/var/lib/terrace-documenso'
+DOCUMENSO_BROWSER = '/root/documenso-functional'
 BLANK_WRITERS = {
     'gateway': ['postgresql.service', 'keycloak.service', 'nginx.service', 'terrace-cms.service', 'terrace-web.service', 'k3s.service'],
     'automation': ['home-assistant.target', 'home-assistant.service', 'terrace-demo-ha.socket', 'terrace-demo-ha.service', 'terrace-demo-ha-network.service', 'frigate.service', 'go2rtc.service', 'nginx.service'],
     'relay': ['headscale.service', 'nginx.service'],
 }
+if DOCUMENSO_ENABLED:
+    BLANK_WRITERS['gateway'] += ['terrace-documenso.service', 'terrace-documenso-migrate.service', 'terrace-documenso-bootstrap.service', 'terrace-documenso-database.service']
 
 
 def assert_blank_writers(machine):
@@ -71,13 +76,52 @@ def bootstrap_app():
     gateway.succeed('systemctl start k3s.service')
     gateway.wait_until_succeeds("k3s kubectl get nodes --no-headers | grep ' Ready '", timeout=360)
     gateway.wait_until_succeeds("k3s kubectl get storageclass local-retain -o jsonpath='{.reclaimPolicy}' | grep -qx Retain", timeout=180)
+    if DOCUMENSO_ENABLED:
+        assert sql("select count(*) from user_entity where email='recovery@terrace.invalid'", 'keycloak') == '0'
+        gateway.succeed('systemctl start terrace-documenso-migrate.service && systemctl start terrace-documenso-bootstrap.service && systemctl start terrace-documenso.service', timeout=360)
+        gateway.wait_until_succeeds('curl --fail --silent --max-time 5 http://127.0.0.1:13050/api/health | jq -e \x27.checks.database.status == "ok"\x27 >/dev/null', timeout=90)
 
 
 def app_signature():
-    return {'realm': sql("select id from realm where name='terrace'", 'keycloak'),
+    signature = {'realm': sql("select id from realm where name='terrace'", 'keycloak'),
             'users': sql('select md5(string_agg(id||username,chr(10) order by id)) from user_entity', 'keycloak'),
             'migrations': sql('select name||batch from payload_migrations order by id'),
             'inputs': gateway.succeed('cd ' + WEB_INPUTS + ' && sha256sum *.env').strip()}
+    if DOCUMENSO_ENABLED:
+        signature['documenso'] = {
+            'migrations': sql('SELECT migration_name||checksum FROM "_prisma_migrations" ORDER BY migration_name', 'terrace_documenso'),
+            'accounts': sql('SELECT md5(string_agg(id::text||email||coalesce(source,\x27\x27)||disabled::text||roles::text||coalesce("twoFactorSecret",\x27\x27)||coalesce("twoFactorBackupCodes",\x27\x27),chr(10) ORDER BY id)) FROM "User"', 'terrace_documenso'),
+            'inputs': gateway.succeed('sha256sum ' + DOCUMENSO_INPUTS + '/secrets.json').strip(),
+        }
+    return signature
+
+
+def documenso_browser(mode):
+    assert mode in ['create', 'verify']
+    try:
+        assert client.succeed('rehearsal-documenso-browser ' + mode, timeout=240).strip() == 'Documenso functional browser phase ' + mode + ' passed.'
+    except Exception:
+        try:
+            destination = run / 'evidence' / ('documenso-failure-' + mode)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='documenso-failure-', dir=client.shared_dir) as private:
+                name = Path(private).name
+                for filename in ['failure-' + mode + '-labels.json', 'failure-' + mode + '.png']:
+                    client.execute('test ! -f ' + DOCUMENSO_BROWSER + '/' + filename + ' || cp --preserve=mode ' + DOCUMENSO_BROWSER + '/' + filename + ' /tmp/shared/' + name + '/', timeout=10)
+                    artifact = Path(private) / filename
+                    if artifact.exists():
+                        assert artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_mode & 0o077 == 0
+                        artifact.rename(destination / filename)
+            print('Private Documenso failure artifacts retained; contents suppressed.')
+        except Exception:
+            print('Private Documenso failure evidence unavailable; original failure preserved.')
+        raise
+
+
+def documenso_container_identity():
+    value = gateway.succeed("podman inspect --format '{{.Id}} {{.Image}}' terrace-documenso").strip().split()
+    assert len(value) == 2 and all(re.fullmatch(r'(?:sha256:)?[a-f0-9]{64}', item) for item in value)
+    return value
 
 
 def bootstrap_automation():
@@ -111,6 +155,8 @@ def check_automation():
     assert settings['telemetry']['version_check'] is False
     assert list(settings['cameras']) == ['synthetic_black']
     automation.succeed('curl --fail --silent --max-time 10 http://127.0.0.1:5000/api/synthetic_black/latest.jpg >/var/tmp/synthetic-frame.jpg && test -s /var/tmp/synthetic-frame.jpg')
+    if DOCUMENSO_ENABLED:
+        automation.succeed('curl --fail --silent --max-time 10 https://documents.terrace.invalid/api/health | jq -e \x27.checks.database.status == "ok"\x27 >/dev/null')
     return True
 
 
@@ -121,7 +167,7 @@ def check_app(phase=''):
     browser = client.succeed('rehearsal-browser', timeout=90).strip()
     assert browser == 'Real Chromium denied-to-switch-to-approved checks passed: HTTPS trust, native POST Origin, approved page and secure cookie.'
     client.succeed('rm /root/gateway-fixture.json')
-    for port in [5432, 6443, 8088, 9000, 13048, 14294]:
+    for port in [5432, 6443, 8088, 9000, 13048, 14294] + ([13050] if DOCUMENSO_ENABLED else []):
         client.fail(f'nc -z -w 1 gateway {port}')
     count = re.search(r': ([0-9]+) ', output)
     assert count is not None
@@ -135,6 +181,11 @@ def stop_units(machine, units):
 
 
 def quiesce_writers():
+    if DOCUMENSO_ENABLED:
+        stop_units(gateway, ['terrace-documenso'])
+        assert gateway.succeed('systemctl show terrace-documenso.service -p ExecMainStatus --value').strip() in ['0', '143']
+        assert gateway.succeed('systemctl show terrace-documenso.service -p ActiveState --value').strip() == 'inactive'
+        assert gateway.succeed('podman ps -q').strip() == ''
     deployments = json.loads(gateway.succeed('k3s kubectl get deployments --all-namespaces -o json'))['items']
     deployment_replicas = [(item['metadata']['namespace'], item['metadata']['name'], item['spec']['replicas']) for item in deployments]
     for namespace, name, _replicas in deployment_replicas:
@@ -196,12 +247,12 @@ def fresh_restore(machine, snapshot, paths):
         # any mutable or unexpected file still rejects before the copy.
         if path == '/var/lib/rancher/k3s/server':
             expected = shlex.quote('d manifests\nl manifests/local-retain.yaml')
-            machine.succeed('test "$(find ' + path + ' -mindepth 1 -printf \x27%y %P\\n\x27 | LC_ALL=C sort)" = ' + expected)
+            machine.succeed('entries="$(find ' + path + ' -mindepth 1 -printf \x27%y %P\\n\x27)" && entries="$(printf \x27%s\\n\x27 "$entries" | LC_ALL=C sort)" && test "$entries" = ' + expected)
             manifest = path + '/manifests/local-retain.yaml'
             machine.succeed('test -L ' + manifest + ' && test -f ' + manifest + ' && readlink ' + manifest + ' | grep -q \x27^/nix/store/\x27')
             machine.succeed('test "$(readlink ' + manifest + ')" = "$(readlink ' + RESTORE + '/files' + manifest + ')"')
         else:
-            machine.succeed('test ! -e ' + shlex.quote(path) + ' || test -z "$(ls -A ' + shlex.quote(path) + ')"')
+            machine.succeed('test ! -L ' + shlex.quote(path) + ' && { test ! -e ' + shlex.quote(path) + ' || { entries="$(ls -A ' + shlex.quote(path) + ')" && test -z "$entries"; }; }')
         machine.succeed('mkdir -p ' + shlex.quote(path) + ' && cp -a ' + RESTORE + '/files' + path + '/. ' + shlex.quote(path) + '/')
 
 
@@ -220,6 +271,8 @@ with subtest('empty state and two explicit bootstrap passes'):
         assert_blank_writers(machine)
     for machine, path in [(gateway, GATEWAY_INPUTS + '/terrace-realm.json'), (automation, '/var/lib/terrace-demo-hass/.storage/auth'), (relay, '/var/lib/headscale/db.sqlite')]:
         machine.fail('test -e ' + path)
+    if DOCUMENSO_ENABLED:
+        gateway.fail('test -e ' + DOCUMENSO_INPUTS + '/secrets.json')
     timed('bootstrapApplication', bootstrap_app)
     signature = app_signature()
     timed('secondBootstrapApplication', bootstrap_app)
@@ -246,6 +299,16 @@ with subtest('empty state and two explicit bootstrap passes'):
     assert gateway.succeed("k3s kubectl get pvc rehearsal -o jsonpath='{.spec.volumeName}'").strip() == volume
     gateway.succeed('k3s kubectl exec rehearsal -- /bin/busybox grep -qx retained-synthetic /data/marker')
 
+if DOCUMENSO_ENABLED:
+    with subtest('native Documenso SSO, unsigned PDF and encrypted account data'):
+        client.succeed('install -d -m 0700 ' + DOCUMENSO_BROWSER)
+        transfer(gateway, GATEWAY_INPUTS + '/documenso-browser.json', client, DOCUMENSO_BROWSER + '/credentials.json')
+        timed('documensoCreate', lambda: documenso_browser('create'))
+        assert sql('SELECT count(*) FROM "User" WHERE "twoFactorEnabled" AND length("twoFactorSecret") > 80 AND length("twoFactorBackupCodes") > 80', 'terrace_documenso') == '1'
+        assert sql("SELECT count(*) FROM \"User\" WHERE email IN ('local-unapproved@terrace.invalid','local-editorial-editor@terrace.invalid')", 'terrace_documenso') == '0'
+        documenso_identity = documenso_container_identity()
+        results['checks']['documensoNativeCreate'] = True
+
 with subtest('simultaneous real native SSO, public/private HTTP and synthetic automation'):
     # Both components remain active concurrently, not isolated passing closures.
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -265,6 +328,8 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
                            'headscale': relay.succeed('headscale version').splitlines()[0],
                            'postgresql': gateway.succeed('psql --version').strip()}
     results['peakBytes'] = {unit: int(gateway.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['keycloak', 'terrace-cms', 'terrace-web', 'postgresql', 'k3s']}
+    if DOCUMENSO_ENABLED:
+        results['peakBytes']['terrace-documenso'] = int(gateway.succeed('systemctl show terrace-documenso.service -p MemoryPeak --value').strip())
     results['automationPeakBytes'] = {unit: int(automation.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['home-assistant', 'frigate', 'go2rtc', 'nginx']}
     results['relayPeakBytes'] = {unit: int(relay.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['headscale', 'nginx']}
     results['postgresConnectionsAfterConcurrentChecks'] = int(sql('select count(*) from pg_stat_activity', 'postgres'))
@@ -312,13 +377,16 @@ with subtest('quiesce every writer before all encrypted snapshots'):
     assert all(not Path('/proc/' + str(item['pid'])).exists() for item in results['originalGuests'])
 
 with subtest('fresh empty disks restore the exact node identity and functional services'):
-    timed('restore-application', lambda: fresh_restore(gateway, snapshots['gateway'], [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']))
+    application_paths = [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']
+    if DOCUMENSO_ENABLED:
+        application_paths += [DOCUMENSO_INPUTS, DOCUMENSO_STATE]
+    timed('restore-application', lambda: fresh_restore(gateway, snapshots['gateway'], application_paths))
     # Adopt the reconciled, stopped PG copy into its DECLARED native service.
     # The module replaces postgresql.conf with its pinned native HBA/config;
     # the isolated trust configuration is never the active runtime configuration.
     pg_dir = gateway.succeed('cat /etc/rehearsal-pg-directory').strip()
     assert re.fullmatch('/var/lib/postgresql/[0-9]+', pg_dir)
-    gateway.succeed('test ! -e ' + pg_dir + ' || test -z "$(ls -A ' + pg_dir + ')"')
+    gateway.succeed('test ! -L ' + pg_dir + ' && { test ! -e ' + pg_dir + ' || { entries="$(ls -A ' + pg_dir + ')" && test -z "$entries"; }; }')
     gateway.succeed('install -d -m 0700 -o postgres -g postgres ' + pg_dir + ' && cp -a ' + RESTORE + '/pgdata/. ' + pg_dir + '/ && chown -R postgres:postgres ' + pg_dir)
     gateway.succeed('systemctl start postgresql.target')
     # PG18 requires its bootstrap OID10 to remain superuser/catalog owner.
@@ -326,12 +394,17 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     sql('alter role "terrace-restore" nologin password null', 'postgres')
     assert sql("select rolsuper and not rolcanlogin and rolpassword is null from pg_authid where oid=10 and rolname='terrace-restore'", 'postgres') == 't'
     assert sql('select count(*) from pg_auth_members where roleid=10 or member=10', 'postgres') == '0'
-    assert sql("select count(*)=2 and bool_and(not pg_has_role(oid,10::oid,'MEMBER') and not pg_has_role(oid,10::oid,'SET')) from pg_roles where rolname in ('terrace_cms','keycloak')", 'postgres') == 't'
+    managed_roles = ['terrace_cms', 'keycloak'] + (['terrace_documenso'] if DOCUMENSO_ENABLED else [])
+    names = ','.join("'" + role + "'" for role in managed_roles)
+    assert sql("select count(*)=" + str(len(managed_roles)) + " and bool_and(not pg_has_role(oid,10::oid,'MEMBER') and not pg_has_role(oid,10::oid,'SET')) from pg_roles where rolname in (" + names + ')', 'postgres') == 't'
     assert sql("select count(*) from pg_stat_activity where usesysid=10 and backend_type='client backend'", 'postgres') == '0'
     gateway.fail('runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U terrace-restore -d postgres -c \x27select 1\x27 >/dev/null 2>&1')
     cms_peer = 'runuser -u terrace_cms -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_cms -d terrace_cms'
     identity_password = 'PGPASSWORD="$(cat /var/lib/terrace-gateway-test/db-password)" psql -X -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U keycloak -d keycloak'
-    for credentials in [cms_peer, identity_password]:
+    app_credentials = [cms_peer, identity_password]
+    if DOCUMENSO_ENABLED:
+        app_credentials.append('PGPASSWORD="$(jq -r .databasePassword ' + DOCUMENSO_INPUTS + '/secrets.json 2>/dev/null)" psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_documenso -d terrace_documenso')
+    for credentials in app_credentials:
         gateway.succeed(credentials + ' -c \x27select 1\x27 >/dev/null 2>&1')
         gateway.fail(credentials + ' -c \x27set role "terrace-restore"\x27 >/dev/null 2>&1')
     results['checks']['bootstrapOwnerLoginAndAssumptionDenied'] = True
@@ -349,6 +422,12 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     gateway.succeed("k3s kubectl exec rehearsal -- /bin/busybox grep -qx restored-write /data/restored")
     results['checks']['freshK3sRuntimeRetainedPVCReadWrite'] = True
     results['checks']['restoredApplication'] = timed('recoveredFunctionalApplication', lambda: check_app('-restored'))
+    if DOCUMENSO_ENABLED:
+        recovered_documenso = documenso_container_identity()
+        assert recovered_documenso[0] != documenso_identity[0] and recovered_documenso[1] == documenso_identity[1]
+        timed('documensoFreshVerify', lambda: documenso_browser('verify'))
+        results['checks']['documensoFreshContainer'] = True
+        results['checks']['documensoRestoredPdfAndEncrypted2FA'] = True
     timed('restore-automation', lambda: fresh_restore(automation, snapshots['automation'], ['/var/lib/terrace-demo-hass', '/var/lib/terrace-demo-frigate', '/var/lib/rehearsal-demo-token']))
     automation.succeed('cp /var/lib/rehearsal-demo-token/token /run/demos-test-token')
     timed('recoveredBootstrapAutomation', bootstrap_automation)

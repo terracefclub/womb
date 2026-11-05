@@ -4,14 +4,7 @@
 }: let
   directory = "/var/lib/terrace-gateway-test";
   inputs = "/var/lib/terrace-documenso-inputs";
-  fixture = pkgs.runCommand "documenso-functional-fixture" {} ''
-    mkdir -p $out
-    cp -R ${contract}/. $out/
-    chmod -R u+w $out
-    cp ${./documenso/functional-fixture.ts} $out/functional-fixture.ts
-    cp ${./documenso/client.ts} $out/client.ts
-    cp ${./documenso/inputs.ts} $out/inputs.ts
-  '';
+  fixture = import ./documenso/fixture-package.nix {inherit pkgs contract;};
   certificate = pkgs.runCommand "documenso-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \

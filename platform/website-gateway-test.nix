@@ -2,6 +2,8 @@
   pkgs,
   release,
   contract,
+  extraDnsNames ? [],
+  fixtureProgram ? "${contract}/fixture.ts",
 }: let
   directory = "/var/lib/terrace-gateway-test";
   media = "/var/lib/terrace-cms-media";
@@ -10,7 +12,7 @@
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem -subj '/CN=web.terrace.invalid' \
-      -addext 'subjectAltName=DNS:web.terrace.invalid,DNS:cms.terrace.invalid,DNS:identity.terrace.invalid' 2>/dev/null
+      -addext ${pkgs.lib.escapeShellArg ("subjectAltName=" + pkgs.lib.concatStringsSep "," (map (name: "DNS:${name}") (["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames)))} 2>/dev/null
   '';
 in {
   name = "terrace-website-https";
@@ -22,7 +24,7 @@ in {
         cores = 2;
       };
       security.pki.certificateFiles = ["${certificate}/cert.pem"];
-      networking.hosts."127.0.0.1" = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"];
+      networking.hosts."127.0.0.1" = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
       terrace.website = {
         enable = true;
         webPackage = release.web;
@@ -64,7 +66,7 @@ in {
         };
         script = ''
           set -euo pipefail
-          ${pkgs.bun}/bin/bun ${contract}/fixture.ts
+          ${pkgs.bun}/bin/bun ${pkgs.lib.escapeShellArg fixtureProgram}
           cp ${certificate}/{cert,key}.pem ${directory}/
           chmod 0400 ${directory}/{cert,key}.pem
         '';
@@ -81,7 +83,7 @@ in {
         cores = 1;
       };
       security.pki.certificateFiles = ["${certificate}/cert.pem"];
-      networking.hosts.${nodes.gateway.networking.primaryIPAddress} = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"];
+      networking.hosts.${nodes.gateway.networking.primaryIPAddress} = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
       environment.systemPackages = [pkgs.curl pkgs.jq pkgs.netcat-openbsd pkgs.nssTools (pkgs.python3.withPackages (ps: [ps.playwright]))];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
       environment.etc."gateway-browser.py".source = ./website-gateway/browser.py;

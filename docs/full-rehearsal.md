@@ -25,6 +25,19 @@ BUILD_LOCK=/absolute/shared-heavy.lock platform/full-rehearsal run \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
+Add `--documenso` to the same `run` command to include the optional Documenso
+recovery scenario. It reuses the reviewed user-free realm/client fixture and
+closed account approval policy. The first service guest creates an unsigned PDF
+through the native interface and enables encrypted 2FA. Its automatic database,
+protected runtime inputs and migration markers join the quiescent backup. After
+the original service QEMU is absent, the replacement imports the pinned image
+into a fresh container runtime, restores those inputs and database, then uses
+fresh SSO to download the identical PDF and decrypt the retained 2FA/recovery
+code data. The private browser receipt models a retained user device in the
+repository/browser guest; it is separate from server backup contents. Signing
+and SMTP remain disabled, and actual profiles remain unchanged. This optional
+scenario requires its own source-matched native acceptance receipt.
+
 The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
 build at 1200 seconds), and controller cleanup at 70 seconds. VM execution uses
 the independently validated transient system service/cgroup: queue 1200 seconds,
@@ -100,9 +113,10 @@ a separately reviewed deletion. Pure rejection/sentinel tests run with
 
 This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
 public DNS/certificate issuance, CDN behavior, off-site operator recovery,
-real invitations or final simultaneous capacity approval. Windmill,
-Documenso and Vaultwarden are not part of this initial established-service
-increment; their runtime and SSO/recovery checks must be composed explicitly.
+real invitations or final simultaneous capacity approval. Windmill and
+Vaultwarden are not part of this scenario. Documenso is included only with
+`--documenso`; the baseline observed acceptance below does not cover that
+optional extension.
 A passing source-matched native receipt is required before claiming this
 scenario accepted.
 
@@ -123,3 +137,16 @@ unrelated host sentinel and an earlier failed-run receipt were unchanged.
 Private receipts, source/log hashes and cleanup/purge evidence were retained.
 These observations cover the established services above; the deployment and
 additional-application limits remain unchanged.
+
+The optional `--documenso` scenario at source
+`a8cdb0761c28acffd4b0999f63b95b0769057822` also passed on November 5 in
+791.74 seconds. It retained both 198-assertion HTTPS/browser phases and the
+existing automation, K3s/PVC and relay recovery checks. Native Documenso create
+took 78.93 seconds; fresh-container verification took 40.94 seconds and required
+the same unsigned PDF digest and decrypted 2FA/recovery codes. PostgreSQL had
+19 connections after concurrent checks, not a measured peak. Documenso's unit
+MemoryPeak was 1,692,995,584 bytes. All 33 recorded controller/guard/driver/guest
+and helper process identities were subsequently absent, with the exact guard
+unit and cgroup off. Explicit synthetic purge removed seven disks, repository
+and escrow while preserving its unrelated sentinel, an earlier failed receipt
+and all evidence. This does not establish signing recovery or real relay peers.
