@@ -52,6 +52,10 @@
     exec ${pkgs.util-linux}/bin/flock --exclusive --timeout 30 --conflict-exit-code 75 --no-fork \
       /run/terrace-vaultwarden-bootstrap.lock ${bootstrapOwned}
   '';
+  inspect = pkgs.writeShellScriptBin "terrace-vaultwarden-inspect" ''
+    # Read-only native admin diagnostics, using the protected local source.
+    exec ${runtimeTool "inspect"} ${toString cfg.port}
+  '';
   privateUnit = {
     UMask = "0077";
     LogNamespace = "terrace-vaultwarden";
@@ -403,6 +407,6 @@ in {
       extraPaths.vaultwarden-state = "/var/lib/vaultwarden";
       extraPaths.vaultwarden-release = "/var/lib/terrace-vaultwarden";
     };
-    environment.systemPackages = [bootstrap];
+    environment.systemPackages = [bootstrap inspect];
   };
 }

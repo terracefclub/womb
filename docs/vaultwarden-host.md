@@ -225,6 +225,52 @@ Each phase prints a fixed result. Failed checks retain bounded private labels
 plus fixed numeric network/status counters (never URL, token or error text)
 and screenshots in the kept build's0700/0600 shared directory, outside the
 published result; cookies/tokens/passwords/response bodies are never printed.
-The synthetic browser receipt is reusable by a later create/verify recovery
-companion. Actual attachment decryption and original-node-off encrypted fresh
-restore remain follow-ups; a same-node restart is not that restore evidence.
+The token-free browser receipt is reusable by the recovery companion below.
+Original-node-off encrypted fresh restore remains a separate combined rehearsal
+gate; a same-node restart is not that restore evidence.
+
+## Attachment, renewal and recovery companion
+
+On November 5, 2026, exact native source `1f91cf0` passed the expanded check in
+590.16 seconds, output
+`/nix/store/mjahc1m2vzjr56y4jq0c4m83dhy4dfsf-vm-test-run-terrace-vaultwarden-functional`.
+All seven browser phases passed: create, verify, renew, disabled, revoked-renewal,
+reenabled and restore. All 15 live-recorded host process fingerprints were absent
+afterward, with no owned tagged guest or source process remaining. The check
+also requires exact application/identity/PostgreSQL units and listeners stopped.
+This is a same-node restart and token-free fresh-login proof; original-node-off
+restoration is still the combined rehearsal gate.
+
+It uploads two synthetic attachments through the official
+client, downloads/decrypts their exact bytes and retains token-free attachment
+IDs/plaintext digests in the browser receipt. A separate bounded file inventory
+rejects plaintext, unexpected entries, symlinks, FIFOs and oversized files;
+it checks both encrypted attachment files are unchanged across approval changes.
+
+The explicit `renew` browser phase waits across the real five-minute early
+refresh boundary, requires a native refresh-grant request/new access token,
+same-user native profile and plaintext item/attachment decryption. Its420-second
+phase bound includes a maximum330-second wait. Retained refresh material stays
+only in a separate private device-session file; `revoked-renewal` requires the
+still-unexpired refresh to receive the pinned native400/`invalid_grant` response
+after disabling that account. Ordinary `create`/`verify` retain their existing
+restart/session positives. No refresh token enters the canonical data receipt.
+
+For a replacement guest, browser `restore` uses only the protected credentials
+and canonical UUID/cipher/attachment-digest receipt, then performs fresh native
+SSO/unlock/decryption. The standalone check exercises it after deleting only its
+two synthetic device-token files. It makes no old-token survival or original-
+node-off restore claim; the combined rehearsal supplies that separate boundary.
+`fixture-package.nix { pkgs; contract; }` exports a code-only writer artifact;
+its `functional-fixture.ts` exports `writeVaultwardenInputs(sharedFixture)` and
+returns only `inputFile`/`browserFile` paths. Importing it does not create a realm
+or write files. The no-argument, `revoke` and `restore` fixture CLIs remain.
+
+When enabled, the module installs `terrace-vaultwarden-inspect`. Run it as the
+authorized host operator with root access to the protected runtime input; it
+uses the existing private admin token internally and emits only a fixed result.
+Its bounded native loopback login/config/account readback makes no approval or
+vault-data changes and creates no readiness marker. The companion stops the
+identity service/timer, proves its processes/listeners absent, runs this check,
+requires public `/admin`403, then restarts identity without its temporary admin.
+This operator access does not decrypt a person's master-password-protected vault.

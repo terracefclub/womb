@@ -1,5 +1,6 @@
 """Disposable real web-vault checks. Never print tokens, URLs or passwords."""
 import base64
+import hashlib
 import http.client
 import json
 import os
@@ -18,6 +19,8 @@ IDENTITY = 'identity.terrace.invalid'
 ITEM = 'Synthetic retained Vaultwarden login'
 ITEM_USER = 'synthetic-vault-user'
 ITEM_PASSWORD = 'Synthetic vault item payload - not an account credential'
+ATTACHMENT_NAME = 'synthetic-retained-attachment.txt'
+ATTACHMENT_DATA = b'Synthetic encrypted attachment bytes; no personal data.\n'
 stage = 'private fixture validation'
 active_page = None
 active_network = {}
@@ -25,15 +28,15 @@ active_network = {}
 
 def network_summary(values):
     result = {}
-    for name in ['validatedOidcRequests','blockedRequests','pageErrors']:
+    for name in ['validatedOidcRequests','blockedRequests','pageErrors','refreshRequests']:
         value = values.get(name)
         result[name] = value if type(value) is int and 0 <= value <= 10000 else 0
-    for name in ['tokenStatus','accountStatus','profileStatus']:
+    for name in ['tokenStatus','accountStatus','profileStatus','nativeRefreshStatus']:
         value = values.get(name)
         result[name] = value if type(value) is int and 100 <= value <= 599 else None
     remaining = values.get('tokenSecondsRemaining')
     result['tokenSecondsRemaining'] = remaining if type(remaining) is int and -86400 <= remaining <= 86400 else None
-    for name in ['refreshTokenPresent','profileEmailMatches','profileExpectedIdMatches','tokenSubjectMatchesProfile']:
+    for name in ['refreshTokenPresent','profileEmailMatches','profileExpectedIdMatches','tokenSubjectMatchesProfile','nativeRefreshDenialMatches']:
         value = values.get(name)
         result[name] = value if type(value) is bool else None
     return result
@@ -83,14 +86,58 @@ def native(path, token):
         connection.close()
 
 
-def require_cipher_denial(value):
+def require_native_denial(value, message):
     status, body = value
-    message = 'Cipher is not owned by user'
     assert status == 400 and body == {
         'message':message, 'validationErrors':{'':[message]},
         'errorModel':{'message':message,'object':'error'}, 'error':'', 'error_description':'',
         'exceptionMessage':None, 'exceptionStackTrace':None, 'innerExceptionMessage':None, 'object':'error',
     }
+
+
+def require_cipher_denial(value):
+    require_native_denial(value, 'Cipher is not owned by user')
+
+
+def require_attachment_denial(value):
+    require_native_denial(value, 'Cipher is not accessible')
+
+
+def attachment_payload(suffix=''):
+    return ATTACHMENT_DATA + suffix.encode('ascii')
+
+
+def attachment_record(cipher, ciphertext_name, digest):
+    assert isinstance(cipher, dict) and cipher.get('id')
+    attachments = cipher.get('attachments')
+    assert isinstance(attachments, list) and len(attachments) == 1
+    value = attachments[0]
+    assert isinstance(value, dict) and re.fullmatch(r'[a-f0-9]{20}', value.get('id', ''))
+    assert isinstance(value.get('fileName'), str) and 0 < len(value['fileName']) <= 4096 and ciphertext_name not in value['fileName']
+    assert isinstance(value.get('key'), str) and 0 < len(value['key']) <= 4096
+    assert re.fullmatch(r'[a-f0-9]{64}', digest)
+    # Signed download URLs and encrypted key material never enter the receipt.
+    return {'id':value['id'],'sha256':digest}
+
+
+def refresh_denial(refresh_token):
+    assert isinstance(refresh_token,str) and 0<len(refresh_token)<=32768
+    connection = http.client.HTTPSConnection('vault.terrace.invalid',timeout=8,context=ssl.create_default_context())
+    try:
+        connection.request('POST','/identity/connect/token',body=urllib.parse.urlencode({'grant_type':'refresh_token','client_id':'web','refresh_token':refresh_token}),headers={'Content-Type':'application/x-www-form-urlencoded'})
+        response=connection.getresponse();body=response.read(131073)
+        active_network['nativeRefreshStatus']=response.status
+        assert len(body)<=131072 and response.status==400
+        value=json.loads(body)
+        active_network['nativeRefreshDenialMatches']=value=={'error':'invalid_grant'}
+        require_refresh_denial((response.status,value))
+    finally:
+        connection.close()
+
+
+def require_refresh_denial(value):
+    # Pinned identity.rs::refresh_login wraps invalid retained refreshes this way.
+    assert value == (400,{'error':'invalid_grant'})
 
 
 def jwt_claims(token):
@@ -130,7 +177,7 @@ def dismiss_toasts(page):
 
 def main():
     global stage, active_page
-    assert len(sys.argv) == 2 and sys.argv[1] in ['create','verify','disabled','reenabled']
+    assert len(sys.argv) == 2 and sys.argv[1] in ['create','verify','disabled','reenabled','renew','revoked-renewal','restore']
     mode = sys.argv[1]
     info = ROOT.lstat()
     assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o777 == 0o700
@@ -164,9 +211,16 @@ def main():
                         request_route.continue_()
                 context.route('**/*',route)
                 page = context.new_page(); active_page = page
-                evidence = {'oidc':0,'token':None,'refresh':False,'error':None,'cipher':None}
+                evidence = {'oidc':0,'token':None,'refresh':False,'refreshToken':None,'refreshRequests':0,'error':None,'cipher':None}
                 def request(value):
                     url = urllib.parse.urlsplit(value.url)
+                    if url.hostname == 'vault.terrace.invalid' and url.path == '/identity/connect/token' and value.method == 'POST':
+                        data=value.post_data or ''
+                        assert len(data)<=131072
+                        if urllib.parse.parse_qs(data).get('grant_type')==['refresh_token']:
+                            evidence['refreshRequests']+=1
+                            assert evidence['refreshRequests']<=10
+                            network['refreshRequests']=evidence['refreshRequests']
                     if url.hostname == IDENTITY and url.path.endswith('/protocol/openid-connect/auth'):
                         query = urllib.parse.parse_qs(url.query)
                         assert query['client_id'] == ['terrace-vaultwarden'] and query['redirect_uri'] == [VAULT + '/identity/connect/oidc-signin']
@@ -183,6 +237,7 @@ def main():
                             token = data['access_token']; assert isinstance(token,str) and len(token)<=32768
                             evidence['token'] = token
                             evidence['refresh'] = isinstance(data.get('refresh_token'),str) and 0 < len(data['refresh_token']) <= 32768
+                            evidence['refreshToken'] = data['refresh_token'] if evidence['refresh'] else None
                             network['refreshTokenPresent'] = evidence['refresh']
                             network['tokenSecondsRemaining'] = int(jwt_exp(token)-time.time())
                         elif value.status in [400,401,403]:
@@ -294,33 +349,138 @@ def main():
                 read_item(page,suffix)
                 return evidence['cipher']
 
+            def read_attachment(page, record, suffix=''):
+                global stage
+                stage='native client decrypts retained attachment'
+                payload=attachment_payload(suffix)
+                assert hashlib.sha256(payload).hexdigest()==record['sha256']
+                view=page.locator('app-vault-item-dialog app-attachments-v2-view')
+                with page.expect_download(timeout=30000) as pending:
+                    view.get_by_role('button',name='Download '+ATTACHMENT_NAME,exact=True).click()
+                download=pending.value
+                assert download.suggested_filename==ATTACHMENT_NAME
+                with tempfile.TemporaryDirectory(prefix='vault-attachment-',dir=ROOT) as directory:
+                    path=Path(directory)/'decrypted.bin'
+                    download.save_as(path)
+                    path.chmod(0o600)
+                    assert path.is_file() and path.stat().st_size==len(payload)
+                    assert path.read_bytes()==payload and hashlib.sha256(path.read_bytes()).hexdigest()==record['sha256']
+
+            def create_attachment(page, evidence, cipher, suffix=''):
+                global stage
+                stage='native client encrypts attachment'
+                dialog=page.locator('app-vault-item-dialog')
+                dialog.get_by_role('button',name='Edit',exact=True).click()
+                dialog.get_by_role('button',name=re.compile(r'^Attachments(?:\s|$)')).click()
+                upload=page.locator('app-vault-attachments-v2')
+                # The modal title and projected field label share the caption.
+                # Bind readiness and selection to its single native file input.
+                file_input=upload.locator('bit-file-upload input[type=file]')
+                file_input.wait_for(state='attached')
+                handle=upload.element_handle();assert handle is not None
+                payload=attachment_payload(suffix)
+                file_input.set_input_files({'name':ATTACHMENT_NAME,'mimeType':'text/plain','buffer':payload})
+                upload.get_by_role('button',name='Upload',exact=True).click()
+                page.get_by_text('Attachment saved',exact=True).wait_for()
+                handle.wait_for_element_state('hidden')
+                dismiss_toasts(page)
+                # Native Cancel returns the existing editor to its view mode;
+                # the attachment upload already committed through the API.
+                dialog.get_by_role('button',name='Cancel',exact=True).click()
+                status,cipher_value=native('/api/ciphers/'+cipher,evidence['token'])
+                assert status==200 and cipher_value['id']==cipher
+                record=attachment_record(cipher_value,ATTACHMENT_NAME,hashlib.sha256(payload).hexdigest())
+                read_attachment(page,record,suffix)
+                return record
+
             if mode=='create':
                 context,page,evidence,profile=session(users['local-member'],enroll=True)
                 member_cipher=create_item(page,evidence)
+                member_attachment=create_attachment(page,evidence,member_cipher)
                 member_id,member_token=profile['id'],evidence['token']
                 context.close()
                 context,page,evidence,profile=session(users['local-alumni'],enroll=True)
                 assert profile['id'] != member_id
                 require_cipher_denial(native('/api/ciphers/'+member_cipher,evidence['token']))
+                require_attachment_denial(native('/api/ciphers/'+member_cipher+'/attachment/'+member_attachment['id'],evidence['token']))
                 alumni_cipher=create_item(page,evidence,' alumni')
+                alumni_attachment=create_attachment(page,evidence,alumni_cipher,' alumni')
                 assert native('/api/accounts/profile',member_token)[0]==200
                 require_cipher_denial(native('/api/ciphers/'+alumni_cipher,member_token))
-                private_write('receipt.json',{'cipher':member_cipher,'member':member_id,'alumniCipher':alumni_cipher,'alumni':profile['id']})
+                require_attachment_denial(native('/api/ciphers/'+alumni_cipher+'/attachment/'+alumni_attachment['id'],member_token))
+                private_write('receipt.json',{'cipher':member_cipher,'member':member_id,'memberAttachment':member_attachment,'alumniCipher':alumni_cipher,'alumni':profile['id'],'alumniAttachment':alumni_attachment})
                 private_write('alumni-session.json',{'token':evidence['token'],'id':profile['id'],'exp':jwt_exp(evidence['token'])})
                 context.close();active_page=None
             elif mode=='verify':
                 context,page,evidence,profile=session(users['local-member'])
                 assert profile['id']==private_read(ROOT/'receipt.json')['member']
-                read_item(page);context.close()
+                read_item(page);read_attachment(page,private_read(ROOT/'receipt.json')['memberAttachment']);context.close()
                 prior=private_read(ROOT/'alumni-session.json')
                 prior_status,prior_profile=native('/api/accounts/profile',prior['token'])
                 assert prior_status==200 and prior_profile['id']==prior['id'] and prior_profile['email']==users['local-alumni']['email']
                 context,page,evidence,profile=session(users['local-alumni'])
                 assert profile['id']==prior['id'] and jwt_exp(evidence['token'])>time.time()+60
                 read_item(page,' alumni')
+                read_attachment(page,private_read(ROOT/'receipt.json')['alumniAttachment'],' alumni')
                 private_update('alumni-revocation-session.json',{'token':evidence['token'],'id':profile['id'],'exp':jwt_exp(evidence['token'])})
                 context.close();active_page=None
                 session(users['local-unapproved'],deny='Signups are disabled. You will need an invitation')
+            elif mode=='restore':
+                receipt=private_read(ROOT/'receipt.json')
+                for name,key,suffix in [('local-member','member',''),('local-alumni','alumni',' alumni')]:
+                    context,page,evidence,profile=session(users[name])
+                    assert profile['id']==receipt[key]
+                    read_item(page,suffix);read_attachment(page,receipt[key+'Attachment'],suffix)
+                    context.close();active_page=None
+            elif mode=='renew':
+                context,page,evidence,profile=session(users['local-alumni'])
+                first=evidence['token'];initial_exp=jwt_exp(first)
+                initial_refresh_count=evidence['refreshRequests']
+                assert initial_exp>time.time()+300
+                read_item(page,' alumni');page.locator('app-vault-item-dialog').get_by_role('button',name='Close',exact=True).click()
+                stage='native web client refresh exchange'
+                # Native webvault refreshes five minutes early. Wait across
+                # that actual boundary, then reload through its normal state.
+                delay=initial_exp-time.time()-280
+                assert 0<delay<=330
+                deadline=time.monotonic()+delay
+                while time.monotonic()<deadline:
+                    page.wait_for_timeout(min(1000,max(1,int((deadline-time.monotonic())*1000))))
+                vault=page.locator('app-header').get_by_role('heading',name='All vaults',exact=True)
+                # Do not reload/cancel an in-flight normal refresh. If the
+                # idle client made no request, reload triggers its native flow.
+                if evidence['token']==first and evidence['refreshRequests']==initial_refresh_count:
+                    page.reload(wait_until='domcontentloaded')
+                    locked=page.locator('bit-lock')
+                    deadline=time.monotonic()+30
+                    while not vault.is_visible() and not locked.is_visible() and time.monotonic()<deadline:
+                        page.wait_for_timeout(100)
+                    if locked.is_visible():
+                        locked.get_by_label(re.compile(r'^Master password(?:\s*\*)?(?:\s*\(required\))?$')).fill(users['local-alumni']['masterPassword'])
+                        locked.get_by_role('button',name='Unlock',exact=True).click()
+                vault.wait_for()
+                deadline=time.monotonic()+15
+                while evidence['token']==first and time.monotonic()<deadline:
+                    page.wait_for_timeout(100)
+                active_network['tokenSecondsRemaining']=int(jwt_exp(evidence['token'])-time.time())
+                assert initial_exp-time.time()<300
+                assert evidence['refreshRequests']>initial_refresh_count and evidence['token']!=first and evidence['refreshToken']
+                stage='renewed native profile validation'
+                status,refreshed_profile=native('/api/accounts/profile',evidence['token'])
+                active_network['profileStatus']=status
+                active_network.update(profile_facts(evidence['token'],refreshed_profile,users['local-alumni']['email'],profile['id']))
+                assert status==200 and refreshed_profile['id']==profile['id'] and refreshed_profile['email']==users['local-alumni']['email']
+                assert profile_facts(evidence['token'],refreshed_profile,users['local-alumni']['email'],profile['id'])=={'profileEmailMatches':True,'profileExpectedIdMatches':True,'tokenSubjectMatchesProfile':True}
+                assert jwt_exp(evidence['token'])>time.time()+300 and jwt_exp(evidence['refreshToken'])>time.time()+60
+                read_item(page,' alumni');read_attachment(page,private_read(ROOT/'receipt.json')['alumniAttachment'],' alumni')
+                private_update('alumni-revocation-session.json',{'token':evidence['token'],'id':profile['id'],'exp':jwt_exp(evidence['token']),'refreshToken':evidence['refreshToken'],'refreshExp':jwt_exp(evidence['refreshToken'])})
+                private_write('renewal-facts.json',{'nativeRefreshRequests':evidence['refreshRequests']-initial_refresh_count,'profileStatus':status,'sameUser':True,'initialAccessLifetimeBelow300':True,'freshAccessLifetimeOver300':True,'freshRefreshLifetimeOver60':True,'plaintextVerified':True})
+                context.close();active_page=None
+            elif mode=='revoked-renewal':
+                stage='revoked retained refresh denial'
+                prior=private_read(ROOT/'alumni-revocation-session.json')
+                assert prior['refreshExp']>time.time()+10
+                refresh_denial(prior['refreshToken'])
             elif mode=='disabled':
                 stage='previously valid revoked session denial'
                 prior=private_read(ROOT/'alumni-revocation-session.json')
@@ -328,13 +488,17 @@ def main():
                 assert native('/api/accounts/profile',prior['token'])[0] == 401
                 session(users['local-alumni'],deny='This user has been disabled')
                 context,page,evidence,profile=session(users['local-member'])
-                read_item(page);context.close();active_page=None
+                read_item(page);read_attachment(page,private_read(ROOT/'receipt.json')['memberAttachment']);context.close();active_page=None
             else:
                 context,page,evidence,profile=session(users['local-alumni'])
                 assert profile['id']==private_read(ROOT/'receipt.json')['alumni']
-                read_item(page,' alumni');context.close();active_page=None
+                read_item(page,' alumni');read_attachment(page,private_read(ROOT/'receipt.json')['alumniAttachment'],' alumni');context.close();active_page=None
             print('Vaultwarden browser phase '+mode+' passed.')
         except Exception:
+            try:
+                private_write('failure-network.json',{'stage':stage,'network':network_summary(active_network)})
+            except Exception:
+                pass
             if active_page:
                 try:
                     image=active_page.screenshot(animations='disabled',mask=[active_page.locator('input,textarea,[contenteditable=true]')])
