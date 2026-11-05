@@ -86,6 +86,8 @@ def warm(run, run_id, args, lock):
         command.extend(['--arg', 'withDocumenso', 'true'])
     if args.relay_peers:
         command.extend(['--arg', 'withRelayPeers', 'true'])
+    if args.documenso_signing:
+        command.extend(['--arg', 'withDocumensoSigning', 'true'])
     command.append('driver')
     child = None
     with (run / 'build.log').open('xb') as log, (run / 'build-output.txt').open('xb') as output:
@@ -152,6 +154,7 @@ def main():
     run = sub.add_parser('run')
     run.add_argument('--output', required=True)
     run.add_argument('--documenso', action='store_true', help='Include the optional native Documenso recovery checks.')
+    run.add_argument('--documenso-signing', action='store_true', help='Include synthetic signed-envelope recovery; implies --documenso.')
     run.add_argument('--relay-peers', action='store_true', help='Include disposable tailnet clients and private service recovery.')
     for key in ['webArchive', 'cmsArchive', 'tfcSource']:
         run.add_argument('--' + key, required=True)
@@ -160,6 +163,8 @@ def main():
     delete.add_argument('--synthetic-only', action='store_true', required=True)
     delete.add_argument('--yes', action='store_true', required=True)
     args = parser.parse_args()
+    if getattr(args, 'documenso_signing', False):
+        args.documenso = True
 
     def interrupted(_signum, _frame):
         raise InterruptedError()

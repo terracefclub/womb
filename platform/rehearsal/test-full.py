@@ -1,5 +1,7 @@
 import json
 import argparse
+import ast
+import stat
 import os
 from pathlib import Path
 import tempfile
@@ -49,6 +51,48 @@ class CgroupInspection(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '')
         self.assertEqual(result.stderr, 'Cgroup inspection failed.\n')
+
+
+class PrivateEvidence(unittest.TestCase):
+    def test_bounded_cross_directory_copy_rejects_unsafe_sources_and_overwrites(self):
+        source = Path(__file__).resolve().parents[1] / 'full' / 'scenario.py'
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'retain_private_artifact')
+        namespace = {'os': os, 'stat': stat}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        retain = namespace['retain_private_artifact']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'durable').mkdir()
+            good = root / 'artifact'; good.write_bytes(b'synthetic private bytes'); good.chmod(0o600)
+            target = root / 'durable' / 'artifact'
+            retain(good, target, 64)
+            self.assertEqual(target.read_bytes(), good.read_bytes())
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError): retain(good, target, 64)
+            link = root / 'link'; link.symlink_to(good)
+            fifo = root / 'fifo'; os.mkfifo(fifo, 0o600)
+            for unsafe in [link, fifo]:
+                with self.assertRaises((OSError, AssertionError)):
+                    retain(unsafe, root / 'rejected', 64)
+            with self.assertRaises(AssertionError): retain(good, root / 'rejected', 2)
+            good.chmod(0o644)
+            with self.assertRaises(AssertionError): retain(good, root / 'rejected', 64)
+            self.assertFalse((root / 'rejected').exists())
+
+
+class CliComposition(unittest.TestCase):
+    def test_signing_is_explicit_and_implies_the_documenso_backup_scope(self):
+        required = ['--output', '/synthetic/private', '--webArchive', '/synthetic/web',
+                    '--cmsArchive', '/synthetic/cms', '--tfcSource', '/synthetic/source']
+        for flags, expected in [([], (False, False)), (['--documenso'], (True, False)),
+                                (['--documenso-signing'], (True, True))]:
+            with patch.object(full.sys, 'argv', ['full-rehearsal', 'run', *required, *flags]), \
+                    patch.object(full.signal, 'signal'), patch.object(full, 'execute') as execute:
+                full.main()
+            args = execute.call_args.args[0]
+            self.assertEqual((args.documenso, args.documenso_signing), expected)
+            self.assertFalse(args.relay_peers)
 
 
 class SyntheticPurge(unittest.TestCase):
