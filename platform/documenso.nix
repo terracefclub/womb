@@ -34,6 +34,8 @@
     DOCUMENSO_DISABLE_TELEMETRY = "true";
     NEXT_PUBLIC_POSTHOG_KEY = "";
     NEXT_PUBLIC_FEATURE_BILLING_ENABLED = "";
+    NEXT_PRIVATE_SIGNING_TRANSPORT = "local";
+    NEXT_PRIVATE_SIGNING_TIMESTAMP_AUTHORITY = "";
   };
   environmentArguments = lib.concatStringsSep " " (lib.mapAttrsToList (key: value: "--env ${lib.escapeShellArg "${key}=${value}"}") commonEnvironment);
   offlineRun = name: environmentFile: command: ''
@@ -92,6 +94,7 @@ in {
       default = 1025;
       description = "Local-only SMTP sink/relay port; no hosted email provider is contacted by this module.";
     };
+    enableSigning = lib.mkEnableOption "local document sealing using protected signing.p12 and signing-passphrase runtime files";
     manageDatabase = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -133,6 +136,8 @@ in {
       };
     systemd.services.terrace-documenso-inputs = {
       description = "Validate and prepare private Documenso runtime inputs";
+      requires = lib.optional cfg.enableSigning "terrace-documenso-image.service";
+      after = lib.optional cfg.enableSigning "terrace-documenso-image.service";
       before = ["terrace-documenso.service" "terrace-documenso-database.service" "terrace-documenso-migrate.service" "terrace-documenso-bootstrap.service"];
       serviceConfig =
         privateUnit
@@ -141,6 +146,9 @@ in {
           RemainAfterExit = true;
           RuntimeDirectory = "terrace-documenso-inputs";
           RuntimeDirectoryMode = "0700";
+        }
+        // lib.optionalAttrs cfg.enableSigning {
+          ExecStopPost = "-${pkgs.podman}/bin/podman rm --force --ignore terrace-documenso-signing-validation";
         };
       script = ''
         set -euo pipefail
@@ -148,6 +156,16 @@ in {
         test "$(stat -c %u:%a ${lib.escapeShellArg cfg.inputsDirectory})" = 0:700
         ${pkgs.bun}/bin/bun ${./documenso/inputs.ts} ${lib.escapeShellArg "${cfg.inputsDirectory}/secrets.json"} ${runtime}
         ${lib.optionalString (cfg.identityCaFile != null) "install -m 0444 ${lib.escapeShellArg cfg.identityCaFile} ${runtime}/identity-ca.pem"}
+        ${lib.optionalString cfg.enableSigning ''
+          ${pkgs.bun}/bin/bun ${./documenso/signing-inputs.ts} prepare ${lib.escapeShellArg cfg.inputsDirectory} ${runtime}
+          ${pkgs.podman}/bin/podman run --rm --name terrace-documenso-signing-validation --pull=never \
+            --network=none --user 1001:1001 --cap-drop=ALL --security-opt=no-new-privileges \
+            --read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m --memory=1g --cpus=1 --pids-limit=128 \
+            --log-driver=none --env-file ${runtime}/signing.env --env NODE_OPTIONS=--max-old-space-size=512 \
+            --volume ${runtime}/signing.p12:/run/terrace-signing.p12:ro \
+            --volume ${./documenso/signing-validation.cjs}:/run/signing-validation.cjs:ro \
+            --workdir /app/apps/remix --entrypoint node ${image} /run/signing-validation.cjs
+        ''}
       '';
     };
     systemd.services.terrace-documenso-database = {
@@ -227,9 +245,15 @@ in {
       workdir = "/app/apps/remix";
       entrypoint = "node";
       cmd = ["build/server/main.js"];
-      environment = commonEnvironment // lib.optionalAttrs (cfg.identityCaFile != null) {NODE_EXTRA_CA_CERTS = "/run/terrace-oidc-ca.pem";};
-      environmentFiles = ["${runtime}/runtime.env"];
-      volumes = ["/run/postgresql:/run/postgresql:ro"] ++ lib.optional (cfg.identityCaFile != null) "${runtime}/identity-ca.pem:/run/terrace-oidc-ca.pem:ro";
+      environment =
+        commonEnvironment
+        // lib.optionalAttrs (cfg.identityCaFile != null) {NODE_EXTRA_CA_CERTS = "/run/terrace-oidc-ca.pem";}
+        // lib.optionalAttrs cfg.enableSigning {NEXT_PRIVATE_SIGNING_LOCAL_FILE_PATH = "/run/terrace-signing.p12";};
+      environmentFiles = ["${runtime}/runtime.env"] ++ lib.optional cfg.enableSigning "${runtime}/signing.env";
+      volumes =
+        ["/run/postgresql:/run/postgresql:ro"]
+        ++ lib.optional (cfg.identityCaFile != null) "${runtime}/identity-ca.pem:/run/terrace-oidc-ca.pem:ro"
+        ++ lib.optional cfg.enableSigning "${runtime}/signing.p12:/run/terrace-signing.p12:ro";
       ports = ["127.0.0.1:${toString cfg.port}:3000"];
       log-driver = "none";
       extraOptions = ["--init" "--cap-drop=ALL" "--security-opt=no-new-privileges" "--read-only" "--tmpfs=/tmp:rw,nosuid,nodev,size=64m" "--memory=2g" "--cpus=2" "--pids-limit=256" "--add-host=${cfg.identityHostname}:host-gateway"];
@@ -250,9 +274,14 @@ in {
       preStart = lib.mkBefore ''
         test "$(cat /var/lib/terrace-documenso/migrated-image)" = '${pin.imageDigest}'
         ${pkgs.bun}/bin/bun ${./documenso/inputs.ts} --check ${lib.escapeShellArg "${cfg.inputsDirectory}/secrets.json"} ${runtime} /var/lib/terrace-documenso/bootstrapped-image '${pin.imageDigest}'
+        ${lib.optionalString cfg.enableSigning "${pkgs.bun}/bin/bun ${./documenso/signing-inputs.ts} check ${lib.escapeShellArg cfg.inputsDirectory} ${runtime}"}
       '';
       postStart = ''
         ${pkgs.curl}/bin/curl --fail --silent --output /dev/null --connect-timeout 2 --max-time 5 --retry 30 --retry-connrefused --retry-delay 2 http://127.0.0.1:${toString cfg.port}/api/health 2>/dev/null
+        ${lib.optionalString cfg.enableSigning ''
+          ${pkgs.curl}/bin/curl --fail --silent --connect-timeout 2 --max-time 5 http://127.0.0.1:${toString cfg.port}/api/health 2>/dev/null |
+            ${pkgs.jq}/bin/jq -e '.checks.certificate.status == "ok"' >/dev/null 2>&1
+        ''}
       '';
     };
     services.nginx = {
