@@ -79,6 +79,8 @@ def bootstrap_app():
     else:
         assert fixture_count == 5
     assert sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", 'keycloak') == '0'
+    # The test-only master bootstrap is no longer needed after enrollment.
+    gateway.succeed('chmod 0600 ' + GATEWAY_INPUTS + '/keycloak.env && truncate -s 0 ' + GATEWAY_INPUTS + '/keycloak.env && chmod 0400 ' + GATEWAY_INPUTS + '/keycloak.env')
     gateway.succeed('systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service', timeout=300)
     gateway.succeed('systemctl start k3s.service')
     gateway.wait_until_succeeds("k3s kubectl get nodes --no-headers | grep ' Ready '", timeout=360)
@@ -123,6 +125,20 @@ def documenso_browser(mode):
         except Exception:
             print('Private Documenso failure evidence unavailable; original failure preserved.')
         raise
+
+
+def documenso_recovery_access():
+    gateway.succeed('systemctl stop terrace-identity-health.timer terrace-identity-health.service keycloak.service', timeout=90)
+    state = dict(line.split('=', 1) for line in gateway.succeed('systemctl show keycloak.service -p ActiveState,MainPID,ControlPID', timeout=10).splitlines())
+    assert state == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
+    assert gateway.succeed('systemctl show terrace-identity-health.timer -p ActiveState --value', timeout=10).strip() == 'inactive'
+    gateway.succeed('listeners=$(ss -H -ltn \'( sport = :8088 or sport = :9000 )\') && test -z "$listeners"', timeout=10)
+    assert gateway.succeed('python /etc/documenso-recovery.py', timeout=60).strip() == 'Native loopback recovery administrator authenticated without identity.'
+    assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize", timeout=10).strip() == '403'
+    gateway.succeed('test ! -s ' + GATEWAY_INPUTS + '/keycloak.env && systemctl start keycloak.service', timeout=300)
+    gateway.wait_until_succeeds('curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e \' .issuer == "https://identity.terrace.invalid/realms/terrace" \' >/dev/null', timeout=90)
+    assert sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", 'keycloak') == '0'
+    return True
 
 
 def documenso_container_identity():
@@ -530,6 +546,7 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         timed('documensoFreshVerify', lambda: documenso_browser('verify'))
         results['checks']['documensoFreshContainer'] = True
         results['checks']['documensoRestoredPdfAndEncrypted2FA'] = True
+        results['checks']['documensoRestoredIdentityIndependentRecovery'] = timed('documensoFreshRecoveryAccess', documenso_recovery_access)
     automation_paths = ['/var/lib/terrace-demo-hass', '/var/lib/terrace-demo-frigate', '/var/lib/rehearsal-demo-token']
     if RELAY_PEERS_ENABLED:
         automation_paths += [TAILNET_INPUTS, TAILNET_STATE]
