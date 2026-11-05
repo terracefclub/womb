@@ -8,3 +8,8 @@ check-supervision:
   image: python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
   script:
     - python platform/test-run-check.py -v
+
+oci-metadata:
+  image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+  script:
+    - bun test tests/platform/oci-image.test.ts
