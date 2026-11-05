@@ -16,6 +16,7 @@ import uuid
 
 ORIGIN = 'https://windmill.terrace.invalid'
 ROOT = Path('/root/windmill-functional')
+ROSTER_BUNDLE = Path('/etc/windmill-roster')
 stage = 'private fixture validation'
 
 FRONTEND_PATHS = {'/', '/user/login', '/env.js', '/api/version', '/api/oauth/list_logins',
@@ -70,9 +71,10 @@ def auth_facts():
     return {'providerRequestObserved': False, 'callbackStatus': None, 'pkceS256': None, 'challengePresent': None}
 
 
-def completion_facts(value, owner):
+def completion_facts(value, owner, expected=None):
+    expected = expected if expected is not None else {'status': 'synthetic-per-user-job-ok'}
     return {'success': value.get('success') if type(value.get('success')) is bool else None,
-            'resultMatches': value.get('result') == {'status': 'synthetic-per-user-job-ok'},
+            'resultMatches': value.get('result') == expected,
             'ownerMatches': value.get('email') == owner['email'] and value.get('created_by') == owner['username']}
 
 
@@ -140,9 +142,47 @@ def validated_receipt(value):
     return value
 
 
-def main(mode):
+
+def validated_roster_receipt(value):
+    assert set(value) == {'workspace', 'script', 'scriptDigest', 'sourceDigest', 'contractDigest', 'lockDigest', 'job', 'resultDigest', 'operator'}
+    assert value['workspace'] == 'terrace' and value['script'] == 'f/sso-rehearsal/roster-proof'
+    for key in ['scriptDigest', 'sourceDigest', 'contractDigest', 'lockDigest', 'resultDigest']:
+        assert re.fullmatch('[a-f0-9]{64}', value[key])
+    uuid.UUID(value['job'])
+    owner = value['operator']
+    assert set(owner) == {'username', 'email'}
+    assert re.fullmatch('[a-zA-Z0-9_-]{1,100}', owner['username']) and owner['email'].endswith('@terrace.invalid')
+    return value
+
+
+def roster_bundle():
+    values = []
+    for name in ['roster-job.py', 'lock.txt', 'manifest.json']:
+        fd = os.open(ROSTER_BUNDLE / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            assert stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 262144
+            value = os.read(fd, 262145)
+            assert len(value) == info.st_size
+            values.append(value)
+        finally:
+            os.close(fd)
+    content, lock, raw = values
+    manifest = json.loads(raw)
+    assert set(manifest) == {'schema', 'scriptDigest', 'result'} and manifest['schema'] == 1
+    assert manifest['scriptDigest'] == hashlib.sha256(content).hexdigest()
+    expected = manifest['result']
+    assert set(expected) == {'status', 'tests', 'sourceDigest', 'contractDigest', 'lockDigest'}
+    assert expected['status'] == 'synthetic-roster-contract-ok' and type(expected['tests']) is int and expected['tests'] == 11
+    assert all(re.fullmatch('[a-f0-9]{64}', expected[key]) for key in ['sourceDigest', 'contractDigest', 'lockDigest'])
+    assert expected['lockDigest'] == hashlib.sha256(lock).hexdigest()
+    return content.decode(), lock.decode(), manifest
+
+
+def main(mode, roster=False):
     global stage
     assert mode in ['create', 'verify', 'disabled']
+    assert not roster or mode in ['create', 'verify']
     info = ROOT.lstat()
     assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0
     users = {user['username']: user for user in private_read(ROOT / 'credentials.json')['users']}
@@ -325,7 +365,50 @@ def main(mode):
                 if mode == 'create':
                     receipt.update(job=job, resultDigest=digest(completed['result']))
                     private_write(ROOT / 'receipt.json', validated_receipt(receipt))
-                else:
+                if roster:
+                    stage = 'reviewed original roster worker preparation'
+                    roster_content, roster_lock, manifest = roster_bundle()
+                    expected = manifest['result']
+                    roster_path = 'f/sso-rehearsal/roster-proof'
+                    if mode == 'create':
+                        assert call(admin, 'POST', '/w/terrace/scripts/create', {'path': roster_path, 'summary': 'Synthetic original roster contract', 'content': roster_content, 'lock': roster_lock, 'language': 'python3', 'timeout': 30}).status == 201
+                        roster_receipt = {'workspace': 'terrace', 'script': roster_path, 'scriptDigest': manifest['scriptDigest'],
+                                          'operator': operator_id, **{key: expected[key] for key in ['sourceDigest', 'contractDigest', 'lockDigest']}}
+                    else:
+                        roster_receipt = validated_roster_receipt(private_read(ROOT / 'roster-receipt.json'))
+                        assert roster_receipt['operator'] == operator_id and roster_receipt['scriptDigest'] == manifest['scriptDigest']
+                        assert all(roster_receipt[key] == expected[key] for key in ['sourceDigest', 'contractDigest', 'lockDigest'])
+                        retained = call(operator, 'GET', '/w/terrace/jobs_u/completed/get/' + roster_receipt['job'])
+                        assert retained.status == 200
+                        assert all(completion_facts(retained.json(), operator_id, expected).values())
+                        assert digest(retained.json()['result']) == roster_receipt['resultDigest']
+                    stored = call(admin, 'GET', '/w/terrace/scripts/get/p/' + roster_path)
+                    assert stored.status == 200
+                    stored = stored.json()
+                    assert stored['content'] == roster_content and stored['lock'] == roster_lock and stored['language'] == 'python3'
+                    stage = 'approved operator original roster worker execution'
+                    started = call(operator, 'POST', '/w/terrace/jobs/run/p/' + roster_path, {})
+                    job_facts = {'submissionStatus': started.status, 'uuidValid': False, 'pollStatus': None, 'pollCount': 0, 'completed': None}
+                    assert started.status in [200, 201]
+                    roster_job = started.text().strip().strip('"')
+                    uuid.UUID(roster_job)
+                    job_facts['uuidValid'] = True
+                    deadline = time.monotonic() + 60
+                    while True:
+                        finished = call(operator, 'GET', '/w/terrace/jobs_u/completed/get/' + roster_job)
+                        job_facts['pollStatus'] = finished.status
+                        job_facts['pollCount'] = min(121, job_facts['pollCount'] + 1)
+                        if finished.status == 200:
+                            completed = finished.json()
+                            job_facts['completed'] = completion_facts(completed, operator_id, expected)
+                            assert all(job_facts['completed'].values())
+                            break
+                        assert finished.status == 404 and time.monotonic() < deadline
+                        time.sleep(0.5)
+                    if mode == 'create':
+                        roster_receipt.update(job=roster_job, resultDigest=digest(completed['result']))
+                        private_write(ROOT / 'roster-receipt.json', validated_roster_receipt(roster_receipt))
+                if mode == 'verify':
                     # Prove this exact retained cookie is still usable after
                     # every other login/restart, immediately before removal.
                     stage = 'retained alumni session positive before revocation'
@@ -366,8 +449,8 @@ def main(mode):
 
 def entrypoint():
     try:
-        assert len(sys.argv) == 2
-        main(sys.argv[1])
+        assert len(sys.argv) in [2, 3] and (len(sys.argv) == 2 or sys.argv[2] == '--roster')
+        main(sys.argv[1], roster=len(sys.argv) == 3)
     except Exception:
         print('Windmill functional check failed at ' + stage + '; private diagnostics suppressed.', file=sys.stderr)
         raise SystemExit(1)

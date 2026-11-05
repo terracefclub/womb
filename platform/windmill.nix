@@ -8,6 +8,8 @@
   pin = builtins.fromJSON (builtins.readFile ./windmill/release.json);
   image = "${pin.imageName}:${pin.version}";
   imageFile = import ./windmill/image.nix {inherit pkgs;};
+  membershipPython = import ./windmill-functional/membership-python.nix {inherit pkgs;};
+  membershipWheels = (builtins.fromJSON (builtins.readFile ./windmill-functional/membership-wheels.json)).wheels;
   user = "terrace_windmill";
   server = "podman-terrace-windmill-server.service";
   worker = "podman-terrace-windmill-worker.service";
@@ -44,6 +46,9 @@
       /run/terrace-windmill-bootstrap.lock ${lockedBootstrap}
   '';
   bootstrap = "${bootstrapPackage}/bin/terrace-windmill-bootstrap";
+  recoveryPackage = pkgs.writeShellScriptBin "terrace-windmill-inspect" ''
+    exec ${pkgs.coreutils}/bin/timeout --kill-after=5 45 ${pkgs.python3}/bin/python3 ${./windmill/recovery.py} ${lib.escapeShellArg cfg.inputsDirectory} ${toString cfg.port}
+  '';
   commonEnvironment = {
     DATABASE_URL = databaseURL;
     SERVER_BIND_ADDR = "127.0.0.1";
@@ -72,7 +77,8 @@
     extraOptions =
       commonOptions
       ++ temporaryOptions mode
-      ++ lib.optional (config.terrace.identity.enable or false) "--add-host=${config.terrace.identity.hostname}:127.0.0.1";
+      ++ lib.optional (config.terrace.identity.enable or false) "--add-host=${config.terrace.identity.hostname}:127.0.0.1"
+      ++ lib.optional (mode == "worker" && cfg.membershipRuntime) "--volume=${membershipPython}:/run/terrace-membership-python:ro";
     environment =
       commonEnvironment
       // {
@@ -87,6 +93,12 @@
           if mode == "server"
           then "6"
           else "4";
+      }
+      // lib.optionalAttrs (mode == "worker" && cfg.membershipRuntime) {
+        # Supported native worker settings: skip only these exact preprovided
+        # lock rows and use this immutable SDK closure, without runtime PyPI.
+        ADDITIONAL_PYTHON_PATHS = "/run/terrace-membership-python";
+        PIP_LOCAL_DEPENDENCIES = lib.concatMapStringsSep "," (row: "^${row.name}==${lib.replaceStrings ["."] ["[.]"] row.version}$") membershipWheels;
       };
   };
   serviceLimits = {
@@ -141,6 +153,7 @@ in {
   imports = [./backup.nix];
   options.terrace.windmill = {
     enable = lib.mkEnableOption "optional unchanged Windmill CE server/worker prototype";
+    membershipRuntime = lib.mkEnableOption "pinned offline Python SDKs for the reviewed synthetic membership workload";
     hostname = lib.mkOption {type = lib.types.str;};
     port = lib.mkOption {
       type = lib.types.port;
@@ -178,7 +191,7 @@ in {
         message = "Windmill inputs must use normalized external absolute runtime paths.";
       }
     ];
-    environment.systemPackages = [bootstrapPackage];
+    environment.systemPackages = [bootstrapPackage recoveryPackage];
     users.groups.${user}.gid = cfg.uid;
     users.users.${user} = {
       isSystemUser = true;

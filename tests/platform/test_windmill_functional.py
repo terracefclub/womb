@@ -85,7 +85,7 @@ class FunctionalReceipt(unittest.TestCase):
         commands=[node.args[0].value for node in ast.walk(tree) if isinstance(node,ast.Call)
                   and isinstance(node.func,ast.Attribute) and node.func.attr=='succeed' and node.args
                   and isinstance(node.args[0],ast.Constant) and isinstance(node.args[0].value,str)
-                  and node.args[0].value.startswith('listeners=')]
+                  and node.args[0].value.startswith('listeners=') and ':18001' in node.args[0].value]
         self.assertEqual(len(commands),1)
         for body,success in [('return 7',False),("printf 'LISTENER\\n'",False),('return 0',True)]:
             result=subprocess.run(['/bin/bash','-c','ss() { '+body+'; }; '+commands[0]],capture_output=True,text=True,timeout=3)
@@ -146,6 +146,39 @@ class FunctionalReceipt(unittest.TestCase):
         now[0]=0
         def late():now[0]=131;return 401
         with self.assertRaises(AssertionError):module.wait_for_session_denial(late,clock,pause)
+
+
+    def test_roster_receipt_has_only_stable_job_and_source_identities(self):
+        value={'workspace':'terrace','script':'f/sso-rehearsal/roster-proof','scriptDigest':'a'*64,
+               'sourceDigest':'b'*64,'contractDigest':'c'*64,'lockDigest':'d'*64,
+               'job':'00000000-0000-0000-0000-000000000001','resultDigest':'e'*64,
+               'operator':{'username':'member','email':'member@terrace.invalid'}}
+        self.assertEqual(module.validated_roster_receipt(value),value)
+        for change in [{'token':'PRIVATE'},{'script':'../PRIVATE'},{'lockDigest':'PRIVATE'},{'job':'PRIVATE'},
+                       {'operator':{'username':'member','email':'PRIVATE'}}]:
+            with self.assertRaises((AssertionError,ValueError)):
+                module.validated_roster_receipt({**value,**change})
+
+    def test_roster_bundle_rejects_changed_code_lock_schema_or_unsafe_file(self):
+        import hashlib,json,os
+        original=module.ROSTER_BUNDLE
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);module.ROSTER_BUNDLE=root
+                content='def main():return {}';lock='# py: 3.12\n'
+                manifest={'schema':1,'scriptDigest':hashlib.sha256(content.encode()).hexdigest(),
+                          'result':{'status':'synthetic-roster-contract-ok','tests':11,'sourceDigest':'a'*64,
+                                    'contractDigest':'b'*64,'lockDigest':hashlib.sha256(lock.encode()).hexdigest()}}
+                (root/'roster-job.py').write_text(content);(root/'lock.txt').write_text(lock)
+                (root/'manifest.json').write_text(json.dumps(manifest))
+                self.assertEqual(module.roster_bundle(),(content,lock,manifest))
+                (root/'lock.txt').write_text(lock+'PRIVATE')
+                with self.assertRaises(AssertionError):module.roster_bundle()
+                (root/'lock.txt').write_text(lock);(root/'roster-job.py').write_text(content+'#PRIVATE')
+                with self.assertRaises(AssertionError):module.roster_bundle()
+                (root/'roster-job.py').unlink();os.mkfifo(root/'roster-job.py')
+                with self.assertRaises(AssertionError):module.roster_bundle()
+        finally:module.ROSTER_BUNDLE=original
 
 
 if __name__=='__main__':unittest.main()

@@ -1,7 +1,13 @@
 {
   pkgs,
   contract,
+  roster ? false,
 }: let
+  rosterFlag =
+    if roster
+    then "1"
+    else "0";
+  rosterBundle = import ./windmill-functional/roster-package.nix {inherit pkgs;};
   fixture = import ./windmill-functional/functional-fixture-package.nix {inherit pkgs contract;};
   certificate = pkgs.runCommand "windmill-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
@@ -38,6 +44,7 @@ in
     nodes = {
       host = {...}: {
         imports = [base.nodes.host];
+        terrace.windmill.membershipRuntime = roster;
         # Append a distinct key; replacing the option list removes direct boot,
         # shared filesystem and test-network definitions from Nixpkgs.
         virtualisation.qemu.options = ["-fw_cfg" ownershipTag];
@@ -54,12 +61,17 @@ in
         };
         environment.systemPackages = [pkgs.nssTools (pkgs.python3.withPackages (ps: [ps.playwright]))];
         environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
-        environment.etc."windmill-functional-browser.py".source = ./windmill-functional/functional-browser.py;
+        environment.etc =
+          {
+            "windmill-functional-browser.py".source = ./windmill-functional/functional-browser.py;
+          }
+          // pkgs.lib.optionalAttrs roster {"windmill-roster".source = rosterBundle;};
       };
     };
     testScript = {nodes}:
       assert pkgs.lib.assertMsg (bootOptionsPresent nodes.host.virtualisation.qemu.options && bootOptionsPresent nodes.client.virtualisation.qemu.options) "Windmill functional guests require native direct boot, shared filesystem and test network options."; ''
         import shlex, tempfile
+        roster_enabled = "${rosterFlag}" == "1"
         from pathlib import Path
 
         def sql(query):
@@ -67,7 +79,7 @@ in
 
         def browser(phase):
             try:
-                assert client.succeed("python /etc/windmill-functional-browser.py " + phase, timeout=240).strip() == "Windmill functional browser phase " + phase + " passed."
+                assert client.succeed("python /etc/windmill-functional-browser.py " + phase + (roster_enabled and phase in ["create", "verify"] and " --roster" or ""), timeout=240).strip() == "Windmill functional browser phase " + phase + " passed."
                 print("Windmill functional browser phase " + phase + " passed.")
             except Exception:
                 try:
@@ -118,6 +130,20 @@ in
                 stopped("keycloak.service")
                 host.succeed("systemctl restart postgresql.service && systemctl start keycloak.service && systemctl start podman-terrace-windmill-server.service && systemctl start podman-terrace-windmill-worker.service", timeout=300)
                 assert sql("SELECT md5(string_agg(row_to_json(p)::text, chr(124) ORDER BY email)) FROM password p") == before
+                if roster_enabled:
+                    with subtest("native private recovery readback without the identity provider"):
+                        host.succeed("systemctl stop terrace-identity-health.timer", timeout=10)
+                        assert host.succeed("systemctl show terrace-identity-health.timer -p ActiveState --value", timeout=10).strip() == "inactive"
+                        for unit in ["terrace-identity-health.service", "keycloak.service"]:
+                            stopped(unit)
+                        host.succeed("listeners=$(ss -H -ltn '( sport = :8088 or sport = :9000 )') && test -z \"$listeners\"", timeout=10)
+                        recovery_sessions = sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'")
+                        assert host.succeed("terrace-windmill-inspect", timeout=55).strip() == "Native Windmill private admin readback passed."
+                        assert sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'") == recovery_sessions
+                        assert client.succeed("curl --silent --max-time 5 -o /dev/null -w '%{http_code}' -X POST https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == "403"
+                        host.succeed("test ! -s ${directory}/keycloak.env && systemctl start keycloak.service terrace-identity-health.timer", timeout=300)
+                        host.wait_until_succeeds("curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null", timeout=90)
+                        assert host.succeed("runuser -u postgres -- psql -w -XAt -d keycloak -c \"SELECT count(*) FROM user_entity WHERE username='gateway-fixture-bootstrap'\" 2>/dev/null", timeout=10).strip() == "0"
                 browser("verify")
             with subtest("approval removal rejects old session and fresh native OIDC"):
                 host.succeed("python - <<'PY'\nimport json,os\np='/var/lib/terrace-windmill-inputs/bootstrap.json'\nv=json.load(open(p));v['approvedUsers']=[u for u in v['approvedUsers'] if u['email']!='local-alumni@terrace.invalid']\nos.chmod(p,0o600)\nwith open(p,'w') as f:json.dump(v,f)\nos.chmod(p,0o400)\nPY", timeout=10)
