@@ -1,6 +1,7 @@
 """Guest-only synthetic HTTPS/OIDC checks. Never print responses or credentials."""
 import http.cookiejar
 import json
+import os
 import ssl
 import sys
 import urllib.error
@@ -189,7 +190,9 @@ def test():
     check(invalid.api(CMS + "/api/users/me")[2].get("user") is None)
 
     stage = "publication and cross-origin mutation"
-    event = {"slug": "gateway-synthetic-event", "title": "Synthetic gateway event", "summary": "Disposable fixture",
+    suffix = os.environ.get("TERRACE_SYNTHETIC_PHASE", "")
+    check(suffix in ["", "-restored"])
+    event = {"slug": "gateway-synthetic-event" + suffix, "title": "Synthetic gateway event", "summary": "Disposable fixture",
              "startsAt": "2030-01-18T23:00:00.000Z", "category": "music", "locationName": "Test only", "_status": "draft"}
     check(editor.api(CMS + "/api/events", "POST", event, {"Origin": "https://attacker.invalid"})[0] == 403)
     status, _, created = editor.api(CMS + "/api/events", "POST", event, {"Origin": CMS})

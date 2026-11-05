@@ -1,6 +1,6 @@
 # Delivery backlog
 
-Updated 2026-10-28. Delivery is tracked in the [Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1)
+Updated 2026-11-05. Delivery is tracked in the [Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1)
 and [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1).
 Each issue carries acceptance criteria; a merged foundation or preview does not
 establish a live deployment. Link each small MR to its issue.
@@ -11,8 +11,8 @@ establish a live deployment. Link each small MR to its issue.
 | 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in Womb !2; optional [identity substrate](identity-host.md), disabled by default; production realm, enrollment, capacity and recovery follow-up remain |
 | 3 | [Website design](https://gitlab.com/terrace/tech/tfc-website/-/issues/1) | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | Preview merged in website !1; [frontend !2](https://gitlab.com/terrace/tech/tfc-website/-/merge_requests/2) merged for published Payload content; design review remains |
 | 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) | Publish/revise/preview; roles; export/import; memory measurement | Accepted Linux bundles and optional [native host/recovery check](website-host.md); actual public activation and combined capacity remain gated |
-| 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) | Targeted plan, approved cost ceiling, separate relay/application hosts, closure diff/health | [Womb !5](https://gitlab.com/terrace/tech/womb/-/merge_requests/5) merged; install/boot VM passed. Strictly-below-$80 plan with Pulumi defaults (relay CX23 + app CX43, $37.18 steady / $44.77 overlap at 2026-10-31 public prices; CX stock reported unavailable). Access recovery, protected backup/restore, dedicated credential, account quote and stock check pending; see [relay plan](access-relay.md) |
-| 6 | [Backup and restore](https://gitlab.com/terrace/tech/womb/-/issues/4) | Encrypted DB/media backup; isolated restore; reconciliation; cost | Module and two-VM restore test in `platform/backup.nix` ([docs](backups.md)); no real Storage Box/B2, secrets delivery or off-site drill yet. Existing server's provider backups are disabled, and no recoverable data copy has been verified |
+| 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) | Dedicated Terrace credential, protected existing data, targeted plan, tested bootstrap/health/teardown | [Womb !5](https://gitlab.com/terrace/tech/womb/-/merge_requests/5) merged; install/boot VM passed. Earlier October31 price estimates are historical; November4 owner direction removes unanswered budget questions as a code/rehearsal gate. Dedicated credential, access recovery and protected existing data remain provider blockers; no provider apply in builder work; see [relay plan](access-relay.md) |
+| 6 | [Backup and restore](https://gitlab.com/terrace/tech/womb/-/issues/4) | Encrypted DB/media backup; quiescent capture; isolated restore; reconciliation; teardown | Module and two-VM restore test in `platform/backup.nix` ([docs](backups.md)); no real Storage Box/B2, secrets delivery or off-site drill yet. Existing server's provider backups are disabled, and no recoverable data copy has been verified |
 | 7 | [WordPress preservation](https://gitlab.com/terrace/tech/tfc-website/-/issues/3) | Full protected DB/files backup, plugin/table inventory, restore | Access pending |
 | 8 | [Membership hardening](https://gitlab.com/terrace/tech/womb/-/issues/5) | Contract tests, authenticated webhook, idempotency, retry/replay, email outbox | Opt-in [roster replay step](membership-roster.md) with synthetic contract tests; live webhook mapping/authentication, email ledger and cutover still need operator access |
 | 9 | [Credential remediation](https://gitlab.com/terrace/tech/womb/-/issues/6) | Map consumers, verified backup, rotation, old credentials rejected | Access pending |
@@ -24,6 +24,12 @@ establish a live deployment. Link each small MR to its issue.
 | 15 | [Community pilot](https://gitlab.com/terrace/tech/tfc-website/-/issues/6) | Approval, per-user Keycloak, privacy/moderation, opt-in mentorship | Payload/SvelteKit pilot; identity and permission-enforced collections merged; interface validation underway |
 
 ## Release gates
+
+The owner authorized functional ephemeral builder rehearsals on November4,
+superseding earlier cost-ceiling prerequisites. Provider validation remains
+blocked on dedicated Terrace credentials, not a budget answer. The optional
+[combined rehearsal](full-rehearsal.md) uses extra guests for test isolation;
+it does not prescribe a production host count or authorize a provider apply.
 
 - Report unit, integration, build, browser, deployment and restore evidence
   separately. Static checks do not establish live health.

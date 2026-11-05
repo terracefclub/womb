@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run rehearsal on the x86-64 Linux builder.' >&2; exit 1; }
+export PYTHONDONTWRITEBYTECODE=1
+exec python3 "$(dirname "$0")/rehearsal/full.py" "$@"
