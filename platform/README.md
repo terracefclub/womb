@@ -40,6 +40,11 @@ The separate [identity recovery drill](../docs/identity-recovery.md),
 signing-key continuity on a disposable recovery guest using the existing encrypted
 backup/restore tooling; production/off-site recovery remains unverified.
 
+The optional [Documenso module](../docs/documenso-host.md) pins an official
+patched image, uses a separate native PostgreSQL database and explicit offline
+migrations/approved-account bootstrap. It is default off; functional OIDC,
+document and recovery checks remain activation gates.
+
 ## Evaluate and test
 
 From this directory on the configured Linux build host, with the shared build
