@@ -84,6 +84,8 @@ def warm(run, run_id, args, lock):
         command.extend(['--argstr', key, str(Path(getattr(args, key)).resolve(strict=True))])
     if args.documenso:
         command.extend(['--arg', 'withDocumenso', 'true'])
+    if args.relay_peers:
+        command.extend(['--arg', 'withRelayPeers', 'true'])
     command.append('driver')
     child = None
     with (run / 'build.log').open('xb') as log, (run / 'build-output.txt').open('xb') as output:
@@ -150,6 +152,7 @@ def main():
     run = sub.add_parser('run')
     run.add_argument('--output', required=True)
     run.add_argument('--documenso', action='store_true', help='Include the optional native Documenso recovery checks.')
+    run.add_argument('--relay-peers', action='store_true', help='Include disposable tailnet clients and private service recovery.')
     for key in ['webArchive', 'cmsArchive', 'tfcSource']:
         run.add_argument('--' + key, required=True)
     delete = sub.add_parser('purge')

@@ -3,6 +3,7 @@
 import concurrent.futures
 import datetime
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,9 @@ MEDIA = '/var/lib/terrace-cms-media'
 DOCUMENSO_INPUTS = '/var/lib/terrace-documenso-inputs'
 DOCUMENSO_STATE = '/var/lib/terrace-documenso'
 DOCUMENSO_BROWSER = '/root/documenso-functional'
+TAILNET_INPUTS = '/var/lib/rehearsal-tailnet'
+TAILNET_STATE = '/var/lib/tailscale'
+TAILNET_PEERS = [(gateway, 'application'), (automation, 'private'), (client, 'denied')]
 BLANK_WRITERS = {
     'gateway': ['postgresql.service', 'keycloak.service', 'nginx.service', 'terrace-cms.service', 'terrace-web.service', 'k3s.service'],
     'automation': ['home-assistant.target', 'home-assistant.service', 'terrace-demo-ha.socket', 'terrace-demo-ha.service', 'terrace-demo-ha-network.service', 'frigate.service', 'go2rtc.service', 'nginx.service'],
@@ -36,6 +40,9 @@ BLANK_WRITERS = {
 }
 if DOCUMENSO_ENABLED:
     BLANK_WRITERS['gateway'] += ['terrace-documenso.service', 'terrace-documenso-migrate.service', 'terrace-documenso-bootstrap.service', 'terrace-documenso-database.service']
+if RELAY_PEERS_ENABLED:
+    BLANK_WRITERS['gateway'].append('tailscaled.service')
+    BLANK_WRITERS['automation'] += ['tailscaled.service', 'rehearsal-private-sensor.service']
 
 
 def assert_blank_writers(machine):
@@ -141,6 +148,72 @@ def bootstrap_relay():
     return users
 
 
+def tailnet_client_identity(machine):
+    value = json.loads(machine.succeed("tailscale status --json --peers=false 2>/dev/null | jq -ce '{state:.BackendState,id:.Self.ID,key:.Self.PublicKey,ips:.TailscaleIPs}'"))
+    assert value['state'] == 'Running' and isinstance(value['id'], str) and value['id']
+    assert re.fullmatch(r'nodekey:[0-9a-f]{64}', value['key'])
+    assert len(value['ips']) in [1, 2]
+    for address in value['ips']:
+        assert ipaddress.ip_address(address) in ipaddress.ip_network('100.64.0.0/10') or ipaddress.ip_address(address) in ipaddress.ip_network('fd7a:115c:a1e0::/48')
+    return value
+
+
+def headscale_peer_identities():
+    # Never return pre_auth_key or the full administrator response to the log.
+    values = json.loads(relay.succeed("headscale nodes list -o json 2>/dev/null | jq -ce '[.[] | {id,machine_key,node_key,ip_addresses,given_name,tags}] | sort_by(.id)'"))
+    assert len(values) == 3
+    assert sorted(tag for value in values for tag in value['tags']) == sorted('tag:rehearsal-' + tag for _, tag in TAILNET_PEERS)
+    assert sorted(value['given_name'] for value in values) == sorted('rehearsal-' + machine.name for machine, _ in TAILNET_PEERS)
+    for value in values:
+        assert value['id'] and value['machine_key'] and value['node_key'] and value['given_name']
+    return values
+
+
+def bootstrap_tailnet_peers():
+    relay.succeed('install -d -m 0700 ' + TAILNET_INPUTS)
+    for machine, role in TAILNET_PEERS:
+        stem = TAILNET_INPUTS + '/' + machine.name
+        relay.succeed('if test ! -e ' + stem + '.key; then umask 077; ulimit -f 128; headscale preauthkeys create --tags tag:rehearsal-' + role + ' --expiration 1h -o json >' + stem + '.json 2>/dev/null && jq -er \x27.key | select(type == "string" and length >= 20 and length <= 256 and test("^[A-Za-z0-9_-]+$"))\x27 ' + stem + '.json >' + stem + '.key 2>/dev/null && chmod 0400 ' + stem + '.key; fi', timeout=20)
+        machine.succeed('systemctl start tailscaled.service', timeout=30)
+        machine.wait_until_succeeds('tailscale status --json --peers=false 2>/dev/null | jq -e \x27.BackendState == "NeedsLogin" or .BackendState == "Running"\x27 >/dev/null', timeout=30)
+        state = machine.succeed('tailscale status --json --peers=false 2>/dev/null | jq -er .BackendState').strip()
+        if state == 'NeedsLogin':
+            transfer(relay, stem + '.key', machine, TAILNET_INPUTS + '/auth-key')
+            machine.succeed('umask 077; tailscale up --login-server https://relay --auth-key=file:' + TAILNET_INPUTS + '/auth-key --accept-dns=false --accept-routes=false --ssh=false --hostname=rehearsal-' + machine.name + ' >' + TAILNET_INPUTS + '/enrollment.log 2>&1', timeout=60)
+        machine.wait_until_succeeds('tailscale status --json --peers=false 2>/dev/null | jq -e \x27.BackendState == "Running"\x27 >/dev/null', timeout=60)
+    # These single-use fixture keys are expired before recovery. Replacement
+    # peers must reconnect using their retained machine/node identities.
+    for machine, _role in TAILNET_PEERS:
+        key_id = relay.succeed('jq -er \x27.id | tonumber\x27 ' + TAILNET_INPUTS + '/' + machine.name + '.json 2>/dev/null').strip()
+        assert re.fullmatch(r'[1-9][0-9]{0,5}', key_id)
+        marker = TAILNET_INPUTS + '/' + machine.name + '.expired'
+        relay.succeed('if test ! -e ' + marker + '; then headscale preauthkeys expire --id ' + key_id + ' >/dev/null 2>&1 && install -m 0400 /dev/null ' + marker + '; fi', timeout=15)
+    relay.succeed('headscale preauthkeys list -o json 2>/dev/null | jq -e \x27length == 3 and all(.[]; .used == true and (.reusable // false) == false and (.ephemeral // false) == false)\x27 >/dev/null', timeout=15)
+    return {machine.name: tailnet_client_identity(machine) for machine, _role in TAILNET_PEERS}
+
+
+def check_tailnet_access(identities):
+    address = next(value for value in identities['automation']['ips'] if ipaddress.ip_address(value).version == 4)
+    url = 'http://' + address + ':18444'
+    automation.succeed('systemctl start rehearsal-private-sensor.service')
+    # Only a private file path, never a bearer value, enters the curl argv/log.
+    command = 'curl --silent --show-error --max-time 5 --max-filesize 65536 --header @' + TAILNET_INPUTS + '/ha-header '
+    gateway.wait_until_succeeds(command + '--fail -D ' + TAILNET_INPUTS + '/headers -o ' + TAILNET_INPUTS + '/sensor ' + url + '/api/states/sensor.synthetic_kitchen_temperature 2>/dev/null', timeout=60)
+    gateway.succeed('jq -e \x27.entity_id == "sensor.synthetic_kitchen_temperature" and .state != "unknown" and .state != "unavailable"\x27 ' + TAILNET_INPUTS + '/sensor >/dev/null && grep -qi \x27^Cache-Control: private, no-store\x27 ' + TAILNET_INPUTS + '/headers')
+    assert gateway.succeed(command + "-o /dev/null -w '%{http_code}' " + url + '/api/config 2>/dev/null').strip() == '403'
+    assert gateway.succeed(command + "-X POST -o /dev/null -w '%{http_code}' " + url + '/api/states/sensor.synthetic_kitchen_temperature 2>/dev/null').strip() == '403'
+    # A missing HTTP credential must not mask an accidentally allowed peer:
+    # require TCP connection failure, rather than accepting an HTTP 401/403.
+    client.fail('nc -z -w 3 ' + address + ' 18444 >/dev/null 2>&1')
+    client_address = next(value for value in identities['client']['ips'] if ipaddress.ip_address(value).version == 4)
+    client.succeed('nc -z -w 3 127.0.0.1 22')
+    gateway.fail('nc -z -w 3 ' + client_address + ' 22 >/dev/null 2>&1')
+    gateway.fail('nc -z -w 3 ' + address + ' 8123 >/dev/null 2>&1')
+    client.fail('nc -z -w 3 automation 18444 >/dev/null 2>&1')
+    relay.wait_until_succeeds('headscale nodes list -o json 2>/dev/null | jq -e \x27length == 3 and all(.[]; .online == true)\x27 >/dev/null', timeout=60)
+    return {'nativeSensorRead': True, 'deniedPeer': True, 'deniedOtherPeerSsh': True, 'deniedPathAndWrite': True, 'deniedBackendPortAndLAN': True}
+
+
 def check_automation():
     states = json.loads(automation.succeed('demos-ha-test states'))
     expected = ['sensor.synthetic_' + area + '_temperature' for area in ['kitchen', 'pool', 'solarium']]
@@ -181,6 +254,10 @@ def stop_units(machine, units):
 
 
 def quiesce_writers():
+    if RELAY_PEERS_ENABLED:
+        stop_units(automation, ['rehearsal-private-sensor'])
+        for machine, _role in TAILNET_PEERS:
+            stop_units(machine, ['tailscaled'])
     if DOCUMENSO_ENABLED:
         stop_units(gateway, ['terrace-documenso'])
         assert gateway.succeed('systemctl show terrace-documenso.service -p ExecMainStatus --value').strip() in ['0', '143']
@@ -273,6 +350,10 @@ with subtest('empty state and two explicit bootstrap passes'):
         machine.fail('test -e ' + path)
     if DOCUMENSO_ENABLED:
         gateway.fail('test -e ' + DOCUMENSO_INPUTS + '/secrets.json')
+    if RELAY_PEERS_ENABLED:
+        for machine, _role in TAILNET_PEERS:
+            assert machine.succeed('systemctl show tailscaled.service -p ActiveState --value').strip() == 'inactive'
+            machine.fail('test -e ' + TAILNET_STATE + '/tailscaled.state')
     timed('bootstrapApplication', bootstrap_app)
     signature = app_signature()
     timed('secondBootstrapApplication', bootstrap_app)
@@ -299,6 +380,19 @@ with subtest('empty state and two explicit bootstrap passes'):
     assert gateway.succeed("k3s kubectl get pvc rehearsal -o jsonpath='{.spec.volumeName}'").strip() == volume
     gateway.succeed('k3s kubectl exec rehearsal -- /bin/busybox grep -qx retained-synthetic /data/marker')
 
+if RELAY_PEERS_ENABLED:
+    with subtest('real tailnet clients, scoped native sensor read and denied peers'):
+        tailnet_identities = timed('bootstrapTailnetPeers', bootstrap_tailnet_peers)
+        tailnet_nodes = headscale_peer_identities()
+        assert timed('secondBootstrapTailnetPeers', bootstrap_tailnet_peers) == tailnet_identities
+        assert headscale_peer_identities() == tailnet_nodes
+        relay_identity = json.loads(relay.succeed('headscale users list -o json'))
+        transfer(automation, '/var/lib/rehearsal-demo-token/token', gateway, TAILNET_INPUTS + '/ha-token')
+        # Bytes are read inside the guest and written only to a private file.
+        # The literal command never contains the token itself.
+        gateway.succeed('umask 077; token="$(cat ' + TAILNET_INPUTS + '/ha-token)" && printf \x27Authorization: Bearer %s\\n\x27 "$token" >' + TAILNET_INPUTS + '/ha-header && chmod 0400 ' + TAILNET_INPUTS + '/ha-header')
+        results['checks']['tailnetPrivateAccess'] = timed('tailnetFunctionalAccess', lambda: check_tailnet_access(tailnet_identities))
+
 if DOCUMENSO_ENABLED:
     with subtest('native Documenso SSO, unsigned PDF and encrypted account data'):
         client.succeed('install -d -m 0700 ' + DOCUMENSO_BROWSER)
@@ -319,14 +413,20 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
     for port in [80, 8123, 5000, 5001, 1984, 8554]:
         client.fail(f'nc -z -w 1 automation {port}')
     results['checks']['automation'] = True
-    relay.succeed("curl --fail --silent --max-time 5 http://127.0.0.1:8080/health >/dev/null && headscale policy get | jq -e '.acls == []' >/dev/null")
+    relay.succeed('curl --fail --silent --max-time 5 http://127.0.0.1:8080/health >/dev/null')
+    if RELAY_PEERS_ENABLED:
+        relay.succeed("headscale policy get | jq -e '.acls == [{action:\"accept\",src:[\"tag:rehearsal-application\"],dst:[\"tag:rehearsal-private:18444\"]}] and (.tagOwners | length == 3)' >/dev/null")
+    else:
+        relay.succeed("headscale policy get | jq -e '.acls == []' >/dev/null")
     client.succeed('curl --fail --silent --max-time 10 https://relay/health >/dev/null')
-    results['checks']['relayControlPlaneOnly'] = True
+    results['checks']['relayControlPlane' if RELAY_PEERS_ENABLED else 'relayControlPlaneOnly'] = True
     results['services'] = json.loads(gateway.succeed('cat /etc/rehearsal-versions.json')) | {'web': json.loads(gateway.succeed('cat $(systemctl show terrace-web.service -p WorkingDirectory --value)/release.json'))['revision'],
                            'cms': json.loads(gateway.succeed('cat $(systemctl show terrace-cms.service -p WorkingDirectory --value)/release.json'))['revision'],
                            'k3s': gateway.succeed('k3s --version').splitlines()[0],
                            'headscale': relay.succeed('headscale version').splitlines()[0],
                            'postgresql': gateway.succeed('psql --version').strip()}
+    if RELAY_PEERS_ENABLED:
+        results['services']['tailscale'] = gateway.succeed('tailscale version').splitlines()[0]
     results['peakBytes'] = {unit: int(gateway.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['keycloak', 'terrace-cms', 'terrace-web', 'postgresql', 'k3s']}
     if DOCUMENSO_ENABLED:
         results['peakBytes']['terrace-documenso'] = int(gateway.succeed('systemctl show terrace-documenso.service -p MemoryPeak --value').strip())
@@ -380,6 +480,8 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     application_paths = [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']
     if DOCUMENSO_ENABLED:
         application_paths += [DOCUMENSO_INPUTS, DOCUMENSO_STATE]
+    if RELAY_PEERS_ENABLED:
+        application_paths += [TAILNET_INPUTS, TAILNET_STATE]
     timed('restore-application', lambda: fresh_restore(gateway, snapshots['gateway'], application_paths))
     # Adopt the reconciled, stopped PG copy into its DECLARED native service.
     # The module replaces postgresql.conf with its pinned native HBA/config;
@@ -428,7 +530,10 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         timed('documensoFreshVerify', lambda: documenso_browser('verify'))
         results['checks']['documensoFreshContainer'] = True
         results['checks']['documensoRestoredPdfAndEncrypted2FA'] = True
-    timed('restore-automation', lambda: fresh_restore(automation, snapshots['automation'], ['/var/lib/terrace-demo-hass', '/var/lib/terrace-demo-frigate', '/var/lib/rehearsal-demo-token']))
+    automation_paths = ['/var/lib/terrace-demo-hass', '/var/lib/terrace-demo-frigate', '/var/lib/rehearsal-demo-token']
+    if RELAY_PEERS_ENABLED:
+        automation_paths += [TAILNET_INPUTS, TAILNET_STATE]
+    timed('restore-automation', lambda: fresh_restore(automation, snapshots['automation'], automation_paths))
     automation.succeed('cp /var/lib/rehearsal-demo-token/token /run/demos-test-token')
     timed('recoveredBootstrapAutomation', bootstrap_automation)
     assert check_automation()
@@ -442,7 +547,14 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     assert json.loads(relay.succeed('headscale users list -o json')) == relay_identity
     relay.succeed('sqlite3 /var/lib/headscale/db.sqlite "PRAGMA integrity_check" | grep -qx ok')
     client.succeed('curl --fail --silent --max-time 10 https://relay/health >/dev/null')
-    results['checks']['restoredRelayControlPlaneOnly'] = True
+    results['checks']['restoredRelayControlPlane' if RELAY_PEERS_ENABLED else 'restoredRelayControlPlaneOnly'] = True
+    if RELAY_PEERS_ENABLED:
+        for machine, _role in TAILNET_PEERS:
+            machine.succeed('systemctl start tailscaled.service', timeout=30)
+            machine.wait_until_succeeds('tailscale status --json --peers=false 2>/dev/null | jq -e \x27.BackendState == "Running"\x27 >/dev/null', timeout=90)
+        assert {machine.name: tailnet_client_identity(machine) for machine, _role in TAILNET_PEERS} == tailnet_identities
+        assert headscale_peer_identities() == tailnet_nodes
+        results['checks']['restoredTailnetIdentitiesAndPrivateAccess'] = timed('restoredTailnetAccess', lambda: check_tailnet_access(tailnet_identities))
     for machine in nodes:
         assert machine.succeed('cat /var/lib/unrelated-synthetic-sentinel').strip() == 'retained'
 

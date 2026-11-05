@@ -4,6 +4,7 @@
   contract,
   runId,
   withDocumenso ? false,
+  withRelayPeers ? false,
 }: let
   documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
   gateway = import ../website-gateway-test.nix {
@@ -84,7 +85,7 @@ in {
       lib,
       ...
     }: {
-      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup];
+      imports = [gateway.nodes.gateway ../single-node.nix ../documenso.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix;
       virtualisation.memorySize = lib.mkForce 8192;
       virtualisation.diskSize = 8192;
       terrace.singleNode.enable = true;
@@ -108,12 +109,17 @@ in {
       };
       terrace.backup = {
         postgresql.databases = ["keycloak"];
-        extraPaths = {
-          identity-inputs = "/var/lib/terrace-gateway-test";
-          k3s-server = "/var/lib/rancher/k3s/server";
-          k3s-storage = "/var/lib/rancher/k3s/storage";
-          k3s-node = "/etc/rancher/node";
-        };
+        extraPaths =
+          {
+            identity-inputs = "/var/lib/terrace-gateway-test";
+            k3s-server = "/var/lib/rancher/k3s/server";
+            k3s-storage = "/var/lib/rancher/k3s/storage";
+            k3s-node = "/etc/rancher/node";
+          }
+          // lib.optionalAttrs withRelayPeers {
+            tailnet-state = "/var/lib/tailscale";
+            tailnet-inputs = "/var/lib/rehearsal-tailnet";
+          };
       };
       # Blank boot does not start writers. The driver performs explicit bootstrap.
       systemd.services =
@@ -145,18 +151,23 @@ in {
       lib,
       ...
     }: {
-      imports = [../demos.nix backup];
+      imports = [../demos.nix backup] ++ lib.optional withRelayPeers ./relay-peers.nix;
       virtualisation = {
         memorySize = 4096;
         diskSize = 4096;
         cores = 2;
       };
       terrace.demos.enable = true;
-      terrace.backup.extraPaths = {
-        home-assistant = "/var/lib/terrace-demo-hass";
-        frigate = "/var/lib/terrace-demo-frigate";
-        fixture-token = "/var/lib/rehearsal-demo-token";
-      };
+      terrace.backup.extraPaths =
+        {
+          home-assistant = "/var/lib/terrace-demo-hass";
+          frigate = "/var/lib/terrace-demo-frigate";
+          fixture-token = "/var/lib/rehearsal-demo-token";
+        }
+        // lib.optionalAttrs withRelayPeers {
+          tailnet-state = "/var/lib/tailscale";
+          tailnet-inputs = "/var/lib/rehearsal-tailnet";
+        };
       environment.systemPackages = [haTest pkgs.sqlite];
       systemd.services = lib.genAttrs ["go2rtc" "frigate" "nginx" "home-assistant"] (_: {wantedBy = lib.mkForce [];});
       systemd.sockets.terrace-demo-ha.wantedBy = lib.mkForce [];
@@ -173,6 +184,16 @@ in {
     }: {
       imports = [relay.nodes.relay backup];
       terrace.relay.publicIPv4 = lib.mkForce config.networking.primaryIPAddress;
+      terrace.relay.policy = lib.mkIf withRelayPeers {
+        tagOwners = lib.genAttrs ["tag:rehearsal-application" "tag:rehearsal-private" "tag:rehearsal-denied"] (_: ["rehearsal-synthetic@"]);
+        acls = [
+          {
+            action = "accept";
+            src = ["tag:rehearsal-application"];
+            dst = ["tag:rehearsal-private:18444"];
+          }
+        ];
+      };
       virtualisation = {
         memorySize = 1024;
         diskSize = 2048;
@@ -185,7 +206,7 @@ in {
       lib,
       ...
     }: {
-      imports = [gateway.nodes.client common];
+      imports = [gateway.nodes.client common] ++ lib.optional withRelayPeers ./relay-peers.nix;
       environment.systemPackages = [browserTest] ++ lib.optional withDocumenso documensoBrowser;
       virtualisation.memorySize = lib.mkForce 2048;
       virtualisation.diskSize = 8192;
@@ -207,6 +228,11 @@ in {
   testScript =
     "DOCUMENSO_ENABLED = ${
       if withDocumenso
+      then "True"
+      else "False"
+    }\n"
+    + "RELAY_PEERS_ENABLED = ${
+      if withRelayPeers
       then "True"
       else "False"
     }\n"
