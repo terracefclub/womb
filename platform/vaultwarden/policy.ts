@@ -47,6 +47,9 @@ export function vaultwardenClient(appOrigin: string, clientSecret: string) {
     implicitFlowEnabled: false, serviceAccountsEnabled: false,
     redirectUris: [appOrigin + '/identity/connect/oidc-signin'], webOrigins: [appOrigin],
     defaultClientScopes: ['profile', 'email'], optionalClientScopes: [],
-    attributes: {'pkce.code.challenge.method': 'S256'},
+    // Native SSO carries the IdP expiry into Vaultwarden's JWT; the web client
+    // refreshes five minutes early. Keep this app above that window, without
+    // changing the shared realm's short website/CMS token lifetime.
+    attributes: {'pkce.code.challenge.method': 'S256', 'access.token.lifespan': '600'},
   }
 }
