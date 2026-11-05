@@ -158,8 +158,8 @@ original failure and post-stop state, then stops/resets only that unit in
 `finally`. Main/control PIDs and the recursive cgroup must be empty, and the
 final unit inactive, before success. The receipt is0600 and never overwritten;
 controller commands have3s deadlines and the diagnostic phase has a30s bound.
-On November5,2026, systemd261.3 returned stop status0 while retaining the
-original failed state/status1; resetting the exact stopped unit then made it
+On November 5, 2026, systemd261.3 returned stop status0 while retaining the
+original failed state/status 1; resetting the exact stopped unit then made it
 inactive/collected. The VM helper therefore preserves its original result,
 requires zero main/control PIDs and an empty cgroup, resets only a known failed
 test unit, and requires an inactive final state.
@@ -393,21 +393,73 @@ actual encrypted restore and old-node-off combined recovery are follow-ups.
 Stop the worker then server before taking a consistent database/input snapshot.
 Worker `/tmp` and dependency caches are disposable and intentionally excluded.
 
+### Managed Python runtime
+
+The worker exposes the pinned official image's managed interpreter directory at
+`/tmp/windmill/cache/py_runtime` through an absolute, read-only image subpath.
+The [pinned Dockerfile](https://github.com/windmill-labs/windmill/blob/v1.861.0/Dockerfile)
+installs Python 3.11/3.12/3.13 there. Native `uv python find` selects the interpreter;
+its path cache and job/log directories remain disposable and writable.
+No runtime package download or additional network access is enabled.
+
+Worker explicit `/tmp` limits total 512MiB: 128MiB `/tmp`, 128MiB `/tmp/windmill`,
+256MiB `/tmp/windmill/cache`. Both nested parents use mode 0700 and Podman's
+[`U=true` tmpfs ownership option](https://raw.githubusercontent.com/containers/podman/v6.1.4/docs/source/markdown/options/mount.md),
+which derives UID/GID from the container user without recursively changing the
+separate interpreter mount. Server and migrator retain their original 512MiB
+layout. Numeric `uid=`/`gid=` tmpfs CLI options are rejected by this Podman.
+
+The full startup regression submits real Bash and Python 3.12 jobs. Python has an
+explicit empty dependency lock and must return the exact result, run from the
+managed directory and observe `ST_RDONLY` on its interpreter filesystem. The
+container readback separately requires the configured user, read-only root and
+exactly one `Type=image` mount at the runtime destination with `RW=false`.
+Podman also reports a bind representation at that destination; selecting its
+canonical image entry follows [GetMounts](https://github.com/containers/podman/blob/v6.1.4/libpod/container_inspect.go#L266-L274).
+Failed synthetic results go only to the existing bounded root-private capture;
+tokens, credentials and job payloads never enter probe stdout.
+
+On November 5, 2026 exact source `4c0ea87` passed the small mount proof in
+**112.70 seconds** and all **nine** native startup/worker/concurrency/failure/stop
+subtests in **337.32 seconds**. The image remained unchanged; managed Python 3.12
+and actual Bash jobs passed alongside factory rejection, account isolation,
+UID-scoped egress, changed/cancelled bootstrap closure and retained state.
+All eleven mount-proof and fifteen full-regression recorded host identities
+were absent afterward; owned source/tag/former isolated-namespace scans were
+empty. Results:
+
+```text
+/nix/store/fp549w2mv9pjmg38qg7z47mkxj0d4v43-vm-test-run-terrace-windmill-mounts
+/nix/store/vhjj425yilmgdw9lxyzx4693b7bg0bz8-vm-test-run-terrace-windmill-runtime
+```
+
+For a small mount-only reproduction from a clean checkout on the Linux builder
+with locked tools available:
+
+```sh
+BUILD_LOCK=/private/shared-heavy.lock BUILD_LOCK_TIMEOUT=1200 CHECK_TIMEOUT=300 CHECK_BUILD_TIMEOUT=300 CHECK_STOP_GRACE=30 platform/windmill-mount-check
+```
+
+It uses one 2GiB disposable guest without PostgreSQL, Keycloak, credentials or the
+application. It reproduces the exact unsupported numeric-ownership error, then
+checks shared production mount options, positive log/cache writes, native
+managed Python, kernel read-only status and selected container readbacks.
+Cold image import has a 180s bound; the whole check remains 300s. Exact containers
+are removed in `finally`, and only inspection status 1 proves absence. The full
+baseline command documented above retains its 900s wall/per-build limits.
+
 This prototype permits only loopback egress for its dedicated UID, including
-before telemetry settings are reconciled. It cannot call live Sheets, mail,
-payment or other external services. Expanding egress/provider access needs a
-separate reviewed activation; synthetic membership-contract execution is also
-separate from a live provider cutover. General worker code is for trusted
-approved authors: privileged namespace/nested-container jobs, Docker-in-Docker,
-LSP/multiplayer and multi-tenant hostile-code isolation are not provided. The
-read-only image/tmp boundary must be proved for each newly enabled language;
-preinstalled caches hidden by `/tmp` are not assumed available. Per-user login
-does not turn trusted-code execution into a sandbox.
+before telemetry settings are reconciled. Live Sheets, mail and payment access
+remain disabled. Actual original roster/SDK execution and encrypted originals-off
+Windmill recovery are separate acceptance gates. General worker code requires
+trusted approved authors; privileged namespace/nested-container jobs,
+Docker-in-Docker, LSP/multiplayer and hostile multi-tenant code isolation are not
+provided. Other languages' hidden caches are unproved. Per-user login does not
+make trusted-code execution a sandbox.
 
 Upstream 1.861.0 exceeds the 1.782.0 fix boundary of
 [GHSA-2jfj-x8j7-7mfh](https://github.com/windmill-labs/windmill/security/advisories/GHSA-2jfj-x8j7-7mfh);
 this is version provenance, not a general security certification. Production
-profiles, DNS/provider actions, complete membership/signing/email integration,
+profiles, DNS/provider actions, complete membership/payment-email integration,
 real-user enrollment, fresh-host restore, pressure/alert delivery and cloud
-deployment remain disabled
-or unverified until their own acceptance passes.
+deployment remain disabled or unverified until their own acceptance passes.

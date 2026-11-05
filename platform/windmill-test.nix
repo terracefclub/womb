@@ -5,6 +5,17 @@
   tlsFixture ? null,
 }: let
   directory = "/var/lib/terrace-windmill-inputs";
+  release = builtins.fromJSON (builtins.readFile ./windmill/release.json);
+  image = "${release.imageName}:${release.version}";
+  oldParentProbe = pkgs.writeText "windmill-old-parent-probe.sh" ''
+    set -eu
+    for directory in /tmp/windmill /tmp/windmill/cache; do
+      metadata=$(stat -c '%u %a' "$directory")
+      writable=0
+      if test -w "$directory"; then writable=1; fi
+      printf '%s %s\n' "$metadata" "$writable"
+    done
+  '';
   certificate =
     if tlsFixture != null
     then tlsFixture
@@ -204,7 +215,25 @@ in {
             host.wait_until_succeeds("grep -Fxq 'Windmill launcher stage: waiting for ownership' /var/lib/windmill-test-launcher.log", timeout=30)
             print(host.succeed("python /etc/windmill-lock-probe.py"))
             host.wait_for_unit("podman-terrace-windmill-server.service", timeout=180)
+            # Measure the old layout without Windmill/DB/credentials. Do not
+            # assume the auto-created parents' owner, mode or writability.
+            # Native timeout + --rm and exact finally cleanup bound this probe.
+            probe_status, _ = host.execute("podman container exists terrace-windmill-parent-probe", timeout=10)
+            assert probe_status == 1
+            try:
+                old_parents = host.succeed("umask 077; podman run --rm --name terrace-windmill-parent-probe --timeout=8 --stop-timeout=2 --pull=never --network=none --userns=host --read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=32 --memory=64m --user=44123:44123 --tmpfs=/tmp:rw,nodev,nosuid,mode=1777,size=512m,notmpcopyup --mount=type=image,source=${image},destination=/tmp/windmill/cache/py_runtime,subpath=/tmp/windmill/cache/py_runtime,rw=false --volume=${oldParentProbe}:/run/parent-probe.sh:ro --entrypoint=/bin/sh ${image} /run/parent-probe.sh", timeout=15).strip().splitlines()
+                assert len(old_parents) == 2
+                import re
+                for label, row in zip(["work", "cache"], old_parents):
+                    fields = re.fullmatch(r"([0-9]{1,10}) ([0-7]{1,4}) ([01])", row)
+                    assert fields and int(fields[1]) <= 4294967295 and int(fields[2], 8) <= 0o7777
+                    print("Windmill old-layout parent", label, "uid", int(fields[1]), "mode", fields[2], "writable", int(fields[3]))
+            finally:
+                host.succeed("podman rm --force --ignore terrace-windmill-parent-probe >/dev/null", timeout=10)
+                probe_status, _ = host.execute("podman container exists terrace-windmill-parent-probe", timeout=10)
+                assert probe_status == 1
             host.succeed("systemctl start podman-terrace-windmill-worker.service")
+            assert host.succeed("podman exec terrace-windmill-worker stat -c '%u %a' /tmp/windmill /tmp/windmill/cache", timeout=10).strip().splitlines() == ["44123 700", "44123 700"]
             host.succeed("systemctl start terrace-windmill-bootstrap.service")
             assert host.succeed("runuser -u postgres -- psql -XAtw -d terrace_windmill -c \"SELECT value->'keycloak'->>'pkce' FROM global_settings WHERE name='oauths'\" 2>/dev/null").strip() == "true"
             assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
@@ -212,7 +241,7 @@ in {
             client.fail("nc -z -w 2 host 18001")
             client.fail("nc -z -w 2 host 5432")
         with subtest("factory rejected and actual bounded worker execution"):
-            host.succeed("python /etc/windmill-probe.py", timeout=90)
+            assert host.succeed("python /etc/windmill-probe.py", timeout=150).strip() == "Windmill actual Bash/Python workers, factory rejection and distinct approved-account checks passed."
             host.succeed("runuser -u terrace_windmill -- psql -XAt -d terrace_windmill -c 'select 1' >/dev/null")
             host.fail("runuser -u terrace_windmill -- psql -XAt -d postgres -c 'select rolpassword from pg_authid' >/dev/null 2>&1")
         with subtest("UID-scoped egress isolation and unmodified nonprivileged image"):
@@ -220,6 +249,7 @@ in {
             host.fail("runuser -u terrace_windmill -- curl --fail --silent --max-time 3 http://client:18080/ >/dev/null 2>&1")
             host.succeed("curl --fail --silent --max-time 3 http://client:18080/ >/dev/null")
             host.succeed("podman inspect terrace-windmill-server | jq -e '.[0] | .Config.User == \"44123:44123\" and .HostConfig.Privileged == false and .HostConfig.ReadonlyRootfs == true' >/dev/null")
+            host.succeed("podman inspect terrace-windmill-worker | jq -e '.[0] | .Config.User == \"44123:44123\" and .HostConfig.Privileged == false and .HostConfig.ReadonlyRootfs == true and ([.Mounts[] | select(.Type == \"image\" and .Destination == \"/tmp/windmill/cache/py_runtime\")] | length == 1 and .[0].RW == false)' >/dev/null")
         with subtest("changed input during concurrent bootstrap cannot publish stale readiness"):
             host.succeed("systemd-run --unit=windmill-test-db-block --property=RuntimeMaxSec=15 --uid=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_windmill -c 'BEGIN; LOCK TABLE global_settings IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(8); COMMIT' >/dev/null 2>&1")
             host.wait_until_succeeds("runuser -u postgres -- psql -XAt -d terrace_windmill -c \"SELECT EXISTS(SELECT FROM pg_locks l JOIN pg_class c ON l.relation=c.oid WHERE c.relname='global_settings' AND l.mode='AccessExclusiveLock' AND l.granted)\" | grep -qx t")
