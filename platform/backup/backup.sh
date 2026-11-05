@@ -75,6 +75,8 @@ prepare_dumps() {
   if [[ ${#DATABASES[@]} -gt 0 ]]; then
     install -d -o "$PG_USER" -m 0700 "$DUMPS/postgresql"
     as_pg pg_dumpall --globals-only >"$DUMPS/postgresql/globals.sql"
+    as_pg psql -XAt -v ON_ERROR_STOP=1 -d postgres -c "$(python "$BOOTSTRAP_HELPER" query)" \
+      | python "$BOOTSTRAP_HELPER" capture "$DUMPS/postgresql/globals.sql" "$DUMPS/postgresql/bootstrap-role.json"
     local db
     for db in "${DATABASES[@]}"; do dump_database "$db"; done
   fi
