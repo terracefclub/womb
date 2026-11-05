@@ -42,10 +42,10 @@ and existing tools; none contains credential values:
 
 ```sh
 install -d -m 0700 "$EVIDENCE_PARENT"
-direnv exec . timeout --signal=TERM --kill-after=10 3600 \
-  flock --exclusive --timeout 3300 "$BUILD_LOCK" \
+direnv exec . timeout --signal=TERM --kill-after=60 700 \
+  flock --exclusive --timeout 300 "$BUILD_LOCK" \
   timeout --signal=TERM --kill-after=10 300 \
-  python platform/full/inspect-restore-disk.py \
+  python -B platform/full/inspect-restore-disk.py \
   --image "$STOPPED_GATEWAY_QCOW2" --source-uid "$SOURCE_UID" \
   --process-receipt "$OWNED_PROCESS_RECEIPT" --process-count "$PROCESS_COUNT" \
   --output "$EVIDENCE_PARENT/restore-diagnostics" \
@@ -57,7 +57,8 @@ source owner/mode/size and command scope before execution; record the launcher
 PID/start identity and verify it and its exact children are absent afterward.
 Use the existing shared builder lock, not a new lock path. The 300-second active
 bound includes copy/hash work; individual image-info/convert/dump bounds are
-15/150/10seconds. The outer queue+active deadline is3600seconds. The output
+15/150/10seconds. The queue bound is300seconds and outer deadline700seconds
+(with60seconds final kill grace). The output
 includes the verified QCOW2 copy, private sparse raw image and `receipt.json`;
 retain them with the original. A receipt is only written after all guards and
 the final original hash check pass. Free disk space must cover the virtual
