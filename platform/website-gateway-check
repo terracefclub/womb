@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run the gateway check on the x86_64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 3 && -f $1 && -f $2 && -d $3 ]] || { echo 'usage: platform/website-gateway-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE'; exit 2; }
+web_archive=$(realpath "$1")
+cms_archive=$(realpath "$2")
+tfc_source=$(realpath "$3")
+cd "$(dirname "$0")"
+exec ./run-check --impure --file website-gateway-check.nix \
+  --argstr webArchive "$web_archive" --argstr cmsArchive "$cms_archive" --argstr tfcSource "$tfc_source"

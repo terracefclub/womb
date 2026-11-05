@@ -7,6 +7,10 @@ foundation remains available for later services. Native services are the first
 host choice because one database, two immutable bundles and explicit recovery
 avoid another application operator/image pipeline on the temporary budget.
 
+The separate optional [HTTPS origin gateway](website-gateway.md) adds trusted
+TLS/native SSO boundary checks with the same accepted bundles. Both modules
+remain disabled in actual host profiles; CDN activation remains separate.
+
 ## Accepted inputs
 
 `platform/website-release.json` pins the exact secret-free Linux x86-64 glibc
