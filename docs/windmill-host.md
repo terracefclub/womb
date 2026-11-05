@@ -179,6 +179,131 @@ container state, UID-scoped egress and retained data after exact service stop.
 Record final passing source/result before considering these checks verified.
 A generic job proves runtime only; it does not migrate membership flows.
 
+### Individual sign-in and worker acceptance
+
+The separate functional check uses the pinned image, explicit migration and
+reviewed initial client, with the approved-state bootstrap described below. Its
+shared identity
+fixture enrolls distinct synthetic administrator and operator accounts, an
+initially approved operator for revocation, and an unapproved IdP account. No
+account, password or generated realm enters the Nix store. It uses native
+Keycloak login through the Windmill button and requires authorization code with
+S256 PKCE and the exact callback; it never substitutes a shared admin session.
+The official [Keycloak setup](https://www.windmill.dev/docs/advanced/setup_oauth#keycloak)
+requires the `offline_access` scope already present in the reviewed client.
+Community license limits and lack of automatic role/group reconciliation above
+still apply; the fixture uses three individually approved app users.
+
+From a clean checkout, allow its credential-free shell once with `direnv allow .`.
+Run only on the configured x86-64 Linux builder with its shared heavy-job lock:
+
+```sh
+direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock \
+  BUILD_LOCK_TIMEOUT=1200 CHECK_TIMEOUT=1500 CHECK_BUILD_TIMEOUT=1200 \
+  CHECK_STOP_GRACE=30 ./platform/windmill-functional-check /absolute/accepted/tfc-source
+```
+
+`platform/test-identity-contract.nix` verifies the three accepted TFC producer
+source hashes. The check requires no provider credentials or license bypass.
+Its initial scope is native browser sign-in, exact per-user identity and role
+readback, operator administration denial, private variable isolation between
+operators, and an approved operator running a persisted Bash script on the real
+worker. Public password login and anonymous identity reads must fail. Removing
+approval must preserve the account but remove tokens and reject both its stored
+session and a fresh IdP login. Token-cache invalidation is measured with a
+130-second bound; it is not claimed to be instantaneous.
+
+The private browser helper's `create` and `verify` modes retain a stable
+workspace/script path, completed job identity/result digest, per-user identities
+and private variable digest. The receipt contains no cookies or passwords.
+`verify` starts fresh individual sign-ins, checks retained data and runs a NEW
+worker job. A separate protected old-session file exists solely for the
+`disabled` phase. These modes can bracket a later originals-off restore. The
+standalone check covers restart continuity; it does not establish fresh-host
+recovery, actual membership-flow execution, capacity under production load or
+live Sheets/mail/payment integration. The source-matched native result is
+recorded below; pure tests alone do not prove SSO support.
+Measured November 5, 2026 at source `88842ca` on the old 1.839 image: the native browser flow emitted a
+provider authorization request, but that request failed both the exact S256
+method and challenge-format checks. The test stopped before individual login,
+permission, worker and restart acceptance; all 15 recorded host identities were
+gone afterward. This differs from the earlier loading-screen failure, whose
+unobserved defaults established no PKCE result. Raw queries were not retained,
+so these facts do not distinguish absent from malformed parameters.
+The merged [PKCE prerequisite](https://gitlab.com/terrace/tech/womb/-/merge_requests/36)
+now pins official 1.861 and enables its native per-provider setting. Its fresh
+runtime check passed; the browser proof below establishes individual SSO against
+the same strict S256 client policy.
+Static extra parameters are not a substitute for per-login verifier binding.
+Evaluating the driver requires retained native kernel/initrd, shared-filesystem
+and test-network options on both guests. Ownership tags append a distinct key;
+they never replace the framework's QEMU option list.
+Pinned 1.861 returns exact 401 for superadmin and private-variable denials via
+[`NotAuthorized`](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-common/src/error.rs),
+the [superadmin gate](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-auth/src/lib.rs)
+and [variable gate](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-store/src/variables.rs).
+Its [script creation](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-scripts/src/scripts.rs)
+now calls [check_role_can_code](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-common/src/workspaces.rs),
+whose `PermissionDenied` maps to exact 403 for an operator. The public password endpoint still requires nginx 403;
+successful per-user identity checks precede the role denials.
+
+The first supported-version trial (`69c904d`, November 5) reached the worker
+submission after native S256/callback-200, individual role checks and private
+value isolation, then was denied access to the newly created script. Its
+protected native journal showed the operator's cached folder list was empty.
+Pinned [authentication caches folder ACLs for 120 seconds](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-auth/src/auth.rs),
+and [folder creation invalidates only the creator's session](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-groups/src/folders.rs).
+The check therefore opens another independent native operator session after
+creating the shared folder and requires the same identity/role before job
+submission. It changes no grant or cache setting. Failure facts distinguish
+submission status, UUID validation, bounded polling and boolean result/owner
+checks without recording job payloads, identifiers or credentials. The complete
+native check exercises worker, restart and revocation together.
+
+Unchanged bootstrap preserves existing sessions: it reads the native global
+account inventory and sends only changed privilege/disabled flags. The native
+[`superadmin` or `devops` update](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-users/src/users.rs#L1553-L1599)
+invalidates sessions even when the supplied flag already matches. Real privilege
+changes and reactivation still make the explicit native update and require
+matching readback. Missing/duplicate approved identities or malformed fields
+close readiness. Inventory uses one explicit page of 100 accounts and rejects a
+full page as potentially incomplete, so a larger instance needs deliberate inventory
+review rather than partial revocation. No unbounded paging is introduced.
+
+Revocation positively resolves the retained alumni cookie at the end of restart
+verification, immediately before approval removal. The native
+[`disabled` update](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api-users/src/users.rs)
+deletes token rows; the public authentication implementation gives cached
+session permissions an expiry up to 120 seconds. The check measures exact 200-to-401
+convergence with a 130-second deadline, rejecting other statuses and late
+responses, then requires global 401, fresh login denial and fresh approved
+administrator/operator positives. It reports the measured delay without
+claiming instantaneous revocation. The stable job/data receipt is unchanged.
+
+The wrapper retains failed-build private state. Fixed stage/status facts and a
+masked actual-page screenshot are copied only to owner-private failed-build
+shared directories, never `$out`; runtime failure capture reuses the bounded
+private module evidence path. All guests/writers must stop at completion or
+failure through the existing bounded supervisor. Preserve retained data until
+investigated; no automatic synthetic purge is added by this check.
+Frontend failure facts cover only the latest sign-in page: 64 allowlisted
+same-origin static/API path/status/MIME rows, 32 fixed network failures,
+16 fixed page-error classes/kinds, pending-route counts and document readiness.
+Queries/fragments, bodies, raw headers, cookies, callback codes and raw error or
+console messages are omitted. Explicit truncation flags prevent an incomplete
+capture being treated as proof of absence. Positive/failing metadata and private
+marker suppression have focused tests; all authentication assertions stay active.
+Auth facts reset for every person: `null` means a request/check has not occurred,
+while observed PKCE and callback facts describe only that current login. Facts
+are saved before optional DOM/screenshot calls so a failed renderer cannot erase
+the network/error evidence.
+The functional check trusts a separate synthetic CA and serves a signed
+CA:false/serverAuth leaf for both exact fixture hostnames; OpenSSL verifies
+purpose and hostnames before the fixture can build. System and browser trust
+only the CA. This corrects the CA-as-leaf test pattern without asserting that
+it caused any earlier frontend loading failure. The baseline runtime check's
+default certificate fixture remains unchanged.
+
 The check wrapper uses Nix `--keep-failed`. Before a failed guest is torn down,
 it exports protected raw launcher/journal data, exact selected systemd state
 (including completion code as well as status), and PID/start-tick observations
@@ -218,9 +343,44 @@ source-process and runtime-tag scans were empty. The immutable result was:
 /nix/store/rsskcbi5h8lz5aa5sgdznxb8576p48a3-vm-test-run-terrace-windmill-runtime
 ```
 
-This is fresh-state runtime acceptance. Individual browser SSO/permissions,
-original roster/workflow execution, encrypted fresh-host restore, and upgrade
-of an existing 1.839 database each need their own proof. No profile was enabled.
+This is fresh-state runtime acceptance for the earlier bootstrap. The session
+preservation follow-up is checked separately below. Existing 1.839 database
+upgrade remains unproved. No profile was enabled.
+
+## Observed individual SSO and session preservation
+
+On November 5, 2026, native source `fa9d243` passed all four functional subtests
+in **714.30 seconds**. It proved individual native code/S256 logins and exact
+roles, unknown-user denial without account creation, operator administration and
+authoring denial, private-variable isolation, persisted real-worker execution
+with exact caller/result, and a new job after database/identity/app restart.
+The original pre-restart session remained valid after unchanged bootstrap.
+Removing approval then denied that warmed session after **5,015 milliseconds**,
+with global 401, fresh login denial and fresh approved-user positives afterward.
+Every writer/listener stopped and all 17 recorded host identities were gone;
+source, workload tag and former isolated-namespace scans were empty. Result:
+
+```text
+/nix/store/wd5kjppb0wj2rlgv5ihy3lm0r8c703wb-vm-test-run-terrace-windmill-functional
+```
+
+Exact source `660035d` also passed the nine-subtest native startup/concurrency/
+failure regression in **310.29 seconds**, with actual migration/bootstrap,
+factory rejection, worker execution, changed-input/concurrent and cancelled
+owners, failure closure and stop/retention checks. All 19 recorded host identities
+were gone and owned source/tag/isolated-namespace scans were empty. Its result:
+
+```text
+/nix/store/w1zj2kh592f801iirga0m3ds1n27b7m6-vm-test-run-terrace-windmill-runtime
+```
+
+The same final snapshot evaluates to the exact successful functional artifact
+above. The functional check uses a 1,500-second wall/1,200-second per-build bound;
+the baseline regression uses 900 seconds for both. Each uses the existing shared
+queue and supervisor, and all test services stop before the next lease.
+Actual Python membership-flow
+execution, encrypted originals-off recovery, production load and live provider
+integration remain separate acceptance gates.
 
 ## Persistence and remaining gates
 
@@ -248,5 +408,6 @@ Upstream 1.861.0 exceeds the 1.782.0 fix boundary of
 [GHSA-2jfj-x8j7-7mfh](https://github.com/windmill-labs/windmill/security/advisories/GHSA-2jfj-x8j7-7mfh);
 this is version provenance, not a general security certification. Production
 profiles, DNS/provider actions, complete membership/signing/email integration,
-real SSO, restore, pressure/alert delivery and cloud deployment remain disabled
+real-user enrollment, fresh-host restore, pressure/alert delivery and cloud
+deployment remain disabled
 or unverified until their own acceptance passes.

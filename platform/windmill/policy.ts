@@ -11,6 +11,24 @@ export const validOrigin = (value: unknown): value is string => {
 }
 export type ApprovedUser = { email: string; name: string; role: 'admin' | 'operator' }
 export type Input = { adminPassword: string; origin: string; issuer: string; clientId: string; clientSecret: string; approvedUsers: ApprovedUser[] }
+type GlobalAccount = { email: string; super_admin: boolean; devops: boolean; disabled: boolean }
+export const ACCOUNT_INVENTORY_LIMIT = 100
+export function globalAccountInventory(value: unknown): GlobalAccount[] {
+  // A full page may be truncated. Never reconcile a partial inventory.
+  if (!Array.isArray(value) || value.length >= ACCOUNT_INVENTORY_LIMIT || value.some(account =>
+    !account || typeof account !== 'object' || Array.isArray(account) || typeof account.email !== 'string' || account.email.length > 254 ||
+    typeof account.super_admin !== 'boolean' || typeof account.devops !== 'boolean' || typeof account.disabled !== 'boolean')) throw failed()
+  return value
+}
+// Native role updates invalidate sessions even if the supplied flag is unchanged.
+export function approvedAccountUpdate(value: unknown, user: ApprovedUser): Record<string, boolean> {
+  const matches = globalAccountInventory(value).filter(account => account.email === user.email)
+  if (matches.length !== 1) throw failed()
+  const account = matches[0]!
+  const current = { is_super_admin: account.super_admin, is_devops: account.devops, disabled: account.disabled }
+  const desired = { is_super_admin: user.role === 'admin', is_devops: false, disabled: false }
+  return Object.fromEntries(Object.entries(desired).filter(([key, wanted]) => current[key as keyof typeof current] !== wanted))
+}
 // Match the pinned KeycloakSetting.svelte producer, including its realm URL.
 export function keycloakProvider(input: Input) {
   return { id: input.clientId, secret: input.clientSecret, org: input.issuer, display_name: 'Keycloak', pkce: true, login_config: {

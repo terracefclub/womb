@@ -1,7 +1,7 @@
 // Protected runtime input; never import dotenv or print provider/account content.
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, rmSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { keycloakProvider, providerReadbackSummary, validateInput } from './policy'
+import { ACCOUNT_INVENTORY_LIMIT, approvedAccountUpdate, globalAccountInventory, keycloakProvider, providerReadbackSummary, validateInput } from './policy'
 import { waitForKeycloak } from './provider'
 
 const READY = '/run/terrace-windmill-ready'
@@ -72,14 +72,22 @@ async function bootstrap(path: string, port: number, expectedOrigin: string) {
       if (check.status !== 200 || JSON.stringify(JSON.parse(check.body)) !== JSON.stringify(value)) throw failed()
     }
   }
+  const inventoryRoute = `/users/list_as_super_admin?per_page=${ACCOUNT_INVENTORY_LIMIT}&page=1`
   stage = 'approved accounts'
   for (const user of input.approvedUsers) {
     const encoded = encodeURIComponent(user.email)
     const exists = await call('GET', '/users/exists/' + encoded, undefined, token)
     if (exists.status !== 200 || !['true', 'false'].includes(exists.body)) throw failed()
     if (exists.body === 'false' && (await call('POST', '/users/create', { email: user.email, password: randomBytes(48).toString('hex'), super_admin: user.role === 'admin', name: user.name, skip_email: true }, token)).status !== 201) throw failed()
-    if ((await call('POST', '/users/update/' + encoded, { is_super_admin: user.role === 'admin', is_devops: false, disabled: false }, token)).status !== 200 ||
-      (await call('POST', '/users/set_login_type/' + encoded, { login_type: 'keycloak' }, token)).status !== 200) throw failed()
+    const readback = await call('GET', inventoryRoute, undefined, token)
+    if (readback.status !== 200) throw failed()
+    const update = approvedAccountUpdate(JSON.parse(readback.body), user)
+    if (Object.keys(update).length) {
+      if ((await call('POST', '/users/update/' + encoded, update, token)).status !== 200) throw failed()
+      const checked = await call('GET', inventoryRoute, undefined, token)
+      if (checked.status !== 200 || Object.keys(approvedAccountUpdate(JSON.parse(checked.body), user)).length) throw failed()
+    }
+    if ((await call('POST', '/users/set_login_type/' + encoded, { login_type: 'keycloak' }, token)).status !== 200) throw failed()
   }
   stage = 'approved workspace membership'
   const workspaces = await call('GET', '/workspaces/list_as_superadmin', undefined, token)
@@ -98,10 +106,9 @@ async function bootstrap(path: string, port: number, expectedOrigin: string) {
     } else if ((await call('POST', '/w/terrace/users/update/' + encodeURIComponent(found.username), {...role,disabled:false}, token)).status !== 200) throw failed()
   }
   stage = 'retained account revocation'
-  const accounts = await call('GET', '/users/list_as_super_admin', undefined, token)
+  const accounts = await call('GET', inventoryRoute, undefined, token)
   if (accounts.status !== 200) throw failed()
-  const listed = JSON.parse(accounts.body)
-  if (!Array.isArray(listed)) throw failed()
+  const listed = globalAccountInventory(JSON.parse(accounts.body))
   for (const account of listed) {
     if (typeof account.email !== 'string') throw failed()
     if (account.email !== 'admin@windmill.dev' && !input.approvedUsers.some(user => user.email === account.email)) {

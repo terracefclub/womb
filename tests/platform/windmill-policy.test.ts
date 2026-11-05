@@ -1,6 +1,29 @@
 import { expect, test } from 'bun:test'
-import { isKeycloakProviderSet, keycloakProvider, providerReadbackSummary, validateInput, windmillClient } from '../../platform/windmill/policy'
+import { ACCOUNT_INVENTORY_LIMIT, approvedAccountUpdate, globalAccountInventory, isKeycloakProviderSet, keycloakProvider, providerReadbackSummary, validateInput, windmillClient } from '../../platform/windmill/policy'
 import { waitForKeycloak } from '../../platform/windmill/provider'
+const approvedOperator = { email: 'operator@terrace.invalid', name: 'Synthetic Operator', role: 'operator' } as const
+const account = () => ({ email: approvedOperator.email, super_admin: false, devops: false, disabled: false })
+test('unchanged approval avoids native privilege updates that invalidate sessions', () => {
+  expect(approvedAccountUpdate([account()], approvedOperator)).toEqual({})
+  expect(approvedAccountUpdate([{ ...account(), super_admin: true }], { ...approvedOperator, role: 'admin' })).toEqual({})
+})
+test('real privilege and reactivation changes remain explicit and scoped to changed fields', () => {
+  expect(approvedAccountUpdate([account()], { ...approvedOperator, role: 'admin' })).toEqual({ is_super_admin: true })
+  expect(approvedAccountUpdate([{ ...account(), super_admin: true }], approvedOperator)).toEqual({ is_super_admin: false })
+  expect(approvedAccountUpdate([{ ...account(), devops: true, disabled: true }], approvedOperator)).toEqual({ is_devops: false, disabled: false })
+})
+test('missing duplicate or malformed account readback fails with a static error', () => {
+  for (const value of [null, {}, [], [account(), account()], [null], [{ ...account(), super_admin: 'PRIVATE' }],
+    [{ ...account(), devops: undefined }], [{ ...account(), disabled: 0 }], [{ ...account(), email: 'other@terrace.invalid' }]]) {
+    expect(() => approvedAccountUpdate(value, approvedOperator)).toThrow('Windmill bootstrap rejected.')
+  }
+})
+test('full or oversized bounded pages cannot masquerade as complete revocation inventory', () => {
+  expect(globalAccountInventory([account()])).toEqual([account()])
+  for (const size of [ACCOUNT_INVENTORY_LIMIT, ACCOUNT_INVENTORY_LIMIT + 1]) {
+    expect(() => globalAccountInventory(new Array(size).fill(account()))).toThrow('Windmill bootstrap rejected.')
+  }
+})
 test('strict provider readback covers delayed upstream10s invalidation polling', async () => {
   let milliseconds = 0
   const result = await waitForKeycloak(async () => ({status:200,body:JSON.stringify({oauth:milliseconds < 12000 ? [] : [{type:'keycloak'}]})}),
