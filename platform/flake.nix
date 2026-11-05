@@ -18,8 +18,13 @@
     nixosModules.identity = import ./identity.nix;
     nixosModules.website = import ./website.nix;
     nixosModules.website-gateway = import ./website-gateway.nix;
+    nixosModules.documenso = import ./documenso.nix;
 
     checks.${system} = {
+      documenso = pkgs.testers.runNixOSTest (import ./documenso-test.nix {
+        inherit pkgs;
+        module = self.nixosModules.documenso;
+      });
       single-node = pkgs.testers.runNixOSTest (import ./test.nix {
         inherit pkgs;
         module = self.nixosModules.single-node;
