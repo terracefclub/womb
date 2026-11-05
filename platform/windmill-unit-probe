@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Bounded root-only diagnostic of one uniquely owned failing transient unit."""
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+
+def command(arguments):
+    result = subprocess.run(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, timeout=3)
+    if len(result.stdout) > 65536:
+        raise ValueError()
+    return result.returncode, result.stdout
+
+
+def main():
+    if sys.platform != 'linux' or os.geteuid() != 0 or len(sys.argv) != 2:
+        raise ValueError()
+    output = Path(sys.argv[1])
+    parent = output.parent.lstat()
+    if not output.is_absolute() or str(output).startswith('/nix/store/') or output.exists() or output.is_symlink() or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o777 != 0o700:
+        raise ValueError()
+    unit = 'terrace-windmill-stop-probe-' + uuid.uuid4().hex + '.service'
+    properties = ['LoadState', 'ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus', 'MainPID', 'ControlPID', 'ControlGroup', 'CollectMode']
+
+    def snapshot():
+        code, text = command(['systemctl', 'show', unit, '--property=' + ','.join(properties)])
+        if code != 0:
+            raise ValueError()
+        values = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+        for key in ['MainPID', 'ControlPID']:
+            if values.get(key) != '0':
+                raise ValueError()
+        group = values.get('ControlGroup', '')
+        pids = []
+        if group:
+            if not group.endswith('/' + unit) or not re.fullmatch(r'/[A-Za-z0-9_./@-]+', group) or '..' in group.split('/'):
+                raise ValueError()
+            for path in Path('/sys/fs/cgroup' + group).rglob('cgroup.procs'):
+                pids.extend(int(pid) for pid in path.read_text().split())
+        if pids:
+            raise ValueError()
+        return values | {'cgroupPids': pids}
+
+    def interrupted(*_args):
+        raise TimeoutError()
+    for signum in [signal.SIGALRM, signal.SIGTERM, signal.SIGINT]:
+        signal.signal(signum, interrupted)
+    signal.alarm(30)
+    evidence = {'unit': unit, 'scope': 'owned-synthetic-false-only'}
+    attempted = False
+    try:
+        assert snapshot()['LoadState'] == 'not-found'
+        attempted = True
+        evidence['launchStatus'], _ = command(['systemd-run', '--unit=' + unit,
+            '--property=Type=exec', '--property=Restart=no', '--property=RuntimeMaxSec=5',
+            '--property=TimeoutStopSec=2', '--', '/run/current-system/sw/bin/false'])
+        deadline = time.monotonic() + 3
+        # Wait only for a completed failure, then preserve the original status.
+        while True:
+            code, active = command(['systemctl', 'show', unit, '-p', 'ActiveState', '--value'])
+            if code == 0 and active.strip() == 'failed':
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+            time.sleep(.05)
+        evidence['beforeStop'] = snapshot()
+        assert evidence['beforeStop']['Result'] == 'exit-code' and evidence['beforeStop']['ExecMainStatus'] == '1'
+        evidence['stopStatus'], _ = command(['systemctl', 'stop', unit])
+        evidence['afterStop'] = snapshot()
+    finally:
+        signal.alarm(0)
+        if attempted:
+            # Only this freshly minted, previously absent exact unit is touched.
+            evidence['finalStopStatus'], _ = command(['systemctl', 'stop', unit])
+            evidence['resetStatus'], _ = command(['systemctl', 'reset-failed', unit])
+        evidence['final'] = snapshot()
+        evidence['computeOff'] = evidence['final']['ActiveState'] == 'inactive'
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(evidence, stream)
+            stream.write('\n')
+        assert evidence['computeOff']
+    print('Windmill owned transient-unit probe completed; final inactive and cgroup empty.')
+    for key in ['beforeStop', 'afterStop', 'final']:
+        value = evidence[key].get('ActiveState')
+        if value not in ['failed', 'inactive']:
+            raise ValueError()
+        print('Windmill probe ' + key + ' ActiveState: ' + value)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        print('Windmill owned transient-unit probe failed; inspect its private receipt.', file=sys.stderr)
+        sys.exit(1)

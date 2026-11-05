@@ -1,0 +1,8 @@
+{
+  "imageName": "ghcr.io/windmill-labs/windmill",
+  "version": "1.839.0",
+  "imageDigest": "sha256:d4ef3d34b3c80a3f7165b374def401fdc816c09420d0aba07208bbc7e01c7364",
+  "archiveHash": "sha256-n+rkZv8qLZxdrgrGXaEnaRTRceBFi1HV39jmIwa3LdE=",
+  "latestMigration": 20261016160346,
+  "backgroundMigrations": ["retire_legacy_hub_sync_script", "audit_partitioned_workspace_operation_index", "retire_legacy_audit_table"]
+}
