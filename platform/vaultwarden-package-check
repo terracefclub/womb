@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run Vaultwarden checks on the x86-64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 0 ]] || { echo 'usage: platform/vaultwarden-package-check' >&2; exit 2; }
+# A first Rust build may be cold. Both overrides remain bounded by run-check.
+export CHECK_TIMEOUT="${CHECK_TIMEOUT:-2400}"
+export CHECK_BUILD_TIMEOUT="${CHECK_BUILD_TIMEOUT:-$CHECK_TIMEOUT}"
+cd "$(dirname "$0")"
+exec ./run-check --impure --file vaultwarden-package-check.nix
