@@ -4,18 +4,60 @@ The prototype consumes the official unchanged Community Edition image. Its
 OAuth authentication includes non-public proprietary code, unlike the pure OSS
 Nixpkgs package whose OAuth implementation is a stub. The upstream free CE
 limits SSO to ten users; this is not an Enterprise trial or a paid license.
-See the [exact upstream license](https://github.com/windmill-labs/windmill/blob/v1.839.0/LICENSE).
+See the [exact upstream license](https://github.com/windmill-labs/windmill/blob/v1.861.0/LICENSE).
 No image is rebuilt, patched, rebranded or redistributed by this repository.
 
 Inspect a proposed official image pin from a clean checkout (public metadata
 only, bounded network requests, registry bearer tokens never printed):
 
 ```sh
-direnv exec . bun platform/oci-image.ts windmill-labs/windmill 1.839.0
+direnv exec . bun platform/oci-image.ts windmill-labs/windmill 1.861.0
 ```
 
 The Linux/amd64 manifest digest is verified against its bytes before reporting.
 This metadata lookup is not runtime or functional acceptance.
+
+Fetch/verify the pinned archive on the Linux builder, without starting a service:
+
+```sh
+direnv exec . env BUILD_LOCK=/absolute/private/shared-build.lock CHECK_TIMEOUT=900 CHECK_BUILD_TIMEOUT=900 ./platform/run-check --impure --file platform/windmill-image-check.nix
+```
+
+For reviewed pin updates that expression also accepts `--argstr version`,
+`--argstr imageDigest` and `--argstr archiveHash`. These override only a private
+preflight evaluation, leaving the runtime pin untouched. An intentional dummy
+archive hash can identify the actual fixed-output hash; its expected mismatch
+is never a passing verification. Commit the measured hash and repeat the
+default check, then run the full runtime/SSO acceptance before claiming support.
+
+## Native PKCE release prerequisite
+
+Upstream [1.861.0](https://github.com/windmill-labs/windmill/releases/tag/v1.861.0)
+(November 4, 2026) introduces per-provider SSO PKCE. The bootstrap explicitly
+sets `pkce: true` beside the Keycloak client credentials, matching the
+[upstream implementation contract](https://github.com/windmill-labs/windmill/pull/12189).
+The flag is opt-in for existing providers: merely changing the image does not
+enable it. Upstream describes a fresh verifier per login, S256 challenge and
+HTTP-only cookie, and callback verifier exchange. Our strict Keycloak client
+and browser acceptance remain required; static authorization parameters are
+not substituted for native verifier binding.
+
+The previous 1.839 functional trial observed an authorization request failing
+S256/challenge validation. No per-user SSO acceptance was established. The new
+image requires its own runtime and browser proof before enabling any profile.
+Source review found 16 added forward migrations, including older timestamps;
+the new latest version is 20261102180907 and the three background migration
+identifiers are unchanged. Image-bound migration markers force explicit stopped
+writer migration on this pin change. No live database upgrade is performed by
+these disposable checks.
+
+Checked November 5, 2026: the five published upstream
+[security advisories](https://github.com/windmill-labs/windmill/security/advisories)
+list patched versions no later than 1.782.0. This is a dated advisory check,
+not a claim of vulnerability absence. The 1.861 license adds explicit terms for
+internal unchanged CE/API use and commercial redistribution/embedding; this
+prototype uses the unchanged official image internally, with no license bypass,
+image modification or commercial embedding. Actual rollout remains separate.
 
 ## Runtime and bootstrap boundary
 
@@ -147,19 +189,38 @@ artifact and do not publish it. A failed-build directory is retained by the
 wrapper, not by an ordinary `nix flake check` invocation. The public summary
 uses tested exact message allowlists; an absent message proves no stage or
 cause. The fixed provider readback follows the pinned
-[CE OpenAPI](https://github.com/windmill-labs/windmill/blob/v1.839.0/backend/windmill-api/openapi.yaml):
+[CE OpenAPI](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/windmill-api/openapi.yaml):
 `oauth` contains provider objects with `type` and optional `display_name`.
 Only Keycloak and no alternate provider is accepted.
 The provider input also follows the pinned upstream
-[Keycloak settings producer](https://github.com/windmill-labs/windmill/blob/v1.839.0/frontend/src/lib/components/KeycloakSetting.svelte):
+[Keycloak settings producer](https://github.com/windmill-labs/windmill/blob/v1.861.0/frontend/src/lib/components/KeycloakSetting.svelte):
 the canonical realm URL is supplied as `org`, with an explicit fixed display
 name and the exact login endpoints. Failure diagnostics expose only bounded
 counts, HTTP status and fixed shape categories, never provider response values.
 Strict provider readiness has a30s deadline, including per-request deadlines.
 The pinned server polls settings invalidations every10s by default
-([upstream main.rs](https://github.com/windmill-labs/windmill/blob/v1.839.0/backend/src/main.rs));
+([upstream main.rs](https://github.com/windmill-labs/windmill/blob/v1.861.0/backend/src/main.rs));
 a5s readback loop could finish before one refresh. Ingress stays closed until
 the exact provider check succeeds; an expired or late result cannot open it.
+
+## Observed 1.861 runtime proof
+
+On November 5, 2026, exact source `1f6b698` passed all nine native subtests
+in 332.43 seconds. The default fixed-output archive hash verified, followed by
+actual foreground/background migrations, persisted `pkce: true`, repeated
+approved-user bootstrap, factory/public password denial, real Bash worker job,
+UID/network boundaries, changed-input/concurrent and cancelled-owner failures,
+closed ingress after failed rebootstrap, and final service stop/data retention.
+All sixteen recorded host identities were gone; the isolated build namespace,
+source-process and runtime-tag scans were empty. The immutable result was:
+
+```text
+/nix/store/rsskcbi5h8lz5aa5sgdznxb8576p48a3-vm-test-run-terrace-windmill-runtime
+```
+
+This is fresh-state runtime acceptance. Individual browser SSO/permissions,
+original roster/workflow execution, encrypted fresh-host restore, and upgrade
+of an existing 1.839 database each need their own proof. No profile was enabled.
 
 ## Persistence and remaining gates
 
@@ -183,7 +244,7 @@ read-only image/tmp boundary must be proved for each newly enabled language;
 preinstalled caches hidden by `/tmp` are not assumed available. Per-user login
 does not turn trusted-code execution into a sandbox.
 
-Upstream1.839.0 exceeds the1.782.0 fix boundary of
+Upstream 1.861.0 exceeds the 1.782.0 fix boundary of
 [GHSA-2jfj-x8j7-7mfh](https://github.com/windmill-labs/windmill/security/advisories/GHSA-2jfj-x8j7-7mfh);
 this is version provenance, not a general security certification. Production
 profiles, DNS/provider actions, complete membership/signing/email integration,

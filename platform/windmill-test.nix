@@ -191,6 +191,7 @@ in {
             host.wait_for_unit("podman-terrace-windmill-server.service", timeout=180)
             host.succeed("systemctl start podman-terrace-windmill-worker.service")
             host.succeed("systemctl start terrace-windmill-bootstrap.service")
+            assert host.succeed("runuser -u postgres -- psql -XAtw -d terrace_windmill -c \"SELECT value->'keycloak'->>'pkce' FROM global_settings WHERE name='oauths'\" 2>/dev/null").strip() == "true"
             assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
             assert client.succeed("curl -s -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login").strip() == "403"
             client.fail("nc -z -w 2 host 18001")
