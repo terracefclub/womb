@@ -6,6 +6,12 @@ Frigate guest, an independent Headscale guest, and a repository/browser guest.
 The extra guests isolate incompatible test contracts and recovery escrow. They
 are not required production topology. Actual host profiles remain disabled.
 
+The complete `--all-services` variant also includes signed Documenso, individual
+Windmill worker/roster execution and encrypted Vaultwarden items/attachments.
+Its originals-off replacement recovery result and exact invocation are recorded
+in the [all-services section](#all-services-composition). Earlier baseline
+results below retain their narrower scopes.
+
 ## Run from a clean checkout
 
 Use the x86-64 Linux builder with its existing passwordless transient-unit
@@ -172,12 +178,11 @@ a separately reviewed deletion. Pure rejection/sentinel tests run with
 
 This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
 public DNS/certificate issuance, CDN behavior, off-site operator recovery,
-real invitations or final simultaneous capacity approval. Windmill and
-Vaultwarden are not part of this scenario. Documenso is included only with
-`--documenso`; the original baseline acceptance below is separate from the
-optional-extension results.
-A passing source-matched native receipt is required before claiming this
-scenario accepted.
+real invitations or production capacity approval. The default baseline command
+excludes Windmill and Vaultwarden; the explicit `--all-services` variant below
+includes both. Documenso is included with `--documenso` or its implied variants.
+Each dated result below applies to its stated flags and source; it does not
+extend the coverage of another variant.
 
 
 ## Observed acceptance — November 5, 2026
@@ -272,9 +277,9 @@ or legal signing, remaining-app composition or actual provider installation.
 ### All-services composition
 
 The explicit `--all-services` mode implies signed Documenso and real tailnet
-peers and adds the accepted Windmill and Vaultwarden runtimes. Its own
-source-matched combined native receipt is still required; component restart
-proofs do not establish replacement-host recovery.
+peers and adds the accepted Windmill and Vaultwarden runtimes. The dated
+source-matched combined result below establishes replacement-host recovery for
+this mode, separately from the earlier component restart proofs.
 
 One shared synthetic identity fixture supplies the three reviewed application
 clients. Windmill uses individual native code/S256 login, decrypts its retained
@@ -358,3 +363,62 @@ reconciliation output, each bounded to 1MiB, into its private evidence directory
 before teardown. Export failures preserve the original restore failure; failed
 disks and the early encrypted repository/escrow remain retained. No diagnostic
 contents are printed by this export.
+
+
+### Observed all-services acceptance — November 5, 2026 (Pacific)
+
+Source `71b45be7f1ae2253b788bff69598beae8b642d9c` completed the
+`--all-services` rehearsal in 1733.06 seconds (scenario timing 1733.03 seconds).
+Both original and replacement phases passed 198 HTTPS protocol assertions and
+four concurrent native browser helpers alongside the automation checks.
+
+The original service guests were absent before blank replacements restored the
+encrypted repository with separately retained escrow. Actual root/systemd backup,
+restic restore and native PostgreSQL adoption preserved the complete role/password,
+grantor/options and role-setting fingerprints before application writers resumed.
+All five native app logins passed before their bootstrap-role and cross-app
+privilege denials. The native Vault probe reads its generated unit User and
+validates the expected account rather than assuming a Nix attribute key is an
+operating-system username.
+
+Fresh containers recovered the same signed/original PDF, certificate and
+encrypted 2FA data; Windmill recovered individual identities, private variable,
+script and old job/result, then ran new Bash and original eleven-case roster
+jobs with the pinned offline SDK closure. Native Vaultwarden decrypted the same two
+items and both attachments from the retained user device's token-free receipt.
+Its server-side synthetic master-password fixture was absent before backup and
+on the replacement. All three apps passed private administrator readback while
+Keycloak was stopped, public password/admin denials and clean issuer return.
+Administrator readback does not establish decryption of real users' vaults.
+
+The fresh automation guest retained Home Assistant identity/sensors, synthetic
+camera/relay behavior and its protected token. Headscale keys/users and all
+three client identities/addresses survived; the two approved service peers were
+replaced, while the denied test client was retained. The same allowed/denied
+access checks and simultaneous application load passed again. K3s retained its
+actual node/PVC identity and accepted a fresh volume write.
+
+PostgreSQL sampled peaks were 27 and 28 clients over 205 and 214 samples, within
+the configured 64 maximum; application pool limits totaled 42 with three reserved
+superuser slots and 19 connections of non-app headroom. Kernel-recorded container
+peaks stayed below their declared limits. These samples and test-VM resources
+do not establish production sizing.
+
+All seven distinct QEMU lifetimes were captured live and matched the original/
+final guest receipts. All 38 recorded host PID/start identities were absent after
+shutdown; the exact guardian was collected/inactive with zero MainPID/ControlPID,
+empty recursive cgroup and no owned source/tag processes. The successful command
+preserved seven disks, the encrypted repository and escrow by default.
+
+After independent proof review, the explicit completed-run synthetic purge
+removed only that run's seven disks, encrypted repository, escrow and validated
+socket runtime. A missing-confirmation attempt was first rejected without
+mutation. The receipt retained `complete=true`, `computeOff=true` and
+`syntheticStatePurged=true`; all other receipt fields, 37 earlier protected
+receipt/archive hashes and two unrelated/earlier-failure sentinels were unchanged.
+Receipts and evidence remain private and retained.
+
+No hosted-CI or merge success is implied by this native result. The current
+GitLab jobs were rejected before execution because the namespace's instance-runner
+compute quota was exhausted. Actual profiles remain disabled and the provider/
+live-integration limits above remain unchanged.
