@@ -200,6 +200,14 @@ address. A real browser uses the canonical HTTPS origins and trusted test CA;
 certificate verification, PKCE and the ordinary app authorization code flow stay
 enabled.
 
+Disposable multi-service checks can import `writeDocumensoInputs()` from
+`platform/documenso/write-inputs.ts` with the result of the shared identity
+fixture and its `documenso` extra secret. This writes app inputs and the limited
+browser credentials without creating another realm. Its default signing
+preparation preserves the standalone check; `{ signing: false }` omits the
+synthetic signing files for unsigned-only fixtures. This test helper does not
+provision real accounts or reconcile an existing production realm.
+
 ```sh
 # x86_64 Linux builder only; TFC source must match test-identity-contract.nix.
 BUILD_LOCK=/absolute/shared/build.lock platform/documenso-functional-check /source/tfc
@@ -324,3 +332,23 @@ standalone acceptance; replacement-host signing recovery and production use
 remain separate gates. Pure parser tests and certificate health alone do not
 establish the workflow. No check publishes
 documents, sends real mail, or signs legal documents.
+
+
+Login failure diagnostics
+-------------------------
+
+The functional browser preserves the existing login timeouts and exact OIDC,
+closed-signup, disabled-account and session assertions. Before the first provider
+click it attaches per-attempt counters (saturated at 255) for page errors, failed
+requests/scripts and same-origin authentication responses/errors. Failure output
+records only the login ordinal, fixed substep/exception labels, numeric HTTP
+statuses and expected-error/session-empty booleans. Each login resets those facts;
+a later failure after a completed login is marked `not-login`. No exception text,
+usernames, URLs, callback tokens, response bodies or credentials are emitted.
+The combined CREATE failure on 2026-11-05 lacked these witnesses, so its signin
+screen and unrelated license-client errors do not establish a login cause.
+
+Run the focused privacy/reset checks from a clean checkout with
+`direnv exec . python3 -B -m unittest discover -s tests/platform -p test_documenso_functional.py`.
+The existing Linux `platform/documenso-functional-check TFC_SOURCE` remains the
+native rerun entrypoint; this diagnostic change alone is not native acceptance.

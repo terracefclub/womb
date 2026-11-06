@@ -6,6 +6,12 @@ Frigate guest, an independent Headscale guest, and a repository/browser guest.
 The extra guests isolate incompatible test contracts and recovery escrow. They
 are not required production topology. Actual host profiles remain disabled.
 
+The complete `--all-services` variant also includes signed Documenso, individual
+Windmill worker/roster execution and encrypted Vaultwarden items/attachments.
+Its originals-off replacement recovery result and exact invocation are recorded
+in the [all-services section](#all-services-composition). Earlier baseline
+results below retain their narrower scopes.
+
 ## Run from a clean checkout
 
 Use the x86-64 Linux builder with its existing passwordless transient-unit
@@ -123,12 +129,22 @@ empty replacement boots. Declared host/node identity is retained, while the
 container runtime and image imports are fresh. Restore reconciles DB counts,
 file hashes and SQLite integrity, then adopts the stopped isolated PostgreSQL
 copy under the declared native HBA/config (not isolated trust authentication).
-PostgreSQL requires its bootstrap catalog owner to remain SUPERUSER; see
-[PG18 ALTER ROLE](https://www.postgresql.org/docs/18/sql-alterrole.html).
-This internal role is made NOLOGIN, has no password, no direct or inherited
-membership path, and no client sessions. Actual fresh peer-login and app-role
-assumption attempts must fail; normal managed `postgres` remains the login
-administrator. The recovered PVC must
+The isolated restore preserves the recorded source bootstrap name at OID10.
+PG18 attaches role-grant dependencies to that identity; importing its grants
+under a differently named bootstrap account fails even when both accounts are
+superusers. See the [upstream PG18 report](https://www.postgresql.org/message-id/CA%2BC_kKWHMP4c56jx1BPvP1jmjp2pmBu0Cw07fPVECUmkJSnT4w%40mail.gmail.com)
+and [pg_dumpall bootstrap notes](https://www.postgresql.org/docs/18/app-pg-dumpall.html#APP-PG-DUMPALL-NOTES).
+The operating-system restore owner remains separate and gains no SQL role.
+This declared native source uses `postgres` as the login administrator; its
+flags, password, settings and every membership/grantor/option are compared
+before resumed writers. The operating-system restore user cannot connect as
+itself or impersonate `postgres`, and app credentials cannot assume that role.
+Native peer HBA and fsync remain mandatory. The narrow restore contract requires
+hash-bound bootstrap metadata and a source bootstrap with LOGIN and SUPERUSER.
+Embedded double quotes in that bootstrap name are rejected before initdb; other
+role names and their SQL remain intact. Legacy metadata-free or NOLOGIN-bootstrap
+snapshots fail closed and retain their
+original artifacts/pinned tooling. The recovered PVC must
 read its original marker and persist a new write. Native SSO/private-content,
 automation auth/sensors, relay keys/users and unrelated sentinels are checked.
 All replacement guests and the repository/browser guest stop before success.
@@ -162,12 +178,11 @@ a separately reviewed deletion. Pure rejection/sentinel tests run with
 
 This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
 public DNS/certificate issuance, CDN behavior, off-site operator recovery,
-real invitations or final simultaneous capacity approval. Windmill and
-Vaultwarden are not part of this scenario. Documenso is included only with
-`--documenso`; the original baseline acceptance below is separate from the
-optional-extension results.
-A passing source-matched native receipt is required before claiming this
-scenario accepted.
+real invitations or production capacity approval. The default baseline command
+excludes Windmill and Vaultwarden; the explicit `--all-services` variant below
+includes both. Documenso is included with `--documenso` or its implied variants.
+Each dated result below applies to its stated flags and source; it does not
+extend the coverage of another variant.
 
 
 ## Observed acceptance — November 5, 2026
@@ -257,3 +272,153 @@ synthetic purge removed seven disks, repository and escrow, retaining evidence,
 its unrelated sentinel and earlier failed state. These observations establish
 synthetic signed-envelope recovery, not production certificate trust, real mail
 or legal signing, remaining-app composition or actual provider installation.
+
+
+### All-services composition
+
+The explicit `--all-services` mode implies signed Documenso and real tailnet
+peers and adds the accepted Windmill and Vaultwarden runtimes. The dated
+source-matched combined result below establishes replacement-host recovery for
+this mode, separately from the earlier component restart proofs.
+
+One shared synthetic identity fixture supplies the three reviewed application
+clients. Windmill uses individual native code/S256 login, decrypts its retained
+private variable, reads its original script/job/result and executes a new real
+operator job. Explicit `--roster` additionally runs the original eleven-case
+roster contract with real pinned SDKs and fake Sheets transport in that worker;
+its separate token-free receipt retains source/lock/script/job/result digests.
+Vaultwarden uses fresh individual SSO and the retained user's master password
+to decrypt the same two vault items and uploaded attachment bytes. Its explicit
+`restore` mode requires no old access or refresh token. Signed PDF, encrypted
+Documenso 2FA and private-network identity/ACL checks remain enabled.
+
+All app and worker writers stop before capture and stay stopped across every
+configured snapshot. After the original service guests are absent, the blank
+replacement adopts the declared native PostgreSQL/HBA configuration, with the
+same app role limits and restricted group memberships, before app startup.
+Windmill receives new container IDs with the same pinned image; its immutable
+SDK closure is reinstalled rather than recovered from mutable worker caches.
+All three apps exercise their private native administrator recovery while
+Keycloak and its health service/timer are stopped. Public password/admin paths
+remain denied. User-side vault decryption is a separate check from administrator
+readback.
+
+Four real browser helpers run together inside a bounded client systemd cgroup,
+while separate guest consoles perform the website/CMS protocol and automation
+checks. This load repeats after replacement recovery. Each phase has exclusive
+private witnesses. App PostgreSQL connection limits total 42 within a
+64-connection server, with maintenance and superuser reserve. The receipt reports
+sampled connections (including the sampler), actual container kernel memory
+counters, bootstrap timings, service versions and seven original/final guest
+PID/start identities with verified absence. Sampled peaks and this synthetic
+load do not establish production sizing.
+
+The existing four disposable guests isolate test contracts. The optional
+application guest uses 12GiB/four vCPUs and the concurrent browser/repository
+guest 6GiB/four vCPUs; this is test capacity, not a production host requirement.
+This explicit mode has a 2700-second independent driver deadline; existing
+variants retain their 1800-second deadline. Build/queue and stop bounds above
+remain unchanged.
+
+The fixture's browser credentials, including synthetic vault master passwords,
+are retained on the disposable client. After verifying the copied bytes and
+real client encryption/decryption, the server-side vault fixture copy is removed
+before backup; absence is checked again on the replacement. Production
+Vaultwarden inputs do not escrow each person's master password. This test's
+private administrator readback does not prove it can decrypt real users' vaults.
+
+With the accepted archives already present on Falcon, the complete invocation
+from a clean repository checkout is:
+
+```sh
+install -d -m 0700 /home/tristan/terrace-work/full-rehearsal-output
+direnv exec . env BUILD_LOCK=/home/tristan/.falcon-heavy.lock \
+  ./platform/full-rehearsal run --all-services \
+  --output /home/tristan/terrace-work/full-rehearsal-output \
+  --webArchive /home/tristan/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+  --cmsArchive /home/tristan/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+  --tfcSource /home/tristan/terrace-work/release-a2
+```
+
+Successful `run` stops all owned compute and preserves its disks, encrypted
+repository and separately protected escrow by default. Only an explicit
+completed synthetic purge removes that run's retained payloads:
+
+```sh
+direnv exec . ./platform/full-rehearsal purge \
+  /home/tristan/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID \
+  --synthetic-only --yes
+```
+
+Receipts/evidence and unrelated or failed runs remain. No provider apply, blank
+provider-machine install, live-data migration, public DNS/cutover, human relay
+OIDC enrollment, forced DERP/NAT path or live Sheets/mail/payment integration is
+claimed by this mode. Website/CMS, identity, Vaultwarden, automation and relay
+use native services; Documenso and Windmill use managed Podman with native
+PostgreSQL. K3s recovery covers its actual persistent-volume probe, not placement
+of every application in Kubernetes. Actual profiles remain disabled.
+
+A failed restore exports only fixed restore/globals/per-database error files and
+reconciliation output, each bounded to 1MiB, into its private evidence directory
+before teardown. Export failures preserve the original restore failure; failed
+disks and the early encrypted repository/escrow remain retained. No diagnostic
+contents are printed by this export.
+
+
+### Observed all-services acceptance — November 5, 2026 (Pacific)
+
+Source `71b45be7f1ae2253b788bff69598beae8b642d9c` completed the
+`--all-services` rehearsal in 1733.06 seconds (scenario timing 1733.03 seconds).
+Both original and replacement phases passed 198 HTTPS protocol assertions and
+four concurrent native browser helpers alongside the automation checks.
+
+The original service guests were absent before blank replacements restored the
+encrypted repository with separately retained escrow. Actual root/systemd backup,
+restic restore and native PostgreSQL adoption preserved the complete role/password,
+grantor/options and role-setting fingerprints before application writers resumed.
+All five native app logins passed before their bootstrap-role and cross-app
+privilege denials. The native Vault probe reads its generated unit User and
+validates the expected account rather than assuming a Nix attribute key is an
+operating-system username.
+
+Fresh containers recovered the same signed/original PDF, certificate and
+encrypted 2FA data; Windmill recovered individual identities, private variable,
+script and old job/result, then ran new Bash and original eleven-case roster
+jobs with the pinned offline SDK closure. Native Vaultwarden decrypted the same two
+items and both attachments from the retained user device's token-free receipt.
+Its server-side synthetic master-password fixture was absent before backup and
+on the replacement. All three apps passed private administrator readback while
+Keycloak was stopped, public password/admin denials and clean issuer return.
+Administrator readback does not establish decryption of real users' vaults.
+
+The fresh automation guest retained Home Assistant identity/sensors, synthetic
+camera/relay behavior and its protected token. Headscale keys/users and all
+three client identities/addresses survived; the two approved service peers were
+replaced, while the denied test client was retained. The same allowed/denied
+access checks and simultaneous application load passed again. K3s retained its
+actual node/PVC identity and accepted a fresh volume write.
+
+PostgreSQL sampled peaks were 27 and 28 clients over 205 and 214 samples, within
+the configured 64 maximum; application pool limits totaled 42 with three reserved
+superuser slots and 19 connections of non-app headroom. Kernel-recorded container
+peaks stayed below their declared limits. These samples and test-VM resources
+do not establish production sizing.
+
+All seven distinct QEMU lifetimes were captured live and matched the original/
+final guest receipts. All 38 recorded host PID/start identities were absent after
+shutdown; the exact guardian was collected/inactive with zero MainPID/ControlPID,
+empty recursive cgroup and no owned source/tag processes. The successful command
+preserved seven disks, the encrypted repository and escrow by default.
+
+After independent proof review, the explicit completed-run synthetic purge
+removed only that run's seven disks, encrypted repository, escrow and validated
+socket runtime. A missing-confirmation attempt was first rejected without
+mutation. The receipt retained `complete=true`, `computeOff=true` and
+`syntheticStatePurged=true`; all other receipt fields, 37 earlier protected
+receipt/archive hashes and two unrelated/earlier-failure sentinels were unchanged.
+Receipts and evidence remain private and retained.
+
+No hosted-CI or merge success is implied by this native result. The current
+GitLab jobs were rejected before execution because the namespace's instance-runner
+compute quota was exhausted. Actual profiles remain disabled and the provider/
+live-integration limits above remain unchanged.

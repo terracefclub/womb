@@ -211,7 +211,9 @@ terrace-backup-restore --target primary --snapshot <ID|latest> \
   `<dest>/reconciliation.txt`.
 - Files are under `<dest>/files/<original path>`; the isolated database socket is
   `<dest>/pgsock`:
-  `runuser -u terrace-restore -- psql -h <dest>/pgsock -U terrace-restore -d cms`.
+  `runuser -u terrace-restore -- psql -h <dest>/pgsock -U "$SQL_BOOTSTRAP" -d cms`,
+  where `SQL_BOOTSTRAP` is the validated source name retained in
+  `<dest>/bootstrap-role.json`; the OS owner stays `terrace-restore`.
 - Re-check later with `terrace-backup-restore --verify-only <dest>`; stop the
   cluster with `terrace-backup-restore --stop <dest>`. Without `--keep-running`
   it stops itself. Failed restores stop their isolated database even when

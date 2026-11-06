@@ -4,16 +4,26 @@
   contract,
   extraDnsNames ? [],
   fixtureProgram ? "${contract}/fixture.ts",
+  tlsFixture ? null,
 }: let
   directory = "/var/lib/terrace-gateway-test";
   media = "/var/lib/terrace-cms-media";
   # Public, disposable test certificates only. No production key or ACME account.
-  certificate = pkgs.runCommand "terrace-gateway-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
-    mkdir -p $out
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-      -keyout $out/key.pem -out $out/cert.pem -subj '/CN=web.terrace.invalid' \
-      -addext ${pkgs.lib.escapeShellArg ("subjectAltName=" + pkgs.lib.concatStringsSep "," (map (name: "DNS:${name}") (["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames)))} 2>/dev/null
-  '';
+  certificate =
+    if tlsFixture != null
+    then tlsFixture
+    else
+      pkgs.runCommand "terrace-gateway-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+        mkdir -p $out
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+          -keyout $out/key.pem -out $out/cert.pem -subj '/CN=web.terrace.invalid' \
+          -addext ${pkgs.lib.escapeShellArg ("subjectAltName=" + pkgs.lib.concatStringsSep "," (map (name: "DNS:${name}") (["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames)))} 2>/dev/null
+      '';
+  trustedCertificate = "${certificate}/${
+    if tlsFixture == null
+    then "cert.pem"
+    else "ca.pem"
+  }";
 in {
   name = "terrace-website-https";
   nodes = {
@@ -23,7 +33,7 @@ in {
         memorySize = 6144;
         cores = 2;
       };
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
+      security.pki.certificateFiles = [trustedCertificate];
       networking.hosts."127.0.0.1" = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
       terrace.website = {
         enable = true;
@@ -49,9 +59,9 @@ in {
       # Test-only isolated master bootstrap; removed through the private API.
       # It is absent from the production realm and from module defaults.
       systemd.services.keycloak.serviceConfig.EnvironmentFile = "${directory}/keycloak.env";
-      systemd.services.terrace-cms.environment.NODE_EXTRA_CA_CERTS = "${certificate}/cert.pem";
-      systemd.services.terrace-cms-migrate.environment.NODE_EXTRA_CA_CERTS = "${certificate}/cert.pem";
-      systemd.services.terrace-web.environment.NODE_EXTRA_CA_CERTS = "${certificate}/cert.pem";
+      systemd.services.terrace-cms.environment.NODE_EXTRA_CA_CERTS = trustedCertificate;
+      systemd.services.terrace-cms-migrate.environment.NODE_EXTRA_CA_CERTS = trustedCertificate;
+      systemd.services.terrace-web.environment.NODE_EXTRA_CA_CERTS = trustedCertificate;
       systemd.services.terrace-cms.wantedBy = lib.mkForce [];
       systemd.services.terrace-web.wantedBy = lib.mkForce [];
       systemd.services.gateway-test-inputs = {
@@ -68,7 +78,7 @@ in {
           set -euo pipefail
           ${pkgs.bun}/bin/bun ${pkgs.lib.escapeShellArg fixtureProgram}
           cp ${certificate}/{cert,key}.pem ${directory}/
-          chmod 0400 ${directory}/{cert,key}.pem
+          chmod 0400 ${directory}/{cert,key}.pem${pkgs.lib.optionalString (tlsFixture != null) "\ncp ${certificate}/ca.pem ${directory}/ca.pem && chmod 0400 ${directory}/ca.pem"}
         '';
       };
       # Pierce the VM firewall to establish actual backend binding, not just filtering.
@@ -82,7 +92,7 @@ in {
         memorySize = 2048;
         cores = 1;
       };
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
+      security.pki.certificateFiles = [trustedCertificate];
       networking.hosts.${nodes.gateway.networking.primaryIPAddress} = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
       environment.systemPackages = [pkgs.curl pkgs.jq pkgs.netcat-openbsd pkgs.nssTools (pkgs.python3.withPackages (ps: [ps.playwright]))];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
@@ -135,7 +145,7 @@ in {
             name = private.rsplit("/", 1)[-1]
             gateway.succeed(f"cp ${directory}/credentials.json /tmp/shared/{name}/credentials.json")
             client.succeed(f"cp /tmp/shared/{name}/credentials.json /root/gateway-fixture.json")
-        client.succeed("install -d -m 0700 /root/.pki/nssdb && certutil -N -d sql:/root/.pki/nssdb --empty-password && certutil -A -d sql:/root/.pki/nssdb -n TerraceGatewayTest -t 'C,,' -i ${certificate}/cert.pem")
+        client.succeed("install -d -m 0700 /root/.pki/nssdb && certutil -N -d sql:/root/.pki/nssdb --empty-password && certutil -A -d sql:/root/.pki/nssdb -n TerraceGatewayTest -t 'C,,' -i ${trustedCertificate}")
         browser = client.succeed("test $(stat -c %a /root/gateway-fixture.json) = 400 && python /etc/gateway-browser.py").strip()
         assert browser == "Real Chromium denied-to-switch-to-approved checks passed: HTTPS trust, native POST Origin, approved page and secure cookie."
         print(browser)

@@ -88,6 +88,8 @@ def warm(run, run_id, args, lock):
         command.extend(['--arg', 'withRelayPeers', 'true'])
     if args.documenso_signing:
         command.extend(['--arg', 'withDocumensoSigning', 'true'])
+    if args.all_services:
+        command.extend(['--arg', 'withApplications', 'true'])
     command.append('driver')
     child = None
     with (run / 'build.log').open('xb') as log, (run / 'build-output.txt').open('xb') as output:
@@ -122,7 +124,7 @@ def execute(args):
         raise ValueError()
     run, run_id = create_run(parent)
     driver = warm(run, run_id, args, lock)
-    containment = contained_driver(run, run_id, [driver, '--no-interactive', '--keep-machine-state', '--output_directory', str(run / 'evidence')], lock, runtime=1800, queue=1200)
+    containment = contained_driver(run, run_id, [driver, '--no-interactive', '--keep-machine-state', '--output_directory', str(run / 'evidence')], lock, runtime=2700 if args.all_services else 1800, queue=1200)
     scenario = private_json(run / 'evidence' / 'scenario-result.json')
     if scenario.get('scope') != 'terrace-disposable-synthetic' or scenario.get('checks', {}).get('allGuestsStopped') is not True:
         raise RuntimeError()
@@ -156,6 +158,7 @@ def main():
     run.add_argument('--documenso', action='store_true', help='Include the optional native Documenso recovery checks.')
     run.add_argument('--documenso-signing', action='store_true', help='Include synthetic signed-envelope recovery; implies --documenso.')
     run.add_argument('--relay-peers', action='store_true', help='Include disposable tailnet clients and private service recovery.')
+    run.add_argument('--all-services', action='store_true', help='Include signed documents, private network peers, Windmill and Vaultwarden recovery.')
     for key in ['webArchive', 'cmsArchive', 'tfcSource']:
         run.add_argument('--' + key, required=True)
     delete = sub.add_parser('purge')
@@ -163,6 +166,9 @@ def main():
     delete.add_argument('--synthetic-only', action='store_true', required=True)
     delete.add_argument('--yes', action='store_true', required=True)
     args = parser.parse_args()
+    if getattr(args, 'all_services', False):
+        args.documenso_signing = True
+        args.relay_peers = True
     if getattr(args, 'documenso_signing', False):
         args.documenso = True
 
