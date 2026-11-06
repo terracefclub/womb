@@ -51,6 +51,7 @@
     ${lib.toShellVar "DATABASES" cfg.postgresql.databases}
     ${lib.toShellVar "PG_USER" cfg.postgresql.user}
     ${lib.toShellVar "RESTORE_USER" "terrace-restore"}
+    ${lib.toShellVar "BOOTSTRAP_HELPER" "${./backup/bootstrap-identity.py}"}
     ${lib.toShellVar "FILESET_ROOT" (lib.mapAttrs (_: v: v.root) fileSets)}
     ${lib.toShellVar "FILESET_EXCLUDES" (lib.mapAttrs (_: v: lib.concatStringsSep "|" v.excludes) fileSets)}
     ${lib.toShellVar "PROTECTED_PATHS" ([stateDir "/var/lib/postgresql" "/var/lib/headscale" cfg.headscale.stateDir] ++ lib.attrValues cfg.media ++ lib.attrValues cfg.extraPaths)}
@@ -80,6 +81,7 @@
     restic
     sqlite
     util-linux
+    python3
     cfg.postgresql.package
   ];
 

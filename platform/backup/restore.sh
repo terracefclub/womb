@@ -43,7 +43,7 @@ fail() {
 }
 
 rpg() { runuser -u "$RESTORE_USER" -- "$@"; }
-rpsql() { rpg psql -X -q -h "$SOCK" -U "$RESTORE_USER" "$@"; }
+rpsql() { rpg psql -X -q -h "$SOCK" -U "$SQL_BOOTSTRAP" "$@"; }
 
 check_dest() {
   local p real
@@ -98,15 +98,18 @@ restore_databases() {
   local dumps=("$DUMPS_R"/postgresql/*.dump)
   shopt -u nullglob
   [[ ${#dumps[@]} -gt 0 ]] || { say "no PostgreSQL dumps in snapshot"; return 0; }
+  python "$BOOTSTRAP_HELPER" prepare "$DUMPS_R/postgresql/globals.sql" "$DUMPS_R/postgresql/bootstrap-role.json" \
+    "$DEST/globals-prepared.sql" "$DEST/bootstrap-role.json"
+  SQL_BOOTSTRAP=$(python "$BOOTSTRAP_HELPER" name "$DEST/bootstrap-role.json")
   install -d -o "$RESTORE_USER" -m 0700 "$DEST/pgdata" "$SOCK"
-  rpg initdb -D "$DEST/pgdata" -U "$RESTORE_USER" --auth-local=trust --no-instructions --no-locale -E UTF8 >"$DEST/initdb.log"
+  rpg initdb -D "$DEST/pgdata" -U "$SQL_BOOTSTRAP" --auth-local=trust --no-instructions --no-locale -E UTF8 >"$DEST/initdb.log"
   start_db
   # Roles carry password hashes: keep output out of the terminal, errors in a 0600 file.
-  rpsql -v ON_ERROR_STOP=1 -d postgres -f - <"$DUMPS_R/postgresql/globals.sql" >/dev/null 2>"$DEST/globals.err" \
+  rpsql -v ON_ERROR_STOP=1 -d postgres -f - <"$DEST/globals-prepared.sql" >/dev/null 2>"$DEST/globals.err" \
     || die "role restore failed (see $DEST/globals.err)"
   for dump in "${dumps[@]}"; do
     db=$(basename "$dump" .dump)
-    rpg pg_restore --create --exit-on-error --dbname=postgres -h "$SOCK" -U "$RESTORE_USER" <"$dump" 2>"$DEST/restore-$db.err" \
+    rpg pg_restore --create --exit-on-error --dbname=postgres -h "$SOCK" -U "$SQL_BOOTSTRAP" <"$dump" 2>"$DEST/restore-$db.err" \
       || die "pg_restore failed for $db (see $DEST/restore-$db.err)"
     n=$((n + 1))
   done
@@ -193,6 +196,9 @@ case "$MODE" in
     ;;
   verify)
     [[ -d $DEST/files ]] || die "not a restored directory: $DEST"
+    if [[ -d $DEST/pgdata ]]; then
+      SQL_BOOTSTRAP=$(python "$BOOTSTRAP_HELPER" name "$DEST/bootstrap-role.json")
+    fi
     : >"$REPORT"
     reconcile
     ;;
@@ -208,7 +214,7 @@ case "$MODE" in
     reconcile || rc=1
     if [[ $KEEP -eq 1 && $rc -eq 0 && -d $DEST/pgdata ]]; then
       LEAVE_RUNNING=1
-      say "restored cluster left running; connect with: runuser -u $RESTORE_USER -- psql -h $SOCK -U $RESTORE_USER -d DBNAME"
+      say "restored cluster left running; use the recorded bootstrap-role.json SQL identity and private socket $SOCK"
       say "stop it with: terrace-backup-restore --stop $DEST"
     fi
     exit "$rc"

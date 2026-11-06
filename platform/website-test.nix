@@ -151,7 +151,7 @@ in {
         return time.monotonic() - before
 
     def sql(machine, query, isolated=False):
-        prefix = "runuser -u terrace-restore -- psql -h ${restored}/pgsock -U terrace-restore" if isolated else "runuser -u postgres -- psql"
+        prefix = "runuser -u terrace-restore -- psql -h ${restored}/pgsock -U postgres" if isolated else "runuser -u postgres -- psql"
         return machine.succeed(prefix + " -X -A -t -d terrace_cms -c " + shlex.quote(query) + " 2>/dev/null").strip()
 
     def api(machine, route):

@@ -78,7 +78,7 @@ in {
 
     S = "${secrets}"
     PG = "runuser -u postgres -- psql -X -A -t -d"
-    RESTORED_PG = "runuser -u terrace-restore -- psql -X -A -t -U terrace-restore -h {sock} -d {db}"
+    RESTORED_PG = "runuser -u terrace-restore -- psql -X -A -t -U postgres -h {sock} -d {db}"
     DB_TABLES = {
         "cms": ["pages", "media_refs"],
         "community": ["members", "stories"],
@@ -303,8 +303,8 @@ in {
     with subtest("a damaged dump fails closed, stops the isolated database and protects diagnostics"):
         # Deliberately corrupt a separate tagged snapshot, never a normal backup.
         dumps = "/var/lib/terrace-backup/dumps"
-        source.succeed(f"install -d -m 0700 {dumps}/postgresql")
-        source.succeed(f"touch {dumps}/postgresql/globals.sql && echo invalid-dump > {dumps}/postgresql/broken.dump")
+        source.succeed("terrace-backup _stage")
+        source.succeed(f"echo invalid-dump > {dumps}/postgresql/broken.dump")
         source.succeed(f"terrace-backup restic primary backup --tag corrupt-restore --quiet {dumps}")
         broken = json.loads(source.succeed("terrace-backup restic primary snapshots --tag corrupt-restore --json"))[0]["id"]
         source.succeed(f"rm -rf {dumps}")
@@ -312,7 +312,7 @@ in {
             out = source.fail(f"terrace-backup-restore --target primary --snapshot {broken} --dest {dest} {flag} 2>&1")
             assert "pg_restore failed" in out, out
             source.fail(f"test -e {dest}/pgdata/postmaster.pid")
-            for private in ["globals.err", "restore-broken.err", "reconciliation.txt", "initdb.log"]:
+            for private in ["globals.err", "globals-prepared.sql", "bootstrap-role.json", "restore-broken.err", "reconciliation.txt", "initdb.log"]:
                 assert source.succeed(f"stat -c %a {dest}/{private}").strip() == "600"
             assert source.succeed(f"stat -c %a {dest}/files").strip() == "700"
             source.fail(f"runuser -u nobody -- cat {dest}/files{dumps}/postgresql/broken.dump")

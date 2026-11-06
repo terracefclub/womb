@@ -15,6 +15,7 @@ check-supervision:
     - python platform/rehearsal/test-host.py -v
     - python -m unittest discover -s tests/platform -p 'test_documenso_*.py' -v
     - python platform/rehearsal/test-full.py -v
+    - python tests/platform/test_bootstrap_identity.py -v
 
 oci-metadata:
   image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
