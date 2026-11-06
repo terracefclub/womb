@@ -18,6 +18,20 @@ class MirrorTests(unittest.TestCase):
         self.assertTrue(all(":refs/heads/github/" in x for x in specs[:3]))
         self.assertEqual(specs[-1], "refs/tags/release-1:refs/tags/github/release-1")
 
+    def test_failure_facts_never_reflect_private_error(self):
+        private = b"credential-marker URL-PRIVATE KEY-PRIVATE Permission denied (publickey)"
+        text = str(MODULE.MirrorFailure("push", 128, private))
+        import json
+        facts = json.loads(text)
+        self.assertEqual(facts["stage"], "push")
+        self.assertEqual(facts["returncode"], 128)
+        self.assertTrue(facts["sshPermissionDenied"])
+        for marker in ("credential-marker", "URL-PRIVATE", "KEY-PRIVATE"):
+            self.assertNotIn(marker, text)
+        timed = json.loads(str(MODULE.MirrorFailure("fetch", stderr=b"x" * 65537, timeout=True)))
+        self.assertTrue(timed["timeout"])
+        self.assertTrue(timed["stderrTruncated"])
+
     def test_bad_inventory_and_refs_rejected(self):
         for heads, tags in (({}, []), ({"trunk": "a" * 40, "unreviewed": "a" * 40}, []),
                             ({"trunk": "not-a-sha"}, []), ({"trunk": "a" * 40}, ["refs/tags/a:refs/heads/trunk"])):
