@@ -23,6 +23,35 @@ stage = "private fixture validation"
 ui_diagnostics = {"pageErrors": 0, "failedScripts": 0, "organisationStatus": 0, "organisationHeading": 0, "createButton": 0, "dialog": 0, "billingEnabled": 0, "documentStatus": 0, "documentRoute": 0}
 
 
+LOGIN_COUNTERS = ("pageErrors", "failedRequests", "failedScripts", "authResponses", "authHttpErrors")
+
+
+def fresh_login_diagnostics(ordinal):
+    assert type(ordinal) is int and 1 <= ordinal <= 100
+    return {"ordinal": ordinal, "step": "context", "exceptionClass": "unobserved",
+            "signinStatus": 0, "callbackStatus": 0, "expectedErrorMatch": None,
+            "sessionStatus": 0, "sessionEmpty": None,
+            **{name: 0 for name in LOGIN_COUNTERS}}
+
+
+def login_exception_class(error):
+    # Return fixed labels only; exception messages/args can contain credentials.
+    for kind in (AssertionError, ValueError, KeyError, TypeError):
+        if type(error) is kind:
+            return kind.__name__
+    known = {("playwright._impl._errors", "TimeoutError"): "PlaywrightTimeout",
+             ("playwright._impl._errors", "Error"): "PlaywrightError"}
+    return known.get((type(error).__module__, type(error).__name__), "other")
+
+
+def login_counter(facts, name):
+    assert name in LOGIN_COUNTERS
+    facts[name] = min(255, facts[name] + 1)
+
+
+login_diagnostics = None
+
+
 def private_read(path):
     info = path.lstat()
     assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0 and info.st_size <= 131072
@@ -72,7 +101,7 @@ def mode_options(arguments):
 
 
 def main():
-    global stage
+    global stage, login_diagnostics
     mode, signing = mode_options(sys.argv[1:])
     assert ROOT.stat().st_mode & 0o077 == 0
     users = {user["username"]: user for user in private_read(ROOT / "credentials.json")["users"]}
@@ -87,37 +116,82 @@ def main():
                 value.set_default_timeout(45000)
                 return value
 
-            def session(ctx):
+            def session(ctx, facts=None):
+                if facts is not None:
+                    facts["step"] = "session-request"
                 response = ctx.request.get(DOC + "/api/auth/session")
+                if facts is not None:
+                    facts["sessionStatus"] = response.status
+                    facts["step"] = "session-response"
                 assert response.status == 200 and len(response.body()) <= 65536
-                return response.json()
+                value = response.json()
+                if facts is not None:
+                    facts["sessionEmpty"] = isinstance(value, dict) and value.get("user") is None
+                    facts["step"] = "session-assertion"
+                return value
 
             def login(username, expected=None):
+                global login_diagnostics
+                ordinal = 1 if login_diagnostics is None else login_diagnostics["ordinal"] + 1
+                facts = fresh_login_diagnostics(ordinal)
+                login_diagnostics = facts
                 ctx = context()
                 page = ctx.new_page()
                 active_page[0] = page
-                page.goto(DOC + "/signin")
+                # Per-page closures retain this attempt only, including the first
+                # SSR/provider action; they never persist URLs, bodies or errors.
+                page.on("pageerror", lambda _: login_counter(facts, "pageErrors"))
+                page.on("requestfailed", lambda _: login_counter(facts, "failedRequests"))
+                def login_response(response):
+                    if response.request.resource_type == "script" and response.status >= 400:
+                        login_counter(facts, "failedScripts")
+                    parsed = urlsplit(response.url)
+                    if parsed.netloc == "documents.terrace.invalid" and parsed.path.startswith("/api/auth/"):
+                        login_counter(facts, "authResponses")
+                        if response.status >= 400:
+                            login_counter(facts, "authHttpErrors")
+                page.on("response", login_response)
+                facts["step"] = "signin-navigation"
+                response = page.goto(DOC + "/signin")
+                facts["signinStatus"] = response.status if response is not None else 0
+                facts["step"] = "provider-click"
                 page.get_by_role("button", name="Terrace", exact=True).click()
+                facts["step"] = "identity-username"
                 page.locator("#username").fill(username)
+                facts["step"] = "identity-password"
                 page.locator("#password").fill(users[username]["password"])
+                facts["step"] = "identity-submit-and-callback"
                 with page.expect_response(lambda response: urlsplit(response.url).netloc == "documents.terrace.invalid" and urlsplit(response.url).path == "/api/auth/callback/oidc") as callback:
                     page.locator("#kc-login").click()
                 callback = callback.value
+                facts["callbackStatus"] = callback.status
+                facts["step"] = "application-redirect"
                 page.wait_for_url(re.compile(r"^https://documents\.terrace\.invalid/"))
                 if expected == "ACCOUNT_DISABLED":
+                    facts["step"] = "disabled-response"
                     assert callback.status == 403 and len(callback.body()) <= 65536
-                    assert callback.json()["code"] == expected
-                    assert session(ctx)["user"] is None
+                    code = callback.json()["code"]
+                    facts["expectedErrorMatch"] = code == expected
+                    assert code == expected
+                    assert session(ctx, facts)["user"] is None
                 elif expected:
+                    facts["step"] = "expected-denial-status"
                     assert callback.status == 302
+                    facts["step"] = "expected-denial-redirect"
                     page.wait_for_url(re.compile(r"[?&]error=" + expected + r"(?:&|$)"))
-                    assert parse_qs(urlsplit(page.url).query).get("error") == [expected]
-                    assert session(ctx)["user"] is None
+                    facts["step"] = "expected-denial-code"
+                    errors = parse_qs(urlsplit(page.url).query).get("error")
+                    facts["expectedErrorMatch"] = errors == [expected]
+                    assert errors == [expected]
+                    assert session(ctx, facts)["user"] is None
                 else:
+                    facts["step"] = "approved-status"
                     assert callback.status == 302
-                    assert session(ctx)["user"]["email"] == users[username]["email"]
+                    assert session(ctx, facts)["user"]["email"] == users[username]["email"]
+                    facts["step"] = "session-cookie"
                     assert any(cookie["secure"] and cookie["httpOnly"] and "session" in cookie["name"].lower()
                                for cookie in ctx.cookies(DOC))
+                facts["step"] = "passed"
                 return ctx, page
 
             def post(ctx, suffix, value):
@@ -401,7 +475,10 @@ def main():
 def entrypoint():
     try:
         main()
-    except BaseException:
+    except BaseException as error:
+        if login_diagnostics is not None:
+            login_diagnostics["exceptionClass"] = login_exception_class(error) if login_diagnostics["step"] != "passed" else "not-login"
+            print("Documenso bounded login facts: " + json.dumps(login_diagnostics, sort_keys=True), file=sys.stderr)
         print("Documenso functional check failed at " + stage + "; private diagnostics suppressed.", file=sys.stderr)
         if stage != "private fixture validation":
             # Only fixed keys and integer counts/status; never page text/URLs/errors.
