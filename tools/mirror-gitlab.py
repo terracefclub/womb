@@ -45,6 +45,12 @@ def refspecs(repo, heads, tags):
     return result
 
 
+def key_file_text(value):
+    # Hosted secret storage omitted the final LF; OpenSSH then reported a
+    # libcrypto parse error. Preserve every existing byte and add only that LF.
+    return value if value.endswith("\n") else value + "\n"
+
+
 def main():
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if repo not in CONFIGS:
@@ -59,7 +65,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="terrace-mirror-") as temporary:
         root = pathlib.Path(temporary)
         identity = root / "identity"
-        identity.write_text(key)
+        identity.write_text(key_file_text(key))
         identity.chmod(0o600)
         key = None
         known = root / "known_hosts"

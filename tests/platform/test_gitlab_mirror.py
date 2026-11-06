@@ -32,6 +32,12 @@ class MirrorTests(unittest.TestCase):
         self.assertTrue(timed["timeout"])
         self.assertTrue(timed["stderrTruncated"])
 
+    def test_key_file_preserves_bytes_and_supplies_required_final_lf(self):
+        original = "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC-PRIVATE-MARKER\n-----END OPENSSH PRIVATE KEY-----\n"
+        self.assertEqual(MODULE.key_file_text(original), original)
+        self.assertEqual(MODULE.key_file_text(original[:-1]), original)
+        self.assertEqual(MODULE.key_file_text(original + "\n"), original + "\n")
+
     def test_bad_inventory_and_refs_rejected(self):
         for heads, tags in (({}, []), ({"trunk": "a" * 40, "unreviewed": "a" * 40}, []),
                             ({"trunk": "not-a-sha"}, []), ({"trunk": "a" * 40}, ["refs/tags/a:refs/heads/trunk"])):
