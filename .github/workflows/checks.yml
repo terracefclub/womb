@@ -1,0 +1,26 @@
+name: Checks
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: ${{ matrix.job }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [membership-contract, check-supervision, oci-metadata, documenso-contract, vaultwarden-contract]
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Run the pinned contract environment
+        run: python3 tools/github-ci.py "${{ matrix.job }}"
