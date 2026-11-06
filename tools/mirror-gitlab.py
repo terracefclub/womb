@@ -21,6 +21,7 @@ class MirrorFailure(RuntimeError):
         facts = {"stage": stage, "returncode": code, "timeout": timeout,
                  "sshPermissionDenied": b"Permission denied (publickey)" in stderr,
                  "hostVerificationFailed": b"Host key verification failed" in stderr,
+                 "keyParseFailed": b"error in libcrypto" in stderr or b"invalid format" in stderr,
                  "connectionRefused": b"Connection refused" in stderr,
                  "connectionTimedOut": b"Connection timed out" in stderr,
                  "remoteRefused": b"remote rejected" in stderr,
@@ -51,6 +52,7 @@ def main():
     key = os.environ.pop("GITLAB_MIRROR_KEY", "")
     if not key.startswith("-----BEGIN OPENSSH PRIVATE KEY-----\n"):
         raise MirrorFailure("credential-format")
+    print(json.dumps({"credentialPresent": True, "credentialFinalNewline": key.endswith("\n")}))
     destination, branches, _ = CONFIGS[repo]
     env = dict(os.environ)
     env.pop("GITHUB_TOKEN", None)
