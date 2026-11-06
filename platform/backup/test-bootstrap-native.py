@@ -90,6 +90,7 @@ def source_fixture(label, name, identifier):
     source = cluster(label, name)
     password = secrets.token_hex(24)
     psql(source, "CREATE ROLE windmill_user NOLOGIN; CREATE ROLE windmill_admin NOLOGIN BYPASSRLS; "
+         'CREATE ROLE "quoted""member" NOLOGIN; '
          "CREATE ROLE terrace_windmill LOGIN CREATEROLE CONNECTION LIMIT 10 PASSWORD '" + password + "'; "
          "CREATE ROLE zz_auditor LOGIN NOINHERIT; CREATE ROLE zz_audited NOLOGIN; "
          "GRANT windmill_user TO windmill_admin WITH ADMIN FALSE, INHERIT TRUE, SET TRUE GRANTED BY " + identifier + "; "
@@ -144,14 +145,21 @@ def proof():
     helper(["capture", duplicate, work / "duplicate.json"], (psql(source, identity.QUERY) + "\n").encode(), expect=1)
     unsupported = psql(source, "ALTER ROLE postgres NOLOGIN; " + identity.QUERY + "; ALTER ROLE postgres LOGIN;")
     helper(["capture", sql, work / "nologin.json"], (unsupported + "\n").encode(), expect=1)
+    unsupported_quote = work / "embedded-quote.sql"
+    create = 'CREATE ROLE "Source ""Root";'
+    identity.write_private(unsupported_quote, (create + '\n').encode())
+    quote_identity = identity.parse_json(psql(source, identity.QUERY))
+    quote_identity.update(name='Source "Root', create=create)
+    helper(["capture", unsupported_quote, work / "embedded-quote.json"], json.dumps(quote_identity).encode(), expect=1)
     print("Native PostgreSQL18 genuine errors and unsupported metadata rejected.", flush=True)
 
-    # A separate source exercises actual quoted-space/quote bootstrap syntax.
-    quoted_source = source_fixture("quoted-source", 'Source "Root', '"Source ""Root"')
+    # A quoted-space bootstrap is supported; other role names retain quotes.
+    quoted_source = source_fixture("quoted-source", 'Source Root', '"Source Root"')
     sql2, metadata2, dump2 = backup(quoted_source, "quoted")
     quoted = restored(sql2, metadata2, dump2, "quoted-restored")
     assert signature(quoted) == signature(quoted_source)
     print("Native PostgreSQL18 quoted bootstrap identity restored.", flush=True)
+    return identity.parse_json(metadata.read_bytes())["serverVersionNum"]
 
 
 if __name__ == "__main__":
@@ -161,7 +169,7 @@ if __name__ == "__main__":
     passed = False
     with errors_path.open("w+b") as errors:
         try:
-            proof()
+            version = proof()
             passed = True
         except Exception:
             print("Native PostgreSQL18 bootstrap proof failed; private SQL suppressed.", file=sys.stderr)
@@ -180,7 +188,7 @@ if __name__ == "__main__":
                     passed = False
     if not passed:
         sys.exit(1)
-    Path(sys.argv[2]).write_text(json.dumps({"postgresMajor": 18, "oldFailure": "42501", "semanticFingerprints": 3,
-                                          "quotedBootstrap": True, "genuineErrorsRejected": True,
+    Path(sys.argv[2]).write_text(json.dumps({"postgresMajor": 18, "postgresVersionNum": version, "oldFailure": "42501", "semanticFingerprints": 3,
+                                          "quotedSpaceBootstrap": True, "embeddedQuoteBootstrapRejected": True, "otherQuotedRolesPreserved": True, "genuineErrorsRejected": True,
                                           "ownedClustersStopped": len(observed)}) + "\n")
     print("Native PostgreSQL18 bootstrap proof passed; all owned clusters stopped.", flush=True)

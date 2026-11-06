@@ -24,12 +24,17 @@ class BootstrapIdentityTests(unittest.TestCase):
         metadata = identity.capture(SQL, catalog())
         self.assertTrue(identity.prepare_bytes(SQL, metadata) == SQL.replace(b"CREATE ROLE postgres;\n", b"", 1))
 
-    def test_quoted_space_quote_and_unicode_identifiers(self):
-        for name, token in [('Source "Root', '"Source ""Root"'), ("équipe", '"équipe"')]:
+    def test_quoted_space_and_unicode_identifiers(self):
+        for name, token in [('Source Root', '"Source Root"'), ("équipe", '"équipe"')]:
             create = "CREATE ROLE " + token + ";"
             data = (create + "\nALTER ROLE " + token + " WITH LOGIN SUPERUSER;\n").encode()
             metadata = identity.capture(data, catalog(name, create))
             self.assertTrue(identity.prepare_bytes(data, metadata) == data[len(create.encode()) + 1:])
+
+    def test_embedded_quote_bootstrap_rejects_before_initdb(self):
+        create = 'CREATE ROLE "Source ""Root";'
+        with self.assertRaises(ValueError):
+            identity.capture((create + '\n').encode(), catalog('Source "Root', create))
 
     def test_name_bounds_and_all_control_categories_rejected(self):
         for name in ["", "a" * 64, "é" * 32, "a\nb", "a\rb", "a\x00b", "a\x7fb", "a\x85b", "a\u202eb"]:

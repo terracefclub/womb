@@ -27,7 +27,7 @@ def parse_json(value):
 
 
 def identity(name, create):
-    if not isinstance(name, str) or not 1 <= len(name.encode("utf-8")) <= 63 or any(unicodedata.category(c).startswith("C") for c in name):
+    if not isinstance(name, str) or not 1 <= len(name.encode("utf-8")) <= 63 or '"' in name or any(unicodedata.category(c).startswith("C") for c in name):
         raise ValueError()
     if not isinstance(create, str) or not create.startswith("CREATE ROLE ") or not create.endswith(";"):
         raise ValueError()

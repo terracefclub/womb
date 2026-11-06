@@ -13,7 +13,7 @@ server version, its `quote_ident`-derived canonical `CREATE ROLE` line, its
 LOGIN/SUPERUSER prerequisites and SHA256 of the **exact** private `globals.sql`.
 Both capture and restore reject unsupported or inconsistent metadata. The
 bootstrap name must be nonempty UTF8 at most63bytes, without Unicode control
-characters. Quoted spaces/quotes are supported. Inputs are bounded stable
+characters or embedded double quotes. Quoted spaces are supported. Inputs are bounded stable
 private regular-file reads with no symlink/FIFO following; outputs are private,
 exclusive and published only after the complete bytes have been written.
 
@@ -36,12 +36,22 @@ extra SQL superuser or role-password change is used to avoid that check.
 
 This narrow contract requires the source bootstrap role to retain LOGIN and
 SUPERUSER. Both are checked at capture and restore and preserved unchanged.
-Old snapshots without this metadata, or with a NOLOGIN/non-superuser bootstrap
-role (including the former adopted `terrace-restore` model), **fail closed**.
+Old snapshots without this metadata, with an embedded-quote bootstrap name,
+or with a NOLOGIN/non-superuser bootstrap role (including the former adopted
+`terrace-restore` model), **fail closed**.
 Keep those snapshots and their matching pinned tools; they require a separately
 reviewed compatibility path. Do not edit dumps or temporarily alter source role
 flags to pass this gate. No declared production profile has been deployed by
 this change, and no real snapshot is rewritten.
+
+Measured2026-11-05 on pinned PostgreSQL18.1: `initdb -U` with an embedded double
+quote fails inside its own initial privilege setup, before our restore helper.
+The [18.1 initdb implementation](https://github.com/postgres/postgres/blob/REL_18_1/src/bin/initdb/initdb.c)
+formats ACL text with the username but escapes single quotes/backslashes rather
+than identifier double quotes. The helper therefore rejects this bootstrap
+edge at both capture and restore; it does not add a temporary SQL superuser or
+rename workaround. **Other** dumped roles containing quotes are preserved
+unchanged and included in the native graph comparison.
 
 The source metadata is retained as `<dest>/bootstrap-role.json` for later
 isolated verify connections. `--stop` still stops the exact data directory
@@ -62,7 +72,8 @@ VM, live host DB, network listener, provider connection or real credentials.
 It reproduces the old42501 grantor failure; compares all role flags/password
 hashes, memberships/grantors/options and role settings using the final
 rehearsal's three semantic fingerprints; restores a real custom DB dump; covers
-a quoted-space/quote bootstrap name; rejects genuine SQL errors before a later
+a quoted-space bootstrap and an ordinary quoted role; rejects an embedded-quote
+bootstrap and genuine SQL errors before a later
 sentinel statement, missing/hash-mismatched/duplicate metadata and NOLOGIN
 source identity; and stops/reaps every owned cluster. Only fixed phase labels
 and a token-free result are returned. SQL/diagnostics stay in private build
