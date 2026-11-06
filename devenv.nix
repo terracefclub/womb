@@ -4,7 +4,7 @@
   ...
 }: {
   name = "terrace-womb";
-  packages = with pkgs; [git glab jq curl openssh kubectl hcloud restic gitleaks pulumi];
+  packages = with pkgs; [git gh glab jq curl openssh kubectl hcloud restic gitleaks pulumi];
   languages.javascript = {
     enable = true;
     bun.enable = true;
@@ -44,6 +44,7 @@
   scripts.check-shell.exec = ''
     set -eu
     command -v git >/dev/null
+    command -v gh >/dev/null
     command -v glab >/dev/null
     command -v bun >/dev/null
     command -v kubectl >/dev/null
