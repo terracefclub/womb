@@ -127,3 +127,14 @@ helper assignments as data (never sources the root scripts), verifies the exact
 readable store file, and executes query/capture/prepare/name with synthetic inputs.
 It starts no PostgreSQL process and does not replace the prior six-cluster SQL
 proof or the pending root/restic/native-adoption rehearsal.
+
+
+Observed2026-11-05: the packaged-only sandbox passed at source `d4aaf59`
+(exit0, 10seconds whole launcher), producing
+`/nix/store/w83cyjfbs10405nnhlxhnvv0q465mi1m-terrace-backup-packaged-helper-proof`.
+Both module-installed wrappers' helper resolution/execution passed; the result
+records zero owned database clusters. The recorded launcher was absent afterward,
+with root source-process/global-PostgreSQL scans empty. The tiny build completed
+before live sandbox-child capture, so no per-child or namespace receipt is claimed.
+The earlier17.38-second six-cluster PostgreSQL18.6 proof still covers unchanged
+helper/SQL semantics; actual root staging/restic/native adoption remains pending.
