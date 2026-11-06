@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -15,6 +17,7 @@ spec.loader.exec_module(identity)
 work = Path(os.environ["TMPDIR"]) / "pg-proof"
 clusters = []
 observed = []
+packaged_helpers = {}
 
 # The exact semantic fingerprints used by the combined recovery rehearsal.
 FINGERPRINTS = [
@@ -30,6 +33,19 @@ def command(arguments, value=None, expect=0):
     if result.returncode != expect or len(result.stdout) > identity.MAX_SQL:
         raise ValueError()
     return result.stdout
+
+
+def packaged_helper(wrapper):
+    # Inspect the actual module-produced executable, never a mirrored setting.
+    # Parse one trusted assignment as data; do not source/eval the root wrapper.
+    assignments = re.findall(r"^BOOTSTRAP_HELPER=(.*)$", Path(wrapper).read_text(), re.M)
+    assert len(assignments) == 1
+    values = shlex.split(assignments[0])
+    assert len(values) == 1 and re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/]+", values[0])
+    path = Path(values[0])
+    assert stat.S_ISREG(path.lstat().st_mode) and os.access(path, os.R_OK)
+    assert path.read_bytes() == Path(sys.argv[1]).read_bytes()
+    return str(path)
 
 
 def cluster(label, name):
@@ -55,7 +71,8 @@ def psql(item, query, database="postgres", expect=0):
 
 
 def helper(arguments, value=None, expect=0):
-    return command([sys.executable, sys.argv[1], *map(str, arguments)], value, expect)
+    owner = "backup" if arguments[0] in ("query", "capture") else "restore"
+    return command([sys.executable, packaged_helpers[owner], *map(str, arguments)], value, expect)
 
 
 def signature(item):
@@ -103,7 +120,31 @@ def source_fixture(label, name, identifier):
     return source
 
 
+def packaged_proof():
+    assert len(sys.argv) in (5, 6) and (len(sys.argv) == 5 or sys.argv[5] == "--packaged-only")
+    for owner, wrapper in zip(("backup", "restore"), sys.argv[3:5]):
+        packaged_helpers[owner] = packaged_helper(wrapper)
+        assert command([sys.executable, packaged_helpers[owner], "query"]).decode().strip() == identity.QUERY
+    assert packaged_helpers["backup"] == packaged_helpers["restore"]
+    print("Native packaged backup and restore helpers retained and executable.", flush=True)
+    sql = work / "packaged.sql"
+    raw = b"-- synthetic packaged boundary\nCREATE ROLE postgres;\nALTER ROLE postgres WITH SUPERUSER LOGIN;\n"
+    identity.write_private(sql, raw)
+    metadata = work / "packaged.json"
+    value = {"oid": 10, "name": "postgres", "create": "CREATE ROLE postgres;",
+             "serverVersionNum": 180006, "login": True, "superuser": True}
+    helper(["capture", sql, metadata], json.dumps(value).encode())
+    prepared = work / "packaged-prepared.sql"
+    retained = work / "packaged-retained.json"
+    helper(["prepare", sql, metadata, prepared, retained])
+    assert prepared.read_bytes() == raw.replace(b"CREATE ROLE postgres;\n", b"", 1)
+    assert retained.read_bytes() == metadata.read_bytes()
+    assert helper(["name", retained]) == b"postgres\n"
+    print("Native packaged helper query capture prepare and name passed.", flush=True)
+
+
 def proof():
+    packaged_proof()
     assert re.search(rb"PostgreSQL\) 18[.]", command(["postgres", "--version"]))
     source = source_fixture("source", "postgres", "postgres")
     sql, metadata, dump = backup(source, "source")
@@ -169,7 +210,11 @@ if __name__ == "__main__":
     passed = False
     with errors_path.open("w+b") as errors:
         try:
-            version = proof()
+            if len(sys.argv) == 6:
+                packaged_proof()
+                version = None
+            else:
+                version = proof()
             passed = True
         except Exception:
             print("Native PostgreSQL18 bootstrap proof failed; private SQL suppressed.", file=sys.stderr)
@@ -188,7 +233,10 @@ if __name__ == "__main__":
                     passed = False
     if not passed:
         sys.exit(1)
-    Path(sys.argv[2]).write_text(json.dumps({"postgresMajor": 18, "postgresVersionNum": version, "oldFailure": "42501", "semanticFingerprints": 3,
-                                          "quotedSpaceBootstrap": True, "embeddedQuoteBootstrapRejected": True, "otherQuotedRolesPreserved": True, "genuineErrorsRejected": True,
-                                          "ownedClustersStopped": len(observed)}) + "\n")
-    print("Native PostgreSQL18 bootstrap proof passed; all owned clusters stopped.", flush=True)
+    result = {"packagedWrappers": 2, "helperQueryCapturePrepareName": True, "ownedClustersStopped": len(observed)}
+    if version is not None:
+        result.update(postgresMajor=18, postgresVersionNum=version, oldFailure="42501", semanticFingerprints=3,
+                      quotedSpaceBootstrap=True, embeddedQuoteBootstrapRejected=True, otherQuotedRolesPreserved=True, genuineErrorsRejected=True)
+    Path(sys.argv[2]).write_text(json.dumps(result) + "\n")
+    print("Native PostgreSQL18 bootstrap proof passed; all owned clusters stopped." if version is not None
+          else "Native packaged backup helper proof passed; no database process started.", flush=True)

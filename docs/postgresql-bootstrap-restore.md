@@ -70,7 +70,11 @@ direnv exec . python tests/platform/test_bootstrap_identity.py -v
 The native proof runs **only on the Linux builder**, as an unprivileged Nix
 sandbox derivation with private socket-only PostgreSQL18 clusters. It has no
 VM, live host DB, network listener, provider connection or real credentials.
-It reproduces the old42501 grantor failure; compares all role flags/password
+It resolves the helper from both **actual module-produced** backup/restore wrapper
+assignments without sourcing/evaluating those root scripts, requires a readable
+regular Nix-store file byte-identical to the reviewed helper, and executes its
+query/capture/prepare/name commands through those resolved paths. It then
+reproduces the old42501 grantor failure; compares all role flags/password
 hashes, memberships/grantors/options and role settings using the final
 rehearsal's three semantic fingerprints; restores a real custom DB dump; covers
 a quoted-space bootstrap and an ordinary quoted role; rejects an embedded-quote
@@ -94,3 +98,32 @@ and60-second kill grace; record actual host build/process identities and verify
 them absent afterward. Namespace-local proof PIDs are not host PID evidence.
 The full combined originals-off recovery remains a separate source-matched
 gate after this prerequisite; local guards alone do not establish it.
+
+
+Packaging correction measured2026-11-05: the first full quiescent-backup run
+failed before metadata capture because the wrapper used `toString` for the
+helper source. Python received a builder-host pathname that did not exist in
+the guest. Explicit Nix path interpolation now retains that same helper in the
+backup **and** restore closures. The earlier tiny PostgreSQL proof imported
+the helper directly and did not cover this boundary; its database results do
+not establish packaged-shell execution. The expanded sandbox proof above must
+pass before another full rehearsal. No metadata, role, SQL or error policy is
+changed by this packaging correction.
+
+
+For the packaging correction alone, the same check has an explicit no-database
+mode (same shared lock/300-second bounds and outer supervision):
+
+```sh
+direnv exec . env BUILD_LOCK=/home/tristan/.falcon-heavy.lock \
+  BUILD_LOCK_TIMEOUT=300 CHECK_TIMEOUT=300 CHECK_BUILD_TIMEOUT=300 \
+  CHECK_STOP_GRACE=30 \
+  ./platform/run-check --impure --file platform/backup-bootstrap-check.nix \
+  --arg packagedOnly true
+```
+
+It builds the actual module-installed backup and restore wrappers, resolves their
+helper assignments as data (never sources the root scripts), verifies the exact
+readable store file, and executes query/capture/prepare/name with synthetic inputs.
+It starts no PostgreSQL process and does not replace the prior six-cluster SQL
+proof or the pending root/restic/native-adoption rehearsal.
