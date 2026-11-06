@@ -44,9 +44,10 @@ reviewed compatibility path. Do not edit dumps or temporarily alter source role
 flags to pass this gate. No declared production profile has been deployed by
 this change, and no real snapshot is rewritten.
 
-Measured2026-11-05 on pinned PostgreSQL18.1: `initdb -U` with an embedded double
+Measured2026-11-05 on pinned PostgreSQL18.6 (`postgres --version` and
+`initdb --version` from the proof's actual recorded executable): `initdb -U` with an embedded double
 quote fails inside its own initial privilege setup, before our restore helper.
-The [18.1 initdb implementation](https://github.com/postgres/postgres/blob/REL_18_1/src/bin/initdb/initdb.c)
+The [18.6 initdb implementation](https://github.com/postgres/postgres/blob/REL_18_6/src/bin/initdb/initdb.c)
 formats ACL text with the username but escapes single quotes/backslashes rather
 than identifier double quotes. The helper therefore rejects this bootstrap
 edge at both capture and restore; it does not add a temporary SQL superuser or
