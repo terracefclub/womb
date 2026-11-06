@@ -19,4 +19,34 @@ The jobs have read-only repository permissions, ten-minute deadlines, no deploym
 steps, and cancel obsolete runs. Native Nix/VM acceptance remains a separate,
 supervised Linux-builder operation; it is not an always-on Actions runner.
 
-Migration of reviewed changes and one-way GitLab mirroring are still in progress.
+GitHub checks were verified before disabling duplicate GitLab pipelines. The
+GitLab job definitions stay in place as the canonical container commands and for
+historical audit; the exact `workflow: rules: when: never` header prevents new
+GitLab pipelines. Mirror pushes additionally use `ci.skip`.
+
+## One-way mirror
+
+`.github/workflows/gitlab-mirror.yml` runs only on published pushes or manual
+dispatch, never on pull requests. It checks out trusted `trunk` code and uses a
+distinct write-enabled GitLab project deploy key stored as the GitHub Actions
+secret `GITLAB_MIRROR_KEY`. The key has no access to other projects. Protected
+GitLab `trunk` must explicitly allow that deploy key; existing human permissions
+and force-push restrictions are retained. The key is generated in protected local
+project state; its private bytes are never committed or placed in command args.
+
+The mirror copies only `trunk` and published tags. It makes atomic, non-forced
+pushes and reads back every target SHA. It never deletes GitLab refs, preserving
+historical review branches. Divergence fails closed and requires investigation.
+SSH is pinned to the GitLab.com Ed25519 host key from the
+[official settings](https://docs.gitlab.com/user/gitlab_com/#ssh-host-keys-fingerprints),
+with strict host checking; temporary identities are mode0600 and removed on exit.
+No personal token or GitHub token is sent to GitLab.
+
+Rerun with **Actions → GitLab mirror → Run workflow** on `trunk`. Rotate by
+creating a new project deploy key, granting only that key protected-branch write,
+replacing the repository Actions secret, verifying a successful mirror, then
+revoking the old project key. Keep GitLab issues and MR conversations available;
+new development and reviews belong on GitHub. GitHub does not copy historical
+GitLab approval or pipeline records.
+
+Migration of the four reviewed changes is still in progress.

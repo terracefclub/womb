@@ -1,0 +1,25 @@
+name: GitLab mirror
+on:
+  push:
+    branches: [trunk]
+    tags: ['*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: gitlab-mirror
+  cancel-in-progress: false
+jobs:
+  mirror:
+    if: github.repository == 'terracefclub/womb'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: trunk
+          persist-credentials: false
+      - name: Mirror published branches and tags without deletion
+        env:
+          GITLAB_MIRROR_KEY: ${{ secrets.GITLAB_MIRROR_KEY }}
+        run: python3 tools/mirror-gitlab.py

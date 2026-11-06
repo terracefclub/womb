@@ -24,6 +24,8 @@ jobs:
           persist-credentials: false
       - name: Validate the CI adapter
         if: matrix.job == 'check-supervision'
-        run: python3 tests/platform/test_github_ci.py -v
+        run: |
+          python3 tests/platform/test_github_ci.py -v
+          python3 tests/platform/test_gitlab_mirror.py -v
       - name: Run the pinned contract environment
         run: python3 tools/github-ci.py "${{ matrix.job }}"
