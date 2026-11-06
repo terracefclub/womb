@@ -31,6 +31,13 @@ MEDIA = '/var/lib/terrace-cms-media'
 DOCUMENSO_INPUTS = '/var/lib/terrace-documenso-inputs'
 DOCUMENSO_STATE = '/var/lib/terrace-documenso'
 DOCUMENSO_BROWSER = '/root/documenso-functional'
+VAULT_INPUTS = '/var/lib/terrace-vaultwarden-inputs'
+VAULT_STATE = '/var/lib/vaultwarden'
+VAULT_RELEASE = '/var/lib/terrace-vaultwarden'
+VAULT_BROWSER = '/root/vaultwarden-functional'
+WIND_INPUTS = '/var/lib/terrace-windmill-inputs'
+WIND_STATE = '/var/lib/terrace-windmill'
+WIND_BROWSER = '/root/windmill-functional'
 TAILNET_INPUTS = '/var/lib/rehearsal-tailnet'
 TAILNET_STATE = '/var/lib/tailscale'
 TAILNET_PEERS = [(gateway, 'application'), (automation, 'private'), (client, 'denied')]
@@ -46,11 +53,24 @@ if DOCUMENSO_SIGNING_ENABLED:
 if RELAY_PEERS_ENABLED:
     BLANK_WRITERS['gateway'].append('tailscaled.service')
     BLANK_WRITERS['automation'] += ['tailscaled.service', 'rehearsal-private-sensor.service']
+APPLICATION_UNITS = [
+    'podman-terrace-windmill-server.service', 'podman-terrace-windmill-worker.service',
+    'terrace-windmill-db.service', 'terrace-windmill-migrate.service', 'terrace-windmill-bootstrap.service',
+    'vaultwarden.service', 'terrace-vaultwarden-inputs.service', 'terrace-vaultwarden-database.service',
+    'terrace-vaultwarden-migration-server.service', 'terrace-vaultwarden-migrate.service',
+    'terrace-vaultwarden-guard.service', 'terrace-vaultwarden-bootstrap.service', 'rehearsal-pg-sample.service',
+]
+if APPLICATIONS_ENABLED:
+    BLANK_WRITERS['gateway'] += APPLICATION_UNITS
 
 
 def assert_blank_writers(machine):
     for unit in BLANK_WRITERS[machine.name]:
         assert machine.succeed('systemctl show ' + unit + ' -p ActiveState --value', timeout=10).strip() == 'inactive'
+    if APPLICATIONS_ENABLED and machine.name == 'gateway':
+        for unit in APPLICATION_UNITS:
+            values = dict(line.split('=', 1) for line in machine.succeed('systemctl show ' + unit + ' -p LoadState,ActiveState,MainPID,ControlPID', timeout=10).splitlines())
+            assert values == {'LoadState': 'loaded', 'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
 
 
 def timed(label, function):
@@ -92,6 +112,18 @@ def bootstrap_app():
         assert sql("select count(*) from user_entity where email='recovery@terrace.invalid'", 'keycloak') == '0'
         gateway.succeed('systemctl start terrace-documenso-migrate.service && systemctl start terrace-documenso-bootstrap.service && systemctl start terrace-documenso.service', timeout=360)
         gateway.wait_until_succeeds('curl --fail --silent --max-time 5 http://127.0.0.1:13050/api/health | jq -e \x27.checks.database.status == "ok"\x27 >/dev/null', timeout=90)
+    if APPLICATIONS_ENABLED:
+        try:
+            gateway.succeed('systemctl start terrace-vaultwarden-migrate.service', timeout=300)
+            gateway.succeed('systemctl start terrace-windmill-migrate.service', timeout=360)
+            assert windmill_role_policy()
+            gateway.succeed('systemctl start podman-terrace-windmill-server.service podman-terrace-windmill-worker.service', timeout=300)
+            gateway.succeed('systemctl start vaultwarden.service && systemctl start terrace-vaultwarden-bootstrap.service', timeout=300)
+            gateway.wait_until_succeeds('curl --fail --silent --max-time 5 http://127.0.0.1:18222/alive >/dev/null', timeout=90)
+        except Exception:
+            application_server_evidence('windmill')
+            application_server_evidence('vaultwarden')
+            raise
 
 
 def app_signature():
@@ -99,6 +131,11 @@ def app_signature():
             'users': sql('select md5(string_agg(id||username,chr(10) order by id)) from user_entity', 'keycloak'),
             'migrations': sql('select name||batch from payload_migrations order by id'),
             'inputs': gateway.succeed('cd ' + WEB_INPUTS + ' && sha256sum *.env').strip()}
+    # Passwords and role settings stay inside these private one-way witnesses.
+    # Compare semantic names, not newly assigned ordinary-role/database OIDs.
+    signature['postgresGlobalRoles'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.rolname),'')) FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,rolpassword,rolvaliduntil,rolbypassrls FROM pg_authid) r", 'postgres')
+    signature['postgresGlobalMemberships'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.member,r.role,r.grantor),'')) FROM (SELECT m.rolname AS member,g.rolname AS role,b.rolname AS grantor,a.admin_option,a.inherit_option,a.set_option FROM pg_auth_members a JOIN pg_roles m ON m.oid=a.member JOIN pg_roles g ON g.oid=a.roleid JOIN pg_roles b ON b.oid=a.grantor) r", 'postgres')
+    signature['postgresRoleSettings'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.role,r.database),'')) FROM (SELECT p.rolname AS role,d.datname AS database,a.setconfig FROM pg_db_role_setting a LEFT JOIN pg_roles p ON p.oid=a.setrole LEFT JOIN pg_database d ON d.oid=a.setdatabase) r", 'postgres')
     if DOCUMENSO_ENABLED:
         signature['documenso'] = {
             'migrations': sql('SELECT migration_name||checksum FROM "_prisma_migrations" ORDER BY migration_name', 'terrace_documenso'),
@@ -107,6 +144,24 @@ def app_signature():
         }
     if DOCUMENSO_SIGNING_ENABLED:
         signature['documenso']['signingInputs'] = gateway.succeed('cd ' + DOCUMENSO_INPUTS + ' && sha256sum signing.p12 signing-passphrase').strip()
+    if APPLICATIONS_ENABLED:
+        # Account/data bytes are hashed privately while writers are stopped;
+        # native browser receipts additionally prove retained job/script values.
+        signature['windmill'] = {
+            table: sql('SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY row_to_json(r)::text),\x27\x27)) FROM ' + table + ' r', 'terrace_windmill')
+            for table in ['password', 'workspace', 'usr', 'script', 'variable']
+        }
+        signature['windmill']['inputs'] = gateway.succeed('sha256sum ' + WIND_INPUTS + '/bootstrap.json').strip()
+        signature['windmill']['release'] = gateway.succeed('sha256sum ' + WIND_STATE + '/migrated-image').strip()
+        signature['vaultwarden'] = {
+            table: sql('SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY ' + key + '),\x27\x27)) FROM ' + table + ' r', 'terrace_vaultwarden')
+            for table, key in [('users', 'uuid'), ('ciphers', 'uuid'), ('attachments', 'id')]
+        }
+        signature['vaultwarden']['migrations'] = sql('SELECT version FROM __diesel_schema_migrations ORDER BY version', 'terrace_vaultwarden')
+        signature['vaultwarden']['inputs'] = gateway.succeed('sha256sum ' + VAULT_INPUTS + '/input.json').strip()
+        if results['checks'].get('vaultwardenEncryptedFileCapture'):
+            signature['vaultwarden']['attachmentInventory'] = gateway.succeed('sha256sum ' + VAULT_INPUTS + '/attachment-files.json').strip()
+        signature['vaultwarden']['rsa'] = gateway.succeed('sha256sum ' + VAULT_STATE + '/rsa_key.pem').strip()
     return signature
 
 
@@ -147,6 +202,77 @@ def documenso_browser(mode):
         except Exception:
             print('Private Documenso failure evidence unavailable; original failure preserved.')
         raise
+
+
+def application_server_evidence(component):
+    assert component in ['windmill', 'vaultwarden']
+    # Reuse the tested private capture/parser, not a raw journal dump to stdout.
+    try:
+        program = 'capture.py' if component == 'windmill' else 'vaultwarden-capture.py'
+        status, summary = gateway.execute('python /etc/windmill-evidence/' + program + ' 2>/dev/null', timeout=60)
+        if status != 0:
+            raise RuntimeError('Private capture unavailable.')
+        print(summary)
+        destination = run / 'evidence' / (component + '-server-failure')
+        destination.mkdir(mode=0o700)
+        with tempfile.TemporaryDirectory(prefix=component + '-server-', dir=gateway.shared_dir) as private:
+            name = Path(private).name
+            gateway.succeed('cp -P --preserve=mode /var/lib/' + component + '-test-evidence/raw.json /tmp/shared/' + name + '/raw.json', timeout=10)
+            retain_private_artifact(Path(private) / 'raw.json', destination / 'raw.json', 12 * 1024 * 1024)
+    except Exception:
+        print('Private bounded application capture unavailable; original failure retained.')
+
+
+def windmill_browser(mode):
+    assert mode in ['create', 'verify']
+    try:
+        assert client.succeed('rehearsal-windmill-browser ' + mode + ' --roster', timeout=240).strip() == 'Windmill functional browser phase ' + mode + ' passed.'
+    except Exception:
+        application_server_evidence('windmill')
+        try:
+            destination = run / 'evidence' / ('windmill-failure-' + mode)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='windmill-failure-', dir=client.shared_dir) as private:
+                name = Path(private).name
+                for filename in ['failure-' + mode + '.json', 'failure-' + mode + '-dom.json', 'failure-' + mode + '.png']:
+                    status, _ = client.execute('test ! -f ' + WIND_BROWSER + '/' + filename + ' || cp -P --preserve=mode ' + WIND_BROWSER + '/' + filename + ' /tmp/shared/' + name + '/', timeout=10)
+                    assert status == 0
+                    artifact = Path(private) / filename
+                    if artifact.exists():
+                        retain_private_artifact(artifact, destination / filename, 4 * 1024 * 1024)
+        except Exception:
+            print('Private Windmill evidence unavailable; original failure retained.')
+        raise
+
+
+def vault_browser(mode):
+    assert mode in ['create', 'restore']
+    try:
+        assert client.succeed('rehearsal-vaultwarden-browser ' + mode, timeout=240).strip() == 'Vaultwarden browser phase ' + mode + ' passed.'
+    except Exception:
+        application_server_evidence('vaultwarden')
+        try:
+            destination = run / 'evidence' / ('vaultwarden-failure-' + mode)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='vaultwarden-failure-', dir=client.shared_dir) as private:
+                name = Path(private).name
+                for filename in ['failure.png', 'failure-network.json', 'failure-labels.json']:
+                    source = VAULT_BROWSER + '/' + filename
+                    status, _ = client.execute('test ! -f ' + source + ' || cp -P --preserve=mode ' + source + ' /tmp/shared/' + name + '/', timeout=10)
+                    assert status == 0
+                    copied = Path(private) / filename
+                    if copied.exists():
+                        retain_private_artifact(copied, destination / filename, 4 * 1024 * 1024)
+        except Exception:
+            print('Private Vaultwarden evidence unavailable; original failure retained.')
+        raise
+
+
+def vault_attachments(mode):
+    assert mode in ['capture', 'verify']
+    assert gateway.succeed('python3 /etc/vaultwarden-attachments.py ' + mode, timeout=10).strip() == 'Vaultwarden encrypted attachment inventory ' + mode + ' passed.'
+    if mode == 'capture':
+        results['checks']['vaultwardenEncryptedFileCapture'] = True
 
 
 def documenso_signing_evidence(phase):
@@ -205,9 +331,21 @@ def documenso_recovery_access():
     state = dict(line.split('=', 1) for line in gateway.succeed('systemctl show keycloak.service -p ActiveState,MainPID,ControlPID', timeout=10).splitlines())
     assert state == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
     assert gateway.succeed('systemctl show terrace-identity-health.timer -p ActiveState --value', timeout=10).strip() == 'inactive'
+    health = dict(line.split('=', 1) for line in gateway.succeed('systemctl show terrace-identity-health.service -p MainPID,ControlPID', timeout=10).splitlines())
+    assert health == {'MainPID': '0', 'ControlPID': '0'}
     gateway.succeed('listeners=$(ss -H -ltn \'( sport = :8088 or sport = :9000 )\') && test -z "$listeners"', timeout=10)
     assert gateway.succeed('python /etc/documenso-recovery.py', timeout=60).strip() == 'Native loopback recovery administrator authenticated without identity.'
     assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize", timeout=10).strip() == '403'
+    if APPLICATIONS_ENABLED:
+        recovery_sessions = sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill')
+        assert gateway.succeed('terrace-windmill-inspect', timeout=55).strip() == 'Native Windmill private admin readback passed.'
+        assert sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill') == recovery_sessions
+        assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == '403'
+        results['checks']['windmillRestoredIdentityIndependentAdminRecovery'] = True
+        assert gateway.succeed('terrace-vaultwarden-inspect', timeout=120).strip() == 'Native Vaultwarden private admin readback passed.'
+        assert client.succeed("curl --silent --max-time 5 -o /dev/null -w '%{http_code}' https://vault.terrace.invalid/admin", timeout=10).strip() == '403'
+        vault_attachments('verify')
+        results['checks']['vaultwardenRestoredIdentityIndependentAdminRecovery'] = True
     gateway.succeed('test ! -s ' + GATEWAY_INPUTS + '/keycloak.env && systemctl start keycloak.service', timeout=300)
     gateway.wait_until_succeeds('curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e \' .issuer == "https://identity.terrace.invalid/realms/terrace" \' >/dev/null', timeout=90)
     assert sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", 'keycloak') == '0'
@@ -322,18 +460,85 @@ def check_automation():
     return True
 
 
-def check_app(phase=''):
+def check_app(phase='', browser_enabled=True):
     output = gateway.succeed('TERRACE_SYNTHETIC_PHASE=' + shlex.quote(phase) + ' python /etc/gateway-protocol.py test', timeout=180).strip()
     assert re.fullmatch(r'Native HTTPS protocol checks passed: [0-9]+ bounded assertions; SSO, roles, state, CSRF, cookies, publication, private cache and logout\.', output)
-    transfer(gateway, GATEWAY_INPUTS + '/credentials.json', client, '/root/gateway-fixture.json')
-    browser = client.succeed('rehearsal-browser', timeout=90).strip()
-    assert browser == 'Real Chromium denied-to-switch-to-approved checks passed: HTTPS trust, native POST Origin, approved page and secure cookie.'
-    client.succeed('rm /root/gateway-fixture.json')
-    for port in [5432, 6443, 8088, 9000, 13048, 14294] + ([13050] if DOCUMENSO_ENABLED else []):
-        client.fail(f'nc -z -w 1 gateway {port}')
+    if browser_enabled:
+        transfer(gateway, GATEWAY_INPUTS + '/credentials.json', client, '/root/gateway-fixture.json')
+        browser = client.succeed('rehearsal-browser', timeout=90).strip()
+        assert browser == 'Real Chromium denied-to-switch-to-approved checks passed: HTTPS trust, native POST Origin, approved page and secure cookie.'
+        client.succeed('rm /root/gateway-fixture.json')
+        check_backend_ports()
     count = re.search(r': ([0-9]+) ', output)
     assert count is not None
-    return {'protocolAssertions': int(count[1]), 'browserSwitch': True}
+    return {'protocolAssertions': int(count[1]), 'browserSwitch': browser_enabled}
+
+
+def check_backend_ports():
+    ports = [5432, 6443, 8088, 9000, 13048, 14294] + ([13050] if DOCUMENSO_ENABLED else [])
+    if APPLICATIONS_ENABLED:
+        ports += [18001, 18002, 18003, 18222, 18224]
+    for port in ports:
+        client.fail(f'nc -z -w 1 gateway {port}')
+
+
+def concurrent_browsers(phase):
+    assert phase in ['original', 'restored']
+    try:
+        client.succeed('systemctl start --wait rehearsal-concurrent.service', timeout=345)
+        state = dict(line.split('=', 1) for line in client.succeed('systemctl show rehearsal-concurrent.service -p ActiveState,MainPID,ControlPID,ControlGroup,ExecMainStatus', timeout=10).splitlines())
+        assert state == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0', 'ControlGroup': '', 'ExecMainStatus': '0'}
+        value = json.loads(client.succeed('cat /root/rehearsal-concurrent/result.json', timeout=10))
+        assert value == {'website': True, 'documents': True, 'workflow': True, 'vault': True}
+        # Preserve each phase's witnesses. The next phase must create a new
+        # exclusive directory and cannot accidentally consume an old result.
+        target = '/root/rehearsal-concurrent-' + phase
+        client.succeed('test ! -e ' + target + ' && test ! -L ' + target + ' && mv -T /root/rehearsal-concurrent ' + target, timeout=10)
+        return value
+    except Exception:
+        # Stop the owned whole cgroup before reading bounded private evidence.
+        client.succeed('systemctl stop rehearsal-concurrent.service', timeout=30)
+        try:
+            destination = run / 'evidence' / ('concurrent-failure-' + phase)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='concurrent-failure-', dir=client.shared_dir) as private:
+                name = Path(private).name
+                for service in ['website', 'documents', 'workflow', 'vault']:
+                    for suffix in ['stdout', 'stderr']:
+                        filename = service + '.' + suffix
+                        client.succeed('test ! -f /root/rehearsal-concurrent/' + filename + ' || cp -P --preserve=mode /root/rehearsal-concurrent/' + filename + ' /tmp/shared/' + name + '/', timeout=10)
+                        artifact = Path(private) / filename
+                        if artifact.exists():
+                            retain_private_artifact(artifact, destination / filename, 4 * 1024 * 1024)
+        except Exception:
+            print('Private concurrent evidence unavailable; original failure retained.')
+        raise
+
+
+def concurrent_failure_artifacts(phase):
+    # Called after both driver threads join, so gateway/client console commands
+    # cannot overlap their work. Fixed private paths only; no page text printed.
+    application_server_evidence('windmill')
+    application_server_evidence('vaultwarden')
+    documenso_signing_evidence('concurrent-' + phase)
+    sources = [
+        ('documents', DOCUMENSO_BROWSER, ['failure-verify-labels.json', 'failure-verify.png', 'signed.pdf', 'signing.crt']),
+        ('workflow', WIND_BROWSER, ['failure-verify.json', 'failure-verify-dom.json', 'failure-verify.png']),
+        ('vault', VAULT_BROWSER, ['failure.png', 'failure-labels.json', 'failure-network.json']),
+    ]
+    try:
+        for component, directory, files in sources:
+            destination = run / 'evidence' / ('concurrent-' + phase + '-' + component)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='concurrent-ui-', dir=client.shared_dir) as private:
+                name = Path(private).name
+                for filename in files:
+                    client.succeed('test ! -f ' + directory + '/' + filename + ' || cp -P --preserve=mode ' + directory + '/' + filename + ' /tmp/shared/' + name + '/', timeout=10)
+                    artifact = Path(private) / filename
+                    if artifact.exists():
+                        retain_private_artifact(artifact, destination / filename, 4 * 1024 * 1024)
+    except Exception:
+        print('Private concurrent UI evidence unavailable; original failure retained.')
 
 
 def stop_units(machine, units):
@@ -342,7 +547,110 @@ def stop_units(machine, units):
         machine.fail('systemctl is-active --quiet ' + unit + '.service')
 
 
+def container_memory(container, limit):
+    # OCI scopes may be outside their launcher service. Read the actual
+    # container's kernel counters instead of treating conmon as its memory use.
+    identity = gateway.succeed("podman inspect --format '{{.Id}} {{.State.CgroupPath}}' " + container, timeout=10).strip().split()
+    assert len(identity) == 2 and re.fullmatch('[a-f0-9]{64}', identity[0])
+    group = identity[1]
+    assert re.fullmatch('/[A-Za-z0-9_./-]+', group) and identity[0] in group
+    assert all(part not in ['.', '..'] for part in group.split('/'))
+    values = gateway.succeed('cat ' + shlex.quote('/sys/fs/cgroup' + group + '/memory.peak') + ' ' + shlex.quote('/sys/fs/cgroup' + group + '/memory.max'), timeout=10).splitlines()
+    assert len(values) == 2 and all(value.isascii() and value.isdigit() for value in values)
+    peak, maximum = map(int, values)
+    assert peak > 0 and maximum == limit
+    return {'peakBytes': peak, 'maximumBytes': maximum}
+
+
+def connection_limits():
+    expected = {'keycloak': 10, 'terrace_cms': 10, 'terrace_documenso': 6, 'terrace_windmill': 10, 'terrace_vaultwarden': 6}
+    names = ','.join("'" + name + "'" for name in expected)
+    observed = json.loads(sql('SELECT json_object_agg(rolname,rolconnlimit) FROM pg_roles WHERE rolname IN (' + names + ')', 'postgres'))
+    assert observed == expected
+    maximum = int(sql('SHOW max_connections', 'postgres'))
+    reserved = int(sql('SHOW superuser_reserved_connections', 'postgres'))
+    assert maximum == 64 and reserved >= 3 and maximum - reserved - sum(observed.values()) >= 10
+    return {'roles': observed, 'configuredMaximum': maximum, 'superuserReserved': reserved,
+            'nonAppHeadroom': maximum - reserved - sum(observed.values())}
+
+
+def windmill_role_policy():
+    assert sql("SELECT count(*)=2 AND bool_and(NOT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolpassword IS NULL AND rolbypassrls=(rolname='windmill_admin')) FROM pg_authid WHERE rolname IN ('windmill_user','windmill_admin')", 'postgres') == 't'
+    # Public role names/flags only; retain a precise witness before assertion.
+    role_flags = sql("SELECT rolname,rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls FROM pg_roles WHERE rolname IN ('keycloak','terrace_cms','terrace_documenso','terrace_windmill','terrace_vaultwarden') ORDER BY rolname", 'postgres').splitlines()
+    expected_roles = ['keycloak', 'terrace_cms', 'terrace_documenso', 'terrace_vaultwarden', 'terrace_windmill']
+    assert len(role_flags) == 5
+    for name, row in zip(expected_roles, role_flags):
+        columns = row.split('|')
+        assert len(columns) == 7 and columns[0] == name and all(value in ['t', 'f'] for value in columns[1:])
+    print('Application role flags: ' + json.dumps(role_flags), flush=True)
+    assert role_flags == [name + '|t|f|f|f|f|f' for name in expected_roles]
+    expected = ['terrace_windmill:windmill_admin:postgres:false:true:true', 'terrace_windmill:windmill_user:postgres:false:true:true', 'windmill_admin:windmill_user:postgres:false:true:true']
+    grants = sql("SELECT member.rolname||':'||group_role.rolname||':'||grantor.rolname||':'||m.admin_option::text||':'||m.inherit_option::text||':'||m.set_option::text FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member JOIN pg_roles group_role ON group_role.oid=m.roleid JOIN pg_roles grantor ON grantor.oid=m.grantor WHERE group_role.rolname IN ('windmill_user','windmill_admin') ORDER BY 1", 'postgres').splitlines()
+    assert grants == expected
+    assert sql("SELECT count(*)=4 AND bool_and(NOT pg_has_role(oid,'windmill_admin','MEMBER') AND NOT pg_has_role(oid,'windmill_admin','SET') AND NOT pg_has_role(oid,'windmill_user','MEMBER') AND NOT pg_has_role(oid,'windmill_user','SET')) FROM pg_roles WHERE rolname IN ('keycloak','terrace_cms','terrace_documenso','terrace_vaultwarden')", 'postgres') == 't'
+    assert sql("SELECT pg_has_role('terrace_windmill','windmill_admin','SET') AND pg_has_role('terrace_windmill','windmill_user','SET')", 'postgres') == 't'
+    return True
+
+
+def simultaneous_functional_checks(phase):
+    if APPLICATIONS_ENABLED:
+        transfer(gateway, GATEWAY_INPUTS + '/credentials.json', client, '/root/gateway-fixture.json')
+        assert windmill_role_policy()
+        limits = connection_limits()
+        if 'postgresConnectionLimits' in results:
+            assert limits == results['postgresConnectionLimits']
+        results['postgresConnectionLimits'] = limits
+        gateway.succeed('systemctl start rehearsal-pg-sample.service', timeout=10)
+        gateway.wait_until_succeeds('test -s /run/rehearsal-pg-sample/result.json', timeout=10)
+    try:
+        # Each thread uses a different guest console. The four browser children
+        # share only the client-owned systemd control group, not its console.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            # The accepted protocol has exactly two publication fixtures.
+            # Run each once: empty suffix before backup, -restored after.
+            protocol_phase = '' if phase == 'original' else '-restored'
+            application = pool.submit(check_app, protocol_phase, not APPLICATIONS_ENABLED)
+            automation_checks = pool.submit(check_automation)
+            native = concurrent_browsers(phase) if APPLICATIONS_ENABLED else None
+            value = application.result()
+            assert automation_checks.result()
+            if APPLICATIONS_ENABLED:
+                value['browserSwitch'] = True
+                value['nativeApplications'] = native
+    except Exception:
+        if APPLICATIONS_ENABLED:
+            concurrent_failure_artifacts(phase)
+        raise
+    finally:
+        if APPLICATIONS_ENABLED:
+            stop_units(gateway, ['rehearsal-pg-sample'])
+            state = dict(line.split('=', 1) for line in gateway.succeed('systemctl show rehearsal-pg-sample.service -p ActiveState,MainPID,ControlPID,ExecMainStatus', timeout=10).splitlines())
+            assert state == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0', 'ExecMainStatus': '0'}
+            sample = json.loads(gateway.succeed('cat /run/rehearsal-pg-sample/result.json', timeout=10))
+            assert set(sample) == {'samples', 'sampledPeakClients', 'configuredMaximum', 'elapsedMs'}
+            assert all(type(item) is int for item in sample.values())
+            assert sample['samples'] >= 2 and 0 < sample['sampledPeakClients'] <= sample['configuredMaximum'] == 64
+            assert 100 <= sample['elapsedMs'] <= 355000
+            results.setdefault('postgresConnectionSamples', {})[phase] = sample
+    if APPLICATIONS_ENABLED:
+        client.succeed('rm /root/gateway-fixture.json')
+        check_backend_ports()
+    return value
+
+
 def quiesce_writers():
+    if APPLICATIONS_ENABLED:
+        stop_units(gateway, ['rehearsal-pg-sample'])
+        stop_units(gateway, ['vaultwarden'])
+        # Stop the job writer before its server and keep both down throughout
+        # all database and file snapshots, including other target snapshots.
+        stop_units(gateway, ['podman-terrace-windmill-worker'])
+        stop_units(gateway, ['podman-terrace-windmill-server'])
+        for name in ['podman-terrace-windmill-worker', 'podman-terrace-windmill-server']:
+            state = dict(line.split('=', 1) for line in gateway.succeed('systemctl show ' + name + '.service -p ActiveState,MainPID,ControlPID', timeout=10).splitlines())
+            assert state == {'ActiveState': 'inactive', 'MainPID': '0', 'ControlPID': '0'}
+        assert gateway.succeed('systemctl show vaultwarden.service -p ActiveState --value', timeout=10).strip() == 'inactive'
     if RELAY_PEERS_ENABLED:
         stop_units(automation, ['rehearsal-private-sensor'])
         for machine, _role in TAILNET_PEERS:
@@ -408,7 +716,19 @@ def fresh_restore(machine, snapshot, paths):
     assert_blank_writers(machine)
     machine.succeed('test ! -e ' + BACKUP_SECRETS)
     transfer(client, '/root/escrow/' + machine.name, machine, BACKUP_SECRETS)
-    machine.succeed('umask 077; terrace-backup-restore --target primary --snapshot ' + snapshot + ' --dest ' + RESTORE + ' >/var/tmp/rehearsal-restore.log 2>&1', timeout=300)
+    try:
+        machine.succeed('umask 077; terrace-backup-restore --target primary --snapshot ' + snapshot + ' --dest ' + RESTORE + ' >/var/tmp/rehearsal-restore.log 2>&1', timeout=300)
+    except Exception:
+        try:
+            destination = run / 'evidence' / ('restore-failure-' + machine.name)
+            destination.mkdir(mode=0o700)
+            with tempfile.TemporaryDirectory(prefix='restore-failure-', dir=machine.shared_dir) as private:
+                machine.succeed('python /etc/rehearsal-restore-evidence.py /tmp/shared/' + Path(private).name + '/files', timeout=15)
+                for artifact in (Path(private) / 'files').iterdir():
+                    retain_private_artifact(artifact, destination / artifact.name, 1024 * 1024)
+        except Exception:
+            print('Private restore evidence could not be exported.', flush=True)
+        raise
     machine.succeed("grep -qx 'RECONCILIATION OK' " + RESTORE + '/reconciliation.txt')
     for path in paths:
         # NixOS tmpfiles installs this one immutable manifest before K3s starts.
@@ -499,13 +819,37 @@ if DOCUMENSO_ENABLED:
         documenso_identity = documenso_container_identity()
         results['checks']['documensoNativeCreate'] = True
 
+if APPLICATIONS_ENABLED:
+    with subtest('individual native workflow identities and real worker execution'):
+        client.succeed('install -d -m 0700 ' + WIND_BROWSER)
+        transfer(gateway, GATEWAY_INPUTS + '/windmill-browser.json', client, WIND_BROWSER + '/credentials.json')
+        timed('windmillCreate', lambda: windmill_browser('create'))
+        windmill_identities = {name: gateway.succeed("podman inspect --format '{{.Id}} {{.Image}}' " + name, timeout=10).strip().split() for name in ['terrace-windmill-server', 'terrace-windmill-worker']}
+        assert all(len(value) == 2 and all(re.fullmatch(r'(?:sha256:)?[a-f0-9]{64}', item) for item in value) for value in windmill_identities.values())
+        roster_receipt_digest = client.succeed('sha256sum ' + WIND_BROWSER + '/roster-receipt.json', timeout=10).split()[0]
+        assert re.fullmatch('[a-f0-9]{64}', roster_receipt_digest)
+        results['retainedDeviceReceipts'] = {'windmillRosterSha256': roster_receipt_digest}
+        results['checks']['windmillIndividualSsoAndWorkerExecution'] = True
+        results['checks']['windmillOriginalRosterContract'] = True
+    with subtest('individual native vault encryption and retained attachment bytes'):
+        client.succeed('install -d -m 0700 ' + VAULT_BROWSER)
+        transfer(gateway, GATEWAY_INPUTS + '/vaultwarden-browser.json', client, VAULT_BROWSER + '/credentials.json')
+        timed('vaultwardenCreate', lambda: vault_browser('create'))
+        vault_attachments('capture')
+        assert sql('SELECT count(*) FROM ciphers', 'terrace_vaultwarden') == '2'
+        assert sql('SELECT count(*) FROM attachments', 'terrace_vaultwarden') == '2'
+        # Master passwords belong to the retained synthetic user device, not
+        # server recovery inputs. Remove only the verified fixture copy after
+        # both real client encrypt/decrypt and byte-for-byte transfer checks.
+        source_digest = gateway.succeed('sha256sum ' + GATEWAY_INPUTS + '/vaultwarden-browser.json', timeout=10).split()[0]
+        device_digest = client.succeed('sha256sum ' + VAULT_BROWSER + '/credentials.json', timeout=10).split()[0]
+        assert re.fullmatch('[a-f0-9]{64}', source_digest) and source_digest == device_digest
+        gateway.succeed('rm -- ' + GATEWAY_INPUTS + '/vaultwarden-browser.json', timeout=10)
+        results['checks']['vaultwardenNativeEncryptionAndAttachments'] = True
+        results['checks']['vaultwardenSyntheticMasterPasswordsOnlyOnRetainedDevice'] = True
+
 with subtest('simultaneous real native SSO, public/private HTTP and synthetic automation'):
-    # Both components remain active concurrently, not isolated passing closures.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        application = pool.submit(check_app)
-        automation_checks = pool.submit(check_automation)
-        results['checks']['application'] = application.result()
-        assert automation_checks.result()
+    results['checks']['application'] = timed('simultaneousOriginalApplications', lambda: simultaneous_functional_checks('original'))
     for port in [80, 8123, 5000, 5001, 1984, 8554]:
         client.fail(f'nc -z -w 1 automation {port}')
     results['checks']['automation'] = True
@@ -526,6 +870,16 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
     results['peakBytes'] = {unit: int(gateway.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['keycloak', 'terrace-cms', 'terrace-web', 'postgresql', 'k3s']}
     if DOCUMENSO_ENABLED:
         results['peakBytes']['terrace-documenso'] = int(gateway.succeed('systemctl show terrace-documenso.service -p MemoryPeak --value').strip())
+    if APPLICATIONS_ENABLED:
+        results['execution'] = {
+            'nativeSystemd': ['web', 'cms', 'keycloak', 'postgresql', 'vaultwarden', 'headscale', 'home-assistant', 'frigate', 'go2rtc'],
+            'managedPodman': ['documenso', 'windmill-server', 'windmill-worker'],
+            'k3sWorkloads': ['synthetic persistent-volume probe'],
+            'testGuestCount': 4,
+        }
+        results['containerMemory'] = {name: container_memory(name, limit) for name, limit in [
+            ('terrace-documenso', 2147483648), ('terrace-windmill-server', 1610612736), ('terrace-windmill-worker', 1610612736)]}
+        results['peakBytes']['vaultwarden'] = int(gateway.succeed('systemctl show vaultwarden.service -p MemoryPeak --value').strip())
     results['automationPeakBytes'] = {unit: int(automation.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['home-assistant', 'frigate', 'go2rtc', 'nginx']}
     results['relayPeakBytes'] = {unit: int(relay.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['headscale', 'nginx']}
     results['postgresConnectionsAfterConcurrentChecks'] = int(sql('select count(*) from pg_stat_activity', 'postgres'))
@@ -533,6 +887,8 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
 with subtest('quiesce every writer before all encrypted snapshots'):
     deployment_replicas = quiesce_writers()
     signature = app_signature()
+    if APPLICATIONS_ENABLED:
+        gateway.succeed('test ! -e ' + GATEWAY_INPUTS + '/vaultwarden-browser.json && test ! -L ' + GATEWAY_INPUTS + '/vaultwarden-browser.json', timeout=10)
     relay_keys = relay.succeed('cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key').strip()
     for machine in nodes:
         machine.succeed('install -d -m 0700 ' + BACKUP_SECRETS + ' && ssh-keygen -q -t ed25519 -N "" -f ' + BACKUP_SECRETS + '/id_ed25519 && chmod 0400 ' + BACKUP_SECRETS + '/id_ed25519')
@@ -574,6 +930,8 @@ with subtest('quiesce every writer before all encrypted snapshots'):
 
 with subtest('fresh empty disks restore the exact node identity and functional services'):
     application_paths = [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']
+    if APPLICATIONS_ENABLED:
+        application_paths += [VAULT_INPUTS, VAULT_STATE, VAULT_RELEASE, WIND_INPUTS, WIND_STATE]
     if DOCUMENSO_ENABLED:
         application_paths += [DOCUMENSO_INPUTS, DOCUMENSO_STATE]
     if RELAY_PEERS_ENABLED:
@@ -587,27 +945,51 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     gateway.succeed('test ! -L ' + pg_dir + ' && { test ! -e ' + pg_dir + ' || { entries="$(ls -A ' + pg_dir + ')" && test -z "$entries"; }; }')
     gateway.succeed('install -d -m 0700 -o postgres -g postgres ' + pg_dir + ' && cp -a ' + RESTORE + '/pgdata/. ' + pg_dir + '/ && chown -R postgres:postgres ' + pg_dir)
     gateway.succeed('systemctl start postgresql.target')
-    # PG18 requires its bootstrap OID10 to remain superuser/catalog owner.
-    # Retain no authentication or membership path to that internal identity.
-    sql('alter role "terrace-restore" nologin password null', 'postgres')
-    assert sql("select rolsuper and not rolcanlogin and rolpassword is null from pg_authid where oid=10 and rolname='terrace-restore'", 'postgres') == 't'
+    # Preserve the source bootstrap identity: PG18 role-grant dependencies
+    # attach to OID10. The native peer administrator remains postgres.
+    assert sql("select rolsuper and rolcanlogin from pg_authid where oid=10 and rolname='postgres'", 'postgres') == 't'
+    assert sql("select count(*) from pg_roles where rolname='terrace-restore'", 'postgres') == '0'
     assert sql('select count(*) from pg_auth_members where roleid=10 or member=10', 'postgres') == '0'
     managed_roles = ['terrace_cms', 'keycloak'] + (['terrace_documenso'] if DOCUMENSO_ENABLED else [])
+    if APPLICATIONS_ENABLED:
+        managed_roles += ['terrace_vaultwarden', 'terrace_windmill']
     names = ','.join("'" + role + "'" for role in managed_roles)
     assert sql("select count(*)=" + str(len(managed_roles)) + " and bool_and(not pg_has_role(oid,10::oid,'MEMBER') and not pg_has_role(oid,10::oid,'SET')) from pg_roles where rolname in (" + names + ')', 'postgres') == 't'
-    assert sql("select count(*) from pg_stat_activity where usesysid=10 and backend_type='client backend'", 'postgres') == '0'
+    assert sql("select count(*) from pg_stat_activity where usesysid=10 and backend_type='client backend' and pid<>pg_backend_pid()", 'postgres') == '0'
     gateway.fail('runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U terrace-restore -d postgres -c \x27select 1\x27 >/dev/null 2>&1')
+    gateway.fail('runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U postgres -d postgres -c \x27select 1\x27 >/dev/null 2>&1')
     cms_peer = 'runuser -u terrace_cms -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_cms -d terrace_cms'
     identity_password = 'PGPASSWORD="$(cat /var/lib/terrace-gateway-test/db-password)" psql -X -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U keycloak -d keycloak'
     app_credentials = [cms_peer, identity_password]
     if DOCUMENSO_ENABLED:
         app_credentials.append('PGPASSWORD="$(jq -r .databasePassword ' + DOCUMENSO_INPUTS + '/secrets.json 2>/dev/null)" psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_documenso -d terrace_documenso')
+    if APPLICATIONS_ENABLED:
+        app_credentials.append('runuser -u terrace_windmill -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_windmill -d terrace_windmill')
+        vault_user = gateway.succeed('systemctl show vaultwarden.service -p User --value', timeout=10).strip()
+        assert vault_user == 'terrace_vaultwarden'
+        app_credentials.append('runuser -u ' + shlex.quote(vault_user) + ' -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_vaultwarden -d terrace_vaultwarden')
     for credentials in app_credentials:
         gateway.succeed(credentials + ' -c \x27select 1\x27 >/dev/null 2>&1')
-        gateway.fail(credentials + ' -c \x27set role "terrace-restore"\x27 >/dev/null 2>&1')
-    results['checks']['bootstrapOwnerLoginAndAssumptionDenied'] = True
+        gateway.fail(credentials + ' -c \x27set role postgres\x27 >/dev/null 2>&1')
+    if APPLICATIONS_ENABLED:
+        assert windmill_role_policy()
+        # Prove native credentials also enforce the role-membership boundary.
+        for credentials in app_credentials:
+            if credentials.startswith('runuser -u terrace_windmill '):
+                for role in ['windmill_admin', 'windmill_user']:
+                    gateway.succeed(credentials + ' -c ' + shlex.quote('set role ' + role + '; select 1') + ' >/dev/null 2>&1')
+            else:
+                for role in ['windmill_admin', 'windmill_user']:
+                    gateway.fail(credentials + ' -c ' + shlex.quote('set role ' + role) + ' >/dev/null 2>&1')
+        results['checks']['restoredWindmillDatabaseRoleIsolation'] = True
+    results['checks']['sourceBootstrapIdentityAndGlobalRolesPreserved'] = True
+    results['checks']['restoreOperatingUserLoginDenied'] = True
+    results['checks']['managedAppBootstrapRoleAssumptionDenied'] = True
     assert sql('show hba_file', 'postgres').startswith('/nix/store/')
     assert sql('show fsync', 'postgres') == 'on'
+    if APPLICATIONS_ENABLED:
+        assert connection_limits() == results['postgresConnectionLimits']
+        results['checks']['restoredDatabaseConnectionLimits'] = True
     assert app_signature() == signature
     timed('recoveredBootstrapApplication', bootstrap_app)
     assert gateway.succeed("k3s kubectl get node gateway -o jsonpath='{.metadata.uid}'").strip() == cluster_identity
@@ -619,7 +1001,20 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     gateway.succeed("k3s kubectl exec rehearsal -- /bin/busybox sh -c 'test $(cat /data/marker) = retained-synthetic && echo restored-write > /data/restored'")
     gateway.succeed("k3s kubectl exec rehearsal -- /bin/busybox grep -qx restored-write /data/restored")
     results['checks']['freshK3sRuntimeRetainedPVCReadWrite'] = True
-    results['checks']['restoredApplication'] = timed('recoveredFunctionalApplication', lambda: check_app('-restored'))
+    if not APPLICATIONS_ENABLED:
+        results['checks']['restoredApplication'] = timed('recoveredFunctionalApplication', lambda: check_app('-restored'))
+    if APPLICATIONS_ENABLED:
+        for name, original in windmill_identities.items():
+            restored = gateway.succeed("podman inspect --format '{{.Id}} {{.Image}}' " + name, timeout=10).strip().split()
+            assert len(restored) == 2 and restored[0] != original[0] and restored[1] == original[1]
+        assert client.succeed('sha256sum ' + WIND_BROWSER + '/roster-receipt.json', timeout=10).split()[0] == roster_receipt_digest
+        timed('windmillFreshRestore', lambda: windmill_browser('verify'))
+        results['checks']['windmillFreshContainersDataAndWorkerExecution'] = True
+        results['checks']['windmillRestoredOriginalRosterContract'] = True
+        gateway.succeed('test ! -e ' + GATEWAY_INPUTS + '/vaultwarden-browser.json && test ! -L ' + GATEWAY_INPUTS + '/vaultwarden-browser.json', timeout=10)
+        timed('vaultwardenFreshRestore', lambda: vault_browser('restore'))
+        vault_attachments('verify')
+        results['checks']['vaultwardenFreshEncryptedVaultAndAttachments'] = True
     if DOCUMENSO_ENABLED:
         recovered_documenso = documenso_container_identity()
         assert recovered_documenso[0] != documenso_identity[0] and recovered_documenso[1] == documenso_identity[1]
@@ -659,18 +1054,34 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         assert {machine.name: tailnet_client_identity(machine) for machine, _role in TAILNET_PEERS} == tailnet_identities
         assert headscale_peer_identities() == tailnet_nodes
         results['checks']['restoredTailnetIdentitiesAndPrivateAccess'] = timed('restoredTailnetAccess', lambda: check_tailnet_access(tailnet_identities))
+    if APPLICATIONS_ENABLED:
+        results['checks']['simultaneousRestoredApplications'] = timed('simultaneousRestoredApplications', lambda: simultaneous_functional_checks('restored'))
+        results['checks']['restoredApplication'] = results['checks']['simultaneousRestoredApplications']
+        results['restoredContainerMemory'] = {name: container_memory(name, limit) for name, limit in [
+            ('terrace-documenso', 2147483648), ('terrace-windmill-server', 1610612736), ('terrace-windmill-worker', 1610612736)]}
+        results['restoredPostgresConnectionsAfterConcurrentChecks'] = int(sql('select count(*) from pg_stat_activity', 'postgres'))
     for machine in nodes:
         assert machine.succeed('cat /var/lib/unrelated-synthetic-sentinel').strip() == 'retained'
 
 with subtest('verified recovery and final stop of every guest'):
     timed('finalQuiesceWriters', quiesce_writers)
     stop_units(gateway, ['postgresql'])
+    final_guests = []
     for machine in [gateway, automation, relay, client]:
         assert machine.process is not None
         pid = machine.process.pid
+        assert Path(f'/proc/{pid}/comm').read_text().startswith('qemu-system')
+        start = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+        assert start.isascii() and start.isdigit()
         machine.execute('systemctl poweroff --no-block', check_return=False, check_output=False, timeout=10)
         machine.wait_for_shutdown(timeout=datetime.timedelta(seconds=90))
+        assert machine.process.poll() is not None
         assert not Path(f'/proc/{pid}').exists()
+        final_guests.append({'name': machine.name, 'pid': pid, 'start': start,
+                             'role': 'retained-device' if machine.name == 'client' else 'replacement',
+                             'absentAfterShutdown': True})
+    results['finalGuests'] = final_guests
+    assert len({(item['pid'], item['start']) for item in results['originalGuests'] + final_guests}) == 7
     results['checks']['allGuestsStopped'] = True
     results['timings']['scenarioTotal'] = round(time.monotonic() - started, 2)
     temporary = run / 'evidence' / 'scenario-result.json.new'

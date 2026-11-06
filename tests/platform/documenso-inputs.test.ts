@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test'
 import { databaseUrl, inputFingerprint, runtimeInputs } from '../../platform/documenso/inputs'
 import { documensoClient } from '../../platform/documenso/client'
+import { writeDocumensoInputs } from '../../platform/documenso/write-inputs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 function fixture() {
   return {
@@ -10,6 +14,32 @@ function fixture() {
     approvedUsers: [{ name: 'Approved Fixture', email: 'approved@terrace.invalid', role: 'USER' }],
   }
 }
+test('shared fixture writer creates private app inputs without generating another realm or exposing server secrets to browser', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'documenso-shared-inputs-'))
+  try {
+    const users = ['local-member', 'local-alumni', 'local-editorial-admin'].map(username => ({
+      username, email: `${username}@terrace.invalid`, password: 'synthetic-browser-password',
+    }))
+    const shared = { directory, users, extraSecrets: { documenso: 'd'.repeat(48) } } as Parameters<typeof writeDocumensoInputs>[0]
+    const inputs = join(directory, 'app')
+    writeDocumensoInputs(shared, { directory: inputs, signing: false })
+    expect(readdirSync(directory).sort()).toEqual(['app', 'documenso-browser.json'])
+    expect(statSync(inputs).mode & 0o777).toBe(0o700)
+    expect(readdirSync(inputs)).toEqual(['secrets.json'])
+    for (const name of readdirSync(inputs)) expect(statSync(join(inputs, name)).mode & 0o777).toBe(0o400)
+    const browserPath = join(directory, 'documenso-browser.json')
+    const browser = JSON.parse(readFileSync(browserPath, 'utf8'))
+    expect(statSync(browserPath).mode & 0o777).toBe(0o400)
+    expect(browser).toEqual({ users })
+    const server = JSON.parse(readFileSync(join(inputs, 'secrets.json'), 'utf8'))
+    expect(runtimeInputs(server).accounts).toHaveLength(4)
+    expect(server.oidcClientSecret).toBe(shared.extraSecrets.documenso)
+    for (const name of ['authSecret', 'encryptionKey', 'encryptionSecondaryKey', 'databasePassword', 'oidcClientSecret']) {
+      expect(JSON.stringify(browser)).not.toContain(server[name])
+    }
+    expect(() => writeDocumensoInputs(shared, { directory: inputs, signing: false })).toThrow()
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+}, 15000)
 test('runtime inputs keep explicit approved accounts separate from the recovery administrator', () => {
   const value = runtimeInputs(fixture())
   expect(value.accounts).toHaveLength(2)
