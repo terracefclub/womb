@@ -16,6 +16,18 @@ CONFIGS = {
 }
 
 
+class MirrorFailure(RuntimeError):
+    def __init__(self, stage, code=None, stderr=b"", timeout=False):
+        facts = {"stage": stage, "returncode": code, "timeout": timeout,
+                 "sshPermissionDenied": b"Permission denied (publickey)" in stderr,
+                 "hostVerificationFailed": b"Host key verification failed" in stderr,
+                 "connectionRefused": b"Connection refused" in stderr,
+                 "connectionTimedOut": b"Connection timed out" in stderr,
+                 "remoteRefused": b"remote rejected" in stderr,
+                 "stderrTruncated": len(stderr) > 65536}
+        super().__init__(json.dumps(facts, sort_keys=True))
+
+
 def refspecs(repo, heads, tags):
     if repo not in CONFIGS:
         raise ValueError("Unsupported repository")
@@ -36,9 +48,9 @@ def main():
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if repo not in CONFIGS:
         raise ValueError("Unsupported repository")
-    key = os.environ.pop("GITLAB_MIRROR_KEY")
+    key = os.environ.pop("GITLAB_MIRROR_KEY", "")
     if not key.startswith("-----BEGIN OPENSSH PRIVATE KEY-----\n"):
-        raise ValueError("Invalid scoped mirror credential")
+        raise MirrorFailure("credential-format")
     destination, branches, _ = CONFIGS[repo]
     env = dict(os.environ)
     env.pop("GITHUB_TOKEN", None)
@@ -56,8 +68,26 @@ def main():
                                   f"-o UserKnownHostsFile={known} -o StrictHostKeyChecking=yes "
                                   "-o BatchMode=yes -o ConnectTimeout=15 -o HostKeyAlgorithms=ssh-ed25519")
         def git(*args):
-            return subprocess.check_output(["git", "-C", str(root), *args], env=env,
-                                           stderr=subprocess.DEVNULL, timeout=120, text=True)
+            # Only fixed command names are allowed in public failure witnesses.
+            stage = args[0]
+            if stage not in {"init", "fetch", "rev-parse", "for-each-ref", "push", "ls-remote"}:
+                raise MirrorFailure("invalid-stage")
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as error:
+                try:
+                    result = subprocess.run(["git", "-C", str(root), *args], env=env,
+                                            stdout=output, stderr=error, timeout=120)
+                except subprocess.TimeoutExpired:
+                    error.seek(0)
+                    raise MirrorFailure(stage, stderr=error.read(65537), timeout=True) from None
+                error.seek(0)
+                diagnostic = error.read(65537)
+                if result.returncode:
+                    raise MirrorFailure(stage, result.returncode, diagnostic)
+                output.seek(0)
+                data = output.read(1048577)
+                if len(data) > 1048576:
+                    raise MirrorFailure("output-limit")
+                return data.decode("utf-8", errors="strict")
         git("init", "--bare", "--quiet")
         git("fetch", "--quiet", f"https://github.com/{repo}.git",
             *[f"refs/heads/{name}:refs/heads/{name}" for name in branches], "refs/tags/*:refs/tags/*")
@@ -77,5 +107,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except MirrorFailure as error:
+        raise SystemExit(str(error)) from None
     except Exception:
         raise SystemExit("Mirror failed; no force or deletion was attempted") from None
