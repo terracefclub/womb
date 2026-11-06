@@ -965,7 +965,9 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         app_credentials.append('PGPASSWORD="$(jq -r .databasePassword ' + DOCUMENSO_INPUTS + '/secrets.json 2>/dev/null)" psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_documenso -d terrace_documenso')
     if APPLICATIONS_ENABLED:
         app_credentials.append('runuser -u terrace_windmill -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_windmill -d terrace_windmill')
-        app_credentials.append('runuser -u vaultwarden -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_vaultwarden -d terrace_vaultwarden')
+        vault_user = gateway.succeed('systemctl show vaultwarden.service -p User --value', timeout=10).strip()
+        assert vault_user == 'terrace_vaultwarden'
+        app_credentials.append('runuser -u ' + shlex.quote(vault_user) + ' -- psql -X -w -v ON_ERROR_STOP=1 -h /run/postgresql -U terrace_vaultwarden -d terrace_vaultwarden')
     for credentials in app_credentials:
         gateway.succeed(credentials + ' -c \x27select 1\x27 >/dev/null 2>&1')
         gateway.fail(credentials + ' -c \x27set role postgres\x27 >/dev/null 2>&1')
