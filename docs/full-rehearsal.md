@@ -134,8 +134,10 @@ flags, password, settings and every membership/grantor/option are compared
 before resumed writers. The operating-system restore user cannot connect as
 itself or impersonate `postgres`, and app credentials cannot assume that role.
 Native peer HBA and fsync remain mandatory. The narrow restore contract requires
-hash-bound bootstrap metadata and a source bootstrap with LOGIN and SUPERUSER;
-legacy metadata-free or NOLOGIN-bootstrap snapshots fail closed and retain their
+hash-bound bootstrap metadata and a source bootstrap with LOGIN and SUPERUSER.
+Embedded double quotes in that bootstrap name are rejected before initdb; other
+role names and their SQL remain intact. Legacy metadata-free or NOLOGIN-bootstrap
+snapshots fail closed and retain their
 original artifacts/pinned tooling. The recovered PVC must
 read its original marker and persist a new write. Native SSO/private-content,
 automation auth/sensors, relay keys/users and unrelated sentinels are checked.
