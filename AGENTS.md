@@ -16,7 +16,7 @@ This public repository contains Terrace infrastructure and membership workflows.
 - Build NixOS, VM tests, containers, and Rust on the configured Linux build host,
   never a developer's Mac. Use `BUILD_HOST` and a task-specific remote checkout;
   do not hardcode someone's personal infrastructure into Terrace configuration.
-- Small MRs, conventional `type(scope): what` titles, 1–3 line descriptions,
+- Small PRs, conventional `type(scope): what` titles, 1–3 line descriptions,
   no attribution trailers. Check the complete file list and validation before
   squash-merging. Verify the resulting diff and deployed health afterward.
 - Change declarative configuration, not live resources. Pulumi changes require
@@ -34,6 +34,12 @@ This public repository contains Terrace infrastructure and membership workflows.
   from devenv. Prefer simple, bounded components over extra operators/services.
 - Report verified evidence separately from assumptions, including dates. Record
   external access or hardware steps in `docs/manual-steps.md`.
+
+GitHub is primary: `https://github.com/terracefclub/womb`, default `trunk`.
+Use GitHub pull requests and green Actions checks, then independently review the
+complete file list and squash-merge with a source-SHA guard. GitLab retains the
+historical issues/MRs and receives a one-way published-ref mirror; do not develop
+or merge new changes there. See [the migration runbook](docs/github-migration.md).
 
 The legacy root flake and Pulumi program remain preserved until the replacement
 passes validation and cutover is planned. Do not run the legacy shell as a

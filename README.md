@@ -2,6 +2,10 @@
 
 Terrace's infrastructure and membership automation.
 
+[GitHub](https://github.com/terracefclub/womb) is primary;
+[GitLab](https://gitlab.com/terrace/tech/womb) retains historical reviews and issues
+and receives the published-ref mirror. See [migration and mirroring](docs/github-migration.md).
+
 The platform is being rebuilt around a small, reproducible NixOS deployment,
 with a temporary Hetzner host and a later move to Terrace's own server. Existing
 infrastructure and Windmill workflows are preserved while replacements are
@@ -22,8 +26,9 @@ does not log in to cloud accounts or select a production stack. CLI state lives
 under `.devenv/state/`; supply credentials through a secret manager or an ignored
 local environment, never command arguments or committed files.
 
-GitLab SSH access and API access are separate. To manage issues/MRs, authenticate
-`glab` inside this shell; its configuration remains local to this worktree.
+GitHub SSH access and API access are separate. Authenticate `gh` for current
+pull requests and issues. Use `glab` only for historical GitLab audit records;
+its configuration remains local to this worktree.
 
 ## Workstreams
 
