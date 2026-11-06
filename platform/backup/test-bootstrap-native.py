@@ -26,7 +26,7 @@ FINGERPRINTS = [
 
 def command(arguments, value=None, expect=0):
     result = subprocess.run(arguments, input=value, stdout=subprocess.PIPE, stderr=errors,
-                            timeout=30, env={"PATH": os.environ["PATH"], "HOME": str(work), "LC_ALL": "C", "PGCONNECT_TIMEOUT": "5"})
+                            timeout=30, env={"PATH": os.environ["PATH"], "LC_ALL": "C", "PGCONNECT_TIMEOUT": "5"})
     if result.returncode != expect or len(result.stdout) > identity.MAX_SQL:
         raise ValueError()
     return result.stdout
