@@ -168,6 +168,31 @@ class ConsoleFingerprintTest(unittest.TestCase):
             "paced": {"echo": "unknown", "erased": False},
         }})
 
+    def test_physical_calibration_requires_qemu_ack_before_any_input(self):
+        page = Mock()
+        frame = Mock()
+        progress = {}
+        page.wait_for_function.side_effect = ValueError("synthetic missing acknowledgement")
+        with self.assertRaisesRegex(ValueError, "missing acknowledgement"):
+            console.calibrate_keyboard(page, frame, progress, console.time.monotonic() + 60, physical=True)
+        page.evaluate.assert_not_called()
+        frame.assert_not_called()
+        self.assertEqual(progress, {"keyboardCalibration": {"physical": {
+            "echo": "unknown", "erased": False, "consoleReady": True, "qemuExtendedKeyEvent": False,
+        }}})
+
+        page.wait_for_function.side_effect = None
+        prompt = "rescue login:"
+        frames = iter([prompt, f"{prompt} {console.KEYBOARD_SWAPPED}", prompt])
+        console.calibrate_keyboard(page, lambda: next(frames), progress, console.time.monotonic() + 60, physical=True)
+        self.assertEqual(progress, {"keyboardCalibration": {"physical": {
+            "echo": "yZSwap", "erased": True, "consoleReady": True, "qemuExtendedKeyEvent": True,
+        }}})
+        self.assertEqual([call.args for call in page.evaluate.call_args_list], [
+            ("value => window.consolePhysicalCalibration(value)", {"sample": console.KEYBOARD_SAMPLE, "erase": erase})
+            for erase in (False, True)
+        ])
+
     def test_keyboard_probe_requires_review_and_never_discovers_or_pins_ssh_key(self):
         directory = Path("/synthetic-lease")
         path = directory / "original-relay-console-1.json"
@@ -186,11 +211,11 @@ class ConsoleFingerprintTest(unittest.TestCase):
               patch.object(console, "attest_console", side_effect=lambda *_args, **_opts:
                            progress.update(keyboardCalibration=result)) as browser):
             with self.assertRaisesRegex(ValueError, "requires a reviewed original relay probe"):
-                console.enroll(directory, "original", "relay", path, progress, keyboard_probe=True)
+                console.enroll(directory, "original", "relay", path, progress, keyboard_probe="standard")
             browser.assert_not_called()
-            console.enroll(directory, "original", "relay", path, progress, keyboard_probe=True)
+            console.enroll(directory, "original", "relay", path, progress, keyboard_probe="standard")
         self.assertEqual(reviewed.call_count, 2)
-        browser.assert_called_once_with(receipt, None, progress, keyboard_probe=True)
+        browser.assert_called_once_with(receipt, None, progress, keyboard_probe="standard")
         write.assert_called_once_with(directory / "original-relay-keyboard-calibration-123.json", result)
         ssh.assert_not_called()
         pin.assert_not_called()

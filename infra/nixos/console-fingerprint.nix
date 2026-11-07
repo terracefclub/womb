@@ -14,8 +14,12 @@ in
     name = "terrace-console-fingerprint";
     text = ''
       success='Provider console authenticated the exact Rescue SSH host key.'
-      if [[ $# == 5 && $5 == --keyboard-probe-only ]]; then
-        success='Console keyboard calibration recorded without login.'
+      if [[ $# == 5 ]]; then
+        case "$5" in
+          --keyboard-probe-only) success='Console keyboard calibration recorded without login.' ;;
+          --physical-keyboard-probe-only) success='Console physical keyboard calibration recorded without login.' ;;
+          *) echo 'Rescue console arguments rejected.' >&2; exit 2 ;;
+        esac
       elif [[ $# != 4 ]]; then
         echo 'Rescue console arguments rejected.' >&2
         exit 2

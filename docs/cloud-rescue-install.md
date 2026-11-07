@@ -64,6 +64,14 @@ It records only the echo classification and erase check. This mode sends
 no Enter or login credentials and creates no SSH pin. Its success output
 identifies keyboard calibration only.
 
+Use `--physical-keyboard-probe-only` in place of `--keyboard-probe-only`
+for one paced sample with physical key codes. The helper requires the
+server's QEMU extended key-event acknowledgement before sending any key.
+It presses and releases Shift explicitly for uppercase letters and checks
+the same active prompt is empty after erasing. The separate private result
+records readiness, acknowledgement, echo classification and the erase
+check. This mode also ends before login or SSH pinning.
+
 ```sh
 direnv exec . python3 -B infra/nixos/test_console_fingerprint.py -v
 ```
