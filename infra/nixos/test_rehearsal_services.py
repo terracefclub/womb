@@ -136,6 +136,22 @@ class ServiceProofTests(unittest.TestCase):
                                         capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
 
+    def test_quiescence_includes_latent_writers_and_scheduled_backup(self):
+        for role, writers in (("app", services.APP_WRITERS), ("relay", services.RELAY_WRITERS)):
+            calls = []
+            host = SimpleNamespace(role=role, run=lambda *args: calls.append(args))
+            services.inactive(host, writers)
+            [(stage, script, *units)] = calls
+            self.assertEqual((stage, script), ("writer-absence", services.INACTIVE))
+            self.assertEqual(len(units), len(set(units)))
+            for name in (*writers, *services.BACKUP_UNITS):
+                self.assertIn(name + ".service", units)
+            for name in services.BACKUP_UNITS:
+                self.assertIn(name + ".timer", units)
+            for unit in ("documenso-test-mailpit.service", "terrace-vaultwarden-migration-server.service",
+                         "terrace-identity-health.timer", "cloud-rehearsal-inputs.service"):
+                self.assertEqual(unit in units, role == "app")
+
 
 if __name__ == "__main__":
     unittest.main()
