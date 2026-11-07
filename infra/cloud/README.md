@@ -119,8 +119,18 @@ arm independent, time-bounded cleanup before making the first write. The
 lease helper alone does not start a timer or provision resources. It never
 deletes unrecognized resources, even if they appear after the baseline.
 
-Run the offline cleanup tests with
-`direnv exec . python3 -B infra/cloud/test_rehearsal_lease.py -v`.
+On Falcon, `rehearsal_timer.py arm` schedules a transient systemd timer at
+the lease expiration. It runs the private `rehearsal_lease.py` copy as the
+operator, with bounded cleanup attempts and control-group termination. The
+creation launcher must check the armed timer while holding the lease lock.
+`disarm` requires the same run's verified final absence receipt and checks
+that the exact timer and service are inactive. A transient timer survives
+SSH disconnects. The protected lease remains the recovery reference if
+the builder restarts or loses API access.
+
+Run the offline cleanup tests from the repository shell with
+`python3 -B infra/cloud/test_rehearsal_lease.py -v` and
+`python3 -B infra/cloud/test_rehearsal_timer.py -v`.
 
 ### Persistent bootstrap plan
 
