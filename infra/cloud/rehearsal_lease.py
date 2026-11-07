@@ -244,7 +244,7 @@ def delete_owned(api, kind, row, all_owned, inventory):
 
 
 def clean(api, manifest, phase, known, *, deadline, delay, pending=(),
-          record_action=lambda _: None, record_owned=lambda _kind, _rid: None):
+          record_action=lambda _: None, record_owned=lambda _kind, _rid: None, quiet_after=0):
     observed = {kind: set(known.get(kind, ())) for kind in DELETION_ORDER}
     actions = dict.fromkeys(pending, "running")
     stable = 0
@@ -286,7 +286,8 @@ def clean(api, manifest, phase, known, *, deadline, delay, pending=(),
                         expected[kind].update({str(r["id"]): baseline_identity(r) for r in all_owned[kind]})
                 if current != expected:
                     raise Rejected("inventory does not match expected baseline")
-                stable += 1
+                if time.time() >= quiet_after:
+                    stable += 1
                 if stable == 3:
                     return {"phase": phase, "verifiedAbsent": {k: sorted(v) for k, v in observed.items()},
                             "baselinePreserved": True, "absenceReads": stable, "actions": actions}
@@ -342,11 +343,21 @@ def main():
             # Recorded numeric IDs survive a lost label or changed provider name.
             known = {kind: set() for kind in DELETION_ORDER}
             phases = ("foundation", "original", "replacement") if phase == "final" else ("original",)
+            quiet_after = 0
+            unresolved = []
             for cohort in phases:
                 path = directory / f"{cohort}-created.json"
                 if path.exists():
                     for kind, ids in json.loads(read_private(path, 16384)).items():
                         known[kind].update(positive_id(rid) for rid in ids)
+                elif (dispatch := directory / f"{cohort}-dispatched.json").exists():
+                    attempt = json.loads(read_private(dispatch, 1024))
+                    if attempt["run"] != manifest["run"]:
+                        raise Rejected("create journal rejected")
+                    # A failed apply may have lost its provider response. Allow the
+                    # bounded writer and an additional minute before counting absence.
+                    quiet_after = max(quiet_after, positive_id(attempt["dispatchedAt"]) + 300)
+                    unresolved.append(cohort)
             journal_phases = ("original", "final") if phase == "final" else ("original",)
             for journal_phase in journal_phases:
                 for path in directory.glob(f"{journal_phase}-owned-*.json"):
@@ -362,10 +373,14 @@ def main():
 
             pending = {positive_id(json.loads(read_private(path, 1024))["id"])
                        for journal_phase in journal_phases for path in directory.glob(f"{journal_phase}-action-*.json")}
-            receipt = clean(api, manifest, phase, known, deadline=time.monotonic() + 300, delay=10,
-                            pending=pending, record_action=record_action, record_owned=record_owned)
+            receipt = clean(api, manifest, phase, known, deadline=time.monotonic() + 370, delay=10,
+                            pending=pending, record_action=record_action, record_owned=record_owned,
+                            quiet_after=quiet_after)
             receipt["run"] = manifest["run"]
+            receipt["unresolvedDispatches"] = unresolved
             write_private(directory / f"{phase}-absence-{time.time_ns()}.json", receipt)
+            if unresolved:
+                raise Rejected("provider dispatch remains unresolved")
             print("Cloud rehearsal cleanup verified.")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         print("Cloud rehearsal lease or cleanup failed. Inspect the protected run state.", file=sys.stderr)
