@@ -159,6 +159,21 @@ use the confirmed pin for a read-only SSH check. Keep password entry private.
 This mode cannot format a disk, boot an installation, or authorize
 replacement. Clean up and verify the project baseline as with a full lease.
 
+For the known-host bootstrap, the reviewed cohort input carries
+`bootstrapHostKeys` for its exact roles. Each entry binds the public
+Ed25519 key and the hash of its private sibling file. The controller
+derives and checks the public key before preview or apply. The provider
+receives the one-use host key as secret cloud-init user data. Keep the
+private file and backend outside Git and use a different installed key.
+Treat guest metadata as accessible to the temporary host and run no
+application services there.
+
+The saved plan and final checkpoint must contain encrypted user data.
+The controller uses Pulumi's text renderer for secret-bearing updates.
+The pinned CLI can include raw secret values in JSON update events even
+with `--show-secrets=false`. The controller also checks bounded private
+artifacts and output for plaintext before accepting the phase.
+
 The escrow helper creates per-run TLS material and an independent restic
 password. Its bounded Falcon repository service uses only an owner-private
 Unix socket, without modifying the personal SSH server. The cloud hosts

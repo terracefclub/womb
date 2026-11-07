@@ -1,4 +1,5 @@
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -45,6 +46,58 @@ def saved_plan(phase, *, probe_only=False):
 
 
 class RehearsalApplyTest(unittest.TestCase):
+    def test_bootstrap_key_is_bound_to_reviewed_bytes_and_public_pin(self):
+        body = b"syntheticPrivateKeyBodyOnly" * 3
+        private = b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + body + b"\n-----END OPENSSH PRIVATE KEY-----\n"
+        public = "ssh-ed25519 " + "x" * 68
+        cfg = {"bootstrapHostKeys": {"relay": {"publicKey": public,
+                                                  "privateKeySha256": hashlib.sha256(private).hexdigest()}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "original-relay-bootstrap-ed25519"
+            path.write_bytes(private)
+            path.chmod(0o600)
+            with patch.object(apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, public.encode())):
+                needles = apply.bootstrap_material(root, "original", cfg, probe_only=True)
+                with self.assertRaises(lease.Rejected):
+                    apply.bootstrap_material(root, "original", cfg, probe_only=False)
+            for leak in (private, body, base64.b64encode(b"x" + body)):
+                with self.assertRaisesRegex(lease.Rejected, "unencrypted"):
+                    apply.reject_plaintext(leak, needles)
+            with patch.object(apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"wrong pin")):
+                with self.assertRaisesRegex(lease.Rejected, "does not match approved private key"):
+                    apply.bootstrap_material(root, "original", cfg, probe_only=True)
+            path.write_bytes(private + b"changed")
+            with self.assertRaisesRegex(lease.Rejected, "bytes differ"):
+                apply.bootstrap_material(root, "original", cfg, probe_only=True)
+
+    def test_bootstrap_plan_and_checkpoint_require_ciphertext(self):
+        secret = {**apply.PULUMI_SECRET_SIGNATURE, "ciphertext": "synthetic-encrypted-value"}
+        urn = next(urn for urn, (kind, _) in apply.phase_targets("original", RUN, probe_only=True).items()
+                   if kind == "servers")
+        plan = {"resourcePlans": {urn: {"goal": {"inputDiff": {"adds": {"userData": secret}}},
+                                          "state": {"userData": secret}}}}
+        apply.check_secret_plan(plan, [urn])
+        plan["resourcePlans"][urn]["state"]["userData"] = "synthetic-plaintext"
+        with self.assertRaises(lease.Rejected):
+            apply.check_secret_plan(plan, [urn])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "backend/.pulumi/stacks" / apply.PROJECT / "original.json"
+            checkpoint.parent.mkdir(parents=True)
+            row = {"urn": urn, "inputs": {"userData": secret}, "outputs": {"userData": secret}}
+            value = {"checkpoint": {"latest": {"resources": [row]}}}
+            lease.write_private(checkpoint, value)
+            apply.check_secret_checkpoint(root, "original", [urn])
+            apply.check_pulumi_artifacts(root, (b"synthetic-plaintext",))
+            row["outputs"]["userData"] = "synthetic-plaintext"
+            checkpoint.unlink()
+            lease.write_private(checkpoint, value)
+            with self.assertRaises(lease.Rejected):
+                apply.check_secret_checkpoint(root, "original", [urn])
+            with self.assertRaises(lease.Rejected):
+                apply.check_pulumi_artifacts(root, (b"synthetic-plaintext",))
+
     def test_failed_update_retains_only_scoped_codes(self):
         targets = apply.phase_targets("original", RUN)
         app = next(urn for urn in targets if urn.endswith("::app"))

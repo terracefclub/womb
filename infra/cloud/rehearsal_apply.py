@@ -1,6 +1,7 @@
 """Preview and apply exact create-only Pulumi plans for an armed cloud lease."""
 
 import argparse
+import base64
 from collections import Counter
 import fcntl
 import hashlib
@@ -34,6 +35,7 @@ RESOURCE_TYPES = {
 PROJECT_FILES = ("Pulumi.yaml", "README.md", "index.ts", "input.ts", "rehearsal.test.ts", "resources.ts", "tsconfig.json")
 PARENT_FILES = ("budget.ts", "package.json", "bun.lock", "tsconfig.json")
 PULUMI_OUTPUT_LIMIT = 4 * 1024 * 1024
+PULUMI_SECRET_SIGNATURE = {"4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270"}
 PROVIDER_ERROR_CODES = re.compile(
     r"\((resource_unavailable|resource_limit_exceeded|invalid_server_type|invalid_input|"
     r"forbidden|maintenance|rate_limit_exceeded|service_error|conflict|timeout)(?:,|\))"
@@ -99,6 +101,93 @@ def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False)
         raise lease.Rejected("saved plan inventory or config rejected")
     if any(entry["steps"] != ["create"] for entry in plans.values()):
         raise lease.Rejected("saved plan contains an unexpected operation")
+
+
+def bootstrap_material(directory, phase, config, *, probe_only):
+    if "bootstrapHostKeys" not in config:
+        return ()
+    keys = config["bootstrapHostKeys"]
+    roles = {"relay"} if probe_only else set(lease.ROLES)
+    if phase not in lease.PHASES or not isinstance(keys, dict) or set(keys) != roles:
+        raise lease.Rejected("bootstrap host key scope rejected")
+    needles = {b"-----BEGIN OPENSSH PRIVATE KEY-----"}
+    for role, key in keys.items():
+        if (not isinstance(key, dict) or set(key) != {"publicKey", "privateKeySha256"}
+                or not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", key["publicKey"])
+                or not re.fullmatch(r"[a-f0-9]{64}", key["privateKeySha256"])):
+            raise lease.Rejected("bootstrap key format rejected")
+        path = directory / f"{phase}-{role}-bootstrap-ed25519"
+        private = lease.read_private(path, 8192)
+        if hashlib.sha256(private).hexdigest() != key["privateKeySha256"]:
+            raise lease.Rejected("bootstrap key bytes differ from approved input")
+        result = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", str(path)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                check=False, timeout=5)
+        if (result.returncode or b" ".join(result.stdout.split()[:2]) != key["publicKey"].encode("ascii")
+                or lease.read_private(path, 8192) != private):
+            raise lease.Rejected("bootstrap public key does not match approved private key")
+        for line in private.splitlines()[1:-1]:
+            if len(line) >= 48:
+                needles.add(line)
+                # Detect plaintext or a base64 wrapper with any byte alignment.
+                needles.update(base64.b64encode(line[i:i + 45]) for i in range(3))
+    return tuple(needles)
+
+
+def reject_plaintext(data, needles):
+    if any(needle in data for needle in needles):
+        raise lease.Rejected("unencrypted bootstrap data rejected")
+
+
+def encrypted_secret(value):
+    return (isinstance(value, dict) and set(value) == {*PULUMI_SECRET_SIGNATURE, "ciphertext"}
+            and all(value[key] == marker for key, marker in PULUMI_SECRET_SIGNATURE.items())
+            and isinstance(value["ciphertext"], str) and bool(value["ciphertext"]))
+
+
+def check_secret_plan(plan, server_urns):
+    for urn in server_urns:
+        record = plan["resourcePlans"][urn]
+        if not encrypted_secret(record["goal"]["inputDiff"]["adds"]["userData"]):
+            raise lease.Rejected("saved bootstrap user data is not encrypted")
+        state = record.get("state", {})
+        if "userData" in state and not encrypted_secret(state["userData"]):
+            raise lease.Rejected("saved bootstrap state user data is not encrypted")
+
+
+def check_pulumi_artifacts(stage, needles):
+    total = 0
+    count = 0
+    for root in (stage / "backend", stage / "pulumi-home/logs", stage / "pulumi-home/workspaces"):
+        if not os.path.lexists(root):
+            continue
+        paths = [root]
+        while paths:
+            path = paths.pop()
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                paths.extend(path.iterdir())
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise lease.Rejected("unexpected Pulumi artifact")
+            count += 1
+            total += info.st_size
+            if count > 128 or total > 16 * 1024 * 1024:
+                raise lease.Rejected("Pulumi artifact inventory exceeds limit")
+            reject_plaintext(lease.read_private(path, PULUMI_OUTPUT_LIMIT), needles)
+
+
+def check_secret_checkpoint(stage, phase, server_urns):
+    path = stage / "backend/.pulumi/stacks" / PROJECT / (phase + ".json")
+    checkpoint = read_json(path, PULUMI_OUTPUT_LIMIT)
+    resources = {row["urn"]: row for row in checkpoint["checkpoint"]["latest"]["resources"]}
+    for urn in server_urns:
+        record = resources[urn]
+        if not encrypted_secret(record["inputs"]["userData"]):
+            raise lease.Rejected("applied bootstrap input is not encrypted")
+        outputs = record.get("outputs", {})
+        if "userData" in outputs and not encrypted_secret(outputs["userData"]):
+            raise lease.Rejected("applied bootstrap output is not encrypted")
 
 
 def ids_by_kind(owned):
@@ -241,19 +330,26 @@ def failed_update(log, targets, status):
             "errors": [{"resource": name, "code": code} for name, code in sorted(errors)]}
 
 
-def pulumi(project, env, args, *, seconds, output=False, failure_receipt=None, targets=()):
+def pulumi(project, env, args, *, seconds, output=False, failure_receipt=None, targets=(), needles=()):
     with tempfile.TemporaryFile() as log:
         result = subprocess.run(["pulumi", *args], cwd=project, env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.DEVNULL, timeout=seconds, check=False)
+        if output or needles or (result.returncode and failure_receipt is not None):
+            log.seek(0)
+            data = log.read(PULUMI_OUTPUT_LIMIT + 1)
+        if needles:
+            if len(data) > PULUMI_OUTPUT_LIMIT:
+                raise lease.Rejected("Pulumi output exceeds limit")
+            reject_plaintext(data, needles)
         if result.returncode:
             if failure_receipt is not None:
-                log.seek(0)
-                evidence = failed_update(log.read(PULUMI_OUTPUT_LIMIT + 1), targets, result.returncode)
+                evidence = failed_update(data, targets, result.returncode)
+                if needles:
+                    evidence["unscopedProviderCodes"] = sorted(set(PROVIDER_ERROR_CODES.findall(
+                        data.decode("utf-8", errors="replace"))))
                 lease.write_private(failure_receipt, evidence)
             raise lease.Rejected("Pulumi command failed")
         if output:
-            log.seek(0)
-            data = log.read(PULUMI_OUTPUT_LIMIT + 1)
             if len(data) > PULUMI_OUTPUT_LIMIT:
                 raise lease.Rejected("Pulumi output exceeds limit")
             return parse_json(data)
@@ -303,6 +399,8 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     if probe_only and config["probeOnly"] is not True:
         raise lease.Rejected("console probe flag rejected")
     scope = phase_targets(phase, manifest["run"], probe_only=probe_only)
+    needles = bootstrap_material(directory, phase, config, probe_only=probe_only)
+    server_urns = [urn for urn, (kind, _) in scope.items() if kind == "servers"]
     if os.path.lexists(directory / "closed.json"):
         raise lease.Rejected("lease closed")
     project = directory / "project" / "rehearsal-create"
@@ -336,12 +434,17 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     targets = [flag for urn in scope for flag in ("--target", urn)]
     fixed = ["--stack", phase, "--non-interactive", "--suppress-outputs", "--suppress-permalink", *targets]
     if action == "preview":
-        pulumi(project, env, ["stack", "init", phase, "--non-interactive"], seconds=25)
+        pulumi(project, env, ["stack", "init", phase, "--non-interactive"], seconds=25, needles=needles)
         digest = pulumi(project, env, ["preview", *fixed, "--json", "--show-secrets=false", "--save-plan", str(plan)],
-                        seconds=120, output=True)
+                        seconds=120, output=True, needles=needles)
         report = validate_preview(digest, phase, manifest["run"], version, probe_only=probe_only)
         plan_data = lease.read_private(plan, 4 * 1024 * 1024)
-        validate_saved_plan(parse_json(plan_data), phase, manifest["run"], version, probe_only=probe_only)
+        planned = parse_json(plan_data)
+        validate_saved_plan(planned, phase, manifest["run"], version, probe_only=probe_only)
+        if needles:
+            reject_plaintext(plan_data, needles)
+            check_secret_plan(planned, server_urns)
+            check_pulumi_artifacts(stage, needles)
         report.update(probeOnly=probe_only, sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
                       planSha256=hashlib.sha256(plan_data).hexdigest(),
                       stackConfigSha256=optional_sha(stack_config))
@@ -351,19 +454,33 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     timer.check_ready(directory, manifest, credential)
     review_data = lease.read_private(review_path, 65536)
     report = parse_json(review_data)
+    plan_data = lease.read_private(plan, PULUMI_OUTPUT_LIMIT)
     if (approval != hashlib.sha256(review_data).hexdigest() or report["sourceSha256"] != source
             or report["probeOnly"] is not probe_only
             or report["inputSha256"] != hashlib.sha256(config_data).hexdigest()
             or report["stackConfigSha256"] != optional_sha(stack_config)
-            or report["planSha256"] != hashlib.sha256(lease.read_private(plan, 4 * 1024 * 1024)).hexdigest()):
+            or report["planSha256"] != hashlib.sha256(plan_data).hexdigest()):
         raise lease.Rejected("approved preview binding rejected")
+    if needles:
+        reject_plaintext(plan_data, needles)
+        check_secret_plan(parse_json(plan_data), server_urns)
+        check_pulumi_artifacts(stage, needles)
     lease.write_private(directory / f"{phase}-dispatched.json", {"run": manifest["run"], "reviewSha256": approval,
                                                                 "dispatchedAt": int(time.time())})
-    pulumi(project, env, ["up", *fixed, "--yes", "--skip-preview", "--json", "--show-secrets=false",
-                          "--plan", str(plan)], seconds=170,
-           failure_receipt=directory / f"{phase}-apply-failure.json", targets=scope)
+    # Pulumi 3.268's update JSON includes raw values in engine events even
+    # with show-secrets disabled. Its text renderer redacts them.
+    display = [] if needles else ["--json"]
+    try:
+        pulumi(project, env, ["up", *fixed, "--yes", "--skip-preview", *display, "--show-secrets=false",
+                              "--plan", str(plan)], seconds=170,
+               failure_receipt=directory / f"{phase}-apply-failure.json", targets=scope, needles=needles)
+    finally:
+        if needles:
+            check_pulumi_artifacts(stage, needles)
+    if needles:
+        check_secret_checkpoint(stage, phase, server_urns)
     result = pulumi(project, env, ["stack", "output", "owned", "--stack", phase, "--json", "--non-interactive"],
-                    seconds=15, output=True)
+                    seconds=15, output=True, needles=needles)
     counts = Counter(kind for kind, _ in scope.values())
     inventory = api.inventory()
     owned, collisions = lease.select_owned(manifest["run"], manifest["baseline"], inventory, "final")

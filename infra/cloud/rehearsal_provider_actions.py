@@ -61,9 +61,12 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     sid = binding["serverId"]
     prefix = f"{phase}-{role}"
     login_path = directory / f"{prefix}-rescue-login.json"
-    probe_only = lease.reviewed_probe_mode(directory, phase)
+    config, _ = lease.reviewed_phase_input(directory, phase)
+    probe_only = "probeOnly" in config
     if probe_only and (role != "relay" or mode == "boot-installed"):
         raise lease.Rejected("console probe action scope rejected")
+    if "bootstrapHostKeys" in config and mode in ("rescue", "console"):
+        raise lease.Rejected("known-host bootstrap does not use provider Rescue")
     host = api.get("servers", sid)
     if (host is None or host["id"] != sid or host["status"] != "running"
             or type(host["rescue_enabled"]) is not bool
