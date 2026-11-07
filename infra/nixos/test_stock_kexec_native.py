@@ -5,7 +5,11 @@ from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
+import re
+import selectors
+import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -26,6 +30,19 @@ BASE_SHA512 = (
 ALIAS = "terrace-stock-kexec-fixture"
 PREFIX = "original-relay"
 SERIAL_LIMIT = 256 * 1024
+SERIAL_MARKERS = {
+    "seaBios": (b"SeaBIOS",),
+    "firmwareDiskBoot": (b"Booting from Hard Disk",),
+    "grub": (b"GRUB",),
+    "loaderError": (b"no such device", b"unknown filesystem", b"no bootable device",
+                    b"you need to load the kernel first", b"disk read error", b"grub rescue>"),
+    "linuxKernel": (b"Linux version ", b"Booting Linux"),
+    "kernelPanic": (b"Kernel panic",),
+    "initStarted": (b"Run /init as init process", b"systemd[1]: "),
+    "cloudInit": (b"Cloud-init v", b"cloud-init["),
+    "noCloud": (b"DataSourceNoCloud",),
+    "sshService": (b"OpenBSD Secure Shell server", b"sshd["),
+}
 
 
 def base_digest(path):
@@ -123,21 +140,99 @@ def wrong_host_rejected(ssh):
                     "wrong host key was not rejected by OpenSSH")
 
 
+def diagnostic_command(argv, seconds):
+    deadline = time.monotonic() + seconds
+    output = [bytearray(), bytearray()]
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as process, selectors.DefaultSelector() as ready:
+        ready.register(process.stdout, selectors.EVENT_READ, 0)
+        ready.register(process.stderr, selectors.EVENT_READ, 1)
+        try:
+            while ready.get_map():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return 124, b"", b""
+                for stream, _ in ready.select(left):
+                    data = os.read(stream.fd, 8192)
+                    if not data:
+                        ready.unregister(stream.fd)
+                        continue
+                    buffer = output[stream.data]
+                    if len(buffer) + len(data) > 8192:
+                        return 125, b"", b""
+                    buffer.extend(data)
+            code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            return code, bytes(output[0]), bytes(output[1])
+        except subprocess.TimeoutExpired:
+            return 124, b"", b""
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def stock_diagnostics(port, ssh, public, operator):
+    facts = {"tcpConnected": False, "sshBanner": False, "ed25519Match": None,
+             "pinnedSsh": "unobserved", "stockCheckLine": None}
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as conn:
+            facts["tcpConnected"] = True
+            with conn.makefile("rb") as stream:
+                facts["sshBanner"] = stream.readline(256).startswith(b"SSH-2.0-")
+    except OSError:
+        pass
+    if not facts["sshBanner"]:
+        return facts
+    code, out, _ = diagnostic_command(
+        ["ssh-keyscan", "-q", "-T", "3", "-p", str(port), "-t", "ed25519", "127.0.0.1"], 5
+    )
+    facts["ed25519Match"] = code == 0 and len(out.splitlines()) == 1 and (
+        out.split()[1:] == [b"ssh-ed25519", public.encode("ascii")]
+    )
+    code, _, err = diagnostic_command([*ssh, "true"], 15)
+    if code == 0:
+        facts["pinnedSsh"] = "authenticated"
+    elif b"Host key verification failed." in err:
+        facts["pinnedSsh"] = "host-key-rejected"
+    elif b"Permission denied (publickey)" in err:
+        facts["pinnedSsh"] = "public-key-rejected"
+    else:
+        facts["pinnedSsh"] = "timeout" if code == 124 else "transport-error"
+    if code == 0:
+        # Repeat the same read-only checks with a fixed line number on failure.
+        probe = stock_kexec.STOCK_PROBE.replace(
+            "set -euo pipefail", """set -Eeuo pipefail
+trap 'printf "stock-line:%d\\n" "$LINENO"' ERR""", 1
+        )
+        command = shlex.join(["timeout", "20", "bash", "-c", probe, "terrace", public, operator])
+        _, out, _ = diagnostic_command([*ssh, command], 25)
+        line = re.fullmatch(rb"stock-line:([1-9][0-9]{0,2})\n", out)
+        if line:
+            facts["stockCheckLine"] = int(line[1])
+    return facts
+
+
 def exercise(args, directory, seed, overlay, facts):
     binding = {"ipv4": "127.0.0.1"}
     options = [*install.ssh_options(directory, PREFIX, "bootstrap"),
                "-o", "HostKeyAlias=" + ALIAS, "-p", str(args.port)]
     ssh = ["ssh", *options, "root@127.0.0.1"]
-    wrong = ["ssh", *install.ssh_options(directory, PREFIX, "wrong"),
-             "-o", "HostKeyAlias=" + ALIAS, "-p", str(args.port), "root@127.0.0.1"]
+    wrong_options = [*install.ssh_options(directory, PREFIX, "wrong"),
+                     "-o", "HostKeyAlias=" + ALIAS, "-p", str(args.port)]
+    wrong = ["ssh", *wrong_options, "root@127.0.0.1"]
     public = (directory / "stock-ed25519.pub").read_text().split()[1]
+    operator = (directory / "operator-ed25519.pub").read_text().split()[1]
     serial = bytearray()
     try:
         with guest(args, overlay, seed, serial, facts) as process, patch.object(
             install, "bootstrap_authority", return_value=(binding, public, options, ssh)
         ), patch.object(install, "remaining", side_effect=lambda _directory, _binding, limit: limit):
             facts["stage"] = "stock"
-            await_fact(process, 150, lambda: stock_kexec.stock_boot(ssh, public, directory))
+            try:
+                await_fact(process, 150, lambda: stock_kexec.stock_boot(ssh, public, directory))
+            except install.Rejected:
+                facts["stockDiagnostics"] = stock_diagnostics(args.port, ssh, public, operator)
+                raise
             wrong_host_rejected(wrong)
             facts["stockWrongKeyRejected"] = True
             facts["stage"] = "dispatch"
@@ -160,6 +255,13 @@ def exercise(args, directory, seed, overlay, facts):
                             "store probe is not a small Nix store file")
             install.remote(ssh, 5, 'test ! -e "$1"', store)
             install.remote(ssh, 20, install.RAM_SERVE, "430")
+            try:
+                install.copy_store(binding, wrong_options, 30, [store])
+            except install.Rejected:
+                install.remote(ssh, 5, 'test ! -e "$1"', store)
+            else:
+                raise install.Rejected("Nix copy accepted the wrong host key")
+            facts["ramStoreWrongKeyRejected"] = True
             install.copy_store(binding, options, 30, [store])
             install.remote(ssh, 5, 'set -eu; test -f "$1"; test "$(sha256sum "$1" | cut -d " " -f1)" = "$2"',
                            store, install.sha(Path(store).read_bytes()))
@@ -169,8 +271,11 @@ def exercise(args, directory, seed, overlay, facts):
         operator = (directory / "operator-ed25519").read_bytes()
         forbidden = {b"PRIVATE KEY-----", *private.splitlines()[1:-1], *operator.splitlines()[1:-1]}
         facts["serialPrivateKeyFound"] = any(marker in serial for marker in forbidden if marker)
-        facts["serialKernelPanic"] = b"Kernel panic" in serial
-        facts["serialCloudInit"] = b"Cloud-init v" in serial
+        lower_serial = serial.lower()
+        facts["serialBootMarkers"] = {
+            name: any(marker.lower() in lower_serial for marker in markers)
+            for name, markers in SERIAL_MARKERS.items()
+        }
         facts["serialBytesCaptured"] = len(serial)
         install.require(not facts["serialPrivateKeyFound"], "guest serial contained private key material")
 

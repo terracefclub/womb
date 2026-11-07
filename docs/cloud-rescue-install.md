@@ -216,8 +216,10 @@ systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
 The single BIOS/KVM guest uses a disposable overlay, and its only forwarded
 port binds loopback. The test substitutes the lease transport for that local
 port, uses the production SSH settings and remote checks, and requires
-OpenSSH to reject a wrong key on both boots. It copies the public sentinel
-through the native Nix store protocol and verifies its digest in RAM. It
-records only fixed facts, discards the bounded serial sample and removes the
-temporary overlay and keys after stopping the guest. No disk formatter or
-application starts in this proof.
+OpenSSH to reject a wrong key on both boots. It requires Nix store copy to
+reject the wrong key and leave the public sentinel absent, then copies the
+sentinel with the reviewed key and verifies its digest in RAM. A stock-boot
+failure records fixed boot markers and, if reached, the SSH stage and failing
+stock check line. The test discards raw diagnostics and the bounded serial
+sample and removes the temporary overlay and keys after stopping the guest.
+No disk formatter or application starts in this proof.

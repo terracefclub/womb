@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 import rescue_install as rescue
 import stock_kexec
+from test_stock_kexec_native import diagnostic_command
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -139,6 +141,17 @@ class RescueInstallTest(unittest.TestCase):
         self.stock_archive(path, ["kexec/run"])
         with path.open("rb") as stream, self.assertRaisesRegex(rescue.Rejected, "entry missing"):
             stock_kexec.archive_unpacked_bytes(stream)
+
+    def test_native_diagnostic_pipes_are_capped_and_timed(self):
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"], 5
+        ), (0, b"out\n", b"err\n"))
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "print('x' * 8192)"], 5
+        ), (125, b"", b""))
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "import time; time.sleep(10)"], 0.05
+        ), (124, b"", b""))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"
