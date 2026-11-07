@@ -87,8 +87,19 @@ PAGE = """<!doctype html><meta charset=utf-8><div id=console></div>
 import RFB from '/core/rfb.js';
 window.consoleEvents = {securityFailure:false, credentialsRequired:false, disconnected:false};
 window.startConsole = ({url, password}) => {
-  window.rfb = new RFB(document.querySelector('#console'), url,
-    {credentials:{password}, wsProtocols:['binary']});
+  const socket = new WebSocket(url, ['binary']);
+  // noVNC checks own properties or one prototype level. Playwright's routed
+  // WebSocket inherits its transport methods through an extra level.
+  const channel = {
+    send: socket.send.bind(socket), close: socket.close.bind(socket),
+    get readyState() { return socket.readyState; },
+    get protocol() { return socket.protocol; },
+  };
+  for (const name of ['binaryType', 'onerror', 'onmessage', 'onopen', 'onclose']) {
+    Object.defineProperty(channel, name, {enumerable:true,
+      get: () => socket[name], set: value => { socket[name] = value; }});
+  }
+  window.rfb = new RFB(document.querySelector('#console'), channel, {credentials:{password}});
   window.rfb.addEventListener('connect', () => window.consoleReady = true);
   window.rfb.addEventListener('securityfailure', () => window.consoleEvents.securityFailure = true);
   window.rfb.addEventListener('credentialsrequired', () => window.consoleEvents.credentialsRequired = true);
