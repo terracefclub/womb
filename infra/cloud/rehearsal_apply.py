@@ -32,7 +32,8 @@ RESOURCE_TYPES = {
     "app": ("servers", "hcloud:index/server:Server"),
     "relay": ("servers", "hcloud:index/server:Server"),
 }
-PROJECT_FILES = ("Pulumi.yaml", "README.md", "index.ts", "input.ts", "rehearsal.test.ts", "resources.ts", "tsconfig.json")
+PROJECT_FILES = ("Pulumi.yaml", "README.md", "bootstrap.ts", "index.ts", "input.ts", "rehearsal.test.ts",
+                 "resources.ts", "tsconfig.json")
 PARENT_FILES = ("budget.ts", "package.json", "bun.lock", "tsconfig.json")
 PULUMI_OUTPUT_LIMIT = 4 * 1024 * 1024
 PULUMI_SECRET_SIGNATURE = {"4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270"}
@@ -105,11 +106,18 @@ def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False)
 
 def bootstrap_material(directory, phase, config, *, probe_only):
     if "bootstrapHostKeys" not in config:
+        if "bootstrapOperatorPublicKey" in config:
+            raise lease.Rejected("bootstrap operator key is outside a bootstrap phase")
         return ()
     keys = config["bootstrapHostKeys"]
     roles = {"relay"} if probe_only else set(lease.ROLES)
     if phase not in lease.PHASES or not isinstance(keys, dict) or set(keys) != roles:
         raise lease.Rejected("bootstrap host key scope rejected")
+    operator = config.get("bootstrapOperatorPublicKey", "")
+    foundation = read_json(directory / "foundation-input.json")["sshPublicKey"]
+    if (not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", operator)
+            or operator != " ".join(foundation.split()[:2])):
+        raise lease.Rejected("bootstrap operator key differs from the foundation")
     needles = {b"-----BEGIN OPENSSH PRIVATE KEY-----"}
     for role, key in keys.items():
         if (not isinstance(key, dict) or set(key) != {"publicKey", "privateKeySha256"}

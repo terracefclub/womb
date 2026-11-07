@@ -50,10 +50,13 @@ class RehearsalApplyTest(unittest.TestCase):
         body = b"syntheticPrivateKeyBodyOnly" * 3
         private = b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + body + b"\n-----END OPENSSH PRIVATE KEY-----\n"
         public = "ssh-ed25519 " + "x" * 68
-        cfg = {"bootstrapHostKeys": {"relay": {"publicKey": public,
+        operator = "ssh-ed25519 " + "y" * 68
+        cfg = {"bootstrapOperatorPublicKey": operator,
+               "bootstrapHostKeys": {"relay": {"publicKey": public,
                                                   "privateKeySha256": hashlib.sha256(private).hexdigest()}}}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator + " comment"})
             path = root / "original-relay-bootstrap-ed25519"
             path.write_bytes(private)
             path.chmod(0o600)
@@ -61,6 +64,9 @@ class RehearsalApplyTest(unittest.TestCase):
                 needles = apply.bootstrap_material(root, "original", cfg, probe_only=True)
                 with self.assertRaises(lease.Rejected):
                     apply.bootstrap_material(root, "original", cfg, probe_only=False)
+                with self.assertRaisesRegex(lease.Rejected, "differs from the foundation"):
+                    apply.bootstrap_material(root, "original", {**cfg, "bootstrapOperatorPublicKey": public},
+                                             probe_only=True)
             for leak in (private, body, base64.b64encode(b"x" + body)):
                 with self.assertRaisesRegex(lease.Rejected, "unencrypted"):
                     apply.reject_plaintext(leak, needles)

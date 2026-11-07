@@ -162,7 +162,8 @@ replacement. Clean up and verify the project baseline as with a full lease.
 For the known-host bootstrap, the reviewed cohort input carries
 `bootstrapHostKeys` for its exact roles. Each entry binds the public
 Ed25519 key and the hash of its private sibling file. The controller
-derives and checks the public key before preview or apply. The provider
+derives and checks the public key before preview or apply. It also binds
+the root operator key to the previously verified foundation key. The provider
 receives the one-use host key as secret cloud-init user data. Keep the
 private file and backend outside Git and use a different installed key.
 Treat guest metadata as accessible to the temporary host and run no
