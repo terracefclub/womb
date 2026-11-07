@@ -1,6 +1,9 @@
 import copy
 import hashlib
+import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 import unittest
@@ -41,6 +44,37 @@ def saved_plan(phase):
 
 
 class RehearsalApplyTest(unittest.TestCase):
+    def test_failed_update_retains_only_scoped_codes(self):
+        targets = apply.phase_targets("original", RUN)
+        app = next(urn for urn in targets if urn.endswith("::app"))
+        secret = "synthetic-private-marker"
+        rows = [
+            {"diagnosticEvent": {"severity": "error", "urn": app,
+                                 "message": f"Error during placement (resource_unavailable, {secret})"}},
+            {"diagnosticEvent": {"severity": "warning", "urn": app, "message": "(maintenance)"}},
+            {"diagnosticEvent": {"severity": "error", "urn": secret, "message": "(conflict)"}},
+            {"diagnosticEvent": {"severity": "error", "urn": app, "message": f"({secret})"}},
+        ]
+
+        def run(*_args, stdout, **_kwargs):
+            stdout.write(b"not an event\n")
+            for row in rows:
+                stdout.write(json.dumps(row).encode() + b"\n")
+            return subprocess.CompletedProcess([], 1)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "failure.json"
+            with patch.object(apply.subprocess, "run", side_effect=run), self.assertRaises(lease.Rejected):
+                apply.pulumi(Path(temporary), {}, ["up"], seconds=10, targets=targets, failure_receipt=path)
+            self.assertEqual(apply.read_json(path), {
+                "exitStatus": 1, "outputExceeded": False,
+                "errors": [{"resource": "app", "code": "resource_unavailable"}],
+            })
+            self.assertNotIn(secret.encode(), path.read_bytes())
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(apply.failed_update(b"x" * (apply.PULUMI_OUTPUT_LIMIT + 1), targets, 1),
+                         {"exitStatus": 1, "outputExceeded": True, "errors": []})
+
     def test_staged_source_rejects_node_resolution_shadows(self):
         with tempfile.TemporaryDirectory() as name:
             parent = Path(name)

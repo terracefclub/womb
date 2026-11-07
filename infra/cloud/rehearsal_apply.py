@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -32,6 +33,11 @@ RESOURCE_TYPES = {
 }
 PROJECT_FILES = ("Pulumi.yaml", "README.md", "index.ts", "input.ts", "rehearsal.test.ts", "resources.ts", "tsconfig.json")
 PARENT_FILES = ("budget.ts", "package.json", "bun.lock", "tsconfig.json")
+PULUMI_OUTPUT_LIMIT = 4 * 1024 * 1024
+PROVIDER_ERROR_CODES = re.compile(
+    r"\((resource_unavailable|resource_limit_exceeded|invalid_server_type|invalid_input|"
+    r"forbidden|maintenance|rate_limit_exceeded|service_error|conflict|timeout)(?:,|\))"
+)
 
 
 def phase_targets(phase, run):
@@ -208,16 +214,43 @@ def source_sha(project):
     return fingerprint_source(lambda path: lease.read_private(project.parent / path, 1024 * 1024))
 
 
-def pulumi(project, env, args, *, seconds, output=False):
+def failed_update(log, targets, status):
+    if len(log) > PULUMI_OUTPUT_LIMIT:
+        return {"exitStatus": status, "outputExceeded": True, "errors": []}
+    errors = set()
+    for line in io.BytesIO(log):
+        try:
+            event = parse_json(line)
+        except (ValueError, RecursionError):
+            continue
+        diagnostic = event.get("diagnosticEvent") if isinstance(event, dict) else None
+        if not isinstance(diagnostic, dict) or diagnostic.get("severity") != "error":
+            continue
+        urn = diagnostic.get("urn")
+        message = diagnostic.get("message")
+        if not isinstance(urn, str) or not isinstance(message, str) or urn not in targets:
+            continue
+        name = urn.rsplit("::", 1)[1]
+        for code in PROVIDER_ERROR_CODES.findall(message):
+            errors.add((name, code))
+    return {"exitStatus": status, "outputExceeded": False,
+            "errors": [{"resource": name, "code": code} for name, code in sorted(errors)]}
+
+
+def pulumi(project, env, args, *, seconds, output=False, failure_receipt=None, targets=()):
     with tempfile.TemporaryFile() as log:
         result = subprocess.run(["pulumi", *args], cwd=project, env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.DEVNULL, timeout=seconds, check=False)
         if result.returncode:
+            if failure_receipt is not None:
+                log.seek(0)
+                evidence = failed_update(log.read(PULUMI_OUTPUT_LIMIT + 1), targets, result.returncode)
+                lease.write_private(failure_receipt, evidence)
             raise lease.Rejected("Pulumi command failed")
         if output:
             log.seek(0)
-            data = log.read(4 * 1024 * 1024 + 1)
-            if len(data) > 4 * 1024 * 1024:
+            data = log.read(PULUMI_OUTPUT_LIMIT + 1)
+            if len(data) > PULUMI_OUTPUT_LIMIT:
                 raise lease.Rejected("Pulumi output exceeds limit")
             return parse_json(data)
 
@@ -317,7 +350,9 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
         raise lease.Rejected("approved preview binding rejected")
     lease.write_private(directory / f"{phase}-dispatched.json", {"run": manifest["run"], "reviewSha256": approval,
                                                                 "dispatchedAt": int(time.time())})
-    pulumi(project, env, ["up", *fixed, "--yes", "--skip-preview", "--plan", str(plan)], seconds=170)
+    pulumi(project, env, ["up", *fixed, "--yes", "--skip-preview", "--json", "--show-secrets=false",
+                          "--plan", str(plan)], seconds=170,
+           failure_receipt=directory / f"{phase}-apply-failure.json", targets=phase_targets(phase, manifest["run"]))
     result = pulumi(project, env, ["stack", "output", "owned", "--stack", phase, "--json", "--non-interactive"],
                     seconds=15, output=True)
     counts = Counter(kind for kind, _ in phase_targets(phase, manifest["run"]).values())
