@@ -133,6 +133,26 @@ window.consoleCalibration = async ({sample, paced, erase}) => {
     }
   }
 };
+window.consolePhysicalCalibration = async ({sample, erase}) => {
+  if (!window.consoleReady || window.rfb._qemuExtKeyEventSupported !== true
+      || !/^[A-Za-z]{1,16}$/.test(sample)) throw new Error('physical calibration unavailable');
+  const pause = () => new Promise(resolve => setTimeout(resolve, 85));
+  for (const char of sample) {
+    const shifted = !erase && char === char.toUpperCase();
+    const key = erase ? 0xff08 : char.toLowerCase().codePointAt(0);
+    const code = erase ? 'Backspace' : 'Key' + char.toUpperCase();
+    if (shifted) window.rfb.sendKey(0xffe1, 'ShiftLeft', true);
+    try {
+      if (shifted) await pause();
+      window.rfb.sendKey(key, code, true);
+      try { await pause(); } finally { window.rfb.sendKey(key, code, false); }
+      await pause();
+    } finally {
+      if (shifted) window.rfb.sendKey(0xffe1, 'ShiftLeft', false);
+    }
+    if (shifted) await pause();
+  }
+};
 </script>"""
 
 
@@ -200,9 +220,15 @@ def active_console_line(text):
     return next((line.rstrip() for line in reversed(text.splitlines()) if line.strip()), "")
 
 
-def calibrate_keyboard(page, read_frame, progress, deadline):
-    results = {mode: {"echo": "unknown", "erased": False} for mode in ("immediate", "paced")}
+def calibrate_keyboard(page, read_frame, progress, deadline, *, physical=False):
+    modes = ("physical",) if physical else ("immediate", "paced")
+    results = {mode: {"echo": "unknown", "erased": False} for mode in modes}
     progress["keyboardCalibration"] = results
+    if physical:
+        results["physical"].update(consoleReady=True, qemuExtendedKeyEvent=False)
+        page.wait_for_function("window.consoleReady === true && window.rfb._qemuExtKeyEventSupported === true",
+                               timeout=4000)
+        results["physical"]["qemuExtendedKeyEvent"] = True
 
     def observe(classify, seconds):
         until = min(deadline, time.monotonic() + seconds)
@@ -214,8 +240,12 @@ def calibrate_keyboard(page, read_frame, progress, deadline):
         return None
 
     def send(*, paced, erase):
-        page.evaluate("value => window.consoleCalibration(value)",
-                      {"sample": KEYBOARD_SAMPLE, "paced": paced, "erase": erase})
+        if physical:
+            page.evaluate("value => window.consolePhysicalCalibration(value)",
+                          {"sample": KEYBOARD_SAMPLE, "erase": erase})
+        else:
+            page.evaluate("value => window.consoleCalibration(value)",
+                          {"sample": KEYBOARD_SAMPLE, "paced": paced, "erase": erase})
 
     prompt = observe(lambda line: line if LOGIN.fullmatch(line) else None, 12)
     rescue.require(prompt is not None, "active empty calibration prompt not observed")
@@ -237,7 +267,7 @@ def calibrate_keyboard(page, read_frame, progress, deadline):
         rescue.require(result["erased"], "active empty calibration prompt not restored")
 
 
-def attest_console(receipt, fingerprint, progress, *, keyboard_probe=False):
+def attest_console(receipt, fingerprint, progress, *, keyboard_probe=None):
     # Import only for the actual console stage. Offline tests use no browser.
     from playwright.sync_api import Error, TimeoutError, sync_playwright
 
@@ -317,8 +347,9 @@ def attest_console(receipt, fingerprint, progress, *, keyboard_probe=False):
                 raise rescue.Rejected("expected console prompt or marker not observed")
 
             if keyboard_probe:
-                progress["stage"] = "keyboard-calibration"
-                calibrate_keyboard(page, read_frame, progress, deadline)
+                physical = keyboard_probe == "physical"
+                progress["stage"] = "physical-keyboard-calibration" if physical else "keyboard-calibration"
+                calibrate_keyboard(page, read_frame, progress, deadline, physical=physical)
                 page.evaluate("window.rfb.disconnect()")
                 return
 
@@ -346,7 +377,7 @@ def record_text(path, value):
         os.link(stream.name, path)
 
 
-def enroll(directory, phase, role, receipt_path, progress, *, keyboard_probe=False):
+def enroll(directory, phase, role, receipt_path, progress, *, keyboard_probe=None):
     rescue.require(receipt_path.parent == directory, "console receipt must stay in the lease directory")
     prefix = f"{phase}-{role}"
     rescue.require(re.fullmatch(re.escape(prefix) + r"-console-[1-9][0-9]{0,19}[.]json", receipt_path.name),
@@ -361,10 +392,11 @@ def enroll(directory, phase, role, receipt_path, progress, *, keyboard_probe=Fal
         rescue.require((phase, role) == ("original", "relay") and rescue.reviewed_probe_mode(directory, phase),
                        "keyboard calibration requires a reviewed original relay probe")
         progress["stage"] = "browser-start"
-        attest_console(receipt, None, progress, keyboard_probe=True)
+        attest_console(receipt, None, progress, keyboard_probe=keyboard_probe)
         rescue.require(rescue.lease_binding(directory, phase, role, time.time()) == binding,
                        "provider binding changed during keyboard calibration")
-        rescue.write_private(directory / f"{prefix}-keyboard-calibration-{time.time_ns()}.json",
+        suffix = "physical-keyboard-calibration" if keyboard_probe == "physical" else "keyboard-calibration"
+        rescue.write_private(directory / f"{prefix}-{suffix}-{time.time_ns()}.json",
                              progress["keyboardCalibration"])
         return
     progress["stage"] = "ssh-candidate"
@@ -386,13 +418,15 @@ def main():
     parser.add_argument("phase", choices=rescue.PHASES)
     parser.add_argument("role", choices=rescue.ROLES)
     parser.add_argument("receipt", type=Path)
-    parser.add_argument("--keyboard-probe-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--keyboard-probe-only", dest="keyboard_probe", action="store_const", const="standard")
+    modes.add_argument("--physical-keyboard-probe-only", dest="keyboard_probe", action="store_const", const="physical")
     args = parser.parse_args()
     directory = None
     progress = {"stage": "binding"}
     try:
         directory = rescue.private_directory(args.directory)
-        enroll(directory, args.phase, args.role, args.receipt, progress, keyboard_probe=args.keyboard_probe_only)
+        enroll(directory, args.phase, args.role, args.receipt, progress, keyboard_probe=args.keyboard_probe)
     except Exception:
         # Playwright exceptions can include the complete WebSocket URL.
         if directory is not None:
@@ -403,7 +437,9 @@ def main():
                 pass
         print("Rescue console authentication failed. Private diagnostics suppressed.", file=sys.stderr)
         return 1
-    if args.keyboard_probe_only:
+    if args.keyboard_probe == "physical":
+        print("Console physical keyboard calibration recorded without login.")
+    elif args.keyboard_probe:
         print("Console keyboard calibration recorded without login.")
     else:
         print("Provider console authenticated the exact Rescue SSH host key.")
