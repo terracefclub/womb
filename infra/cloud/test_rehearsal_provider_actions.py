@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -10,7 +9,7 @@ from urllib.parse import urlencode
 
 import rehearsal_lease as lease
 import rehearsal_provider_actions as actions
-from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource
+from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource, write_reviewed_input
 
 
 class ProviderActionsTest(unittest.TestCase):
@@ -73,7 +72,7 @@ class ProviderActionsTest(unittest.TestCase):
             lease.write_private(root / "foundation-created.json", {"ssh_keys": [1]})
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": "ssh-ed25519 synthetic test"})
             lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
-            lease.write_private(root / "original-input.json", {"phase": "original", "run": RUN})
+            write_reviewed_input(root, {"phase": "original", "run": RUN})
             with (patch.object(actions.lease, "Api", return_value=api), patch.object(actions.apply, "require_run_unit"),
                   patch.object(actions.timer, "check_ready")):
                 args = (root, manifest, root / "credential", b"synthetic", "original", "app")
@@ -119,25 +118,21 @@ class ProviderActionsTest(unittest.TestCase):
         api = FakeApi(data)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            config_path = root / "original-input.json"
-            lease.write_private(config_path, {"phase": "original", "run": RUN, "probeOnly": True})
+            config = {"phase": "original", "run": RUN, "probeOnly": True}
+            config_path = write_reviewed_input(root, config)
             lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
             lease.write_private(root / "foundation-created.json", {"ssh_keys": [9]})
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": "ssh-ed25519 synthetic"})
-            (root / "original").mkdir()
-            review = root / "original/review.json"
-            lease.write_private(review, {"inputSha256": hashlib.sha256(config_path.read_bytes()).hexdigest()})
-            dispatch_receipt = root / "original-dispatched.json"
-            lease.write_private(dispatch_receipt, {"reviewSha256": "0" * 64})
             with (patch.object(actions.lease, "Api", return_value=api), patch.object(actions.apply, "require_run_unit"),
                   patch.object(actions.timer, "check_ready"),
                   patch.object(actions, "dispatch", return_value={"root_password": "synthetic-password"}) as dispatch):
                 args = (root, manifest, root / "credential", b"synthetic", "original", "relay")
-                with self.assertRaisesRegex(lease.Rejected, "probe action scope"):
+                config_path.unlink()
+                lease.write_private(config_path, {**config, "probeOnly": False})
+                with self.assertRaisesRegex(lease.Rejected, "no longer matches"):
                     actions.operate("rescue", *args)
                 dispatch.assert_not_called()
-                dispatch_receipt.unlink()
-                lease.write_private(dispatch_receipt, {"reviewSha256": hashlib.sha256(review.read_bytes()).hexdigest()})
+                write_reviewed_input(root, config)
                 with self.assertRaisesRegex(lease.Rejected, "probe action scope"):
                     actions.operate("boot-installed", *args)
                 dispatch.assert_not_called()

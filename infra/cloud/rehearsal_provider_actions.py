@@ -61,16 +61,9 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     sid = binding["serverId"]
     prefix = f"{phase}-{role}"
     login_path = directory / f"{prefix}-rescue-login.json"
-    config_data = lease.read_private(directory / f"{phase}-input.json", 65536)
-    config = apply.parse_json(config_data)
-    probe_only = config.get("probeOnly") is True
-    if probe_only:
-        dispatch_receipt = apply.read_json(directory / f"{phase}-dispatched.json")
-        review_data = lease.read_private(directory / phase / "review.json", 65536)
-        if (phase != "original" or role != "relay" or mode == "boot-installed"
-                or dispatch_receipt["reviewSha256"] != hashlib.sha256(review_data).hexdigest()
-                or apply.parse_json(review_data)["inputSha256"] != hashlib.sha256(config_data).hexdigest()):
-            raise lease.Rejected("console probe action scope rejected")
+    probe_only = lease.reviewed_probe_mode(directory, phase)
+    if probe_only and (role != "relay" or mode == "boot-installed"):
+        raise lease.Rejected("console probe action scope rejected")
     host = api.get("servers", sid)
     if (host is None or host["id"] != sid or host["status"] != "running"
             or type(host["rescue_enabled"]) is not bool

@@ -106,6 +106,25 @@ def write_private(path, value):
         os.close(fd)
 
 
+def reviewed_probe_mode(directory, phase):
+    """Bind the mode decision to the input that actually authorized dispatch."""
+    if phase not in PHASES:
+        raise Rejected("reviewed phase rejected")
+    dispatch = json.loads(read_private(directory / f"{phase}-dispatched.json", 4096))
+    review_data = read_private(directory / phase / "review.json", 65536)
+    input_data = read_private(directory / f"{phase}-input.json", 65536)
+    review = json.loads(review_data)
+    config = json.loads(input_data)
+    probe_only = review.get("probeOnly", False)
+    if (dispatch["reviewSha256"] != hashlib.sha256(review_data).hexdigest()
+            or review["inputSha256"] != hashlib.sha256(input_data).hexdigest()
+            or dispatch["run"] != config["run"] or config["phase"] != phase
+            or type(probe_only) is not bool or ("probeOnly" in config) != probe_only
+            or (probe_only and (phase != "original" or config["probeOnly"] is not True))):
+        raise Rejected("phase no longer matches its dispatched review")
+    return probe_only
+
+
 def expected_names(run):
     if not re.fullmatch(r"[a-f0-9]{32}", run):
         raise Rejected("run ID rejected")

@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cloud"))
 from rehearsal_lease import (  # noqa: E402
     PHASES, ROLES, Rejected, expected_names, positive_id, private_directory,
-    read_private, write_private,
+    read_private, reviewed_probe_mode, write_private,
 )
 
 
@@ -309,8 +309,7 @@ def remaining(directory, binding, limit):
 
 
 def install(directory, phase, role, approved, archive):
-    config, _ = read_json(directory / f"{phase}-input.json")
-    require(config.get("probeOnly") is not True, "console probe cannot write a disk")
+    require(not reviewed_probe_mode(directory, phase), "console probe cannot write a disk")
     prefix = f"{phase}-{role}"
     target_seconds = TARGET_COPY_SECONDS[role]
     require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")

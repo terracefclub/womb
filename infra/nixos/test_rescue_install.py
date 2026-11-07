@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import rescue_install as rescue
+from test_rehearsal_lease import RUN, write_reviewed_input
 
 
 class RescueInstallTest(unittest.TestCase):
@@ -62,9 +63,14 @@ class RescueInstallTest(unittest.TestCase):
                 rescue.known_key(known, address, expected)
 
     def test_console_probe_cannot_dispatch_an_install(self):
-        self.write("original-input.json", {"probeOnly": True})
+        cfg = {"run": RUN, "phase": "original", "probeOnly": True}
+        path = write_reviewed_input(self.directory, cfg)
         with patch.object(rescue, "authority") as authority:
             with self.assertRaisesRegex(rescue.Rejected, "cannot write a disk"):
+                rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            path.unlink()
+            self.write("original-input.json", {"run": RUN, "phase": "original"})
+            with self.assertRaisesRegex(rescue.Rejected, "no longer matches"):
                 rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
             authority.assert_not_called()
 

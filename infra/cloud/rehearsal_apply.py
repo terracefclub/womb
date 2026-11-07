@@ -165,7 +165,7 @@ def expected_before(api, manifest, directory, phase, config):
                         "ssh_keys": [config["sshKeyId"]]}:
             raise lease.Rejected("foundation identity mismatch")
     if phase == "replacement":
-        if read_json(directory / "original-input.json").get("probeOnly") is True:
+        if lease.reviewed_probe_mode(directory, "original"):
             raise lease.Rejected("console probe does not authorize replacement")
         receipts = sorted(directory.glob("original-absence-*.json"))
         if not receipts:
@@ -342,7 +342,7 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
         report = validate_preview(digest, phase, manifest["run"], version, probe_only=probe_only)
         plan_data = lease.read_private(plan, 4 * 1024 * 1024)
         validate_saved_plan(parse_json(plan_data), phase, manifest["run"], version, probe_only=probe_only)
-        report.update(sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
+        report.update(probeOnly=probe_only, sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
                       planSha256=hashlib.sha256(plan_data).hexdigest(),
                       stackConfigSha256=optional_sha(stack_config))
         lease.write_private(review_path, report)
@@ -352,6 +352,7 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     review_data = lease.read_private(review_path, 65536)
     report = parse_json(review_data)
     if (approval != hashlib.sha256(review_data).hexdigest() or report["sourceSha256"] != source
+            or report["probeOnly"] is not probe_only
             or report["inputSha256"] != hashlib.sha256(config_data).hexdigest()
             or report["stackConfigSha256"] != optional_sha(stack_config)
             or report["planSha256"] != hashlib.sha256(lease.read_private(plan, 4 * 1024 * 1024)).hexdigest()):

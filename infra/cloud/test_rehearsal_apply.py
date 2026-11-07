@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import rehearsal_apply as apply
 import rehearsal_lease as lease
-from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource
+from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource, write_reviewed_input
 
 
 FOUNDATION = {"phase": "foundation", "run": RUN, "sshPublicKey": "ssh-ed25519 synthetic",
@@ -141,7 +141,8 @@ class RehearsalApplyTest(unittest.TestCase):
             foundation = {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]}
             lease.write_private(root / "foundation-created.json", foundation)
             lease.write_private(root / "foundation-input.json", FOUNDATION)
-            lease.write_private(root / "original-input.json", {"probeOnly": True})
+            original_input = {"run": RUN, "phase": "original"}
+            config_path = write_reviewed_input(root, {**original_input, "probeOnly": True})
             config = {"sshKeyId": 9, "firewallId": 8}
             self.assertEqual(apply.expected_before(api, manifest, root, "original", config), foundation)
             with self.assertRaises(lease.Rejected):
@@ -154,8 +155,11 @@ class RehearsalApplyTest(unittest.TestCase):
             })
             with self.assertRaisesRegex(lease.Rejected, "does not authorize replacement"):
                 apply.expected_before(api, manifest, root, "replacement", config)
-            (root / "original-input.json").unlink()
-            lease.write_private(root / "original-input.json", {})
+            config_path.unlink()
+            lease.write_private(config_path, original_input)
+            with self.assertRaisesRegex(lease.Rejected, "no longer matches"):
+                apply.expected_before(api, manifest, root, "replacement", config)
+            write_reviewed_input(root, original_input)
             self.assertEqual(apply.expected_before(api, manifest, root, "replacement", config), foundation)
             populate(data, "original", 6, 4)
             with self.assertRaises(lease.Rejected):

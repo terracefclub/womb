@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -22,6 +23,21 @@ def inventory():
     result["primary_ips"] = [resource(2, "existing-ip", False, assignee_id=1)]
     result["ssh_keys"] = [resource(3, "existing-key", False)]
     return result
+
+
+def write_reviewed_input(root, config):
+    phase = config["phase"]
+    path = root / f"{phase}-input.json"
+    review = root / phase / "review.json"
+    dispatch = root / f"{phase}-dispatched.json"
+    review.parent.mkdir(exist_ok=True)
+    for file in (path, review, dispatch):
+        file.unlink(missing_ok=True)
+    lease.write_private(path, config)
+    lease.write_private(review, {"probeOnly": config.get("probeOnly", False),
+                                 "inputSha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    lease.write_private(dispatch, {"run": config["run"], "reviewSha256": hashlib.sha256(review.read_bytes()).hexdigest()})
+    return path
 
 
 def populate(data, phase, server_id, ip_id):
