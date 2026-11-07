@@ -74,12 +74,19 @@ class TimerTest(unittest.TestCase):
                     lease.write_private(self.directory / "closed.json", {"closedAt": 1200})
                 with self.assertRaises(lease.Rejected):
                     timer.disarm(self.directory, self.manifest, self.credential)
+            lease.write_private(self.directory / "final-absence-1.json", {
+                "run": self.manifest["run"], "phase": "final", "baselinePreserved": True, "absenceReads": 3,
+                "unresolvedDispatches": ["original"],
+            })
+            with self.assertRaises(lease.Rejected):
+                timer.disarm(self.directory, self.manifest, self.credential)
             system.assert_not_called()
 
     def test_disarm_requires_empty_or_absent_kernel_cgroup(self):
         lease.write_private(self.directory / "closed.json", {"closedAt": 1200})
         lease.write_private(self.directory / "final-absence-1.json", {
             "run": self.manifest["run"], "phase": "final", "baselinePreserved": True, "absenceReads": 3,
+            "unresolvedDispatches": [],
         })
         cgroup = self.directory / (self.unit + ".service")
         cgroup.mkdir()
