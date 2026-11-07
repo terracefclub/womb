@@ -76,6 +76,24 @@ class TimerTest(unittest.TestCase):
                     timer.disarm(self.directory, self.manifest, self.credential)
             system.assert_not_called()
 
+    def test_disarm_requires_empty_or_absent_kernel_cgroup(self):
+        lease.write_private(self.directory / "closed.json", {"closedAt": 1200})
+        lease.write_private(self.directory / "final-absence-1.json", {
+            "run": self.manifest["run"], "phase": "final", "baselinePreserved": True, "absenceReads": 3,
+        })
+        cgroup = self.directory / (self.unit + ".service")
+        cgroup.mkdir()
+        with (patch.object(timer, "timer_settings", return_value=(self.unit, "operator", self.argv)),
+              patch.object(timer, "CGROUP", self.directory), patch.object(timer, "system"),
+              patch.object(timer, "read_property", side_effect=lambda _unit, key: "inactive" if key == "ActiveState" else "")):
+            with self.assertRaises(lease.Rejected):
+                timer.disarm(self.directory, self.manifest, self.credential)
+            (cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+            with self.assertRaises(lease.Rejected):
+                timer.disarm(self.directory, self.manifest, self.credential)
+            (cgroup / "cgroup.events").write_text("populated 0\nfrozen 0\n")
+            timer.disarm(self.directory, self.manifest, self.credential)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,7 +143,15 @@ def disarm(directory, manifest, credential):
     if read_property(names[1], "ControlGroup"):
         raise lease.Rejected("cleanup service has a cgroup")
     cgroup = CGROUP / names[1]
-    if cgroup.exists() and any(path.read_text().strip() for path in cgroup.rglob("cgroup.procs")):
+    try:
+        events = (cgroup / "cgroup.events").read_text().splitlines()
+    except FileNotFoundError:
+        try:
+            cgroup.stat()
+        except FileNotFoundError:
+            return
+        raise lease.Rejected("cleanup cgroup events missing") from None
+    if [line for line in events if line.startswith("populated ")] != ["populated 0"]:
         raise lease.Rejected("cleanup cgroup is populated")
 
 
