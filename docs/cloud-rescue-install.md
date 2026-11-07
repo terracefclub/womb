@@ -165,8 +165,11 @@ direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
 direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
 ```
 
-Dispatch checks the sole operator key on stock Debian and stages the archive in
-root-only tmpfs. The connection can close during the switch. If the dispatch
+Dispatch checks the sole operator key on stock Debian. It verifies the archive
+in a private directory under `/dev/shm` and unpacks it under `/run` so the
+compressed and unpacked copies do not compete for the same tmpfs limit. It
+checks both mount capacities and available RAM against the measured archive
+sizes. The connection can close during the switch. If the dispatch
 receipt exists, check the new boot instead of dispatching again.
 Verification requires the same SSH pin, a different kernel
 boot ID, the pinned installer marker and the RAM-backed root and store.

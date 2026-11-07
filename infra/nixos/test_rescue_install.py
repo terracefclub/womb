@@ -1,8 +1,10 @@
 import base64
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -90,7 +92,7 @@ class RescueInstallTest(unittest.TestCase):
 
     def test_stock_dispatch_checks_archive_and_rebinds_before_kexec(self):
         archive = self.directory / "installer.tar.gz"
-        archive.write_bytes(b"public installer fixture")
+        self.stock_archive(archive)
         digest = rescue.sha(archive.read_bytes())
         binding = {"run": RUN, "ipv4": "1.1.1.1"}
         boot = "abcd0123-1234-1234-1234-1234567890ab"
@@ -110,8 +112,33 @@ class RescueInstallTest(unittest.TestCase):
             authority.side_effect = None
             stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
             self.assertEqual(remote.call_args.args[2], stock_kexec.KEXEC)
+            sent, _ = rescue.read_json(self.directory / "original-relay-kexec-dispatched.json")
+            self.assertEqual(sent["archiveUnpackedBytes"], len(stock_kexec.ARCHIVE_FILES))
             with self.assertRaisesRegex(rescue.Rejected, "already dispatched"):
                 stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+
+    def stock_archive(self, path, names=None):
+        with tarfile.open(path, "w:gz") as archive:
+            root = tarfile.TarInfo("kexec")
+            root.type = tarfile.DIRTYPE
+            archive.addfile(root)
+            for name in sorted(stock_kexec.ARCHIVE_FILES) if names is None else names:
+                entry = tarfile.TarInfo(name)
+                entry.size = 1
+                archive.addfile(entry, io.BytesIO(b"x"))
+
+    def test_stock_archive_requires_exact_entries_and_measures_unpacked_size(self):
+        path = self.directory / "installer.tar.gz"
+        self.stock_archive(path)
+        with path.open("rb") as stream:
+            self.assertEqual(stock_kexec.archive_unpacked_bytes(stream), 5)
+        for extra in ("kexec/run", "kexec/extra", "../escaping"):
+            self.stock_archive(path, [*stock_kexec.ARCHIVE_FILES, extra])
+            with path.open("rb") as stream, self.assertRaisesRegex(rescue.Rejected, "unexpected installer"):
+                stock_kexec.archive_unpacked_bytes(stream)
+        self.stock_archive(path, ["kexec/run"])
+        with path.open("rb") as stream, self.assertRaisesRegex(rescue.Rejected, "entry missing"):
+            stock_kexec.archive_unpacked_bytes(stream)
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"

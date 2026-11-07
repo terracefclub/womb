@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -146,6 +147,9 @@ def exercise(args, directory, seed, overlay, facts):
                 # The live SSH session can end during the kernel switch.
                 if not (directory / f"{PREFIX}-kexec-dispatched.json").is_file():
                     raise
+            sent, _ = install.read_json(directory / f"{PREFIX}-kexec-dispatched.json")
+            facts["archiveBytes"] = sent["archiveBytes"]
+            facts["archiveUnpackedBytes"] = sent["archiveUnpackedBytes"]
             facts["stage"] = "ram"
             await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
             wrong_host_rejected(wrong)
@@ -207,7 +211,7 @@ def main():
             facts["stage"] = "complete"
         install.write_private(output / "stock-kexec-native.json", facts)
         print("Strict SSH handoff and RAM store copy passed. The offline guest is off.")
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError):
         if "output" in locals():
             install.write_private(output / "stock-kexec-native-failure.json", facts)
         print("Offline stock kexec proof rejected. Private inputs suppressed.", file=sys.stderr)

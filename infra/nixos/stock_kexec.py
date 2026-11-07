@@ -8,12 +8,14 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 
 import rescue_install as install
 
 
 ARCHIVE_LIMIT = 1_073_741_824
 ARCHIVE_SHA = re.compile(r"[a-f0-9]{64}")
+ARCHIVE_FILES = {"kexec/bzImage", "kexec/initrd", "kexec/ip", "kexec/kexec", "kexec/run"}
 SCRATCH = "/run/terrace-stock-kexec"
 STOCK_PROBE = """
 set -euo pipefail
@@ -65,14 +67,18 @@ set -euo pipefail
 umask 077
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
-test "$(awk '/^MemAvailable:/ {{print $2}}' /proc/meminfo)" -gt "$(( $3 * 3 / 1024 + 524288 ))"
+test "$(findmnt -rn -o FSTYPE --mountpoint /dev/shm)" = tmpfs
+test "$(df -PB1 /dev/shm | awk 'NR == 2 {{print $4}}')" -gt "$3"
+test "$(df -PB1 /run | awk 'NR == 2 {{print $4}}')" -gt "$(( $4 + 16777216 ))"
+test "$(awk '/^MemAvailable:/ {{print $2}}' /proc/meminfo)" -gt "$(( ($3 + 2 * $4) / 1024 + 524288 ))"
+staged="$(mktemp -d /dev/shm/terrace-stock-kexec.XXXXXXXX)"
+trap 'rm -f -- "$staged/installer.tar.gz"; rmdir -- "$staged"' EXIT
+head -c "$(( $3 + 1 ))" > "$staged/installer.tar.gz"
+test "$(stat -c %s "$staged/installer.tar.gz")" = "$3"
+printf '%s  %s\n' "$2" "$staged/installer.tar.gz" | sha256sum --check --status
 mkdir -m 0700 {SCRATCH}
 cd {SCRATCH}
-head -c "$(( $3 + 1 ))" > installer.tar.gz
-test "$(stat -c %s installer.tar.gz)" = "$3"
-printf '%s  installer.tar.gz\n' "$2" | sha256sum --check --status
-tar --no-same-owner -xzf installer.tar.gz
-rm installer.tar.gz
+tar --no-same-owner -xzf "$staged/installer.tar.gz"
 test -x kexec/run && test -f kexec/run && test ! -L kexec/run
 """
 KEXEC = f"""
@@ -99,6 +105,22 @@ def stock_boot(ssh, key, directory):
     return boot_id(install.remote(ssh, 60, STOCK_PROBE, key, public[1], capture=True))
 
 
+def archive_unpacked_bytes(source):
+    seen = set()
+    total = 0
+    with tarfile.open(fileobj=source, mode="r|gz") as archive:
+        for member in archive:
+            install.require(member.name not in seen and (
+                (member.name == "kexec" and member.isdir() and member.size == 0)
+                or (member.name in ARCHIVE_FILES and member.type == tarfile.REGTYPE and member.size > 0)
+            ), "unexpected installer archive entry")
+            seen.add(member.name)
+            total += member.size
+            install.require(total <= ARCHIVE_LIMIT, "unpacked installer archive exceeds limit")
+    install.require(seen == ARCHIVE_FILES | {"kexec"}, "installer archive entry missing")
+    return total
+
+
 def dispatch(directory, phase, role, archive, archive_sha):
     install.require(ARCHIVE_SHA.fullmatch(archive_sha), "invalid installer archive digest")
     binding, key, _, ssh = install.bootstrap_authority(directory, phase, role)
@@ -113,13 +135,16 @@ def dispatch(directory, phase, role, archive, archive_sha):
                         and hashlib.file_digest(source, "sha256").hexdigest() == archive_sha,
                         "installer archive rejected")
         source.seek(0)
+        unpacked = archive_unpacked_bytes(source)
+        source.seek(0)
         install.remote(ssh, install.remaining(directory, binding, 420), UPLOAD,
-                       old_boot, archive_sha, str(info.st_size), stdin=source)
+                       old_boot, archive_sha, str(info.st_size), str(unpacked), stdin=source)
     fresh, fresh_key, _, _ = install.bootstrap_authority(directory, phase, role)
     install.require((fresh, fresh_key) == (binding, key), "stock target changed before kexec")
     seconds = install.remaining(directory, binding, 120)
     install.write_private(receipt, {"binding": binding, "bootstrapKey": key,
-                                   "stockBootId": old_boot, "archiveSha256": archive_sha})
+                                   "stockBootId": old_boot, "archiveSha256": archive_sha,
+                                   "archiveBytes": info.st_size, "archiveUnpackedBytes": unpacked})
     install.remote(ssh, seconds, KEXEC, old_boot)
 
 
@@ -152,7 +177,7 @@ def main():
         else:
             verify_ram(directory, args.phase, args.role)
             print("The pinned host now runs the RAM installer on a new boot.")
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError):
         print("Stock kexec operation rejected. Private inputs suppressed.", file=sys.stderr)
         return 1
     return 0
