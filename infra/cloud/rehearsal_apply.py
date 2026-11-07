@@ -8,7 +8,9 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,8 @@ RESOURCE_TYPES = {
     "app": ("servers", "hcloud:index/server:Server"),
     "relay": ("servers", "hcloud:index/server:Server"),
 }
+PROJECT_FILES = ("Pulumi.yaml", "README.md", "index.ts", "input.ts", "rehearsal.test.ts", "resources.ts", "tsconfig.json")
+PARENT_FILES = ("budget.ts", "package.json", "bun.lock", "tsconfig.json")
 
 
 def phase_targets(phase, run):
@@ -93,6 +97,45 @@ def ids_by_kind(owned):
     return {kind: sorted(lease.positive_id(row["id"]) for row in owned[kind]) for kind in lease.DELETION_ORDER}
 
 
+def without_owned(inventory, owned):
+    baseline = lease.baseline_from(inventory)
+    for kind, ids in ids_by_kind(owned).items():
+        for rid in ids:
+            del baseline[kind][str(rid)]
+    return baseline
+
+
+def verify_foundation(owned, config):
+    firewall, = owned["firewalls"]
+    rule, = firewall["rules"]
+    if (rule["direction"] != "in" or rule["protocol"] != "tcp" or rule["port"] != "22"
+            or sorted(rule["source_ips"]) != sorted(config["sshCidrs"]) or rule["destination_ips"] != []
+            or firewall["applied_to"] != []):
+        raise lease.Rejected("foundation SSH firewall rejected")
+    key, = owned["ssh_keys"]
+    if key["public_key"].split()[:2] != config["sshPublicKey"].split()[:2]:
+        raise lease.Rejected("foundation operator key rejected")
+
+
+def verify_cohort(owned, inventory, config, created):
+    primary = {row["id"]: row for row in owned["primary_ips"]}
+    for server in owned["servers"]:
+        lease.require_disposable_server(server, owned, inventory)
+        net = server["public_net"]
+        address = net["ipv4"]
+        ip = primary[address["id"]]
+        expected_type = config["appType"] if server["name"].endswith("-app") else config["relayType"]
+        location = (server.get("location") or {}).get("name") or server["datacenter"]["location"]["name"]
+        if (ip["id"] not in created["primary_ips"] or ip["assignee_type"] != "server"
+                or ip["auto_delete"] is not False or ip["protection"]["delete"] is not False
+                or ip["ip"] != address["ip"] or not ipaddress.IPv4Address(ip["ip"]).is_global
+                or net["firewalls"] != [{"id": config["firewallId"], "status": "applied"}]
+                or server["server_type"]["name"] != expected_type or server["image"]["name"] != config["image"]
+                or location != config["location"] or server["rescue_enabled"] is not False
+                or server["backup_window"] is not None or server["protection"] != {"delete": False, "rebuild": False}):
+            raise lease.Rejected("created server attachment or protection rejected")
+
+
 def read_json(path, limit=65536):
     return parse_json(lease.read_private(path, limit))
 
@@ -121,29 +164,48 @@ def expected_before(api, manifest, directory, phase, config):
         original = read_json(directory / "original-created.json")
         if (receipt["run"] != manifest["run"] or receipt["phase"] != "original"
                 or receipt["baselinePreserved"] is not True or receipt["absenceReads"] != 3
+                or receipt["unresolvedDispatches"] != []
                 or receipt["verifiedAbsent"] != {kind: sorted(ids) for kind, ids in original.items()}):
             raise lease.Rejected("original absence rejected")
     if found != expected:
         raise lease.Rejected("provider inventory is not ready for this phase")
-    baseline = lease.baseline_from(inventory)
-    for kind, ids in found.items():
-        for rid in ids:
-            del baseline[kind][str(rid)]
-    if baseline != manifest["baseline"]:
+    if phase != "foundation":
+        verify_foundation(owned, read_json(directory / "foundation-input.json"))
+    if without_owned(inventory, owned) != manifest["baseline"]:
         raise lease.Rejected("baseline inventory changed")
     return expected
 
 
-def source_sha(project):
-    paths = [project / "Pulumi.yaml", project / "tsconfig.json", *sorted(project.glob("*.ts")),
-             *(project.parent / name for name in ("budget.ts", "package.json", "bun.lock", "tsconfig.json"))]
-    if not (project / "index.ts").is_file():
-        raise lease.Rejected("program missing")
+def fingerprint_source(read):
+    paths = [*("rehearsal-create/" + name for name in PROJECT_FILES), *PARENT_FILES]
     digest = hashlib.sha256()
     for path in paths:
-        digest.update(str(path.relative_to(project.parent)).encode() + b"\0")
-        digest.update(hashlib.sha256(lease.read_private(path, 1024 * 1024)).digest())
+        digest.update(path.encode() + b"\0")
+        digest.update(hashlib.sha256(read(path)).digest())
     return digest.hexdigest()
+
+
+def git_source_sha(commit):
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise lease.Rejected("reviewed Git commit rejected")
+    return fingerprint_source(lambda path: subprocess.check_output(
+        ["git", "show", f"{commit}:infra/cloud/{path}"], stderr=subprocess.DEVNULL, timeout=10))
+
+
+def source_sha(project):
+    allowed_configs = {f"Pulumi.{phase}.yaml" for phase in PHASES}
+    if ({path.name for path in project.iterdir()} - allowed_configs != set(PROJECT_FILES)
+            or {path.name for path in project.parent.iterdir()} != {*PARENT_FILES, "rehearsal-create", "node_modules"}):
+        raise lease.Rejected("staged source inventory rejected")
+    dependencies = project.parent / "node_modules"
+    info = dependencies.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise lease.Rejected("dependency staging rejected")
+    for package in ("@pulumi/hcloud", "@pulumi/pulumi"):
+        candidate = (dependencies / package).resolve(strict=True)
+        if not candidate.is_relative_to(dependencies.resolve(strict=True)):
+            raise lease.Rejected("dependency is outside the private staging boundary")
+    return fingerprint_source(lambda path: lease.read_private(project.parent / path, 1024 * 1024))
 
 
 def pulumi(project, env, args, *, seconds, output=False):
@@ -193,7 +255,7 @@ def observe_server(api, directory, manifest, phase, role):
             "ipv4": str(ipv4), "expires": manifest["expires"], "observedAt": int(time.time())}
 
 
-def operate(action, directory, manifest, token, phase, credential, approval):
+def operate(action, directory, manifest, token, phase, credential, approval, approved_source):
     require_run_unit(manifest["run"], phase, action)
     config_path = directory / f"{phase}-input.json"
     config_data = lease.read_private(config_path, 65536)
@@ -205,6 +267,8 @@ def operate(action, directory, manifest, token, phase, credential, approval):
     project = directory / "project" / "rehearsal-create"
     version = read_json(project.parent / "package.json")["dependencies"]["@pulumi/hcloud"]
     source = source_sha(project)
+    if not re.fullmatch(r"[a-f0-9]{64}", approved_source or "") or source != approved_source:
+        raise lease.Rejected("staged source does not match reviewed Git bytes")
     api = lease.Api(token.decode("ascii"))
     before = expected_before(api, manifest, directory, phase, config)
     stage = directory / phase
@@ -266,8 +330,12 @@ def operate(action, directory, manifest, token, phase, credential, approval):
         ids = sorted(lease.positive_id(rid) for rid in result[kind])
         if len(ids) != counts[kind] or len(set(ids)) != len(ids) or sorted(before[kind] + ids) != observed[kind]:
             raise lease.Rejected("created IDs disagree with inventory")
-    for rows in owned["servers"]:
-        lease.require_disposable_server(rows, owned, inventory)
+    if without_owned(inventory, owned) != manifest["baseline"]:
+        raise lease.Rejected("post-create inventory disagrees with baseline")
+    if phase == "foundation":
+        verify_foundation(owned, config)
+    else:
+        verify_cohort(owned, inventory, config, result)
     lease.write_private(directory / f"{phase}-created.json", result)
     print("Cloud rehearsal phase creation verified.")
 
@@ -279,6 +347,7 @@ def main():
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--credential-file", required=True, type=Path)
     parser.add_argument("--review-sha")
+    parser.add_argument("--source-sha")
     parser.add_argument("--role", choices=lease.ROLES)
     args = parser.parse_args()
     os.umask(0o077)
@@ -297,7 +366,8 @@ def main():
                 lease.write_private(path, binding)
                 print("Protected server binding written to", path)
             else:
-                operate(args.action, directory, manifest, token, args.phase, args.credential_file, args.review_sha)
+                operate(args.action, directory, manifest, token, args.phase, args.credential_file,
+                        args.review_sha, args.source_sha)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.TimeoutExpired):
         print("Cloud rehearsal preview or apply rejected. Check the protected run state.", file=sys.stderr)
         return 1

@@ -11,6 +11,18 @@ import rehearsal_lease as lease
 from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource
 
 
+FOUNDATION = {"phase": "foundation", "run": RUN, "sshPublicKey": "ssh-ed25519 synthetic",
+              "sshCidrs": ["192.0.2.1/32"]}
+
+
+def create_foundation(data):
+    data["firewalls"] = [resource(8, PREFIX + "-firewall", applied_to=[], rules=[
+        {"direction": "in", "protocol": "tcp", "port": "22", "source_ips": FOUNDATION["sshCidrs"],
+         "destination_ips": []},
+    ])]
+    data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key=FOUNDATION["sshPublicKey"]))
+
+
 def digest(phase):
     targets = apply.phase_targets(phase, RUN)
     prefix = f"urn:pulumi:{phase}::{apply.PROJECT}::"
@@ -29,6 +41,23 @@ def saved_plan(phase):
 
 
 class RehearsalApplyTest(unittest.TestCase):
+    def test_staged_source_rejects_node_resolution_shadows(self):
+        with tempfile.TemporaryDirectory() as name:
+            parent = Path(name)
+            project = parent / "rehearsal-create"
+            project.mkdir(mode=0o700)
+            deps = parent / "node_modules" / "@pulumi"
+            for package in ("pulumi", "hcloud"):
+                (deps / package).mkdir(parents=True)
+            for root, names in ((parent, apply.PARENT_FILES), (project, apply.PROJECT_FILES)):
+                for path in names:
+                    lease.write_private(root / path, {"synthetic": path})
+            fingerprint = apply.source_sha(project)
+            self.assertRegex(fingerprint, r"^[a-f0-9]{64}$")
+            lease.write_private(project / "resources.js", {"shadow": True})
+            with self.assertRaises(lease.Rejected):
+                apply.source_sha(project)
+
     def test_exact_create_only_phases(self):
         for phase in apply.PHASES:
             data = digest(phase)
@@ -59,10 +88,10 @@ class RehearsalApplyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             apply.expected_before(api, manifest, root, "foundation", {})
-            data["firewalls"] = [resource(8, PREFIX + "-firewall", applied_to=[])]
-            data["ssh_keys"].append(resource(9, PREFIX + "-key"))
+            create_foundation(data)
             foundation = {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]}
             lease.write_private(root / "foundation-created.json", foundation)
+            lease.write_private(root / "foundation-input.json", FOUNDATION)
             config = {"sshKeyId": 9, "firewallId": 8}
             self.assertEqual(apply.expected_before(api, manifest, root, "original", config), foundation)
             with self.assertRaises(lease.Rejected):
@@ -70,7 +99,7 @@ class RehearsalApplyTest(unittest.TestCase):
             original = {"servers": [7, 6], "primary_ips": [5, 4], "firewalls": [], "ssh_keys": []}
             lease.write_private(root / "original-created.json", original)
             lease.write_private(root / "original-absence-1.json", {
-                "run": RUN, "phase": "original", "baselinePreserved": True, "absenceReads": 3,
+                "run": RUN, "phase": "original", "baselinePreserved": True, "absenceReads": 3, "unresolvedDispatches": [],
                 "verifiedAbsent": {kind: sorted(ids) for kind, ids in original.items()},
             })
             self.assertEqual(apply.expected_before(api, manifest, root, "replacement", config), foundation)
@@ -82,7 +111,7 @@ class RehearsalApplyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             config = root / "foundation-input.json"
-            lease.write_private(config, {"phase": "foundation", "run": RUN})
+            lease.write_private(config, FOUNDATION)
             parent = root / "project"
             (parent / "rehearsal-create").mkdir(parents=True)
             lease.write_private(parent / "package.json", {"dependencies": {"@pulumi/hcloud": "1.42.0"}})
@@ -100,26 +129,28 @@ class RehearsalApplyTest(unittest.TestCase):
                     self.assertEqual(args[-2:], ["--plan", calls[1][-1]])
                     self.assertEqual([args[i + 1] for i, value in enumerate(args) if value == "--target"],
                                      list(apply.phase_targets("foundation", RUN)))
-                    api.data["firewalls"] = [resource(8, PREFIX + "-firewall", applied_to=[])]
-                    api.data["ssh_keys"].append(resource(9, PREFIX + "-key"))
+                    create_foundation(api.data)
                 if args[:2] == ["stack", "output"]:
                     return created
 
-            with (patch.object(apply.lease, "Api", return_value=api), patch.object(apply, "source_sha", return_value="source"),
+            source = "1" * 64
+            with (patch.object(apply.lease, "Api", return_value=api), patch.object(apply, "source_sha", return_value=source),
                   patch.object(apply, "pulumi", pulumi), patch.object(apply, "require_run_unit"),
                   patch.object(apply.timer, "check_ready") as ready, patch("builtins.print")):
                 args = (root, manifest, b"synthetic", "foundation", root / "credential")
-                apply.operate("preview", *args, None)
+                with self.assertRaises(lease.Rejected):
+                    apply.operate("preview", *args, None, "2" * 64)
+                apply.operate("preview", *args, None, source)
                 review_sha = hashlib.sha256((root / "foundation/review.json").read_bytes()).hexdigest()
                 with self.assertRaises(lease.Rejected):
-                    apply.operate("create", *args, "unreviewed")
+                    apply.operate("create", *args, "unreviewed", source)
                 self.assertFalse((root / "foundation-dispatched.json").exists())
-                apply.operate("create", *args, review_sha)
+                apply.operate("create", *args, review_sha, source)
                 self.assertTrue((root / "foundation-dispatched.json").exists())
                 self.assertEqual(apply.read_json(root / "foundation-created.json"), created)
                 self.assertEqual(ready.call_count, 2)
                 with self.assertRaises(lease.Rejected):
-                    apply.operate("create", *args, review_sha)
+                    apply.operate("create", *args, review_sha, source)
                 self.assertEqual(sum(args[0] == "up" for args in calls), 1)
 
     def test_install_binding_is_role_and_provider_id_specific(self):

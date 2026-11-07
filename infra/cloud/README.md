@@ -134,9 +134,13 @@ creates an application server and relay with explicitly labelled IPv4s.
 `rehearsal_apply.py` requires a bounded Falcon service for each preview and
 apply. It checks both the preview and the saved plan for exact create-only
 scope. Apply consumes the reviewed digest under the lease lock, and binds
-it to the same source, input, stack config and plan bytes. Each phase has one
-dispatch marker. A failed or interrupted write is reconciled by the lease
-cleanup rather than retried blindly. Replacement requires the original
+it to the reviewed Git source, input, stack config and plan bytes. Stage
+only the reviewed creator and its pinned dependency files in the private
+project directory. Compute `--source-sha` with `git_source_sha` from the
+reviewed commit, then install the locked dependencies there before loading
+the project token. Each phase has one dispatch marker. Cleanup reconciles a
+failed or interrupted write, records any unresolved provider outcome, and
+keeps disarm closed while uncertainty remains. Replacement requires the original
 cohort's verified absence. `binding` independently reads each created host
 and writes a short-lived private ID/address receipt for the installer.
 

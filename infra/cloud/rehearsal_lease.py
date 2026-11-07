@@ -344,6 +344,7 @@ def main():
             known = {kind: set() for kind in DELETION_ORDER}
             phases = ("foundation", "original", "replacement") if phase == "final" else ("original",)
             quiet_after = 0
+            unresolved = []
             for cohort in phases:
                 path = directory / f"{cohort}-created.json"
                 if path.exists():
@@ -356,6 +357,7 @@ def main():
                     # A failed apply may have lost its provider response. Allow the
                     # bounded writer and an additional minute before counting absence.
                     quiet_after = max(quiet_after, positive_id(attempt["dispatchedAt"]) + 300)
+                    unresolved.append(cohort)
             journal_phases = ("original", "final") if phase == "final" else ("original",)
             for journal_phase in journal_phases:
                 for path in directory.glob(f"{journal_phase}-owned-*.json"):
@@ -375,7 +377,10 @@ def main():
                             pending=pending, record_action=record_action, record_owned=record_owned,
                             quiet_after=quiet_after)
             receipt["run"] = manifest["run"]
+            receipt["unresolvedDispatches"] = unresolved
             write_private(directory / f"{phase}-absence-{time.time_ns()}.json", receipt)
+            if unresolved:
+                raise Rejected("provider dispatch remains unresolved")
             print("Cloud rehearsal cleanup verified.")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         print("Cloud rehearsal lease or cleanup failed. Inspect the protected run state.", file=sys.stderr)

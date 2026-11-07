@@ -130,7 +130,8 @@ def disarm(directory, manifest, credential):
         raise lease.Rejected("final absence missing")
     receipt = json.loads(lease.read_private(receipts[-1], 65536))
     if (receipt["run"] != manifest["run"] or receipt["phase"] != "final"
-            or receipt["baselinePreserved"] is not True or receipt["absenceReads"] != 3):
+            or receipt["baselinePreserved"] is not True or receipt["absenceReads"] != 3
+            or receipt["unresolvedDispatches"] != []):
         raise lease.Rejected("final absence rejected")
     unit, _, _ = timer_settings(directory, manifest, credential)
     names = (unit + ".timer", unit + ".service")
