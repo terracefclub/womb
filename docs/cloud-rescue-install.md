@@ -24,6 +24,45 @@ per-host Ed25519 host key in `original-app-installed-ed25519` and put its
 public pin for the same IP in `original-app-installed-known-hosts`. Use mode
 0600 and no symbolic links for these files.
 
+### Headless provider console
+
+Before the lease starts, build the console helper on Falcon under the
+shared build lock. The helper packages the pinned noVNC client, Chromium,
+Playwright, and English Tesseract data from the platform lock.
+
+```sh
+nix build --no-link --print-out-paths --impure --file infra/nixos/console-fingerprint.nix
+```
+
+After the controller confirms Rescue is ready, it can request the console
+for the exact lease-owned server. Supply the resulting mode-0600
+`original-app-console-<time_ns>.json` by absolute path before its short
+connection deadline. Run the helper under a bounded user unit on Falcon.
+
+```sh
+systemd-run --user --wait --collect --pipe \
+  --property=RuntimeMaxSec=125s --property=TimeoutStopSec=5s \
+  --property=KillMode=control-group \
+  "$CONSOLE_PACKAGE/bin/terrace-console-fingerprint" \
+  /protected/lease original app "$PROTECTED_CONSOLE_RECEIPT"
+```
+
+The helper compares the independently authenticated Rescue console key to
+the SSH discovery candidate. It requires a new, exact console marker from
+the comparison before writing both Rescue pins. Console frames, credentials
+and URLs stay out of logs. On failure, the private per-attempt JSON records
+only the fixed last stage. Check that the user unit and its processes have
+stopped before another attempt. The helper does not retry or replace any
+existing pin files. An interrupted publication can leave one file present.
+Review that state before proceeding. This console route still requires an
+actual provider test.
+
+```sh
+direnv exec . python3 -B infra/nixos/test_console_fingerprint.py -v
+```
+
+### Inspect and install
+
 First collect the read-only disk receipt from the builder:
 
 ```sh
