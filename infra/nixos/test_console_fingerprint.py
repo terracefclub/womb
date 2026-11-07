@@ -130,6 +130,71 @@ class ConsoleFingerprintTest(unittest.TestCase):
         self.assertTrue(accepts("root@rescue ~ #"))
         self.assertEqual(progress, {"rootWait": dict.fromkeys(initial, True)})
 
+    def test_keyboard_calibration_requires_active_echo_and_empty_line_after_erasing(self):
+        page = Mock()
+        progress = {}
+        prompt = "rescue login:"
+        frames = iter([
+            prompt + "\nnot the active line", prompt,
+            f"{prompt} {console.KEYBOARD_SAMPLE}\nnot the active line",
+            f"{prompt} {console.KEYBOARD_SAMPLE}",
+            prompt + "\nnot erased yet", prompt,
+            f"{prompt} {console.KEYBOARD_SWAPPED}", prompt,
+        ])
+        with patch.object(console.time, "sleep"):
+            console.calibrate_keyboard(page, lambda: next(frames), progress, console.time.monotonic() + 60)
+        self.assertEqual(progress, {"keyboardCalibration": {
+            "immediate": {"echo": "asExpected", "erased": True},
+            "paced": {"echo": "yZSwap", "erased": True},
+        }})
+        self.assertEqual([call.args for call in page.evaluate.call_args_list], [
+            ("value => window.consoleCalibration(value)", {"sample": console.KEYBOARD_SAMPLE, "paced": paced, "erase": erase})
+            for paced, erase in ((False, False), (True, True), (True, False), (True, True))
+        ])
+
+    def test_keyboard_calibration_stops_if_active_prompt_is_not_restored(self):
+        page = Mock()
+        prompt = "rescue login:"
+        frames = iter([prompt, f"{prompt} {console.KEYBOARD_SAMPLE}"])
+        progress = {}
+        ticks = iter(range(25))
+        with (patch.object(console.time, "monotonic", side_effect=lambda: next(ticks)),
+              patch.object(console.time, "sleep")):
+            with self.assertRaisesRegex(ValueError, "not restored"):
+                console.calibrate_keyboard(page, lambda: next(frames, "private unknown text"), progress, 60)
+        self.assertEqual(page.evaluate.call_count, 2)
+        self.assertEqual(progress, {"keyboardCalibration": {
+            "immediate": {"echo": "asExpected", "erased": False},
+            "paced": {"echo": "unknown", "erased": False},
+        }})
+
+    def test_keyboard_probe_requires_review_and_never_discovers_or_pins_ssh_key(self):
+        directory = Path("/synthetic-lease")
+        path = directory / "original-relay-console-1.json"
+        binding = {**self.binding, "role": "relay"}
+        receipt = {**self.receipt, "role": "relay"}
+        result = {"immediate": {"echo": "unknown", "erased": True}, "paced": {"echo": "asExpected", "erased": True}}
+        progress = {}
+        with (patch.object(console.rescue, "lease_binding", return_value=binding),
+              patch.object(console.rescue, "read_json", side_effect=[(receipt, ""), ({"id": 82}, "")] * 2),
+              patch.object(console.rescue, "reviewed_probe_mode", side_effect=[False, True]) as reviewed,
+              patch.object(console.time, "time", return_value=1010),
+              patch.object(console.time, "time_ns", return_value=123),
+              patch.object(console.rescue, "checked_process") as ssh,
+              patch.object(console, "record_text") as pin,
+              patch.object(console.rescue, "write_private") as write,
+              patch.object(console, "attest_console", side_effect=lambda *_args, **_opts:
+                           progress.update(keyboardCalibration=result)) as browser):
+            with self.assertRaisesRegex(ValueError, "requires a reviewed original relay probe"):
+                console.enroll(directory, "original", "relay", path, progress, keyboard_probe=True)
+            browser.assert_not_called()
+            console.enroll(directory, "original", "relay", path, progress, keyboard_probe=True)
+        self.assertEqual(reviewed.call_count, 2)
+        browser.assert_called_once_with(receipt, None, progress, keyboard_probe=True)
+        write.assert_called_once_with(directory / "original-relay-keyboard-calibration-123.json", result)
+        ssh.assert_not_called()
+        pin.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

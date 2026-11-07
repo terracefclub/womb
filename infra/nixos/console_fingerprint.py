@@ -26,6 +26,8 @@ PASSWORD = re.compile(r"(?im)^password:[ \t]*$")
 ROOT = re.compile(r"(?m)^root@[a-zA-Z0-9.-]+[^\r\n]*#[ \t]*$")
 LOGIN_INCORRECT = re.compile(r"(?im)^[ \t]*login incorrect[ \t]*$")
 ROOT_LIKE = re.compile(r"(?im)^[ \t]*root[ \t]*@[ \t]*[a-z0-9.-]+")
+KEYBOARD_SAMPLE = "roottAAyYzZ"
+KEYBOARD_SWAPPED = KEYBOARD_SAMPLE.translate(str.maketrans("yYzZ", "zZyY"))
 RFB_EVENTS = ("securityFailure", "credentialsRequired", "disconnected")
 RFB_STATES = {"ProtocolVersion", "Security", "SecurityReason", "Authentication", "SecurityResult",
               "ClientInitialisation", "ServerInitialisation"}
@@ -115,6 +117,22 @@ window.consoleInput = text => {
   for (const char of text) window.rfb.sendKey(char.codePointAt(0), '');
   window.rfb.sendKey(0xff0d, 'Enter');
 };
+window.consoleCalibration = async ({sample, paced, erase}) => {
+  if (!window.consoleReady || !/^[A-Za-z]{1,16}$/.test(sample)) throw new Error('invalid calibration input');
+  const pause = () => new Promise(resolve => setTimeout(resolve, 85));
+  for (const char of sample) {
+    const key = erase ? 0xff08 : char.codePointAt(0);
+    const code = erase ? 'Backspace' : paced ? null : '';
+    if (paced) {
+      window.rfb.sendKey(key, code, true);
+      await pause();
+      window.rfb.sendKey(key, code, false);
+      await pause();
+    } else {
+      window.rfb.sendKey(key, code);
+    }
+  }
+};
 </script>"""
 
 
@@ -178,7 +196,48 @@ def root_prompt_observer(progress):
     return accepts
 
 
-def attest_console(receipt, fingerprint, progress):
+def active_console_line(text):
+    return next((line.rstrip() for line in reversed(text.splitlines()) if line.strip()), "")
+
+
+def calibrate_keyboard(page, read_frame, progress, deadline):
+    results = {mode: {"echo": "unknown", "erased": False} for mode in ("immediate", "paced")}
+    progress["keyboardCalibration"] = results
+
+    def observe(classify, seconds):
+        until = min(deadline, time.monotonic() + seconds)
+        while time.monotonic() < until:
+            result = classify(active_console_line(read_frame()))
+            if result is not None:
+                return result
+            time.sleep(0.35)
+        return None
+
+    def send(*, paced, erase):
+        page.evaluate("value => window.consoleCalibration(value)",
+                      {"sample": KEYBOARD_SAMPLE, "paced": paced, "erase": erase})
+
+    prompt = observe(lambda line: line if LOGIN.fullmatch(line) else None, 12)
+    rescue.require(prompt is not None, "active empty calibration prompt not observed")
+
+    def classify_echo(line):
+        if line.startswith(prompt):
+            echo = line[len(prompt):].lstrip(" \t")
+            if echo == KEYBOARD_SAMPLE:
+                return "asExpected"
+            if echo == KEYBOARD_SWAPPED:
+                return "yZSwap"
+        return None
+
+    for mode, result in results.items():
+        send(paced=mode == "paced", erase=False)
+        result["echo"] = observe(classify_echo, 6) or "unknown"
+        send(paced=True, erase=True)
+        result["erased"] = observe(lambda line: True if line == prompt else None, 6) is True
+        rescue.require(result["erased"], "active empty calibration prompt not restored")
+
+
+def attest_console(receipt, fingerprint, progress, *, keyboard_probe=False):
     # Import only for the actual console stage. Offline tests use no browser.
     from playwright.sync_api import Error, TimeoutError, sync_playwright
 
@@ -244,15 +303,24 @@ def attest_console(receipt, fingerprint, progress):
             canvas = page.locator("#console canvas")
             deadline = time.monotonic() + 60
 
+            def read_frame():
+                frame = canvas.bounding_box(timeout=3000)
+                rescue.require(frame is not None and 0 < frame["width"] <= 4096
+                               and 0 < frame["height"] <= 2160, "unexpected console dimensions")
+                return ocr(canvas.screenshot(timeout=3000))
+
             def wait_for(predicate):
                 while time.monotonic() < deadline:
-                    frame = canvas.bounding_box(timeout=3000)
-                    rescue.require(frame is not None and 0 < frame["width"] <= 4096
-                                   and 0 < frame["height"] <= 2160, "unexpected console dimensions")
-                    if predicate(ocr(canvas.screenshot(timeout=3000))):
+                    if predicate(read_frame()):
                         return
                     time.sleep(0.35)
                 raise rescue.Rejected("expected console prompt or marker not observed")
+
+            if keyboard_probe:
+                progress["stage"] = "keyboard-calibration"
+                calibrate_keyboard(page, read_frame, progress, deadline)
+                page.evaluate("window.rfb.disconnect()")
+                return
 
             progress["stage"] = "login-prompt"
             wait_for(lambda text: bool(LOGIN.search(text)))
@@ -278,7 +346,7 @@ def record_text(path, value):
         os.link(stream.name, path)
 
 
-def enroll(directory, phase, role, receipt_path, progress):
+def enroll(directory, phase, role, receipt_path, progress, *, keyboard_probe=False):
     rescue.require(receipt_path.parent == directory, "console receipt must stay in the lease directory")
     prefix = f"{phase}-{role}"
     rescue.require(re.fullmatch(re.escape(prefix) + r"-console-[1-9][0-9]{0,19}[.]json", receipt_path.name),
@@ -289,6 +357,16 @@ def enroll(directory, phase, role, receipt_path, progress):
     journal, _ = rescue.read_json(directory / f"{phase}-action-{action_id}.json", 4096)
     rescue.require(isinstance(journal, dict) and set(journal) == {"id"}
                    and positive_id(journal["id"]) == action_id, "console action journal disagrees")
+    if keyboard_probe:
+        rescue.require((phase, role) == ("original", "relay") and rescue.reviewed_probe_mode(directory, phase),
+                       "keyboard calibration requires a reviewed original relay probe")
+        progress["stage"] = "browser-start"
+        attest_console(receipt, None, progress, keyboard_probe=True)
+        rescue.require(rescue.lease_binding(directory, phase, role, time.time()) == binding,
+                       "provider binding changed during keyboard calibration")
+        rescue.write_private(directory / f"{prefix}-keyboard-calibration-{time.time_ns()}.json",
+                             progress["keyboardCalibration"])
+        return
     progress["stage"] = "ssh-candidate"
     raw = rescue.checked_process(["ssh-keyscan", "-q", "-T", "5", "-t", "ed25519", binding["ipv4"]],
                                  8, capture=True)
@@ -308,12 +386,13 @@ def main():
     parser.add_argument("phase", choices=rescue.PHASES)
     parser.add_argument("role", choices=rescue.ROLES)
     parser.add_argument("receipt", type=Path)
+    parser.add_argument("--keyboard-probe-only", action="store_true")
     args = parser.parse_args()
     directory = None
     progress = {"stage": "binding"}
     try:
         directory = rescue.private_directory(args.directory)
-        enroll(directory, args.phase, args.role, args.receipt, progress)
+        enroll(directory, args.phase, args.role, args.receipt, progress, keyboard_probe=args.keyboard_probe_only)
     except Exception:
         # Playwright exceptions can include the complete WebSocket URL.
         if directory is not None:
@@ -324,7 +403,10 @@ def main():
                 pass
         print("Rescue console authentication failed. Private diagnostics suppressed.", file=sys.stderr)
         return 1
-    print("Provider console authenticated the exact Rescue SSH host key.")
+    if args.keyboard_probe_only:
+        print("Console keyboard calibration recorded without login.")
+    else:
+        print("Provider console authenticated the exact Rescue SSH host key.")
     return 0
 
 

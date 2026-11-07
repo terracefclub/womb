@@ -51,11 +51,18 @@ The helper compares the independently authenticated Rescue console key to
 the SSH discovery candidate. It requires a new, exact console marker from
 the comparison before writing both Rescue pins. Console frames, credentials
 and URLs stay out of logs. On failure, the private per-attempt JSON records
-only the fixed last stage. Check that the user unit and its processes have
+the fixed last stage and bounded diagnostic facts. Check that the user unit and its processes have
 stopped before another attempt. The helper does not retry or replace any
 existing pin files. An interrupted publication can leave one file present.
-Review that state before proceeding. This console route still requires an
-actual provider test.
+Review that state before proceeding.
+
+For a reviewed `probeOnly` original relay, pass `--keyboard-probe-only`
+after the console receipt path in the command above, and select `relay`.
+The helper compares immediate and paced entry of a fixed public sample on
+the active getty line and verifies the line is empty again after each trial.
+It records only the echo classification and erase check. This mode sends
+no Enter or login credentials and creates no SSH pin. Its success output
+identifies keyboard calibration only.
 
 ```sh
 direnv exec . python3 -B infra/nixos/test_console_fingerprint.py -v
