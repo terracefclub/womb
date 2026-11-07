@@ -26,7 +26,9 @@ in {
         message = "Terrace cloud disk requires a verified whole /dev device.";
       }
     ];
-    boot.loader.grub.device = lib.mkForce cfg.device;
+    # Disko's EF02 partition already adds the disk to grub.devices. Clear the
+    # host profile's singular fallback so GRUB does not add a second device.
+    boot.loader.grub.device = lib.mkForce "";
     disko.devices.disk.system = {
       type = "disk";
       device = cfg.device;

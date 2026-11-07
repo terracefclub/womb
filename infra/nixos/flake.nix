@@ -16,12 +16,14 @@
     ...
   }: let
     system = "x86_64-linux";
-    hostModule = {...}: {
+    diskModule = {...}: {
       imports = [
         disko.nixosModules.disko
-        platform.nixosModules.hetzner
         ./disk.nix
       ];
+    };
+    hostModule = {...}: {
+      imports = [diskModule platform.nixosModules.hetzner];
       terrace.hetzner.enable = true;
     };
     installConfig = nixpkgs.lib.nixosSystem {
@@ -41,6 +43,7 @@
       ];
     };
   in {
+    nixosModules.cloud-disk = diskModule;
     nixosModules.cloud-host = hostModule;
     checks.${system}.disk-install = installConfig.config.system.build.installTest;
   };
