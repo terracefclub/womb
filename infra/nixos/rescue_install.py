@@ -27,6 +27,7 @@ from rehearsal_lease import (  # noqa: E402
 NIX_SHA = "0c3960a9792331a22081c3c7a5d8465db9b17c50b3acdf18587fa4c6f2cb1158"
 NIX_STORE = "/nix/store/irfrbndi76zhkvqsfhmsn4a99iafck29-nix-2.35.2/bin/nix-store"
 NIX_SERVE = "/run/terrace-rescue-nix-serve"
+TARGET_COPY_SECONDS = {"app": 1800, "relay": 420}
 MAX_FACTS = 65536
 DISK = re.compile(r"/dev/(?:sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+)")
 BY_ID = re.compile(r"/dev/disk/by-id/[A-Za-z0-9][A-Za-z0-9_.:+-]{0,220}")
@@ -188,6 +189,7 @@ exec lsblk --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:
 BOOTSTRAP = f"""
 set -euo pipefail
 umask 077
+case "$1" in 430|1810) ;; *) exit 1;; esac
 test ! -e /nix && test ! -L /nix
 test ! -e {NIX_SERVE} && test ! -L {NIX_SERVE}
 scratch="$(mktemp -d /tmp/terrace-rescue-nix.XXXXXXXX)"
@@ -200,10 +202,7 @@ mkdir -m 0755 /nix /nix/store
 cp -a "$payload/store/." /nix/store/
 {NIX_STORE} --option build-users-group "" --load-db <"$payload/.reginfo"
 set -o noclobber
-cat >{NIX_SERVE} <<'EOF'
-#!/bin/sh
-exec timeout --kill-after=10 430 {NIX_STORE} --option build-users-group "" "$@"
-EOF
+printf '#!/bin/sh\nexec timeout --kill-after=10 %s {NIX_STORE} --option build-users-group "" "$@"\n' "$1" >{NIX_SERVE}
 chmod 0700 {NIX_SERVE}
 """
 
@@ -311,6 +310,7 @@ def remaining(directory, binding, limit):
 
 def install(directory, phase, role, approved, archive):
     prefix = f"{phase}-{role}"
+    target_seconds = TARGET_COPY_SECONDS[role]
     require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")
     binding, key, options, ssh = authority(directory, phase, role)
     reviewed, disk_digest = read_json(directory / f"{prefix}-disk.json")
@@ -338,7 +338,7 @@ def install(directory, phase, role, approved, archive):
                 and hashlib.file_digest(source, "sha256").hexdigest() == NIX_SHA,
                 "Rescue Nix archive rejected")
         source.seek(0)
-        remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, stdin=source)
+        remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, str(target_seconds + 10), stdin=source)
     copy_store(binding, options, remaining(directory, binding, 240), [plan["disko"], plan["installer"]])
     # Provider controller may refresh observedAt. The immutable binding and
     # Rescue pin must still match, immediately before any disk write.
@@ -351,7 +351,7 @@ def install(directory, phase, role, approved, archive):
     })
     disk_args = [disk["bootId"], device, disk["canonical"], disk["majorMinor"], str(disk["size"])]
     remote(ssh, remaining(directory, binding, 90), FORMAT, *disk_args, plan["disko"])
-    copy_store(binding, options, remaining(directory, binding, 420), [plan["system"]], target=True)
+    copy_store(binding, options, remaining(directory, binding, target_seconds), [plan["system"]], target=True)
     with tempfile.TemporaryFile() as key_stream:
         key_stream.write(key_bytes)
         key_stream.seek(0)

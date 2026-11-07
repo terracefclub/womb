@@ -86,6 +86,10 @@ from the [pinned upstream installer](https://releases.nixos.org/nix/nix-2.35.2/i
 The executor verifies the archive again before using it to initialize the
 temporary Rescue Nix store. It copies the large system closure directly
 to the mounted target store, keeping it out of Rescue RAM.
+The measured synthetic gateway closure is about 10 GB. The target copy
+allows up to 30 minutes for the gateway or seven minutes for the relay,
+subject to the remaining lease. The remote store process has an independent
+stop deadline and a ten-second kill grace.
 
 With the lease still armed and the provider binding refreshed, the
 reviewed destructive step is:

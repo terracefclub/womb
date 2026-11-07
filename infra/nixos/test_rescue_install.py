@@ -44,6 +44,7 @@ class RescueInstallTest(unittest.TestCase):
         self.write("lease.json", {"schema": 1, "run": run, "expires": 9000})
         with patch.object(rescue.time, "time", return_value=1000):
             rescue.require_open(self.directory, run, 8000)
+            self.assertEqual(rescue.remaining(self.directory, {"run": run, "expires": 1500}, 1800), 480)
             with self.assertRaises(rescue.Rejected):
                 rescue.require_open(self.directory, run, 999)
             self.write("closed.json", {})
