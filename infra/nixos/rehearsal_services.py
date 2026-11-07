@@ -25,6 +25,14 @@ APP_WRITERS = (
     "podman-terrace-windmill-worker", "vaultwarden",
 )
 RELAY_WRITERS = ("headscale", "nginx")
+APP_ONESHOTS = (
+    "cloud-rehearsal-inputs", "terrace-cms-migrate", "terrace-documenso-migrate",
+    "terrace-documenso-bootstrap", "terrace-windmill-migrate", "terrace-windmill-bootstrap",
+    "terrace-vaultwarden-migrate", "terrace-vaultwarden-migration-server",
+    "terrace-vaultwarden-bootstrap", "terrace-vaultwarden-guard", "terrace-identity-health",
+    "documenso-test-mailpit",
+)
+BACKUP_UNITS = ("terrace-backup", "terrace-backup-check", "terrace-backup-freshness")
 APP_PATHS = (
     GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media",
     "/var/lib/rancher/k3s/server", "/var/lib/rancher/k3s/storage", "/etc/rancher/node",
@@ -72,8 +80,13 @@ wait_for() {
 INACTIVE = r"""
 expected=$'ActiveState=inactive\nControlPID=0\nLoadState=loaded\nMainPID=0'
 for name in "$@"; do
-  facts=$(systemctl show "$name.service" -p LoadState,ActiveState,MainPID,ControlPID | LC_ALL=C sort)
-  test "$facts" = "$expected"
+  if [[ "$name" == *.timer ]]; then
+    facts=$(systemctl show "$name" -p LoadState,ActiveState | LC_ALL=C sort)
+    test "$facts" = $'ActiveState=inactive\nLoadState=loaded'
+  else
+    facts=$(systemctl show "$name" -p LoadState,ActiveState,MainPID,ControlPID | LC_ALL=C sort)
+    test "$facts" = "$expected"
+  fi
 done
 """
 BOOTSTRAP_APP = SQL + WAIT + r"""
@@ -417,7 +430,13 @@ install -d -m 0755 /var/lib/terrace-rehearsal-trust
 
 
 def inactive(host, names):
-    host.run("writer-absence", INACTIVE, *names)
+    services = (*names, *BACKUP_UNITS)
+    timers = BACKUP_UNITS
+    if host.role == "app":
+        services += APP_ONESHOTS
+        timers += ("terrace-identity-health",)
+    host.run("writer-absence", INACTIVE, *(name + ".service" for name in services),
+             *(name + ".timer" for name in timers))
 
 
 def bootstrap_app(host):
@@ -501,6 +520,7 @@ def original(app, relay, inputs, verify_repository):
     require(app_signature(app) == signature, "database changed during quiescent backup")
     app.run("database-stop", "systemctl stop postgresql.service")
     inactive(app, APP_WRITERS)
+    inactive(relay, RELAY_WRITERS)
     return {
         "verified": True, "servers": sorted([app.id, relay.id]), "snapshots": snapshots,
         "repositoryConfigSha256": repo_hash, "inputSha256": {name: digest(value) for name, value in inputs.items()},
@@ -571,7 +591,9 @@ def authenticate_host(directory, phase, role, rescue, socket, expires):
     binding = rescue.lease_binding(directory, phase, role, time.time())
     prefix = phase + "-" + role
     installed, _ = rescue.read_json(directory / (prefix + "-installed.json"))
+    boot, _ = rescue.read_json(directory / (prefix + "-installed-boot.json"), 4096)
     require(installed["binding"] == binding and installed["mountedExt4Verified"] is True
+            and boot == binding
             and rescue.STORE.fullmatch(installed["system"])
             and SNAPSHOT.fullmatch(installed["planSha256"]), "installed host receipt rejected")
     key = installed["installedHostKey"]
@@ -600,11 +622,14 @@ def offhost_verifier(directory, rescue, expires):
     repository = directory / "repository-data" / "repository"
     password = directory / "repository-password"
 
-    def checked(command, seconds, *, capture=False, env):
+    def checked(stage, command, seconds, *, capture=False, env):
         reserve = min(seconds, int(expires - time.time()) - 30)
         require(reserve >= 5 and not os.path.lexists(directory / "closed.json"),
                 "service lease closed or expired")
-        return rescue.checked_process(command, reserve, capture=capture, env=env)
+        try:
+            return rescue.checked_process(command, reserve, capture=capture, env=env)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            raise Rejected(f"off-host {stage} failed") from None
 
     def verify():
         rescue.private_directory(repository)
@@ -618,8 +643,8 @@ def offhost_verifier(directory, rescue, expires):
             raise Rejected("off-host repository configuration is not encrypted")
         env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME") if key in os.environ}
         command = ["restic", "--repo", str(repository), "--password-file", str(password), "--no-cache"]
-        checked([*command, "check", "--read-data"], 300, env=env)
-        data = checked([*command, "snapshots", "--json"], 30, capture=True, env=env)
+        checked("encrypted data check", [*command, "check", "--read-data"], 300, env=env)
+        data = checked("snapshot inventory", [*command, "snapshots", "--json"], 30, capture=True, env=env)
         return check_snapshots(json.loads(data)), digest(config)
 
     return verify
@@ -657,13 +682,23 @@ def run_phase(directory, phase, rescue):
     expires = min(expires, manifest["expires"], app.expires, relay.expires)
     verify_repository = offhost_verifier(directory, rescue, expires)
     rescue.write_private(directory / f"{phase}-services-started.json", {"run": run, "phase": phase})
-    if phase == "original":
-        result = original(app, relay, inputs, verify_repository)
-    else:
-        result = replacement(app, relay, inputs, backup, verify_repository)
-    require(time.time() < expires and not os.path.lexists(directory / "closed.json"),
-            "service lease closed during verification")
-    rescue.write_private(output, {"run": run, "phase": phase, **result})
+    try:
+        if phase == "original":
+            result = original(app, relay, inputs, verify_repository)
+        else:
+            result = replacement(app, relay, inputs, backup, verify_repository)
+        require(time.time() < expires and not os.path.lexists(directory / "closed.json"),
+                "service lease closed during verification")
+        rescue.write_private(output, {"run": run, "phase": phase, **result})
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.TimeoutExpired) as error:
+        # Persist only our fixed error labels, never child stderr or input values.
+        reason = str(error) if type(error) is Rejected else "service stage rejected"
+        try:
+            rescue.write_private(directory / f"{phase}-services-failure.json",
+                                 {"run": run, "phase": phase, "reason": reason})
+        except (OSError, ValueError):
+            pass
+        raise
 
 
 def main():
