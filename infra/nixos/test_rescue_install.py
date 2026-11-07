@@ -92,6 +92,18 @@ class RescueInstallTest(unittest.TestCase):
             with self.assertRaisesRegex(rescue.Rejected, "reviewed host key"):
                 rescue.bootstrap_authority(self.directory, "original", "relay")
 
+    def test_stock_published_key_accepts_one_exact_line_with_or_without_lf(self):
+        path = self.directory / "host.pub"
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        start = next(index for index, line in enumerate(lines) if line.startswith("mapfile -t -n 2 published "))
+        script = 'set -euo pipefail\nkeys=(unused "$2")\n' + "\n".join(lines[start:start + 3])
+        key = b"ssh-ed25519 synthetic"
+        for data, expected in [(key, 0), (key + b"\n", 0), (key + b"\n\n", 1),
+                               (key + b" comment\n", 1), (key + b"\nssh-ed25519 other\n", 1)]:
+            path.write_bytes(data)
+            result = subprocess.run(["bash", "-c", script, "fixture", "synthetic", str(path)], timeout=5)
+            self.assertEqual(result.returncode, expected)
+
     def test_stock_dispatch_checks_archive_and_rebinds_before_kexec(self):
         archive = self.directory / "installer.tar.gz"
         self.stock_archive(archive)

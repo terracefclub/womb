@@ -165,8 +165,10 @@ direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
 direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
 ```
 
-Dispatch checks the sole operator key on stock Debian. It verifies the archive
-in a private directory under `/dev/shm` and unpacks it under `/run` so the
+Dispatch checks the sole operator key and exact Ed25519 host key on stock
+Debian. Cloud-init writes the reviewed public key without a terminal newline.
+The check accepts that one-line file with or without the newline. It verifies
+the archive in a private directory under `/dev/shm` and unpacks it under `/run` so the
 compressed and unpacked copies do not compete for the same tmpfs limit. It
 checks both mount capacities and available RAM against the measured archive
 sizes. The connection can close during the switch. If the dispatch
