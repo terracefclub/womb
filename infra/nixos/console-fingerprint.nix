@@ -13,6 +13,13 @@ in
   pkgs.writeShellApplication {
     name = "terrace-console-fingerprint";
     text = ''
+      success='Provider console authenticated the exact Rescue SSH host key.'
+      if [[ $# == 5 && $5 == --keyboard-probe-only ]]; then
+        success='Console keyboard calibration recorded without login.'
+      elif [[ $# != 4 ]]; then
+        echo 'Rescue console arguments rejected.' >&2
+        exit 2
+      fi
       umask 077
       scratch=$(${pkgs.coreutils}/bin/mktemp -d /tmp/terrace-console.XXXXXXXX)
       trap '${pkgs.coreutils}/bin/rm -rf -- "$scratch"' EXIT
@@ -22,7 +29,7 @@ in
           TERRACE_CONSOLE_BROWSER=${pkgs.chromium}/bin/chromium \
           timeout --kill-after=5 110 ${python}/bin/python3 -B ${sources}/infra/nixos/console_fingerprint.py "$@" \
           >/dev/null 2>&1; then
-        echo 'Provider console authenticated the exact Rescue SSH host key.'
+        echo "$success"
       else
         status=$?
         echo 'Rescue console authentication failed. Private diagnostics suppressed.' >&2
