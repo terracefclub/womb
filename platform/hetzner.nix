@@ -9,6 +9,11 @@ in {
 
   options.terrace.hetzner = {
     enable = lib.mkEnableOption "Terrace Hetzner BIOS host profile";
+    enableK3s = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Enable the single-node application cluster. Disable on an independent recovery relay.";
+    };
     authorizedKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
@@ -24,7 +29,7 @@ in {
       }
     ];
 
-    terrace.singleNode.enable = true;
+    terrace.singleNode.enable = cfg.enableK3s;
     system.stateVersion = "26.05";
     boot.loader.grub = {
       enable = true;
@@ -46,6 +51,9 @@ in {
       openssh.authorizedKeys.keys = cfg.authorizedKeys;
     };
     security.sudo.wheelNeedsPassword = false;
-    networking.firewall.allowedTCPPorts = [22];
+    networking.firewall = {
+      enable = true;
+      allowedTCPPorts = [22];
+    };
   };
 }
