@@ -26,12 +26,18 @@ APP_WRITERS = (
 )
 RELAY_WRITERS = ("headscale", "nginx")
 APP_ONESHOTS = (
-    "cloud-rehearsal-inputs", "terrace-cms-migrate", "terrace-documenso-migrate",
+    "cloud-rehearsal-inputs", "terrace-website-inputs", "terrace-cms-migrate", "terrace-documenso-migrate",
     "terrace-documenso-bootstrap", "terrace-windmill-migrate", "terrace-windmill-bootstrap",
     "terrace-vaultwarden-migrate", "terrace-vaultwarden-migration-server",
     "terrace-vaultwarden-bootstrap", "terrace-vaultwarden-guard", "terrace-identity-health",
     "documenso-test-mailpit",
 )
+APP_SETUP = (
+    "terrace-documenso-inputs", "terrace-documenso-database", "terrace-documenso-image",
+    "terrace-windmill-db", "terrace-vaultwarden-inputs", "terrace-vaultwarden-database",
+    "keycloakPostgreSQLInit",
+)
+RELAY_SETUP = ("cloud-rehearsal-relay-address",)
 BACKUP_UNITS = ("terrace-backup", "terrace-backup-check", "terrace-backup-freshness")
 APP_PATHS = (
     GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media",
@@ -194,6 +200,7 @@ systemctl stop vaultwarden.service
 systemctl stop podman-terrace-windmill-worker.service
 systemctl stop podman-terrace-windmill-server.service
 systemctl stop terrace-documenso.service terrace-web.service terrace-cms.service keycloak.service nginx.service
+systemctl stop "$@"
 k3s kubectl delete pod --all --all-namespaces --wait=true --timeout=120s >/dev/null
 systemctl stop k3s.service
 systemctl kill --kill-whom=all --signal=SIGKILL k3s.service >/dev/null 2>&1 || true
@@ -430,11 +437,15 @@ install -d -m 0755 /var/lib/terrace-rehearsal-trust
 
 
 def inactive(host, names):
-    services = (*names, *BACKUP_UNITS)
+    services = (*names, *BACKUP_UNITS, "cloud-rehearsal-tls")
     timers = BACKUP_UNITS
     if host.role == "app":
-        services += APP_ONESHOTS
+        services += (*APP_ONESHOTS, *APP_SETUP)
         timers += ("terrace-identity-health",)
+        if "postgresql" in names:
+            services += ("postgresql-setup",)
+    else:
+        services += RELAY_SETUP
     host.run("writer-absence", INACTIVE, *(name + ".service" for name in services),
              *(name + ".timer" for name in timers))
 
@@ -487,11 +498,17 @@ def quiesce(app, relay):
         "deployment-inventory", "k3s kubectl get deployments --all-namespaces -o json", capture=True,
     ))
     scale(app, replicas, stop=True)
-    app.run("gateway-quiescence", STOP_APP, seconds=210)
+    app.run("gateway-quiescence", STOP_APP, *(name + ".service" for name in APP_SETUP), seconds=210)
     inactive(app, tuple(name for name in APP_WRITERS if name != "postgresql"))
-    relay.run("relay-quiescence", "systemctl stop nginx.service headscale.service", seconds=90)
+    relay.run("relay-quiescence", "systemctl stop nginx.service headscale.service\nsystemctl stop \"$@\"",
+              *(name + ".service" for name in RELAY_SETUP), seconds=90)
     inactive(relay, RELAY_WRITERS)
     return replicas
+
+
+def stop_database(app):
+    app.run("database-stop", "systemctl stop postgresql.target postgresql-setup.service postgresql.service")
+    inactive(app, APP_WRITERS)
 
 
 def original(app, relay, inputs, verify_repository):
@@ -518,8 +535,7 @@ def original(app, relay, inputs, verify_repository):
         host.run("native-backup", "systemctl start terrace-backup.service", seconds=300, repository=True)
     snapshots, repo_hash = verify_repository()
     require(app_signature(app) == signature, "database changed during quiescent backup")
-    app.run("database-stop", "systemctl stop postgresql.service")
-    inactive(app, APP_WRITERS)
+    stop_database(app)
     inactive(relay, RELAY_WRITERS)
     return {
         "verified": True, "servers": sorted([app.id, relay.id]), "snapshots": snapshots,
@@ -561,8 +577,7 @@ install -m 0600 -o headscale -g headscale \
     assertions = protocol(app, "-restored")
     require(assertions == backup["protocolAssertions"], "restored protocol assertion count changed")
     quiesce(app, relay)
-    app.run("restored-database-stop", "systemctl stop postgresql.service")
-    inactive(app, APP_WRITERS)
+    stop_database(app)
     return {
         "servers": sorted([app.id, relay.id]), "protocolAssertions": assertions,
         "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True,

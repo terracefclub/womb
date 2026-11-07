@@ -149,8 +149,10 @@ class ServiceProofTests(unittest.TestCase):
             for name in services.BACKUP_UNITS:
                 self.assertIn(name + ".timer", units)
             for unit in ("documenso-test-mailpit.service", "terrace-vaultwarden-migration-server.service",
-                         "terrace-identity-health.timer", "cloud-rehearsal-inputs.service"):
+                         "terrace-identity-health.timer", "cloud-rehearsal-inputs.service",
+                         "postgresql-setup.service", *(name + ".service" for name in services.APP_SETUP)):
                 self.assertEqual(unit in units, role == "app")
+            self.assertEqual("cloud-rehearsal-relay-address.service" in units, role == "relay")
 
 
 if __name__ == "__main__":
