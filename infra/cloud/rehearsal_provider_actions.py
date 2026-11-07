@@ -9,14 +9,12 @@ import re
 import subprocess
 import sys
 import time
-from urllib.parse import parse_qs, urlsplit
 
 import rehearsal_apply as apply
 import rehearsal_lease as lease
 import rehearsal_timer as timer
 
 
-CONSOLE = "console.hetzner.cloud"
 ACTIONS = {"enable_rescue", "disable_rescue", "request_console", "reboot"}
 
 
@@ -24,21 +22,6 @@ def password(value):
     if not isinstance(value, str) or not re.fullmatch(r"[!-~]{8,128}", value):
         raise lease.Rejected("provider password format rejected")
     return value
-
-
-def console_url(url, sid):
-    if not isinstance(url, str) or len(url) > 1024 or not re.fullmatch(r"[!-~]+", url):
-        raise lease.Rejected("console URL format rejected")
-    try:
-        endpoint = urlsplit(url)
-        values = parse_qs(endpoint.query, strict_parsing=True, max_num_fields=2)
-    except ValueError:
-        raise lease.Rejected("console URL format rejected") from None
-    if (endpoint.scheme != "wss" or endpoint.netloc != CONSOLE or endpoint.path != "/" or endpoint.fragment
-            or set(values) != {"server_id", "token"} or values["server_id"] != [str(sid)]
-            or len(values["token"]) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", values["token"][0])):
-        raise lease.Rejected("console endpoint does not match the leased host")
-    return url
 
 
 def wait_action(api, directory, phase, response):
@@ -110,12 +93,19 @@ def operate(mode, directory, manifest, credential, token, phase, role):
             raise lease.Rejected("Rescue console scope rejected")
         observed_at = int(time.time())
         response = dispatch(api, directory, phase, sid, "request_console", {})
+        action_id = lease.positive_id(response["action"]["id"])
+        action = api.request(f"actions/{action_id}")["action"]
+        if (lease.positive_id(action["id"]) != action_id or action["status"] != "success"
+                or action["command"] != "request_console" or action["resources"] != [{"id": sid, "type": "server"}]
+                or type(action["resources"][0]["id"]) is not int):
+            raise lease.Rejected("provider console action scope rejected")
         expires = min(binding["expires"], observed_at + 55)
         if expires - time.time() < 15:
             raise lease.Rejected("console request is no longer fresh")
         lease.write_private(directory / f"{prefix}-console-{time.time_ns()}.json", {
             **binding, "observedAt": observed_at, "expires": expires,
-            "wssUrl": console_url(response["wss_url"], sid),
+            "wssUrl": lease.console_url(response["wss_url"], sid),
+            "consoleAction": {"id": action_id, "serverId": sid},
             "vncPassword": password(response["password"]),
             "rescuePassword": password(login["rescuePassword"]),
         })

@@ -1,6 +1,7 @@
 """Private Hetzner rehearsal lease. Only this tool's cleanup path writes to the API."""
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -12,7 +13,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
@@ -35,6 +36,34 @@ class Retryable(OSError):
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+
+
+def console_url(url, server_id):
+    """Validate a provider console URL without interpreting its opaque grant."""
+    if not isinstance(url, str) or len(url) > 1024 or not re.fullmatch(r"[!-~]+", url):
+        raise Rejected("console URL format rejected")
+    try:
+        endpoint = urlsplit(url)
+        query = parse_qs(endpoint.query, strict_parsing=True, max_num_fields=3)
+    except ValueError:
+        raise Rejected("console URL format rejected") from None
+    if (endpoint.scheme != "wss" or endpoint.netloc not in ("console.hetzner.cloud", "web-console.hetzner.cloud")
+            or endpoint.fragment or endpoint.geturl() != url):
+        raise Rejected("console endpoint rejected")
+    if (endpoint.netloc == "console.hetzner.cloud" and endpoint.path == "/" and set(query) == {"server_id", "token"}
+            and query["server_id"] == [str(server_id)] and len(query["token"]) == 1
+            and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", query["token"][0])):
+        return url
+    if (endpoint.netloc == "web-console.hetzner.cloud" and endpoint.path == "/pp"
+            and set(query) == {"data", "nonce", "tag"} and all(len(values) == 1 for values in query.values())):
+        try:
+            decoded = {name: base64.b64decode(values[0], validate=True) for name, values in query.items()}
+        except ValueError:
+            raise Rejected("console grant encoding rejected") from None
+        if (0 < len(decoded["data"]) <= 512 and len(decoded["nonce"]) == 12 and len(decoded["tag"]) == 16
+                and all(base64.b64encode(value).decode("ascii") == query[name][0] for name, value in decoded.items())):
+            return url
+    raise Rejected("console grant scope rejected")
 
 
 def read_private(path, limit):
