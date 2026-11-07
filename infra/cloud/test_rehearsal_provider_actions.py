@@ -1,9 +1,11 @@
+import base64
 import json
 from pathlib import Path
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 import rehearsal_lease as lease
 import rehearsal_provider_actions as actions
@@ -13,11 +15,23 @@ from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, reso
 class ProviderActionsTest(unittest.TestCase):
     def test_console_only_accepts_official_host_and_exact_server(self):
         url = "wss://console.hetzner.cloud/?server_id=4&token=synthetic-opaque-token"
-        self.assertEqual(actions.console_url(url, 4), url)
+        self.assertEqual(lease.console_url(url, 4), url)
         for bad in (url.replace("server_id=4", "server_id=1"), url.replace("wss:", "ws:"),
                     url.replace("hetzner.cloud", "hetzner.cloud.example"), url + "&server_id=4", url + "#extra"):
             with self.assertRaises(lease.Rejected):
-                actions.console_url(bad, 4)
+                lease.console_url(bad, 4)
+
+    def test_opaque_console_grant_has_fixed_host_path_and_encoding(self):
+        grant = {key: base64.b64encode(b"\xff" * size).decode()
+                 for key, size in (("data", 117), ("nonce", 12), ("tag", 16))}
+        route = "wss://web-console.hetzner.cloud/pp?"
+        url = route + urlencode(grant)
+        self.assertEqual(lease.console_url(url, 4), url)
+        for bad in (url.replace("/pp?", "/other?"), url.replace("web-console", "console"),
+                    route + urlencode({**grant, "tag": "AAAA"}), url + "&nonce=duplicate",
+                    route + urlencode({**grant, "data": "***"}), url + "#extra"):
+            with self.assertRaises(lease.Rejected):
+                lease.console_url(bad, 4)
 
     def test_rescue_console_and_installed_boot_use_only_owned_server_and_key(self):
         data = inventory()
@@ -30,8 +44,13 @@ class ProviderActionsTest(unittest.TestCase):
         data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key="ssh-ed25519 unexpected"))
         api = FakeApi(data)
         calls = []
+        console_server = 1
 
-        def request(route, *, post):
+        def request(route, *, post=None):
+            if post is None:
+                self.assertEqual(route, f"actions/{len(calls)}")
+                return {"action": {"id": len(calls), "status": "success", "command": "request_console",
+                                   "resources": [{"type": "server", "id": console_server}]}}
             self.assertTrue(route.startswith("servers/4/actions/"))
             operation = route.rsplit("/", 1)[-1]
             calls.append(operation)
@@ -65,18 +84,24 @@ class ProviderActionsTest(unittest.TestCase):
                 self.assertEqual(calls, [])
                 data["ssh_keys"][1]["public_key"] = "ssh-ed25519 synthetic"
                 actions.operate("rescue", *args)
+                with self.assertRaises(lease.Rejected):
+                    actions.operate("console", *args)
+                self.assertEqual(list(root.glob("original-app-console-*.json")), [])
+                console_server = 4
                 actions.operate("console", *args)
                 receipt, = root.glob("original-app-console-*.json")
                 self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
                 console = json.loads(lease.read_private(receipt, 4096))
                 self.assertEqual(console["serverId"], 4)
+                self.assertEqual(console["consoleAction"], {"id": 4, "serverId": 4})
                 self.assertLessEqual(console["expires"] - console["observedAt"], 55)
                 binding = json.loads(lease.read_private(root / "original-app-rescue-boot.json", 4096))
                 lease.write_private(root / "original-app-installed.json", {"binding": binding, "mountedExt4Verified": True})
                 actions.operate("boot-installed", *args)
                 with self.assertRaises(lease.Rejected):
                     actions.operate("console", *args)
-            self.assertEqual(calls, ["enable_rescue", "reboot", "request_console", "disable_rescue", "reboot"])
+            self.assertEqual(calls, ["enable_rescue", "reboot", "request_console", "request_console",
+                                     "disable_rescue", "reboot"])
 
 
 if __name__ == "__main__":
