@@ -20,6 +20,34 @@ The module accepts canonical whole `sd`, `vd`, `xvd`, and `nvme` device names,
 or a single `/dev/disk/by-id/` name without a `-partN` suffix. This syntax
 check cannot prove where a by-id symlink points; verify that in Rescue.
 
+## Independent recovery relay
+
+Use the `cloud-disk` export when composing the disk layout with a separately
+pinned platform revision. It supplies Disko, GPT, BIOS and ext4 disk settings
+without activating services. Import the `hetzner` and `relay` modules from
+that same current platform revision and set `terrace.hetzner.enable = true`,
+`terrace.hetzner.enableK3s = false` and `terrace.relay.enable = true`.
+The relay must remain available independently of the application cluster. The
+existing `cloud-host` export retains its original application-host pin and
+K3s default. Each role requires its own verified whole disk and explicit
+operator public keys.
+
+For a disposable rehearsal, provide a separate private network path and
+per-run runtime certificates for the synthetic `.invalid` names. The native
+VM test's firewall overrides, Nix-store test key and shared guest paths are
+only for the isolated VM driver. See [the relay runbook](../../docs/access-relay.md)
+for the operator and service requirements.
+
+Evaluate the three profile compositions from the repository root on the Linux
+builder. This checks the boot layout, operator-only SSH, firewall and the
+relay's independence without building or touching a disk:
+
+```sh
+direnv exec . nix eval --raw --impure --file infra/nixos/profile-check.nix
+```
+
+## Application host
+
 For an actual fresh server, compose this module from a **local, uncommitted**
 installation flake in Rescue. Its `nixpkgs` input should follow this flake's
 locked `nixpkgs`; its NixOS configuration imports
@@ -37,13 +65,17 @@ module containing at least:
 ```
 
 Evaluate the complete NixOS configuration and inspect its `fileSystems`,
-`boot.loader.grub.device`, SSH settings and firewall before allowing Disko's
+`boot.loader.grub.devices`, SSH settings and firewall before allowing Disko's
 destructive `disko` mode. Then use the pinned Disko tooling to partition and
 mount the verified disk and `nixos-install --flake` for that same configuration.
 Reboot through Hetzner Console, verify operator-key SSH, K3s service and a
 single Ready node, and verify port 6443 is unreachable from an external host.
 The VM result below checks disk installation and boot; it does not replace
 these cloud checks.
+
+The EF02 partition makes Disko supply the whole disk as the sole GRUB
+device. Setting the legacy singular `boot.loader.grub.device` as well would
+add the same disk twice and cause NixOS to reject the configuration.
 
 The install test runs Disko's NixOS installer in an isolated VM, boots the
 result under BIOS/GRUB, and checks the root filesystem. It disables K3s only
