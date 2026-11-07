@@ -223,3 +223,8 @@ failure records fixed boot markers and, if reached, the SSH stage and failing
 stock check line. The test discards raw diagnostics and the bounded serial
 sample and removes the temporary overlay and keys after stopping the guest.
 No disk formatter or application starts in this proof.
+
+On 2026-11-07 the pinned base reached a Debian login prompt in a separate
+25-second offline BIOS boot with standard VGA and no NIC or cloud-init seed.
+The trust fixture includes that display hardware while keeping display
+rendering disabled. The boot-only check did not exercise SSH or kexec.

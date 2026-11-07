@@ -93,7 +93,8 @@ process.stdout.write(renderBootstrapCloudConfig(hostPublicKey, hostPrivateKey, o
 def guest(args, overlay, seed, serial, facts):
     command = [
         args.qemu, "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "4096", "-smp", "2",
-        "-nodefaults", "-boot", "order=c", "-display", "none", "-monitor", "none", "-serial", "stdio",
+        "-nodefaults", "-boot", "order=c", "-vga", "std", "-display", "none",
+        "-monitor", "none", "-serial", "stdio",
         "-drive", f"file={overlay},format=qcow2,if=virtio",
         "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
         "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-:22",
