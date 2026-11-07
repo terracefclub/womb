@@ -119,7 +119,7 @@ class ConsoleFingerprintTest(unittest.TestCase):
     def test_root_wait_diagnostics_accumulate_only_fixed_observations(self):
         progress = {}
         accepts = console.root_prompt_observer(progress)
-        initial = {"loginIncorrect": False, "loginPromptReappeared": False,
+        initial = {"loginIncorrect": False, "loginPromptVisible": False,
                    "passwordPromptReappeared": False, "rootLikeWithoutExactPrompt": False}
         self.assertFalse(accepts("Password:\nprivate fixture text"))
         self.assertEqual(progress, {"rootWait": initial})

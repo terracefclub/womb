@@ -157,7 +157,7 @@ def record_rfb_facts(facts, observed):
 
 
 def root_prompt_observer(progress):
-    facts = {"loginIncorrect": False, "loginPromptReappeared": False,
+    facts = {"loginIncorrect": False, "loginPromptVisible": False,
              "passwordPromptReappeared": False, "rootLikeWithoutExactPrompt": False}
     progress["rootWait"] = facts
     # The password prompt was visible immediately before submission. A frame
@@ -169,7 +169,7 @@ def root_prompt_observer(progress):
         exact_root = bool(ROOT.search(text))
         has_password = bool(PASSWORD.search(text))
         facts["loginIncorrect"] |= bool(LOGIN_INCORRECT.search(text))
-        facts["loginPromptReappeared"] |= bool(LOGIN.search(text))
+        facts["loginPromptVisible"] |= bool(LOGIN.search(text))
         facts["passwordPromptReappeared"] |= has_password and not password_visible
         facts["rootLikeWithoutExactPrompt"] |= not exact_root and bool(ROOT_LIKE.search(text))
         password_visible = has_password
