@@ -25,6 +25,7 @@ check-supervision:
     - python platform/full/test_restore_evidence.py -v
     - python tests/platform/test_restore_disk.py -v
     - python infra/cloud/test_preview.py -v
+    - python infra/cloud/test_rehearsal_lease.py -v
 
 oci-metadata:
   image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
