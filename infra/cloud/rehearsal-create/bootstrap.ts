@@ -22,7 +22,6 @@ export function renderBootstrapCloudConfig(
     allow_public_ssh_keys: false,
     ssh_pwauth: false,
     ssh_deletekeys: true,
-    ssh_genkeytypes: [],
     ssh_keys: { ed25519_public: hostPublicKey, ed25519_private: hostPrivateKey },
     ssh_quiet_keygen: true,
     ssh_publish_hostkeys: { enabled: false },
