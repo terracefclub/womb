@@ -20,6 +20,7 @@ SYSTEMD = Path("/run/current-system/sw/bin")
 TRANSIENT = Path("/run/systemd/transient")
 SERVICE_DEADLINE = "420s"
 CREATE_RESERVE = 300
+CGROUP = Path("/sys/fs/cgroup/system.slice")
 
 
 def safe_path(path):
@@ -48,14 +49,19 @@ def timer_settings(directory, manifest, credential):
 
 def system(*args, allow_inactive=False):
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            text=True, timeout=15, check=False)
+                            env=dict(os.environ, TZ="UTC", LC_ALL="C"), text=True, timeout=15, check=False)
     if result.returncode and not allow_inactive:
         raise lease.Rejected("systemd command failed")
     return result.stdout.strip()
 
 
 def read_property(unit, key):
-    return system(SYSTEMD / "systemctl", "show", unit, "--property=" + key, "--value", allow_inactive=True)
+    return system(SYSTEMD / "systemctl", "show", unit, "--property=" + key, "--value")
+
+
+def read_properties(unit, keys):
+    output = system(SYSTEMD / "systemctl", "show", unit, *("--property=" + key for key in keys))
+    return dict(line.split("=", 1) for line in output.splitlines())
 
 
 def check_ready(directory, manifest, credential, *, now=None):
@@ -71,12 +77,23 @@ def check_ready(directory, manifest, credential, *, now=None):
     timer = unit + ".timer"
     service = unit + ".service"
     timer_file = (TRANSIENT / timer).read_text()
-    if (read_property(timer, "ActiveState") != "active" or read_property(timer, "SubState") != "waiting"
-            or read_property(timer, "Unit") != service or not read_property(timer, "NextElapseUSecRealtime")
-            or "OnCalendar=" + calendar(manifest["expires"]) not in timer_file.splitlines()
-            or read_property(service, "ActiveState") != "inactive" or read_property(service, "User") != user
-            or read_property(service, "KillMode") != "control-group"
-            or "argv[]=" + " ".join(argv) + " ;" not in read_property(service, "ExecStart")):
+    expiry = calendar(manifest["expires"])
+    expected_timer = {"ActiveState": "active", "SubState": "waiting", "Unit": service,
+                      "AccuracyUSec": "1s", "RemainAfterElapse": "no"}
+    expected_service = {"ActiveState": "inactive", "User": user, "KillMode": "control-group",
+                        "Type": "exec", "RuntimeMaxUSec": "7min", "TimeoutStopUSec": "10s",
+                        "Restart": "on-failure", "RestartUSec": "20s", "StartLimitIntervalUSec": "2h",
+                        "StartLimitBurst": "3", "UMask": "0077", "NoNewPrivileges": "yes", "PrivateTmp": "yes",
+                        "ProtectSystem": "strict", "ReadWritePaths": safe_path(directory)}
+    timer_status = read_properties(timer, (*expected_timer, "NextElapseUSecRealtime"))
+    service_status = read_properties(service, (*expected_service, "ExecStart"))
+    next_elapse = timer_status.pop("NextElapseUSecRealtime")
+    exec_start = service_status.pop("ExecStart")
+    command = r"\{ path=" + re.escape(argv[0]) + r" ; argv\[\]=" + re.escape(" ".join(argv))
+    command += r" ; ignore_errors=no ; [^{}]* \}"
+    if (timer_status != expected_timer or service_status != expected_service
+            or not re.fullmatch(r"[A-Z][a-z]{2} " + re.escape(expiry), next_elapse)
+            or "OnCalendar=" + expiry not in timer_file.splitlines() or not re.fullmatch(command, exec_start)):
         raise lease.Rejected("cleanup timer is not ready")
 
 
@@ -125,6 +142,9 @@ def disarm(directory, manifest, credential):
             raise lease.Rejected("cleanup service has a process")
     if read_property(names[1], "ControlGroup"):
         raise lease.Rejected("cleanup service has a cgroup")
+    cgroup = CGROUP / names[1]
+    if cgroup.exists() and any(path.read_text().strip() for path in cgroup.rglob("cgroup.procs")):
+        raise lease.Rejected("cleanup cgroup is populated")
 
 
 def main():

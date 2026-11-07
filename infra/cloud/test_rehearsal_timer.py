@@ -22,17 +22,22 @@ class TimerTest(unittest.TestCase):
         self.timer_unit = self.directory / (self.unit + ".timer")
         self.timer_unit.write_text("OnCalendar=" + timer.calendar(2000) + "\n")
         self.properties = {"ActiveState": "active", "SubState": "waiting", "Unit": self.unit + ".service",
-                           "NextElapseUSecRealtime": "scheduled", "User": "operator", "KillMode": "control-group",
-                           "ExecStart": "{ argv[]=" + " ".join(self.argv) + " ; }"}
+                           "NextElapseUSecRealtime": "Thu " + timer.calendar(2000), "User": "operator",
+                           "AccuracyUSec": "1s", "RemainAfterElapse": "no", "KillMode": "control-group",
+                           "Type": "exec", "RuntimeMaxUSec": "7min", "TimeoutStopUSec": "10s",
+                           "Restart": "on-failure", "RestartUSec": "20s", "StartLimitIntervalUSec": "2h",
+                           "StartLimitBurst": "3", "UMask": "0077", "NoNewPrivileges": "yes", "PrivateTmp": "yes",
+                           "ProtectSystem": "strict", "ReadWritePaths": str(self.directory),
+                           "ExecStart": "{ path=" + self.argv[0] + " ; argv[]=" + " ".join(self.argv)
+                                        + " ; ignore_errors=no ; pid=0 }"}
 
     def ready(self, now=1000):
-        def read_property(unit, key):
-            if unit.endswith(".service") and key == "ActiveState":
-                return "inactive"
-            return self.properties[key]
+        def read_properties(unit, keys):
+            return {key: "inactive" if unit.endswith(".service") and key == "ActiveState"
+                    else self.properties[key] for key in keys}
 
         with (patch.object(timer, "timer_settings", return_value=(self.unit, "operator", self.argv)),
-              patch.object(timer, "TRANSIENT", self.directory), patch.object(timer, "read_property", read_property)):
+              patch.object(timer, "TRANSIENT", self.directory), patch.object(timer, "read_properties", read_properties)):
             timer.check_ready(self.directory, self.manifest, self.credential, now=now)
 
     def arm_receipt(self):
@@ -44,7 +49,7 @@ class TimerTest(unittest.TestCase):
             self.ready()
         self.arm_receipt()
         self.ready()
-        for property_name in ("SubState", "Unit", "ExecStart", "KillMode"):
+        for property_name in ("SubState", "Unit", "ExecStart", "KillMode", "RuntimeMaxUSec", "NextElapseUSecRealtime"):
             saved = self.properties[property_name]
             self.properties[property_name] = "unexpected"
             with self.assertRaises(lease.Rejected):
