@@ -103,6 +103,27 @@ retirement plan or a revised owner-approved budget exists.
 
 ## Review and recovery sequence
 
+The disposable cloud rehearsal uses a separate, expiring run lease. Its
+baseline and receipts live in a private directory outside Git. The lease
+binds a project credential and a random 32-hex run ID to the complete
+pre-existing inventory. Cleanup requires the expected name and run label,
+excludes all baseline IDs and checks attached IPs and firewalls before
+deleting any run server. It waits for provider actions and verifies absence
+in three reads, with the baseline resources and associations preserved.
+
+`rehearsal_lease.py prepare` is read-only. `retire-original` requires a
+verified off-host backup receipt and fails if the replacement cohort already
+exists. `cleanup` closes the lease to future creates before removing its
+resources. A launcher must hold the same lease lock across each create and
+arm independent, time-bounded cleanup before making the first write. The
+lease helper alone does not start a timer or provision resources. It never
+deletes unrecognized resources, even if they appear after the baseline.
+
+Run the offline cleanup tests with
+`direnv exec . python3 -B infra/cloud/test_rehearsal_lease.py -v`.
+
+### Persistent bootstrap plan
+
 1. Obtain the dedicated project token through a protected channel. Verify
    project scope in Console, then use read-only inventory commands. A
    project-scoped Read & Write token can support the inventory and later
