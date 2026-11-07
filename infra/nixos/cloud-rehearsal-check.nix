@@ -55,6 +55,8 @@ in
   assert builtins.elem "${trust}:/run/terrace-ca.crt:ro" gateway.virtualisation.oci-containers.containers.terrace-windmill-server.volumes;
   assert gateway.terrace.documenso.identityCaFile == trust && gateway.terrace.vaultwarden.identityCaFile == trust;
   assert !relay.services.k3s.enable && relay.services.headscale.enable && relay.terrace.backup.headscale.enable;
+  assert builtins.elem relay.services.headscale.package relay.environment.systemPackages;
+  assert lib.all (name: lib.any (package: lib.getName package == name) relay.environment.systemPackages) ["curl" "jq" "sqlite"];
   assert noBoot relay ["headscale" "nginx" "cloud-rehearsal-relay-address"];
   assert relay.services.headscale.settings.derp.server.stun_listen_addr == "10.71.0.8:3478";
   assert relay.services.nginx.defaultListenAddresses == ["127.0.0.1"];

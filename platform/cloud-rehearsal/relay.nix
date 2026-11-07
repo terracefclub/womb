@@ -26,6 +26,7 @@ in {
   ];
   networking.hostName = "relay";
   networking.hosts."127.0.0.1" = [hostname];
+  environment.systemPackages = [pkgs.jq];
   assertions = [
     {
       assertion = isPrivate;
