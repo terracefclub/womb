@@ -28,5 +28,6 @@ jobs:
           python3 tests/platform/test_github_ci.py -v
           python3 tests/platform/test_gitlab_mirror.py -v
           python3 -B infra/nixos/test_rescue_install.py -v
+          python3 -B infra/nixos/test_console_fingerprint.py -v
       - name: Run the pinned contract environment
         run: python3 tools/github-ci.py "${{ matrix.job }}"

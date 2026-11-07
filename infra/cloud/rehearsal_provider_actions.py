@@ -96,7 +96,8 @@ def operate(mode, directory, manifest, credential, token, phase, role):
         action_id = lease.positive_id(response["action"]["id"])
         action = api.request(f"actions/{action_id}")["action"]
         if (lease.positive_id(action["id"]) != action_id or action["status"] != "success"
-                or action["command"] != "request_console" or action["resources"] != [{"id": sid, "type": "server"}]):
+                or action["command"] != "request_console" or action["resources"] != [{"id": sid, "type": "server"}]
+                or type(action["resources"][0]["id"]) is not int):
             raise lease.Rejected("provider console action scope rejected")
         expires = min(binding["expires"], observed_at + 55)
         if expires - time.time() < 15:
