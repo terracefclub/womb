@@ -114,10 +114,11 @@ test("only reads the exact bound private sibling and renders one root key", () =
     expect(readBootstrapUserData(inputPath, input)).toEqual({ relay: expected });
     expect(expected.startsWith("#cloud-config\n")).toBe(true);
     const config = JSON.parse(expected.slice("#cloud-config\n".length));
+    expect(config).not.toHaveProperty("ssh_genkeytypes");
     expect(config).toEqual({
       users: [{ name: "root", lock_passwd: true, ssh_authorized_keys: [sshPublicKey] }],
       disable_root: false, allow_public_ssh_keys: false, ssh_pwauth: false,
-      ssh_deletekeys: true, ssh_genkeytypes: [],
+      ssh_deletekeys: true,
       ssh_keys: { ed25519_public: relayKey.publicKey, ed25519_private: syntheticPrivate },
       ssh_quiet_keygen: true, ssh_publish_hostkeys: { enabled: false },
       ssh: { emit_keys_to_console: false }, no_ssh_fingerprints: true,
