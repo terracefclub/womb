@@ -170,17 +170,23 @@ class Api:
         self.token = token
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
-    def request(self, route, *, delete=False, missing=False):
+    def request(self, route, *, delete=False, missing=False, post=None):
+        if delete and post is not None:
+            raise Rejected("conflicting provider operation")
+        headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
+        data = None
+        if post is not None:
+            data = json.dumps(post).encode()
+            headers["Content-Type"] = "application/json"
         req = Request("https://api.hetzner.cloud/v1/" + route,
-                      headers={"Authorization": "Bearer " + self.token, "Accept": "application/json"},
-                      method="DELETE" if delete else "GET")
+                      headers=headers, data=data, method="DELETE" if delete else "POST" if data is not None else "GET")
         try:
             with self.opener.open(req, timeout=8) as response:
                 data = response.read(2 * 1024 * 1024 + 1)
         except HTTPError as error:
             if (delete or missing) and error.code == 404:
                 return None
-            if error.code in (409, 429) or 500 <= error.code <= 599:
+            if error.code in (409, 423, 429) or 500 <= error.code <= 599:
                 raise Retryable("provider request retryable") from None
             raise Rejected("provider request failed") from None
         except OSError:

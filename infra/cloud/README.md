@@ -144,6 +144,19 @@ keeps disarm closed while uncertainty remains. Replacement requires the original
 cohort's verified absence. `binding` independently reads each created host
 and writes a short-lived private ID/address receipt for the installer.
 
+The operator helper uses the same lease and bounded systemd writer unit
+for Rescue boot, an authenticated provider console receipt, and the installed
+boot. Each action rechecks the exact provider server and run-owned key. The
+provider console passwords are held only in private, short-lived receipts.
+The installed boot requires the reviewed disk-install receipt for that role.
+
+The escrow helper creates per-run TLS material and an independent restic
+password. Its bounded Falcon repository service uses only an owner-private
+Unix socket, without modifying the personal SSH server. The cloud hosts
+reach it only through the pinned reverse SSH connection. Keep the encrypted
+repository off both cohorts and verify its data before retiring the original
+hosts. Stop the exact repository service after the final verification.
+
 Run the offline cleanup tests from the repository shell with
 `python3 -B infra/cloud/test_rehearsal_lease.py -v` and
 `python3 -B infra/cloud/test_rehearsal_timer.py -v`. Test the plan gate with
