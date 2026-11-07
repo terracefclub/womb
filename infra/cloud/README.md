@@ -128,9 +128,22 @@ that the exact timer and service are inactive. A transient timer survives
 SSH disconnects. The protected lease remains the recovery reference if
 the builder restarts or loses API access.
 
+The separate `rehearsal-create` project has three isolated stacks. The
+foundation creates only the operator key and SSH firewall. Each cohort
+creates an application server and relay with explicitly labelled IPv4s.
+`rehearsal_apply.py` requires a bounded Falcon service for each preview and
+apply. It checks both the preview and the saved plan for exact create-only
+scope. Apply consumes the reviewed digest under the lease lock, and binds
+it to the same source, input, stack config and plan bytes. Each phase has one
+dispatch marker. A failed or interrupted write is reconciled by the lease
+cleanup rather than retried blindly. Replacement requires the original
+cohort's verified absence. `binding` independently reads each created host
+and writes a short-lived private ID/address receipt for the installer.
+
 Run the offline cleanup tests from the repository shell with
 `python3 -B infra/cloud/test_rehearsal_lease.py -v` and
-`python3 -B infra/cloud/test_rehearsal_timer.py -v`.
+`python3 -B infra/cloud/test_rehearsal_timer.py -v`. Test the plan gate with
+`python3 -B infra/cloud/test_rehearsal_apply.py -v`.
 
 ### Persistent bootstrap plan
 
