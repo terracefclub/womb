@@ -73,7 +73,7 @@
     autoStart = false;
     user = "${toString cfg.uid}:${toString cfg.uid}";
     privileged = false;
-    volumes = ["/run/postgresql:/run/postgresql:ro" "/etc/ssl/certs/ca-certificates.crt:/run/terrace-ca.crt:ro"];
+    volumes = ["/run/postgresql:/run/postgresql:ro" "${cfg.identityCaFile}:/run/terrace-ca.crt:ro"];
     extraOptions =
       commonOptions
       ++ temporaryOptions mode
@@ -170,6 +170,11 @@ in {
     };
     certificateFile = lib.mkOption {type = lib.types.str;};
     certificateKeyFile = lib.mkOption {type = lib.types.str;};
+    identityCaFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/etc/ssl/certs/ca-certificates.crt";
+      description = "Readable runtime PEM trust bundle for the identity issuer, mounted read-only.";
+    };
     manageDatabase = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -187,7 +192,7 @@ in {
         message = "Windmill requires a canonical DNS hostname.";
       }
       {
-        assertion = lib.all validPath [cfg.inputsDirectory cfg.certificateFile cfg.certificateKeyFile];
+        assertion = lib.all validPath [cfg.inputsDirectory cfg.certificateFile cfg.certificateKeyFile cfg.identityCaFile];
         message = "Windmill inputs must use normalized external absolute runtime paths.";
       }
     ];
