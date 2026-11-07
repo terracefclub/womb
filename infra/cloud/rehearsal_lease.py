@@ -50,7 +50,7 @@ def console_url(url, server_id):
     if (endpoint.scheme != "wss" or endpoint.netloc not in ("console.hetzner.cloud", "web-console.hetzner.cloud")
             or endpoint.fragment or endpoint.geturl() != url):
         raise Rejected("console endpoint rejected")
-    if (endpoint.path == "/" and set(query) == {"server_id", "token"}
+    if (endpoint.netloc == "console.hetzner.cloud" and endpoint.path == "/" and set(query) == {"server_id", "token"}
             and query["server_id"] == [str(server_id)] and len(query["token"]) == 1
             and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", query["token"][0])):
         return url

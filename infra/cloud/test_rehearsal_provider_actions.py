@@ -17,7 +17,8 @@ class ProviderActionsTest(unittest.TestCase):
         url = "wss://console.hetzner.cloud/?server_id=4&token=synthetic-opaque-token"
         self.assertEqual(lease.console_url(url, 4), url)
         for bad in (url.replace("server_id=4", "server_id=1"), url.replace("wss:", "ws:"),
-                    url.replace("hetzner.cloud", "hetzner.cloud.example"), url + "&server_id=4", url + "#extra"):
+                    url.replace("hetzner.cloud", "hetzner.cloud.example"),
+                    url.replace("console.hetzner.cloud", "web-console.hetzner.cloud"), url + "&server_id=4", url + "#extra"):
             with self.assertRaises(lease.Rejected):
                 lease.console_url(bad, 4)
 

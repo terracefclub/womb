@@ -12,15 +12,15 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import rescue_install as rescue
+from rehearsal_lease import console_url, positive_id
 
 
 ORIGIN = "https://console-fixture.invalid"
-CONSOLE_HOSTS = {"console.hetzner.cloud", "web-console.hetzner.cloud"}
 FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt",
-          "wssUrl", "vncPassword", "rescuePassword"}
+          "wssUrl", "vncPassword", "rescuePassword", "consoleAction"}
 LOGIN = re.compile(r"(?im)^(?:[a-z0-9.-]+[ ]+)?login:[ \t]*$")
 PASSWORD = re.compile(r"(?im)^password:[ \t]*$")
 ROOT = re.compile(r"(?m)^root@[a-zA-Z0-9.-]+[^\r\n]*#[ \t]*$")
@@ -36,17 +36,15 @@ def validate_receipt(receipt, binding, now):
                    and observed <= now < expires <= binding["expires"]
                    and 0 < expires - observed <= 60,
                    "console credential expired")
-    parsed = urlsplit(receipt["wssUrl"])
-    rescue.require(parsed.scheme == "wss" and parsed.netloc in CONSOLE_HOSTS
-                   and parsed.path == "/" and not parsed.fragment
-                   and parsed.geturl() == receipt["wssUrl"],
-                   "unexpected provider console URL")
-    query = parse_qs(parsed.query, strict_parsing=True, max_num_fields=2)
-    rescue.require(set(query) == {"server_id", "token"} and query["server_id"] == [str(binding["serverId"])]
-                   and len(query["token"]) == 1 and re.fullmatch(r"[A-Za-z0-9_.~-]{16,1024}", query["token"][0]),
-                   "unexpected provider console query")
+    action = receipt["consoleAction"]
+    rescue.require(isinstance(action, dict) and set(action) == {"id", "serverId"}
+                   and positive_id(action["serverId"]) == binding["serverId"],
+                   "console action is for a different host")
+    action_id = positive_id(action["id"])
+    console_url(receipt["wssUrl"], binding["serverId"])
     for field in ("vncPassword", "rescuePassword"):
         rescue.require(re.fullmatch(r"[!-~]{6,128}", receipt[field]), "unexpected console credential form")
+    return action_id
 
 
 def candidate_key(raw, ipv4):
@@ -185,7 +183,10 @@ def enroll(directory, phase, role, receipt_path, progress):
                    "unexpected console receipt name")
     binding = rescue.lease_binding(directory, phase, role, time.time())
     receipt, _ = rescue.read_json(receipt_path, 16384)
-    validate_receipt(receipt, binding, time.time())
+    action_id = validate_receipt(receipt, binding, time.time())
+    journal, _ = rescue.read_json(directory / f"{phase}-action-{action_id}.json", 4096)
+    rescue.require(isinstance(journal, dict) and set(journal) == {"id"}
+                   and positive_id(journal["id"]) == action_id, "console action journal disagrees")
     progress["stage"] = "ssh-candidate"
     raw = rescue.checked_process(["ssh-keyscan", "-T", "5", "-t", "ed25519", binding["ipv4"]],
                                  8, capture=True)

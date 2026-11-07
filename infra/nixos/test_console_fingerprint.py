@@ -1,5 +1,8 @@
 import base64
+from pathlib import Path
 import unittest
+from unittest.mock import patch
+from urllib.parse import urlencode
 
 import console_fingerprint as console
 
@@ -10,14 +13,17 @@ class ConsoleFingerprintTest(unittest.TestCase):
                         "serverId": 55, "ipv4": "1.1.1.1", "expires": 1300}
         self.receipt = {**self.binding, "observedAt": 1000, "expires": 1060,
                         "wssUrl": "wss://console.hetzner.cloud/?server_id=55&token=synthetic-placeholder",
+                        "consoleAction": {"id": 82, "serverId": 55},
                         "vncPassword": "synthetic-password", "rescuePassword": "synthetic-password"}
 
     def test_console_only_exact_provider_role_and_expiry(self):
-        console.validate_receipt(self.receipt, self.binding, 1010)
+        self.assertEqual(console.validate_receipt(self.receipt, self.binding, 1010), 82)
         for delta, now in [
             ({"role": "relay"}, 1010),
             ({"serverId": 56}, 1010),
             ({"serverId": "55"}, 1010),
+            ({"consoleAction": {"id": True, "serverId": 55}}, 1010),
+            ({"consoleAction": {"id": 82, "serverId": 56}}, 1010),
             ({"expires": 1061}, 1010),
             ({}, 1060),
             ({"wssUrl": self.receipt["wssUrl"].replace("55", "56")}, 1010),
@@ -29,6 +35,22 @@ class ConsoleFingerprintTest(unittest.TestCase):
             with self.subTest(now=now, fields=list(delta)):
                 with self.assertRaises(ValueError):
                     console.validate_receipt({**self.receipt, **delta}, self.binding, now)
+
+    def test_opaque_endpoint_requires_matching_action_journal_before_ssh(self):
+        query = urlencode({key: base64.b64encode(b"\xff" * size).decode("ascii")
+                           for key, size in (("data", 116), ("nonce", 12), ("tag", 16))})
+        receipt = {**self.receipt, "wssUrl": "wss://web-console.hetzner.cloud/pp?" + query}
+        self.assertEqual(console.validate_receipt(receipt, self.binding, 1010), 82)
+        directory = Path("/synthetic-lease")
+        path = directory / "original-app-console-1.json"
+        with (patch.object(console.rescue, "lease_binding", return_value=self.binding),
+              patch.object(console.rescue, "read_json", side_effect=[(receipt, ""), ({"id": 83}, "")]) as read,
+              patch.object(console.time, "time", return_value=1010),
+              patch.object(console.rescue, "checked_process") as ssh):
+            with self.assertRaisesRegex(ValueError, "action journal disagrees"):
+                console.enroll(directory, "original", "app", path, {})
+        self.assertEqual(read.call_args.args[0], directory / "original-action-82.json")
+        ssh.assert_not_called()
 
     def test_marker_cannot_be_observed_from_echoed_command(self):
         key = console.rescue.KEY_PREFIX + b"x" * 32
