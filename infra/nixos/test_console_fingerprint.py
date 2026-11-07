@@ -116,6 +116,20 @@ class ConsoleFingerprintTest(unittest.TestCase):
         self.assertTrue(console.ROOT.search("root@rescue ~ #"))
         self.assertFalse(console.ROOT.search("someone #"))
 
+    def test_root_wait_diagnostics_accumulate_only_fixed_observations(self):
+        progress = {}
+        accepts = console.root_prompt_observer(progress)
+        initial = {"loginIncorrect": False, "loginPromptReappeared": False,
+                   "passwordPromptReappeared": False, "rootLikeWithoutExactPrompt": False}
+        self.assertFalse(accepts("Password:\nprivate fixture text"))
+        self.assertEqual(progress, {"rootWait": initial})
+        self.assertFalse(accepts("note: Login incorrect (synthetic)\nsecret synthetic text"))
+        self.assertEqual(progress, {"rootWait": initial})
+        self.assertFalse(accepts(" Login incorrect \nrescue login:\nPassword:"))
+        self.assertFalse(accepts(" root @ rescue ~ #"))
+        self.assertTrue(accepts("root@rescue ~ #"))
+        self.assertEqual(progress, {"rootWait": dict.fromkeys(initial, True)})
+
 
 if __name__ == "__main__":
     unittest.main()

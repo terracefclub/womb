@@ -24,6 +24,8 @@ FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt",
 LOGIN = re.compile(r"(?im)^(?:[a-z0-9.-]+[ ]+)?login:[ \t]*$")
 PASSWORD = re.compile(r"(?im)^password:[ \t]*$")
 ROOT = re.compile(r"(?m)^root@[a-zA-Z0-9.-]+[^\r\n]*#[ \t]*$")
+LOGIN_INCORRECT = re.compile(r"(?im)^[ \t]*login incorrect[ \t]*$")
+ROOT_LIKE = re.compile(r"(?im)^[ \t]*root[ \t]*@[ \t]*[a-z0-9.-]+")
 RFB_EVENTS = ("securityFailure", "credentialsRequired", "disconnected")
 RFB_STATES = {"ProtocolVersion", "Security", "SecurityReason", "Authentication", "SecurityResult",
               "ClientInitialisation", "ServerInitialisation"}
@@ -154,6 +156,28 @@ def record_rfb_facts(facts, observed):
         facts["rfbInitState"] = state
 
 
+def root_prompt_observer(progress):
+    facts = {"loginIncorrect": False, "loginPromptReappeared": False,
+             "passwordPromptReappeared": False, "rootLikeWithoutExactPrompt": False}
+    progress["rootWait"] = facts
+    # The password prompt was visible immediately before submission. A frame
+    # still showing it is not evidence that the console prompted again.
+    password_visible = True
+
+    def accepts(text):
+        nonlocal password_visible
+        exact_root = bool(ROOT.search(text))
+        has_password = bool(PASSWORD.search(text))
+        facts["loginIncorrect"] |= bool(LOGIN_INCORRECT.search(text))
+        facts["loginPromptReappeared"] |= bool(LOGIN.search(text))
+        facts["passwordPromptReappeared"] |= has_password and not password_visible
+        facts["rootLikeWithoutExactPrompt"] |= not exact_root and bool(ROOT_LIKE.search(text))
+        password_visible = has_password
+        return exact_root
+
+    return accepts
+
+
 def attest_console(receipt, fingerprint, progress):
     # Import only for the actual console stage. Offline tests use no browser.
     from playwright.sync_api import Error, TimeoutError, sync_playwright
@@ -237,7 +261,7 @@ def attest_console(receipt, fingerprint, progress):
             wait_for(lambda text: bool(PASSWORD.search(text)))
             page.evaluate("text => window.consoleInput(text)", receipt["rescuePassword"])
             progress["stage"] = "root-prompt"
-            wait_for(lambda text: bool(ROOT.search(text)))
+            wait_for(root_prompt_observer(progress))
             page.evaluate("text => window.consoleInput(text)", console_command(fingerprint, marker))
             progress["stage"] = "fingerprint-marker"
             wait_for(lambda text: marker_seen(text, marker))
