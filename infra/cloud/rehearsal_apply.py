@@ -105,6 +105,12 @@ def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False)
 
 
 def bootstrap_material(directory, phase, config, *, probe_only):
+    original_keys = None
+    if phase == "replacement":
+        original, _ = lease.reviewed_phase_input(directory, "original")
+        original_keys = original.get("bootstrapHostKeys")
+        if ("bootstrapHostKeys" in original) != ("bootstrapHostKeys" in config):
+            raise lease.Rejected("replacement bootstrap mode differs from the original")
     if "bootstrapHostKeys" not in config:
         if "bootstrapOperatorPublicKey" in config:
             raise lease.Rejected("bootstrap operator key is outside a bootstrap phase")
@@ -124,6 +130,11 @@ def bootstrap_material(directory, phase, config, *, probe_only):
                 or not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", key["publicKey"])
                 or not re.fullmatch(r"[a-f0-9]{64}", key["privateKeySha256"])):
             raise lease.Rejected("bootstrap key format rejected")
+        if original_keys and any(
+            key[field] == original[field]
+            for original in original_keys.values() for field in ("publicKey", "privateKeySha256")
+        ):
+            raise lease.Rejected("replacement bootstrap keys must differ from the original")
         path = directory / f"{phase}-{role}-bootstrap-ed25519"
         private = lease.read_private(path, 8192)
         if hashlib.sha256(private).hexdigest() != key["privateKeySha256"]:

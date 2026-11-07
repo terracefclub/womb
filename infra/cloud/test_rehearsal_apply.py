@@ -46,6 +46,22 @@ def saved_plan(phase, *, probe_only=False):
 
 
 class RehearsalApplyTest(unittest.TestCase):
+    def test_replacement_keeps_bootstrap_mode_and_rejects_previous_keys(self):
+        original = {"app": {"publicKey": "ssh-ed25519 " + "x" * 68, "privateKeySha256": "a" * 64}}
+        fresh = {"publicKey": "ssh-ed25519 " + "y" * 68, "privateKeySha256": "b" * 64}
+        operator = "ssh-ed25519 " + "z" * 68
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_reviewed_input(root, {"run": RUN, "phase": "original", "bootstrapHostKeys": original})
+            lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator})
+            with self.assertRaisesRegex(lease.Rejected, "mode differs"):
+                apply.bootstrap_material(root, "replacement", {}, probe_only=False)
+            for field in ("publicKey", "privateKeySha256"):
+                cfg = {"bootstrapOperatorPublicKey": operator, "bootstrapHostKeys": {
+                    "relay": {**fresh, field: original["app"][field]}, "app": fresh}}
+                with self.assertRaisesRegex(lease.Rejected, "keys must differ"):
+                    apply.bootstrap_material(root, "replacement", cfg, probe_only=False)
+
     def test_bootstrap_key_is_bound_to_reviewed_bytes_and_public_pin(self):
         body = b"syntheticPrivateKeyBodyOnly" * 3
         private = b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + body + b"\n-----END OPENSSH PRIVATE KEY-----\n"

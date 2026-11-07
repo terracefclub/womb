@@ -169,7 +169,9 @@ private file and backend outside Git and use a different installed key.
 Treat guest metadata as accessible to the temporary host and run no
 application services there.
 
-The saved plan and final checkpoint must contain encrypted user data.
+Replacement preserves the original bootstrap mode and requires a different
+bootstrap key for every host. The saved plan and final checkpoint must
+contain encrypted user data.
 The controller uses Pulumi's text renderer for secret-bearing updates.
 The pinned CLI can include raw secret values in JSON update events even
 with `--show-secrets=false`. The controller also checks bounded private
