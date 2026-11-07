@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -55,7 +56,7 @@ def validated_preview(digest):
     resources = []
     for urn in TARGETS:
         step = steps[urn]
-        inputs = step["newState"].get("inputs", {})
+        inputs = step["newState"]["inputs"]
         if not isinstance(inputs, dict):
             raise ValueError
         inputs = inputs.copy()
@@ -64,6 +65,17 @@ def validated_preview(digest):
             inputs["publicKeySha256"] = hashlib.sha256(public_key.encode()).hexdigest()
         resources.append({"urn": urn, "operation": step["op"], "inputs": inputs})
     return resources
+
+
+def unique_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError
+    return result
+
+
+def invalid_constant(_value):
+    raise ValueError
 
 
 def preview():
@@ -76,23 +88,45 @@ def preview():
 
     # Pulumi's digest can contain private provider diagnostics. Keep it off the terminal.
     with tempfile.TemporaryFile() as output:
-        process = subprocess.Popen(args, cwd=PROJECT, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.DEVNULL, start_new_session=True)
+        interrupted = False
+
+        def request_stop(_signum, _frame):
+            nonlocal interrupted
+            interrupted = True
+
+        handlers = {signum: signal.signal(signum, request_stop) for signum in (signal.SIGINT, signal.SIGTERM)}
         try:
-            if process.wait(timeout=DEADLINE):
-                raise ValueError
-        finally:
-            if process.poll() is None:
+            process = subprocess.Popen(args, cwd=PROJECT, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.DEVNULL, start_new_session=True)
+            deadline = time.monotonic() + DEADLINE
+            completed = None
+            try:
+                # Keep the leader unreaped so its PID still identifies our process group.
+                while not (completed := os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)):
+                    if interrupted or time.monotonic() >= deadline:
+                        raise ValueError
+                    time.sleep(0.05)
+            finally:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait()
+                except PermissionError:
+                    # Darwin can report EPERM when the completed leader is the only member left.
+                    if sys.platform != "darwin" or completed is None:
+                        raise
+                finally:
+                    process.wait(timeout=5)
+        finally:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+        if interrupted or process.returncode:
+            raise ValueError
         output.seek(0)
         data = output.read(MAX_DIGEST_BYTES + 1)
         if len(data) > MAX_DIGEST_BYTES:
             raise ValueError
-        return validated_preview(json.loads(data))
+        return validated_preview(json.loads(data, object_pairs_hook=unique_object, parse_constant=invalid_constant))
 
 
 def review_destination(value):
@@ -118,18 +152,12 @@ def write_review(destination, resources):
         os.link(output.name, destination)
 
 
-def interrupted(_signum, _frame):
-    raise InterruptedError
-
-
 def main(args):
     with_review_file = len(args) == 3 and args[:2] == ["bootstrap", "--review-file"]
     if (args != ["bootstrap"] and not with_review_file) or not os.environ.get("HCLOUD_TOKEN"):
         print("Use preview.sh bootstrap [--review-file /absolute/private/preview.json] "
               "with the dedicated HCLOUD_TOKEN.", file=sys.stderr)
         return 2
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGINT, interrupted)
     try:
         destination = review_destination(args[2]) if with_review_file else None
         if destination is not None and os.path.lexists(destination):
@@ -137,7 +165,7 @@ def main(args):
         resources = preview()
         if destination is not None:
             write_review(destination, resources)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, subprocess.TimeoutExpired):
         print("Bootstrap preview rejected. Check the dedicated project, inputs and exact create/unchanged plan.", file=sys.stderr)
         return 1
     print("Bootstrap preview accepted for four targets with create or unchanged operations.")

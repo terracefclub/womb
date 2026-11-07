@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import preview
@@ -27,7 +28,8 @@ class BootstrapPreviewTest(unittest.TestCase):
         self.assertEqual([r["operation"] for r in preview.validated_preview(digest)], ["same"] * 4)
 
     def test_rejects_outside_targets_and_incomplete_plans(self):
-        for defect in ("extra", "duplicate", "missing", "bad-summary", "hidden-delete", "corrupt", "bad-inputs", "error"):
+        for defect in ("extra", "duplicate", "missing", "bad-summary", "hidden-delete", "corrupt",
+                       "bad-inputs", "missing-inputs", "error"):
             with self.subTest(defect=defect):
                 digest = fixture()
                 if defect == "extra":
@@ -45,9 +47,11 @@ class BootstrapPreviewTest(unittest.TestCase):
                     digest["maybeCorrupt"] = True
                 elif defect == "bad-inputs":
                     digest["steps"][1]["newState"]["inputs"] = [["name", "invalid-input-object"]]
+                elif defect == "missing-inputs":
+                    del digest["steps"][1]["newState"]["inputs"]
                 else:
                     digest["diagnostics"] = [{"severity": "error", "message": "synthetic diagnostic"}]
-                with self.assertRaises(ValueError):
+                with self.assertRaises((ValueError, KeyError)):
                     preview.validated_preview(digest)
 
     def test_rejects_mutation_of_an_allowed_urn(self):
@@ -68,9 +72,12 @@ class BootstrapPreviewTest(unittest.TestCase):
             for target in preview.TARGETS:
                 expected.extend(("--target", target))
             fake.write_text(f"#!{sys.executable}\n"
-                            "import os, sys\n"
+                            "import os, subprocess, sys\n"
                             f"assert sys.argv[1:] == {expected!r}\n"
                             "assert 'PULUMI_ENABLE_STREAMING_JSON_PREVIEW' not in os.environ\n"
+                            "if marker := os.environ.get('FIXTURE_CHILD_MARKER'):\n"
+                            "    subprocess.Popen([sys.executable, '-c', "
+                            "'import pathlib, sys, time; time.sleep(1); pathlib.Path(sys.argv[1]).touch()', marker])\n"
                             "print('synthetic-private-stderr', file=sys.stderr)\n"
                             "print(os.environ['FIXTURE_DIGEST'])\n"
                             "sys.exit(int(os.environ.get('FIXTURE_EXIT', '0')))\n")
@@ -104,6 +111,19 @@ class BootstrapPreviewTest(unittest.TestCase):
             self.assertEqual(failed.returncode, 1)
             self.assertEqual(failed.stdout, "")
             self.assertNotIn("synthetic-private", failed.stderr)
+            for prefix in ('"steps":[],', '"number":NaN,'):
+                failed = subprocess.run([preview.PROJECT / "preview.sh", "bootstrap"],
+                                        env=dict(env, FIXTURE_DIGEST="{" + prefix + json.dumps(digest)[1:]),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(failed.returncode, 1)
+                self.assertEqual(failed.stdout, "")
+                self.assertTrue(failed.stderr.startswith("Bootstrap preview rejected."))
+            marker = root / "child-survived"
+            finished = subprocess.run([preview.PROJECT / "preview.sh", "bootstrap"],
+                                      env=dict(env, FIXTURE_CHILD_MARKER=str(marker)), capture_output=True, timeout=10)
+            self.assertEqual(finished.returncode, 0)
+            time.sleep(1.2)
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":
