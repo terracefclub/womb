@@ -39,7 +39,10 @@ export function declareResources(input: RehearsalInput): pulumi.Output<Owned> {
     });
   }
 
-  const hosts = (["app", "relay"] as const).map(role => {
+  const roles = input.phase === "original" && input.probeOnly
+    ? (["relay"] as const)
+    : (["app", "relay"] as const);
+  const hosts = roles.map(role => {
     const name = prefix + "-" + input.phase + "-" + role;
     const ip = new hcloud.PrimaryIp(role + "-ip", {
       name: name + "-ip",

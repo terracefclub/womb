@@ -150,6 +150,15 @@ boot. Each action rechecks the exact provider server and run-owned key. The
 provider console passwords are held only in private, short-lived receipts.
 The installed boot requires the reviewed disk-install receipt for that role.
 
+For a standalone Rescue console check, add `"probeOnly": true` to the
+reviewed `original` input. The creator and plan gate require one relay and
+its IPv4, alongside the existing foundation key and firewall. The probe
+requests Hetzner's Rescue password mode without passing an SSH key. First
+compare the SSH host key through the authenticated provider console, then
+use the confirmed pin for a read-only SSH check. Keep password entry private.
+This mode cannot format a disk, boot an installation, or authorize
+replacement. Clean up and verify the project baseline as with a full lease.
+
 The escrow helper creates per-run TLS material and an independent restic
 password. Its bounded Falcon repository service uses only an owner-private
 Unix socket, without modifying the personal SSH server. The cloud hosts

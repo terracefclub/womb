@@ -56,7 +56,18 @@ test("reads bounded private regular input without following symlinks", () => {
   }
 });
 
-test.each(["foundation", "original", "replacement"] as const)("declares only the %s cohort", async phase => {
+test("allows only explicit original console probe mode", () => {
+  expect(parseInput(cohort, "original")).toEqual(cohort);
+  expect(parseInput({ ...cohort, probeOnly: true }, "original")).toEqual({ ...cohort, probeOnly: true });
+  for (const probeOnly of [false, null, "true", 1, undefined]) {
+    expect(() => parseInput({ ...cohort, probeOnly }, "original")).toThrow();
+  }
+  expect(() => parseInput({ ...cohort, phase: "replacement", probeOnly: true }, "replacement")).toThrow();
+  expect(() => parseInput({ ...foundation, probeOnly: true }, "foundation")).toThrow();
+});
+
+test.each(["foundation", "original", "replacement", "console probe"] as const)("declares only the %s cohort", async mode => {
+  const phase = mode === "console probe" ? "original" : mode;
   const resources = new Map<string, pulumi.runtime.MockResourceArgs>();
   const ids: Record<string, string> = {
     key: "11", firewall: "12", "app-ip": "13", "relay-ip": "14", app: "15", relay: "16",
@@ -71,7 +82,8 @@ test.each(["foundation", "original", "replacement"] as const)("declares only the
     },
   }, "terrace-cloud-rehearsal", phase, false);
 
-  const value = phase === "foundation" ? foundation : { ...cohort, phase };
+  const value = phase === "foundation" ? foundation
+    : { ...cohort, phase, ...(mode === "console probe" ? { probeOnly: true } : {}) };
   const output = declareResources(parseInput(value, phase));
   const owned = await new Promise(resolve => output.apply(resolve));
   const labels = { "terrace-rehearsal": run };
@@ -89,8 +101,9 @@ test.each(["foundation", "original", "replacement"] as const)("declares only the
     return;
   }
 
-  expect([...resources.keys()].sort()).toEqual(["app", "app-ip", "relay", "relay-ip"]);
-  for (const role of ["app", "relay"] as const) {
+  const roles = mode === "console probe" ? (["relay"] as const) : (["app", "relay"] as const);
+  expect([...resources.keys()].sort()).toEqual(roles.flatMap(role => [role, role + "-ip"]));
+  for (const role of roles) {
     const name = prefix + "-" + phase + "-" + role;
     const ip = resources.get(role + "-ip");
     expect(ip?.type).toBe("hcloud:index/primaryIp:PrimaryIp");
@@ -108,5 +121,7 @@ test.each(["foundation", "original", "replacement"] as const)("declares only the
       backups: false, deleteProtection: false, rebuildProtection: false,
     });
   }
-  expect(owned).toEqual({ servers: [15, 16], primary_ips: [13, 14], firewalls: [], ssh_keys: [] });
+  expect(owned).toEqual(mode === "console probe"
+    ? { servers: [16], primary_ips: [14], firewalls: [], ssh_keys: [] }
+    : { servers: [15, 16], primary_ips: [13, 14], firewalls: [], ssh_keys: [] });
 });

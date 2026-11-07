@@ -309,6 +309,8 @@ def remaining(directory, binding, limit):
 
 
 def install(directory, phase, role, approved, archive):
+    config, _ = read_json(directory / f"{phase}-input.json")
+    require(config.get("probeOnly") is not True, "console probe cannot write a disk")
     prefix = f"{phase}-{role}"
     target_seconds = TARGET_COPY_SECONDS[role]
     require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")

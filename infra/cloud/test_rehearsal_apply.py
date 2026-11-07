@@ -26,8 +26,8 @@ def create_foundation(data):
     data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key=FOUNDATION["sshPublicKey"]))
 
 
-def digest(phase):
-    targets = apply.phase_targets(phase, RUN)
+def digest(phase, *, probe_only=False):
+    targets = apply.phase_targets(phase, RUN, probe_only=probe_only)
     prefix = f"urn:pulumi:{phase}::{apply.PROJECT}::"
     return {
         "steps": [{"urn": urn, "op": "create", "newState": {"inputs": {"name": name, "labels": {lease.LABEL: RUN}}}}
@@ -39,8 +39,9 @@ def digest(phase):
     }
 
 
-def saved_plan(phase):
-    return {"resourcePlans": {step["urn"]: {"steps": ["create"]} for step in digest(phase)["steps"]}}
+def saved_plan(phase, *, probe_only=False):
+    return {"resourcePlans": {step["urn"]: {"steps": ["create"]}
+                              for step in digest(phase, probe_only=probe_only)["steps"]}}
 
 
 class RehearsalApplyTest(unittest.TestCase):
@@ -115,6 +116,20 @@ class RehearsalApplyTest(unittest.TestCase):
                 with self.assertRaises(lease.Rejected):
                     apply.validate_preview(changed, phase, RUN, "1.42.0")
 
+    def test_console_probe_requires_exact_single_relay_plan(self):
+        data = digest("original", probe_only=True)
+        plan = saved_plan("original", probe_only=True)
+        report = apply.validate_preview(data, "original", RUN, "1.42.0", probe_only=True)
+        self.assertEqual({urn.rsplit("::", 1)[1] for urn in report["creates"]}, {"relay", "relay-ip"})
+        apply.validate_saved_plan(plan, "original", RUN, "1.42.0", probe_only=True)
+        with self.assertRaises(lease.Rejected):
+            apply.validate_preview(data, "original", RUN, "1.42.0")
+        with self.assertRaises(lease.Rejected):
+            apply.validate_saved_plan(saved_plan("original"), "original", RUN, "1.42.0", probe_only=True)
+        for phase in ("foundation", "replacement"):
+            with self.assertRaises(lease.Rejected):
+                apply.phase_targets(phase, RUN, probe_only=True)
+
     def test_phase_inventory_requires_baseline_foundation_and_original_absence(self):
         data = inventory()
         manifest = {"run": RUN, "baseline": lease.baseline_from(data)}
@@ -126,6 +141,7 @@ class RehearsalApplyTest(unittest.TestCase):
             foundation = {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]}
             lease.write_private(root / "foundation-created.json", foundation)
             lease.write_private(root / "foundation-input.json", FOUNDATION)
+            lease.write_private(root / "original-input.json", {"probeOnly": True})
             config = {"sshKeyId": 9, "firewallId": 8}
             self.assertEqual(apply.expected_before(api, manifest, root, "original", config), foundation)
             with self.assertRaises(lease.Rejected):
@@ -136,6 +152,10 @@ class RehearsalApplyTest(unittest.TestCase):
                 "run": RUN, "phase": "original", "baselinePreserved": True, "absenceReads": 3, "unresolvedDispatches": [],
                 "verifiedAbsent": {kind: sorted(ids) for kind, ids in original.items()},
             })
+            with self.assertRaisesRegex(lease.Rejected, "does not authorize replacement"):
+                apply.expected_before(api, manifest, root, "replacement", config)
+            (root / "original-input.json").unlink()
+            lease.write_private(root / "original-input.json", {})
             self.assertEqual(apply.expected_before(api, manifest, root, "replacement", config), foundation)
             populate(data, "original", 6, 4)
             with self.assertRaises(lease.Rejected):

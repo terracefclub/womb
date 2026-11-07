@@ -61,6 +61,13 @@ class RescueInstallTest(unittest.TestCase):
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
 
+    def test_console_probe_cannot_dispatch_an_install(self):
+        self.write("original-input.json", {"probeOnly": True})
+        with patch.object(rescue, "authority") as authority:
+            with self.assertRaisesRegex(rescue.Rejected, "cannot write a disk"):
+                rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            authority.assert_not_called()
+
     def test_disk_probe_rejects_mount_holder_and_partition(self):
         row = {"path": "/dev/vda", "type": "disk", "size": 123456, "ro": False,
                "rm": False, "maj:min": "252:0", "mountpoints": [None]}
