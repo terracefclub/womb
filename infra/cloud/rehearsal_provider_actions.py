@@ -80,6 +80,7 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     login_path = directory / f"{prefix}-rescue-login.json"
     host = api.get("servers", sid)
     if (host is None or host["id"] != sid or host["status"] != "running"
+            or type(host["rescue_enabled"]) is not bool
             or host["name"] != f"terrace-r-{manifest['run']}-{prefix}" or host["labels"].get(lease.LABEL) != manifest["run"]):
         raise lease.Rejected("live server action target rejected")
     if mode == "rescue":
@@ -89,9 +90,11 @@ def operate(mode, directory, manifest, credential, token, phase, role):
         key, = foundation["ssh_keys"]
         key = lease.positive_id(key)
         key_row = api.get("ssh_keys", key)
+        approved_key = apply.read_json(directory / "foundation-input.json")["sshPublicKey"].split()[:2]
         if (key_row is None or str(key) in manifest["baseline"]["ssh_keys"]
                 or key_row["id"] != key or key_row["name"] != f"terrace-r-{manifest['run']}-key"
-                or key_row["labels"].get(lease.LABEL) != manifest["run"]):
+                or key_row["labels"].get(lease.LABEL) != manifest["run"]
+                or approved_key[:1] != ["ssh-ed25519"] or key_row["public_key"].split()[:2] != approved_key):
             raise lease.Rejected("Rescue key is not owned by the lease")
         lease.write_private(directory / f"{prefix}-rescue-dispatched.json", server_binding(binding))
         response = dispatch(api, directory, phase, sid, "enable_rescue", {"type": "linux64", "ssh_keys": [key]})
