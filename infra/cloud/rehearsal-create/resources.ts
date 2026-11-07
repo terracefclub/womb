@@ -1,6 +1,6 @@
 import * as hcloud from "@pulumi/hcloud";
 import * as pulumi from "@pulumi/pulumi";
-import type { RehearsalInput } from "./input";
+import { cohortRoles, readBootstrapUserData, type RehearsalInput } from "./input";
 
 type Owned = {
   servers: number[];
@@ -17,7 +17,7 @@ function providerId(value: string): number {
   return id;
 }
 
-export function declareResources(input: RehearsalInput): pulumi.Output<Owned> {
+export function declareResources(input: RehearsalInput, inputPath?: string): pulumi.Output<Owned> {
   const prefix = "terrace-r-" + input.run;
   const labels = { "terrace-rehearsal": input.run };
   if (input.phase === "foundation") {
@@ -39,10 +39,8 @@ export function declareResources(input: RehearsalInput): pulumi.Output<Owned> {
     });
   }
 
-  const roles = input.phase === "original" && input.probeOnly
-    ? (["relay"] as const)
-    : (["app", "relay"] as const);
-  const hosts = roles.map(role => {
+  const bootstrap = readBootstrapUserData(inputPath, input);
+  const hosts = cohortRoles(input.probeOnly).map(role => {
     const name = prefix + "-" + input.phase + "-" + role;
     const ip = new hcloud.PrimaryIp(role + "-ip", {
       name: name + "-ip",
@@ -53,6 +51,7 @@ export function declareResources(input: RehearsalInput): pulumi.Output<Owned> {
       deleteProtection: false,
     });
     const ipId = ip.id.apply(providerId);
+    const userData = bootstrap[role];
     const server = new hcloud.Server(role, {
       name,
       labels,
@@ -65,7 +64,8 @@ export function declareResources(input: RehearsalInput): pulumi.Output<Owned> {
       backups: false,
       deleteProtection: false,
       rebuildProtection: false,
-    });
+      ...(userData ? { userData: pulumi.secret(userData) } : {}),
+    }, userData ? { additionalSecretOutputs: ["userData"] } : undefined);
     return { ipId, serverId: server.id.apply(providerId) };
   });
   return pulumi.output({

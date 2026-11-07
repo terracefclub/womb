@@ -1,13 +1,22 @@
-import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
-import { isAbsolute } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { euLocation, serverType } from "../budget";
+import { renderBootstrapCloudConfig } from "./bootstrap";
 
 type Foundation = {
   run: string;
   phase: "foundation";
   sshPublicKey: string;
   sshCidrs: string[];
+};
+
+type HostRole = "app" | "relay";
+type BootstrapKey = { publicKey: string; privateKeySha256: string };
+type BootstrapInput = {
+  bootstrapHostKeys: Partial<Record<HostRole, BootstrapKey>>;
+  bootstrapOperatorPublicKey: string;
 };
 
 type Cohort = {
@@ -20,12 +29,17 @@ type Cohort = {
   appType: string;
   relayType: string;
   probeOnly?: true;
-};
+} & (BootstrapInput | { bootstrapHostKeys?: never; bootstrapOperatorPublicKey?: never });
 
 export type RehearsalInput = Foundation | Cohort;
 
 const MAX_INPUT = 4096;
+const MAX_PRIVATE_KEY = 2048;
 const ED25519_PREFIX = Buffer.from("0000000b7373682d6564323535313900000020", "hex");
+
+export function cohortRoles(probeOnly?: true): readonly HostRole[] {
+  return probeOnly ? ["relay"] : ["app", "relay"];
+}
 
 function exactKeys(record: Record<string, unknown>, expected: string[]): void {
   const keys = Object.keys(record);
@@ -52,14 +66,47 @@ function publicKey(value: unknown): string {
   return "ssh-ed25519 " + match[1];
 }
 
+function recordOf(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid rehearsal input");
+  }
+  return value as Record<string, unknown>;
+}
+
+function canonicalPublicKey(value: unknown): string {
+  const key = publicKey(value);
+  if (key !== value) throw new Error("bootstrap public key must be canonical");
+  return key;
+}
+
+function parseBootstrap(record: Record<string, unknown>, roles: readonly HostRole[]): BootstrapInput {
+  const operator = canonicalPublicKey(record.bootstrapOperatorPublicKey);
+  const supplied = recordOf(record.bootstrapHostKeys);
+  exactKeys(supplied, [...roles]);
+  const hostKeys: BootstrapInput["bootstrapHostKeys"] = {};
+  const keys = new Set([operator]);
+  const hashes = new Set<string>();
+  for (const role of roles) {
+    const entry = recordOf(supplied[role]);
+    exactKeys(entry, ["publicKey", "privateKeySha256"]);
+    const key = canonicalPublicKey(entry.publicKey);
+    const hash = entry.privateKeySha256;
+    if (typeof hash !== "string" || hash.length !== 64 || !/^[a-f0-9]+$/.test(hash)
+      || keys.has(key) || hashes.has(hash)) {
+      throw new Error("invalid or reused bootstrap host key");
+    }
+    keys.add(key);
+    hashes.add(hash);
+    hostKeys[role] = { publicKey: key, privateKeySha256: hash };
+  }
+  return { bootstrapHostKeys: hostKeys, bootstrapOperatorPublicKey: operator };
+}
+
 export function parseInput(value: unknown, stack: string): RehearsalInput {
   if (stack !== "foundation" && stack !== "original" && stack !== "replacement") {
     throw new Error("unsupported rehearsal stack");
   }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("invalid rehearsal input");
-  }
-  const record = value as Record<string, unknown>;
+  const record = recordOf(value);
   const { run, phase } = record;
   if (phase !== stack || typeof run !== "string" || run.length !== 32 || !/^[a-f0-9]+$/.test(run)) {
     throw new Error("invalid rehearsal identity");
@@ -83,6 +130,9 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     if (stack !== "original" || record.probeOnly !== true) throw new Error("invalid console probe mode");
     expected.push("probeOnly");
   }
+  const bootstrap = Object.prototype.hasOwnProperty.call(record, "bootstrapHostKeys")
+    || Object.prototype.hasOwnProperty.call(record, "bootstrapOperatorPublicKey");
+  if (bootstrap) expected.push("bootstrapHostKeys", "bootstrapOperatorPublicKey");
   exactKeys(record, expected);
   const { image, location, appType, relayType } = record;
   if (image !== "debian-13" || typeof location !== "string"
@@ -99,20 +149,20 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     sshKeyId: inputId(record.sshKeyId),
     firewallId: inputId(record.firewallId),
     ...(probeOnly ? { probeOnly: true as const } : {}),
+    ...(bootstrap ? parseBootstrap(record, cohortRoles(probeOnly ? true : undefined)) : {}),
   };
 }
 
-export function readInput(path: string | undefined, stack: string): RehearsalInput {
-  if (!path || !isAbsolute(path)) throw new Error("invalid rehearsal input path");
+function readPrivateFile(path: string, limit: number): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const first = fstatSync(fd, { bigint: true });
     if (!first.isFile() || first.uid !== BigInt(process.geteuid!())
       || (first.mode & 0o7777n) !== 0o600n || first.nlink !== 1n
-      || first.size < 1n || first.size > BigInt(MAX_INPUT)) {
+      || first.size < 1n || first.size > BigInt(limit)) {
       throw new Error("invalid private rehearsal input");
     }
-    const bytes = Buffer.alloc(MAX_INPUT + 1);
+    const bytes = Buffer.alloc(limit + 1);
     let count = 0;
     while (count < bytes.length) {
       const read = readSync(fd, bytes, count, bytes.length - count, null);
@@ -123,9 +173,41 @@ export function readInput(path: string | undefined, stack: string): RehearsalInp
     if (BigInt(count) !== first.size || last.mtimeNs !== first.mtimeNs || last.ctimeNs !== first.ctimeNs) {
       throw new Error("private rehearsal input changed");
     }
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, count));
-    return parseInput(JSON.parse(text), stack);
+    return bytes.subarray(0, count);
   } finally {
     closeSync(fd);
   }
+}
+
+export function readInput(path: string | undefined, stack: string): RehearsalInput {
+  if (!path || !isAbsolute(path)) throw new Error("invalid rehearsal input path");
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(readPrivateFile(path, MAX_INPUT));
+  return parseInput(JSON.parse(text), stack);
+}
+
+export function readBootstrapUserData(path: string | undefined, input: Cohort): Partial<Record<HostRole, string>> {
+  if (!input.bootstrapHostKeys) return {};
+  if (!path || !isAbsolute(path) || basename(path) !== input.phase + "-input.json") {
+    throw new Error("invalid bootstrap input path");
+  }
+  const directory = dirname(path);
+  const facts = lstatSync(directory);
+  if (!facts.isDirectory() || facts.uid !== process.geteuid!()
+    || (facts.mode & 0o7777) !== 0o700 || realpathSync(directory) !== directory) {
+    throw new Error("invalid private bootstrap directory");
+  }
+  const result: Partial<Record<HostRole, string>> = {};
+  for (const role of cohortRoles(input.probeOnly)) {
+    const key = input.bootstrapHostKeys[role];
+    const bytes = readPrivateFile(join(directory, input.phase + "-" + role + "-bootstrap-ed25519"), MAX_PRIVATE_KEY);
+    if (!key || createHash("sha256").update(bytes).digest("hex") !== key.privateKeySha256) {
+      throw new Error("bootstrap private key digest mismatch");
+    }
+    const privateKey = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (!/^-----BEGIN OPENSSH PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]+\n)+-----END OPENSSH PRIVATE KEY-----\n$/.test(privateKey)) {
+      throw new Error("invalid bootstrap private key encoding");
+    }
+    result[role] = renderBootstrapCloudConfig(key.publicKey, privateKey, input.bootstrapOperatorPublicKey);
+  }
+  return result;
 }
