@@ -188,7 +188,7 @@ def enroll(directory, phase, role, receipt_path, progress):
     rescue.require(isinstance(journal, dict) and set(journal) == {"id"}
                    and positive_id(journal["id"]) == action_id, "console action journal disagrees")
     progress["stage"] = "ssh-candidate"
-    raw = rescue.checked_process(["ssh-keyscan", "-T", "5", "-t", "ed25519", binding["ipv4"]],
+    raw = rescue.checked_process(["ssh-keyscan", "-q", "-T", "5", "-t", "ed25519", binding["ipv4"]],
                                  8, capture=True)
     fingerprint = candidate_key(raw, binding["ipv4"])
     progress["stage"] = "browser-start"
