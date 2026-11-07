@@ -24,6 +24,9 @@ FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt",
 LOGIN = re.compile(r"(?im)^(?:[a-z0-9.-]+[ ]+)?login:[ \t]*$")
 PASSWORD = re.compile(r"(?im)^password:[ \t]*$")
 ROOT = re.compile(r"(?m)^root@[a-zA-Z0-9.-]+[^\r\n]*#[ \t]*$")
+RFB_EVENTS = ("securityFailure", "credentialsRequired", "disconnected")
+RFB_STATES = {"ProtocolVersion", "Security", "SecurityReason", "Authentication", "SecurityResult",
+              "ClientInitialisation", "ServerInitialisation"}
 
 
 def validate_receipt(receipt, binding, now):
@@ -82,11 +85,17 @@ def ocr(png):
 PAGE = """<!doctype html><meta charset=utf-8><div id=console></div>
 <script type=module>
 import RFB from '/core/rfb.js';
+window.consoleEvents = {securityFailure:false, credentialsRequired:false, disconnected:false};
 window.startConsole = ({url, password}) => {
   window.rfb = new RFB(document.querySelector('#console'), url,
     {credentials:{password}, wsProtocols:['binary']});
   window.rfb.addEventListener('connect', () => window.consoleReady = true);
-  window.rfb.addEventListener('disconnect', () => window.consoleReady = false);
+  window.rfb.addEventListener('securityfailure', () => window.consoleEvents.securityFailure = true);
+  window.rfb.addEventListener('credentialsrequired', () => window.consoleEvents.credentialsRequired = true);
+  window.rfb.addEventListener('disconnect', () => {
+    window.consoleReady = false;
+    window.consoleEvents.disconnected = true;
+  });
 };
 window.consoleInput = text => {
   if (!window.consoleReady) throw new Error('console disconnected');
@@ -96,9 +105,47 @@ window.consoleInput = text => {
 </script>"""
 
 
+def observe_socket(cdp, url, facts):
+    # Keep one exact browser request ID in memory. Never subscribe to frame data.
+    request_id = None
+
+    def created(event):
+        nonlocal request_id
+        if request_id is None and event.get("url") == url and isinstance(event.get("requestId"), str):
+            request_id = event["requestId"]
+            facts["socketCreated"] = True
+
+    def response(event):
+        if request_id is None or event.get("requestId") != request_id:
+            return
+        status = event.get("response", {}).get("status")
+        if type(status) is int and 100 <= status <= 599:
+            facts["handshakeStatus"] = status
+
+    def failed(event):
+        if request_id is not None and event.get("requestId") == request_id:
+            facts["frameError"] = True
+
+    cdp.on("Network.webSocketCreated", created)
+    cdp.on("Network.webSocketHandshakeResponseReceived", response)
+    cdp.on("Network.webSocketFrameError", failed)
+    cdp.send("Network.enable")
+    facts["cdpAttached"] = True
+
+
+def record_rfb_facts(facts, observed):
+    if not isinstance(observed, dict):
+        return
+    for name in RFB_EVENTS:
+        facts[name] = observed.get(name) is True
+    state = observed.get("initState")
+    if isinstance(state, str) and state in RFB_STATES:
+        facts["rfbInitState"] = state
+
+
 def attest_console(receipt, fingerprint, progress):
     # Import only for the actual console stage. Offline tests use no browser.
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error, TimeoutError, sync_playwright
 
     marker = "TERRACE" + "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ") for _ in range(12))
     assets = Path(os.environ["TERRACE_NOVNC_ROOT"]).resolve(strict=True)
@@ -124,21 +171,41 @@ def attest_console(receipt, fingerprint, progress):
 
             def websocket(route):
                 if route.url == receipt["wssUrl"]:
+                    facts["routeMatched"] = True
                     route.connect_to_server()
                 else:
+                    facts["routeRejected"] = True
                     route.close()
 
+            facts = {"cdpAttached": False, "routeMatched": False, "routeRejected": False,
+                     "socketCreated": False, "handshakeStatus": None, "frameError": False,
+                     "pageError": False}
+            progress["connection"] = facts
             context.route("**/*", serve)
             context.route_web_socket("**/*", websocket)
             page = context.new_page()
             page.set_default_timeout(8000)
+            page.on("pageerror", lambda _: facts.__setitem__("pageError", True))
+            try:
+                observe_socket(context.new_cdp_session(page), receipt["wssUrl"], facts)
+            except Error:
+                pass
             page.goto(ORIGIN + "/", timeout=8000)
             page.wait_for_function("typeof window.startConsole === 'function'")
             rescue.require(time.time() < receipt["expires"], "console credential expired before connect")
             progress["stage"] = "console-connect"
-            page.evaluate("value => window.startConsole(value)",
-                          {"url": receipt["wssUrl"], "password": receipt["vncPassword"]})
-            page.wait_for_function("window.consoleReady === true", timeout=12000)
+            try:
+                page.evaluate("value => window.startConsole(value)",
+                              {"url": receipt["wssUrl"], "password": receipt["vncPassword"]})
+                page.wait_for_function("window.consoleReady === true", timeout=12000)
+            except Error as error:
+                facts["errorClass"] = "timeout" if isinstance(error, TimeoutError) else "playwright-error"
+                try:
+                    record_rfb_facts(facts, page.evaluate("""() => ({...window.consoleEvents,
+                        initState: window.rfb?._rfbInitState})"""))
+                except Error:
+                    pass
+                raise
             canvas = page.locator("#console canvas")
             deadline = time.monotonic() + 60
 

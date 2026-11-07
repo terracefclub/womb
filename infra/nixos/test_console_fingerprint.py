@@ -1,7 +1,7 @@
 import base64
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 
 import console_fingerprint as console
@@ -67,6 +67,34 @@ class ConsoleFingerprintTest(unittest.TestCase):
         ssh.assert_called_once_with(["ssh-keyscan", "-q", "-T", "5", "-t", "ed25519", "1.1.1.1"],
                                     8, capture=True)
         attest.assert_not_called()
+
+    def test_connection_diagnostics_keep_only_exact_socket_and_fixed_fields(self):
+        cdp = Mock()
+        facts = {}
+        url = self.receipt["wssUrl"]
+        console.observe_socket(cdp, url, facts)
+        callbacks = dict(call.args for call in cdp.on.call_args_list)
+        cdp.send.assert_called_once_with("Network.enable")
+        self.assertEqual(set(callbacks), {"Network.webSocketCreated", "Network.webSocketHandshakeResponseReceived",
+                                          "Network.webSocketFrameError"})
+        created = callbacks["Network.webSocketCreated"]
+        response = callbacks["Network.webSocketHandshakeResponseReceived"]
+        failed = callbacks["Network.webSocketFrameError"]
+        created({"requestId": "other", "url": url + "&unexpected=1"})
+        response({"requestId": "other", "response": {"status": 401}})
+        failed({"requestId": "other", "errorMessage": "synthetic credential"})
+        self.assertEqual(facts, {"cdpAttached": True})
+        created({"requestId": "expected", "url": url})
+        response({"requestId": "expected", "response": {"status": True}})
+        self.assertNotIn("handshakeStatus", facts)
+        response({"requestId": "expected", "response": {"status": 101, "headers": {"x-secret": "synthetic"}}})
+        failed({"requestId": "expected", "errorMessage": "synthetic credential"})
+        console.record_rfb_facts(facts, {"securityFailure": True, "credentialsRequired": "synthetic credential",
+                                         "initState": "Security", "other": "synthetic credential"})
+        console.record_rfb_facts(facts, {"securityFailure": True, "initState": "synthetic credential"})
+        self.assertEqual(facts, {"cdpAttached": True, "socketCreated": True, "handshakeStatus": 101,
+                                 "frameError": True, "securityFailure": True, "credentialsRequired": False,
+                                 "disconnected": False, "rfbInitState": "Security"})
 
     def test_marker_cannot_be_observed_from_echoed_command(self):
         key = console.rescue.KEY_PREFIX + b"x" * 32
