@@ -138,14 +138,16 @@ The stock route starts with a reviewed disposable Debian 13 cohort whose
 cloud-init data installs the per-host Ed25519 key. The reviewed input carries
 the matching public key. Keep the bootstrap key and cloud-init payload private
 and use a separate installed host key. The provider and stock guest receive the
-bootstrap private key. The installer archive and Nix store receive no private
-material. The runtime installer copies the bootstrap key across kexec in RAM.
+bootstrap private key, including through the guest-local metadata endpoint.
+The installer archive and Nix store receive no private material. The runtime
+installer copies the bootstrap key across kexec in RAM.
 
 Build the public archive on Falcon under the shared build lock. Verify and
 record the exact archive SHA256 before dispatch:
 
 ```sh
-direnv exec . nix build --impure --file infra/nixos/kexec-installer.nix \
+direnv exec . nix eval --json --impure --file infra/nixos/kexec-installer.nix proof
+direnv exec . nix build --impure --file infra/nixos/kexec-installer.nix archive \
   --no-link --print-out-paths --max-jobs 1 --option builders ""
 ```
 
@@ -164,7 +166,9 @@ direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --
 ```
 
 Dispatch checks the sole operator key on stock Debian and stages the archive in
-root-only tmpfs. Verification requires the same SSH pin, a different kernel
+root-only tmpfs. The connection can close during the switch. If the dispatch
+receipt exists, check the new boot instead of dispatching again.
+Verification requires the same SSH pin, a different kernel
 boot ID, the pinned installer marker and the RAM-backed root and store.
 The probe-only cohort ends here. A full cohort can subsequently run the
 whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
