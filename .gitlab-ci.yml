@@ -24,6 +24,7 @@ check-supervision:
     - python tests/platform/test_full_concurrent.py -v
     - python platform/full/test_restore_evidence.py -v
     - python tests/platform/test_restore_disk.py -v
+    - python infra/nixos/test_rehearsal_services.py -v
     - python infra/cloud/test_preview.py -v
     - python infra/cloud/test_rehearsal_lease.py -v
     - python infra/cloud/test_rehearsal_timer.py -v
