@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import rescue_install as rescue
+import stock_kexec
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -61,6 +62,80 @@ class RescueInstallTest(unittest.TestCase):
         for address, expected in [("8.8.8.8", fingerprint), ("1.1.1.1", b"SHA256:wrong")]:
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
+
+    def test_stock_pin_must_match_dispatched_key_before_ssh(self):
+        blob = rescue.KEY_PREFIX + b"x" * 32
+        encoded = base64.b64encode(blob).decode()
+        fingerprint = b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
+        for name, contents in [
+            ("original-relay-bootstrap-known-hosts", f"1.1.1.1 ssh-ed25519 {encoded}\n".encode()),
+            ("original-relay-bootstrap-fingerprint", fingerprint),
+            ("operator-ed25519", b"fixture"),
+        ]:
+            path = self.directory / name
+            path.write_bytes(contents)
+            path.chmod(0o600)
+        binding = {"ipv4": "1.1.1.1"}
+        with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
+            rescue, "reviewed_bootstrap", return_value="ssh-ed25519 " + encoded
+        ) as reviewed:
+            _, key, options, ssh = rescue.bootstrap_authority(self.directory, "original", "relay")
+            self.assertEqual(key, encoded)
+            self.assertIn("StrictHostKeyChecking=yes", options)
+            self.assertTrue(any(x.endswith("original-relay-bootstrap-known-hosts") for x in options))
+            self.assertEqual(ssh[-1], "root@1.1.1.1")
+            reviewed.return_value = "ssh-ed25519 another"
+            with self.assertRaisesRegex(rescue.Rejected, "reviewed host key"):
+                rescue.bootstrap_authority(self.directory, "original", "relay")
+
+    def test_stock_dispatch_checks_archive_and_rebinds_before_kexec(self):
+        archive = self.directory / "installer.tar.gz"
+        archive.write_bytes(b"public installer fixture")
+        digest = rescue.sha(archive.read_bytes())
+        binding = {"run": RUN, "ipv4": "1.1.1.1"}
+        boot = "abcd0123-1234-1234-1234-1234567890ab"
+        other = {**binding, "ipv4": "8.8.8.8"}
+        initial = (binding, "fixture", [], ["ssh"])
+        with patch.object(rescue, "bootstrap_authority", return_value=initial) as authority, patch.object(
+            stock_kexec, "stock_boot", return_value=boot
+        ), patch.object(rescue, "remaining", return_value=60), patch.object(rescue, "remote") as remote:
+            with self.assertRaisesRegex(rescue.Rejected, "archive rejected"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, "0" * 64)
+            remote.assert_not_called()
+            authority.side_effect = [initial, (other, "fixture", [], ["ssh"])]
+            with self.assertRaisesRegex(rescue.Rejected, "target changed"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+            self.assertEqual(remote.call_count, 1)
+            self.assertEqual(remote.call_args.args[2], stock_kexec.UPLOAD)
+            authority.side_effect = None
+            stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+            self.assertEqual(remote.call_args.args[2], stock_kexec.KEXEC)
+            with self.assertRaisesRegex(rescue.Rejected, "already dispatched"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+
+    def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
+        old = "abcd0123-1234-1234-1234-1234567890ab"
+        new = "abcd0123-1234-1234-1234-1234567890cd"
+        binding = {"run": RUN, "ipv4": "1.1.1.1"}
+        dispatch = self.write("original-relay-kexec-dispatched.json", {
+            "binding": binding, "bootstrapKey": "fixture", "stockBootId": old,
+        })
+        value = (binding, "fixture", [], ["ssh"])
+        with patch.object(rescue, "bootstrap_authority", return_value=value), patch.object(
+            rescue, "ram_boot_id", return_value=old
+        ) as boot:
+            with self.assertRaisesRegex(rescue.Rejected, "stock boot is still running"):
+                stock_kexec.verify_ram(self.directory, "original", "relay")
+            boot.return_value = new
+            stock_kexec.verify_ram(self.directory, "original", "relay")
+            self.assertEqual(rescue.authority(self.directory, "original", "relay", ram=True), value)
+            boot.return_value = old
+            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                rescue.authority(self.directory, "original", "relay", ram=True)
+            boot.return_value = new
+            dispatch.write_bytes(dispatch.read_bytes() + b" ")
+            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                rescue.authority(self.directory, "original", "relay", ram=True)
 
     def test_console_probe_cannot_dispatch_an_install(self):
         cfg = {"run": RUN, "phase": "original", "probeOnly": True}
@@ -116,7 +191,9 @@ class RescueInstallTest(unittest.TestCase):
         self.assertEqual(checked.call_args.kwargs["env"]["NIX_SSHOPTS"], "-o StrictHostKeyChecking=yes")
 
     def test_all_fixed_remote_scripts_parse_without_execution(self):
-        for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH]:
+        for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH,
+                       rescue.RAM_PROBE, rescue.RAM_SERVE,
+                       stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC]:
             subprocess.run(["bash", "-n"], input=script, text=True, check=True, timeout=5)
 
 

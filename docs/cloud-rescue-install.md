@@ -131,3 +131,49 @@ provider rehearsal.
 ```sh
 direnv exec . python3 -B infra/nixos/test_rescue_install.py -v
 ```
+
+## Pinned Debian-to-RAM bootstrap
+
+The stock route starts with a reviewed disposable Debian 13 cohort whose
+cloud-init data installs the per-host Ed25519 key. The reviewed input carries
+the matching public key. Keep the bootstrap key and cloud-init payload private
+and use a separate installed host key. The provider and stock guest receive the
+bootstrap private key. The installer archive and Nix store receive no private
+material. The runtime installer copies the bootstrap key across kexec in RAM.
+
+Build the public archive on Falcon under the shared build lock. Verify and
+record the exact archive SHA256 before dispatch:
+
+```sh
+direnv exec . nix build --impure --file infra/nixos/kexec-installer.nix \
+  --no-link --print-out-paths --max-jobs 1 --option builders ""
+```
+
+Use the resulting `nixos-kexec-installer-x86_64-linux.tar.gz`. For each host,
+stage the reviewed public key in the owner-private lease directory as
+`<phase>-<role>-bootstrap-known-hosts` and its fingerprint as
+`<phase>-<role>-bootstrap-fingerprint`. Use the authenticated provider binding
+for the known-hosts IP. The controller checks the local pin against the public
+key bound to the dispatched review before SSH. These commands assume a fresh
+provider binding at both steps:
+
+```sh
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
+  --dispatch "$archive" "$archive_sha256"
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
+```
+
+Dispatch checks the sole operator key on stock Debian and stages the archive in
+root-only tmpfs. Verification requires the same SSH pin, a different kernel
+boot ID, the pinned installer marker and the RAM-backed root and store.
+The probe-only cohort ends here. A full cohort can subsequently run the
+whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
+on this route because the RAM installer supplies Nix. Disko still requires the
+separate reviewed disk and install-plan digests. The legacy Rescue route uses
+its original console pin and separate Nix bootstrap archive.
+
+The [pinned standalone kexec runner](https://github.com/nix-community/nixos-images/blob/aa38dbbdf0e955baef7e03dfc4265ae3fdac4808/nix/kexec-installer/kexec-run.sh)
+and its [initrd handoff](https://github.com/nix-community/nixos-images/blob/aa38dbbdf0e955baef7e03dfc4265ae3fdac4808/nix/restore-remote-access.nix)
+carry the network state and SSH files. The controller calls the standalone
+runner over the already pinned connection and retains strict verification
+after the boot.
