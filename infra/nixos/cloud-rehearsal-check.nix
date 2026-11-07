@@ -38,8 +38,8 @@ let
     && cfg.boot.loader.grub.devices == ["/dev/vda"]
     && lib.unique cfg.networking.firewall.allowedTCPPorts == [22]
     && cfg.networking.firewall.allowedUDPPorts == []
-    && cfg.terrace.backup.targets.primary.repository == "sftp:restic@127.0.0.1:repository"
-    && cfg.terrace.backup.targets.primary.sftp.port == 22422
+    && cfg.terrace.backup.targets.primary.repository == "rest:http://127.0.0.1:22422/repository"
+    && cfg.terrace.backup.targets.primary.sftp.identityFile == null
     && cfg.systemd.timers.terrace-backup.wantedBy == [];
   noBoot = cfg: lib.all (name: cfg.systemd.services.${name}.wantedBy == []);
   trust = "/var/lib/terrace-rehearsal-trust/ca.pem";
@@ -49,6 +49,8 @@ in
   assert gateway.terrace.windmill.membershipRuntime && gateway.terrace.documenso.enableSigning;
   assert noBoot gateway ["postgresql" "nginx" "keycloak" "k3s" "terrace-web" "terrace-cms" "terrace-documenso" "vaultwarden" "podman-terrace-windmill-server" "podman-terrace-windmill-worker" "cloud-rehearsal-inputs"];
   assert gateway.systemd.targets.postgresql.wantedBy == [];
+  assert builtins.elem (import ../../platform/full/probe-image.nix {inherit pkgs;}) gateway.services.k3s.images;
+  assert gateway.environment.etc."rehearsal-probe.yaml".source == ../../platform/full/probe.yaml;
   assert lib.sort builtins.lessThan gateway.networking.firewall.interfaces.podman0.allowedTCPPorts == [443 1025];
   assert builtins.elem "${trust}:/run/terrace-ca.crt:ro" gateway.virtualisation.oci-containers.containers.terrace-windmill-server.volumes;
   assert gateway.terrace.documenso.identityCaFile == trust && gateway.terrace.vaultwarden.identityCaFile == trust;

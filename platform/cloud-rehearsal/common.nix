@@ -22,13 +22,8 @@ in {
     check.readDataSubset = "100%";
     targets.primary = {
       enable = true;
-      repository = "sftp:restic@127.0.0.1:repository";
+      repository = "rest:http://127.0.0.1:22422/repository";
       passwordFile = "/var/lib/rehearsal-escrow/repository-password";
-      sftp = {
-        port = 22422;
-        identityFile = "/var/lib/rehearsal-escrow/id_ed25519";
-        knownHostsFile = "/var/lib/rehearsal-escrow/known_hosts";
-      };
     };
   };
   systemd.timers = lib.genAttrs ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"] (_: {wantedBy = lib.mkForce [];});

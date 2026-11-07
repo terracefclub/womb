@@ -86,9 +86,10 @@ service health are measured provider steps.
   environment.
 - Host the encrypted restic repository in separate protected operator
   storage. A pinned reverse SSH forward from each leased host's
-  `127.0.0.1:22422` reaches the isolated operator SFTP service. Copy only
-  protected run escrow to the fixed backup input directory
-  `/var/lib/rehearsal-escrow`. Backup and check timers remain disabled.
+  `127.0.0.1:22422` reaches the isolated operator rest-server loopback
+  listener. Copy the root-owned mode-0400 repository password to
+  `/var/lib/rehearsal-escrow/repository-password`. Backup and check timers
+  remain disabled.
 - Explicitly run `cloud-rehearsal-inputs.service` once on the original
   gateway, then use the [native rehearsal order](full-rehearsal.md) for
   migration, bootstrap, bounded browser/worker checks and quiescence. Set
@@ -98,6 +99,10 @@ service health are measured provider steps.
   provider receipt must establish that the originals are gone before the
   fresh restore. Transfer the retained TLS files independently and restore
   the application inputs before starting writers on the replacements.
+
+The gateway contains the native rehearsal's pinned local PVC probe image,
+`/etc/rehearsal-probe.yaml` and `rehearsal-cgroups-empty` for the same storage
+and writer-stop checks.
 
 The two-host profile covers the gateway and relay install configuration.
 It leaves separate automation and peer-topology exercises to the full

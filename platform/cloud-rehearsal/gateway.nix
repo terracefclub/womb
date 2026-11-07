@@ -21,6 +21,12 @@
     certificateKeyFile = "/var/lib/terrace-rehearsal-tls/key.pem";
   };
   fixture = import ../full/fixture-package.nix {inherit pkgs contract;};
+  probeImage = import ../full/probe-image.nix {inherit pkgs;};
+  cgroupCheck = pkgs.writeShellApplication {
+    name = "rehearsal-cgroups-empty";
+    runtimeInputs = [pkgs.findutils pkgs.coreutils];
+    text = builtins.readFile ../full/empty-cgroups.sh;
+  };
   writers = [
     "postgresql"
     "keycloak"
@@ -103,7 +109,7 @@ in {
       work_mem = "2MB";
     };
   };
-  services.k3s.images = [pkgs.k3s.airgap-images];
+  services.k3s.images = [pkgs.k3s.airgap-images probeImage];
   systemd.services = lib.mkMerge [
     (lib.genAttrs writers (_: {wantedBy = lib.mkForce [];}))
     (lib.genAttrs ["terrace-cms" "terrace-cms-migrate" "terrace-web"] (_: {
@@ -141,9 +147,10 @@ in {
       k3s-node = "/etc/rancher/node";
     };
   };
-  environment.systemPackages = [pkgs.curl pkgs.jq pkgs.python3 pkgs.openssl pkgs.netcat-openbsd];
+  environment.systemPackages = [pkgs.curl pkgs.jq pkgs.python3 pkgs.openssl pkgs.netcat-openbsd cgroupCheck];
   environment.etc = {
     "rehearsal-pg-directory".text = config.services.postgresql.dataDir;
+    "rehearsal-probe.yaml".source = ../full/probe.yaml;
     "gateway-protocol.py".source = ../website-gateway/protocol.py;
     "documenso-recovery.py".source = ../documenso/recovery-auth-test.py;
     "documenso-signing-proof.py".source = ../documenso/signing-proof.py;
