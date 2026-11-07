@@ -200,7 +200,7 @@ def enroll(directory, phase, role, receipt_path, progress):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument("directory", type=Path)
     parser.add_argument("phase", choices=rescue.PHASES)
     parser.add_argument("role", choices=rescue.ROLES)
