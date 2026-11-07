@@ -52,6 +52,22 @@ class ConsoleFingerprintTest(unittest.TestCase):
         self.assertEqual(read.call_args.args[0], directory / "original-action-82.json")
         ssh.assert_not_called()
 
+    def test_quiet_keyscan_preserves_strict_candidate_shape(self):
+        directory = Path("/synthetic-lease")
+        path = directory / "original-app-console-1.json"
+        key = b"1.1.1.1 ssh-ed25519 " + base64.b64encode(console.rescue.KEY_PREFIX + b"x" * 32)
+        noisy = b"# 1.1.1.1:22 SSH-2.0-synthetic\n" + key
+        with (patch.object(console.rescue, "lease_binding", return_value=self.binding),
+              patch.object(console.rescue, "read_json", side_effect=[(self.receipt, ""), ({"id": 82}, "")]),
+              patch.object(console.time, "time", return_value=1010),
+              patch.object(console.rescue, "checked_process", return_value=noisy) as ssh,
+              patch.object(console, "attest_console") as attest):
+            with self.assertRaises(ValueError):
+                console.enroll(directory, "original", "app", path, {})
+        ssh.assert_called_once_with(["ssh-keyscan", "-q", "-T", "5", "-t", "ed25519", "1.1.1.1"],
+                                    8, capture=True)
+        attest.assert_not_called()
+
     def test_marker_cannot_be_observed_from_echoed_command(self):
         key = console.rescue.KEY_PREFIX + b"x" * 32
         raw = b"1.1.1.1 ssh-ed25519 " + base64.b64encode(key)
