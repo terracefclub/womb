@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import rescue_install as rescue
+from test_rehearsal_lease import RUN, write_reviewed_input
 
 
 class RescueInstallTest(unittest.TestCase):
@@ -60,6 +61,18 @@ class RescueInstallTest(unittest.TestCase):
         for address, expected in [("8.8.8.8", fingerprint), ("1.1.1.1", b"SHA256:wrong")]:
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
+
+    def test_console_probe_cannot_dispatch_an_install(self):
+        cfg = {"run": RUN, "phase": "original", "probeOnly": True}
+        path = write_reviewed_input(self.directory, cfg)
+        with patch.object(rescue, "authority") as authority:
+            with self.assertRaisesRegex(rescue.Rejected, "cannot write a disk"):
+                rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            path.unlink()
+            self.write("original-input.json", {"run": RUN, "phase": "original"})
+            with self.assertRaisesRegex(rescue.Rejected, "no longer matches"):
+                rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            authority.assert_not_called()
 
     def test_disk_probe_rejects_mount_holder_and_partition(self):
         row = {"path": "/dev/vda", "type": "disk", "size": 123456, "ro": False,

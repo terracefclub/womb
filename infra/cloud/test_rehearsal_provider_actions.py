@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 import rehearsal_lease as lease
 import rehearsal_provider_actions as actions
-from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource
+from test_rehearsal_lease import RUN, PREFIX, FakeApi, inventory, populate, resource, write_reviewed_input
 
 
 class ProviderActionsTest(unittest.TestCase):
@@ -72,6 +72,7 @@ class ProviderActionsTest(unittest.TestCase):
             lease.write_private(root / "foundation-created.json", {"ssh_keys": [1]})
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": "ssh-ed25519 synthetic test"})
             lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
+            write_reviewed_input(root, {"phase": "original", "run": RUN})
             with (patch.object(actions.lease, "Api", return_value=api), patch.object(actions.apply, "require_run_unit"),
                   patch.object(actions.timer, "check_ready")):
                 args = (root, manifest, root / "credential", b"synthetic", "original", "app")
@@ -103,6 +104,41 @@ class ProviderActionsTest(unittest.TestCase):
                     actions.operate("console", *args)
             self.assertEqual(calls, ["enable_rescue", "reboot", "request_console", "request_console",
                                      "disable_rescue", "reboot"])
+
+    def test_exact_console_probe_uses_password_only_rescue_and_blocks_installed_boot(self):
+        data = inventory()
+        manifest = {"run": RUN, "baseline": lease.baseline_from(data), "expires": int(time.time()) + 1200}
+        populate(data, "original", 4, 5)
+        name = PREFIX + "-original-relay"
+        data["servers"][1].update(name=name, rescue_enabled=False, status="running")
+        data["servers"][1]["public_net"]["ipv4"]["ip"] = "93.184.215.14"
+        data["primary_ips"][1]["name"] = name + "-ip"
+        data["firewalls"] = [resource(8, PREFIX + "-firewall")]
+        data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key="ssh-ed25519 synthetic"))
+        api = FakeApi(data)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = {"phase": "original", "run": RUN, "probeOnly": True}
+            config_path = write_reviewed_input(root, config)
+            lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
+            lease.write_private(root / "foundation-created.json", {"ssh_keys": [9]})
+            lease.write_private(root / "foundation-input.json", {"sshPublicKey": "ssh-ed25519 synthetic"})
+            with (patch.object(actions.lease, "Api", return_value=api), patch.object(actions.apply, "require_run_unit"),
+                  patch.object(actions.timer, "check_ready"),
+                  patch.object(actions, "dispatch", return_value={"root_password": "synthetic-password"}) as dispatch):
+                args = (root, manifest, root / "credential", b"synthetic", "original", "relay")
+                config_path.unlink()
+                lease.write_private(config_path, {**config, "probeOnly": False})
+                with self.assertRaisesRegex(lease.Rejected, "no longer matches"):
+                    actions.operate("rescue", *args)
+                dispatch.assert_not_called()
+                write_reviewed_input(root, config)
+                with self.assertRaisesRegex(lease.Rejected, "probe action scope"):
+                    actions.operate("boot-installed", *args)
+                dispatch.assert_not_called()
+                actions.operate("rescue", *args)
+                self.assertEqual([call.args[-2:] for call in dispatch.call_args_list],
+                                 [("enable_rescue", {"type": "linux64", "ssh_keys": []}), ("reboot", {})])
 
 
 if __name__ == "__main__":

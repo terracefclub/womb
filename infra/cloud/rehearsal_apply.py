@@ -40,13 +40,15 @@ PROVIDER_ERROR_CODES = re.compile(
 )
 
 
-def phase_targets(phase, run):
-    if phase not in PHASES:
+def phase_targets(phase, run, *, probe_only=False):
+    if phase not in PHASES or (probe_only and phase != "original"):
         raise lease.Rejected("phase rejected")
     lease.expected_names(run)
     prefix = "terrace-r-" + run
     urn_prefix = f"urn:pulumi:{phase}::{PROJECT}::"
     names = ("key", "firewall") if phase == "foundation" else ("app-ip", "relay-ip", "app", "relay")
+    if probe_only:
+        names = ("relay-ip", "relay")
     return {urn_prefix + RESOURCE_TYPES[name][1] + "::" + name:
             (RESOURCE_TYPES[name][0], f"{prefix}-{name}" if phase == "foundation" else f"{prefix}-{phase}-{name}")
             for name in names}
@@ -65,8 +67,8 @@ def parse_json(data):
     return json.loads(data, object_pairs_hook=unique, parse_constant=invalid)
 
 
-def validate_preview(digest, phase, run, provider_version):
-    targets = phase_targets(phase, run)
+def validate_preview(digest, phase, run, provider_version, *, probe_only=False):
+    targets = phase_targets(phase, run, probe_only=probe_only)
     prefix = f"urn:pulumi:{phase}::{PROJECT}::"
     stack = prefix + f"pulumi:pulumi:Stack::{PROJECT}-{phase}"
     provider = prefix + "pulumi:providers:hcloud::default_" + provider_version.replace(".", "_")
@@ -87,8 +89,8 @@ def validate_preview(digest, phase, run, provider_version):
     return {"creates": sorted(targets), "providerAndStackCreates": len(steps) - len(targets)}
 
 
-def validate_saved_plan(plan, phase, run, provider_version):
-    targets = phase_targets(phase, run)
+def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False):
+    targets = phase_targets(phase, run, probe_only=probe_only)
     prefix = f"urn:pulumi:{phase}::{PROJECT}::"
     stack = prefix + f"pulumi:pulumi:Stack::{PROJECT}-{phase}"
     provider = prefix + "pulumi:providers:hcloud::default_" + provider_version.replace(".", "_")
@@ -163,6 +165,8 @@ def expected_before(api, manifest, directory, phase, config):
                         "ssh_keys": [config["sshKeyId"]]}:
             raise lease.Rejected("foundation identity mismatch")
     if phase == "replacement":
+        if lease.reviewed_probe_mode(directory, "original"):
+            raise lease.Rejected("console probe does not authorize replacement")
         receipts = sorted(directory.glob("original-absence-*.json"))
         if not receipts:
             raise lease.Rejected("original absence missing")
@@ -295,6 +299,10 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     config = parse_json(config_data)
     if config["run"] != manifest["run"] or config["phase"] != phase:
         raise lease.Rejected("phase input rejected")
+    probe_only = "probeOnly" in config
+    if probe_only and config["probeOnly"] is not True:
+        raise lease.Rejected("console probe flag rejected")
+    scope = phase_targets(phase, manifest["run"], probe_only=probe_only)
     if os.path.lexists(directory / "closed.json"):
         raise lease.Rejected("lease closed")
     project = directory / "project" / "rehearsal-create"
@@ -325,16 +333,16 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
                PULUMI_HOME=str(stage / "pulumi-home"), PULUMI_BACKEND_URL=backend.as_uri(),
                PULUMI_CONFIG_PASSPHRASE=read_json(password)["value"], PULUMI_SKIP_UPDATE_CHECK="true",
                TERRACE_REHEARSAL_INPUT=str(config_path))
-    targets = [flag for urn in phase_targets(phase, manifest["run"]) for flag in ("--target", urn)]
+    targets = [flag for urn in scope for flag in ("--target", urn)]
     fixed = ["--stack", phase, "--non-interactive", "--suppress-outputs", "--suppress-permalink", *targets]
     if action == "preview":
         pulumi(project, env, ["stack", "init", phase, "--non-interactive"], seconds=25)
         digest = pulumi(project, env, ["preview", *fixed, "--json", "--show-secrets=false", "--save-plan", str(plan)],
                         seconds=120, output=True)
-        report = validate_preview(digest, phase, manifest["run"], version)
+        report = validate_preview(digest, phase, manifest["run"], version, probe_only=probe_only)
         plan_data = lease.read_private(plan, 4 * 1024 * 1024)
-        validate_saved_plan(parse_json(plan_data), phase, manifest["run"], version)
-        report.update(sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
+        validate_saved_plan(parse_json(plan_data), phase, manifest["run"], version, probe_only=probe_only)
+        report.update(probeOnly=probe_only, sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
                       planSha256=hashlib.sha256(plan_data).hexdigest(),
                       stackConfigSha256=optional_sha(stack_config))
         lease.write_private(review_path, report)
@@ -344,6 +352,7 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     review_data = lease.read_private(review_path, 65536)
     report = parse_json(review_data)
     if (approval != hashlib.sha256(review_data).hexdigest() or report["sourceSha256"] != source
+            or report["probeOnly"] is not probe_only
             or report["inputSha256"] != hashlib.sha256(config_data).hexdigest()
             or report["stackConfigSha256"] != optional_sha(stack_config)
             or report["planSha256"] != hashlib.sha256(lease.read_private(plan, 4 * 1024 * 1024)).hexdigest()):
@@ -352,10 +361,10 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
                                                                 "dispatchedAt": int(time.time())})
     pulumi(project, env, ["up", *fixed, "--yes", "--skip-preview", "--json", "--show-secrets=false",
                           "--plan", str(plan)], seconds=170,
-           failure_receipt=directory / f"{phase}-apply-failure.json", targets=phase_targets(phase, manifest["run"]))
+           failure_receipt=directory / f"{phase}-apply-failure.json", targets=scope)
     result = pulumi(project, env, ["stack", "output", "owned", "--stack", phase, "--json", "--non-interactive"],
                     seconds=15, output=True)
-    counts = Counter(kind for kind, _ in phase_targets(phase, manifest["run"]).values())
+    counts = Counter(kind for kind, _ in scope.values())
     inventory = api.inventory()
     owned, collisions = lease.select_owned(manifest["run"], manifest["baseline"], inventory, "final")
     observed = ids_by_kind(owned)
@@ -365,6 +374,10 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
         ids = sorted(lease.positive_id(rid) for rid in result[kind])
         if len(ids) != counts[kind] or len(set(ids)) != len(ids) or sorted(before[kind] + ids) != observed[kind]:
             raise lease.Rejected("created IDs disagree with inventory")
+    new_names = {(kind, row["name"]) for kind, rows in owned.items()
+                 for row in rows if row["id"] not in before[kind]}
+    if new_names != set(scope.values()):
+        raise lease.Rejected("created provider names disagree with plan")
     if without_owned(inventory, owned) != manifest["baseline"]:
         raise lease.Rejected("post-create inventory disagrees with baseline")
     if phase == "foundation":

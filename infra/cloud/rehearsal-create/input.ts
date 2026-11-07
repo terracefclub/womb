@@ -19,6 +19,7 @@ type Cohort = {
   location: string;
   appType: string;
   relayType: string;
+  probeOnly?: true;
 };
 
 export type RehearsalInput = Foundation | Cohort;
@@ -76,7 +77,13 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     return { run, phase: stack, sshPublicKey: publicKey(record.sshPublicKey), sshCidrs: cidrs };
   }
 
-  exactKeys(record, ["run", "phase", "sshKeyId", "firewallId", "image", "location", "appType", "relayType"]);
+  const probeOnly = Object.prototype.hasOwnProperty.call(record, "probeOnly");
+  const expected = ["run", "phase", "sshKeyId", "firewallId", "image", "location", "appType", "relayType"];
+  if (probeOnly) {
+    if (stack !== "original" || record.probeOnly !== true) throw new Error("invalid console probe mode");
+    expected.push("probeOnly");
+  }
+  exactKeys(record, expected);
   const { image, location, appType, relayType } = record;
   if (image !== "debian-13" || typeof location !== "string"
     || typeof appType !== "string" || typeof relayType !== "string") {
@@ -91,6 +98,7 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     relayType: serverType("rehearsal relay", relayType),
     sshKeyId: inputId(record.sshKeyId),
     firewallId: inputId(record.firewallId),
+    ...(probeOnly ? { probeOnly: true as const } : {}),
   };
 }
 

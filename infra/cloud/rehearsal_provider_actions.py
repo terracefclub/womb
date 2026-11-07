@@ -61,6 +61,9 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     sid = binding["serverId"]
     prefix = f"{phase}-{role}"
     login_path = directory / f"{prefix}-rescue-login.json"
+    probe_only = lease.reviewed_probe_mode(directory, phase)
+    if probe_only and (role != "relay" or mode == "boot-installed"):
+        raise lease.Rejected("console probe action scope rejected")
     host = api.get("servers", sid)
     if (host is None or host["id"] != sid or host["status"] != "running"
             or type(host["rescue_enabled"]) is not bool
@@ -80,7 +83,8 @@ def operate(mode, directory, manifest, credential, token, phase, role):
                 or approved_key[:1] != ["ssh-ed25519"] or key_row["public_key"].split()[:2] != approved_key):
             raise lease.Rejected("Rescue key is not owned by the lease")
         lease.write_private(directory / f"{prefix}-rescue-dispatched.json", server_binding(binding))
-        response = dispatch(api, directory, phase, sid, "enable_rescue", {"type": "linux64", "ssh_keys": [key]})
+        payload = {"type": "linux64", "ssh_keys": [] if probe_only else [key]}
+        response = dispatch(api, directory, phase, sid, "enable_rescue", payload)
         lease.write_private(login_path, {"binding": server_binding(binding),
                                         "rescuePassword": password(response["root_password"])})
         dispatch(api, directory, phase, sid, "reboot", {})
