@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -42,6 +43,10 @@ SERIAL_MARKERS = {
     "cloudInit": (b"Cloud-init v", b"cloud-init["),
     "noCloud": (b"DataSourceNoCloud",),
     "sshService": (b"OpenBSD Secure Shell server", b"sshd["),
+}
+CLOUD_INIT_STATES = {
+    "not started", "running", "done", "error", "disabled", "error - done",
+    "error - running", "degraded done", "degraded running",
 }
 
 
@@ -172,9 +177,31 @@ def diagnostic_command(argv, seconds):
                 process.wait(timeout=5)
 
 
+def cloud_status_facts(code, data):
+    facts = {"statusReadRc": code, "status": None, "extendedStatus": None,
+             "fatalErrorCount": None, "recoverableErrorCount": None}
+    try:
+        status = json.loads(data)
+    except (ValueError, RecursionError):
+        return facts
+    if not isinstance(status, dict):
+        return facts
+    for source, target in (("status", "status"), ("extended_status", "extendedStatus")):
+        value = status.get(source)
+        if isinstance(value, str) and value in CLOUD_INIT_STATES:
+            facts[target] = value
+    errors = status.get("errors")
+    if isinstance(errors, list):
+        facts["fatalErrorCount"] = len(errors)
+    recoverable = status.get("recoverable_errors")
+    if isinstance(recoverable, dict) and all(isinstance(items, list) for items in recoverable.values()):
+        facts["recoverableErrorCount"] = sum(map(len, recoverable.values()))
+    return facts
+
+
 def stock_diagnostics(port, ssh, public, operator):
     facts = {"tcpConnected": False, "sshBanner": False, "ed25519Match": None,
-             "pinnedSsh": "unobserved", "stockCheckLine": None}
+             "pinnedSsh": "unobserved", "stockCheckLine": None, "stockCheckRc": None}
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as conn:
             facts["tcpConnected"] = True
@@ -203,13 +230,18 @@ def stock_diagnostics(port, ssh, public, operator):
         # Repeat the same read-only checks with a fixed line number on failure.
         probe = stock_kexec.STOCK_PROBE.replace(
             "set -euo pipefail", """set -Eeuo pipefail
-trap 'printf "stock-line:%d\\n" "$LINENO"' ERR""", 1
+trap 'printf "stock-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
         )
         command = shlex.join(["timeout", "20", "bash", "-c", probe, "terrace", public, operator])
         _, out, _ = diagnostic_command([*ssh, command], 25)
-        line = re.fullmatch(rb"stock-line:([1-9][0-9]{0,2})\n", out)
-        if line:
-            facts["stockCheckLine"] = int(line[1])
+        match = re.fullmatch(rb"stock-line:([1-9][0-9]{0,2}):([1-9][0-9]{0,2})\n", out)
+        if match:
+            line, rc = map(int, match.groups())
+            facts.update(stockCheckLine=line, stockCheckRc=rc)
+            lines = probe.splitlines()
+            if line <= len(lines) and lines[line - 1] == "cloud-init status --wait >/dev/null":
+                code, status, _ = diagnostic_command([*ssh, "timeout 10 cloud-init status --format json"], 15)
+                facts["cloudInitStatus"] = cloud_status_facts(code, status)
     return facts
 
 

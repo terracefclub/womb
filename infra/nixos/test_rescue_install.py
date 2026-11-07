@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import rescue_install as rescue
 import stock_kexec
-from test_stock_kexec_native import diagnostic_command
+from test_stock_kexec_native import cloud_status_facts, diagnostic_command
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -152,6 +152,16 @@ class RescueInstallTest(unittest.TestCase):
         self.assertEqual(diagnostic_command(
             [sys.executable, "-c", "import time; time.sleep(10)"], 0.05
         ), (124, b"", b""))
+
+    def test_cloud_status_keeps_only_known_states_and_counts(self):
+        status = {"status": "done", "extended_status": "degraded done", "errors": [],
+                  "recoverable_errors": {"WARNING": ["synthetic private message"]}}
+        self.assertEqual(cloud_status_facts(2, json.dumps(status)), {
+            "statusReadRc": 2, "status": "done", "extendedStatus": "degraded done",
+            "fatalErrorCount": 0, "recoverableErrorCount": 1,
+        })
+        self.assertIsNone(cloud_status_facts(1, b'{"status":"synthetic private message"}')["status"])
+        self.assertIsNone(cloud_status_facts(125, b"")["recoverableErrorCount"])
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"
