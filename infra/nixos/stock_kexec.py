@@ -23,6 +23,20 @@ grep -qx 'ID=debian' /etc/os-release
 grep -Eq '^VERSION_ID="?13"?$' /etc/os-release
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
 cloud-init status --wait >/dev/null
+read -r client _ <<<"${SSH_CLIENT:?}"
+settings="$(/usr/sbin/sshd -T -C "user=root,host=$client,addr=$client")"
+grep -qx 'pubkeyauthentication yes' <<<"$settings"
+grep -qx 'authenticationmethods publickey' <<<"$settings"
+grep -qx 'allowusers root' <<<"$settings"
+grep -qx 'passwordauthentication no' <<<"$settings"
+grep -qx 'kbdinteractiveauthentication no' <<<"$settings"
+grep -qx 'hostbasedauthentication no' <<<"$settings"
+grep -qx 'gssapiauthentication no' <<<"$settings"
+grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$settings"
+test "$(grep '^hostkey ' <<<"$settings")" = 'hostkey /etc/ssh/ssh_host_ed25519_key'
+test -x /usr/bin/ip && test "$(stat -Lc '%u:%g:%a' /usr/bin/ip)" = 0:0:755
+/usr/bin/ip --json addr >/dev/null
+command -v cpio >/dev/null
 keys=(/etc/ssh/ssh_host_*)
 test "${#keys[@]}" = 2
 test "${keys[0]}" = /etc/ssh/ssh_host_ed25519_key

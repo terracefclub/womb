@@ -43,8 +43,26 @@ let
     ];
   };
   inherit (installer) config;
+  pkgs = nixpkgs.legacyPackages.x86_64-linux;
   ssh = config.services.openssh;
-  archive = config.system.build.kexecInstallerTarball;
+  # The upstream runner calls this only on Debian, before entering NixOS.
+  # Use Debian's iproute2 instead of building a second static iproute2.
+  stockIp = pkgs.writeText "stock-debian-ip" ''
+    #!/bin/sh
+    set -eu
+    test -f /usr/bin/ip && test -x /usr/bin/ip
+    test "$(stat -Lc '%u:%g:%a' /usr/bin/ip)" = 0:0:755
+    exec /usr/bin/ip "$@"
+  '';
+  archive = pkgs.runCommand "terrace-kexec-tarball" {} ''
+    mkdir kexec "$out"
+    install -m 0644 "${config.system.build.netbootRamdisk}/initrd" kexec/initrd
+    install -m 0644 "${config.system.build.kernel}/${config.system.boot.loader.kernelFile}" kexec/bzImage
+    install -m 0755 "${config.system.build.kexecRun}" kexec/run
+    install -m 0755 "${pkgs.pkgsStatic.kexec-tools}/bin/kexec" kexec/kexec
+    install -m 0755 "${stockIp}" kexec/ip
+    tar -czf "$out/nixos-kexec-installer-x86_64-linux.tar.gz" kexec
+  '';
 in {
   inherit archive;
   proof = assert config.boot.initrd.systemd.enable;

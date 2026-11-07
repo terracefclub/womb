@@ -182,3 +182,39 @@ carry the network state and SSH files. The installer uses upstream's locked
 NixOS 26.05, which still exposes its required initrd option. The app and Disko
 keep their existing pins. The controller retains strict SSH verification
 throughout.
+The archive keeps upstream's runner and static kexec binary. The runner's
+three network-inventory calls use the authenticated stock guest's
+[Debian iproute2 binary](https://packages.debian.org/trixie/amd64/iproute2/filelist).
+
+### Offline trust proof
+
+Use the [Debian 13 genericcloud image and published SHA512 list](https://cloud.debian.org/images/cloud/trixie/20261103-2651/)
+for build 20261103-2651. The test verifies the exact amd64 QCOW2 digest
+before and after use. Supply the evaluated archive and its reviewed SHA256.
+The fixture creates temporary keys and calls the same cloud-config renderer
+as the creator. It attaches a private read-only NoCloud CIDATA drive, as
+described in the [cloud-init NoCloud documentation](https://github.com/canonical/cloud-init/blob/25.1.4/doc/rtd/reference/datasources/nocloud.rst).
+
+On Falcon, hold the shared build lock and use one supervised service scope.
+Set the public store sentinel to a small file added with `nix store add-file`,
+then point the tool variables at the reviewed Linux binaries. Use a fresh
+owner-only output directory outside the checkout and an unused loopback port.
+
+```sh
+systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
+  --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 \
+  --property=KillMode=control-group \
+  direnv exec . python3 -B infra/nixos/test_stock_kexec_native.py "$output" \
+    --base "$debian_image" --archive "$archive" --archive-sha256 "$archive_sha256" \
+    --store-probe "$sentinel_store_path" --port "$loopback_port" \
+    --qemu "$qemu" --qemu-img "$qemu_img" --mkfs-vfat "$mkfs_vfat" --mcopy "$mcopy"
+```
+
+The single BIOS/KVM guest uses a disposable overlay, and its only forwarded
+port binds loopback. The test substitutes the lease transport for that local
+port, uses the production SSH settings and remote checks, and requires
+OpenSSH to reject a wrong key on both boots. It copies the public sentinel
+through the native Nix store protocol and verifies its digest in RAM. It
+records only fixed facts, discards the bounded serial sample and removes the
+temporary overlay and keys after stopping the guest. No disk formatter or
+application starts in this proof.
