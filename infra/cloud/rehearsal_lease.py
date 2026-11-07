@@ -364,6 +364,7 @@ def main():
                        for journal_phase in journal_phases for path in directory.glob(f"{journal_phase}-action-*.json")}
             receipt = clean(api, manifest, phase, known, deadline=time.monotonic() + 300, delay=10,
                             pending=pending, record_action=record_action, record_owned=record_owned)
+            receipt["run"] = manifest["run"]
             write_private(directory / f"{phase}-absence-{time.time_ns()}.json", receipt)
             print("Cloud rehearsal cleanup verified.")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
