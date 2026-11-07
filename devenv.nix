@@ -4,7 +4,7 @@
   ...
 }: {
   name = "terrace-womb";
-  packages = with pkgs; [git gh glab jq curl openssh kubectl hcloud restic gitleaks pulumi];
+  packages = with pkgs; [git gh glab jq curl openssh kubectl hcloud restic gitleaks pulumi pulumi.pkgs.pulumi-nodejs];
   languages.javascript = {
     enable = true;
     bun.enable = true;
@@ -49,6 +49,7 @@
     command -v bun >/dev/null
     command -v kubectl >/dev/null
     command -v pulumi >/dev/null
+    command -v pulumi-language-nodejs >/dev/null
     test "$CLOUDSDK_CONFIG" = "${config.devenv.state}/gcloud"
     test "$PULUMI_HOME" = "${config.devenv.state}/pulumi"
     test "$GLAB_CONFIG_DIR" = "${config.devenv.state}/glab"

@@ -104,13 +104,29 @@ retirement plan or a revised owner-approved budget exists.
 ## Review and recovery sequence
 
 1. Obtain the dedicated project token through a protected channel. Verify
-   project scope in Console; obtain the operator's `.pub` file and narrow SSH
-   source CIDR. Use an ignored local Pulumi backend for **preview only**.
+   project scope in Console, then use read-only inventory commands. A
+   project-scoped Read & Write token can support the inventory and later
+   authorized creation and teardown. Obtain the operator's `.pub` file and
+   narrow SSH source CIDR. Use an ignored local Pulumi backend for **preview only**.
 2. Fill the non-secret stack config and run `bun install --frozen-lockfile`,
    `bun test`, and `bun run typecheck`. Select the `bootstrap` stack in this
-   project and run `./preview.sh bootstrap`; it targets only the four URNs
-   in that script. The script suppresses provider stderr, which may contain
-   sensitive request details. Keep the reviewed preview in a protected channel.
+   project and run the guarded preview from the repository root:
+
+   ```sh
+   direnv exec . ./infra/cloud/preview.sh bootstrap --review-file /protected/terrace/preview.json
+   ```
+
+   The wrapper requires the four bootstrap resources and accepts only create or
+   unchanged steps, including Pulumi's expected stack and provider bookkeeping.
+   It rejects replacements, updates, deletions, unexpected URNs and incomplete
+   summaries. The optional review file is written once as mode 0600 in a private
+   directory outside Git. It contains the four target inputs and operations,
+   with the public key hashed. The terminal receives fixed resource names and
+   operations. Provider diagnostics and configuration stay out of the report.
+   The command has a two-minute deadline.
+
+   Run the offline regressions with
+   `direnv exec . python3 -B infra/cloud/test_preview.py -v`.
 3. Before any matching targeted `pulumi up`, move state to a durable backend
    recoverable without the server, verify the quote and project inventory,
    then review the exact target list and replacement/deletion diff. Approval
