@@ -1,0 +1,4 @@
+name: terrace-cloud-rehearsal
+runtime: nodejs
+main: index.ts
+description: Disposable run-owned Terrace rehearsal resources
