@@ -77,7 +77,7 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     return { run, phase: stack, sshPublicKey: publicKey(record.sshPublicKey), sshCidrs: cidrs };
   }
 
-  const probeOnly = Object.hasOwn(record, "probeOnly");
+  const probeOnly = Object.prototype.hasOwnProperty.call(record, "probeOnly");
   const expected = ["run", "phase", "sshKeyId", "firewallId", "image", "location", "appType", "relayType"];
   if (probeOnly) {
     if (stack !== "original" || record.probeOnly !== true) throw new Error("invalid console probe mode");
