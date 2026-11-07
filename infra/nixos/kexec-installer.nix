@@ -1,7 +1,9 @@
 # Public installer image. The pinned runner transfers the SSH files at runtime.
 let
-  nixpkgs = (builtins.getFlake "path:${toString ./.}").inputs.nixpkgs;
-  images = builtins.getFlake "github:nix-community/nixos-images/aa38dbbdf0e955baef7e03dfc4265ae3fdac4808";
+  images = builtins.getFlake "github:nix-community/nixos-images/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4";
+  # Use upstream's locked NixOS 26.05 for this ephemeral installer only.
+  # The application closure and Disko retain the repository's own pins.
+  nixpkgs = images.inputs.nixos-stable;
   installer = nixpkgs.lib.nixosSystem {
     system = "x86_64-linux";
     modules = [
@@ -11,11 +13,9 @@ let
         pkgs,
         ...
       }: {
-        # This GPT/ext4 installer needs no ZFS-specific kernel. The old upstream
-        # installer module names a ZFS package alias removed by our nixpkgs pin.
+        # The disposable GPT/ext4 target needs no ZFS-specific kernel.
         boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
         boot.supportedFilesystems = lib.mkForce ["ext4" "vfat" "squashfs" "overlay"];
-        boot.zfs.package = lib.mkForce pkgs.zfs;
         nix.settings.substituters = lib.mkForce [];
         nix.settings.extra-substituters = lib.mkForce [];
         networking.hostName = "terrace-ram-installer";

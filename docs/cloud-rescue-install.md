@@ -176,8 +176,9 @@ on this route because the RAM installer supplies Nix. Disko still requires the
 separate reviewed disk and install-plan digests. The legacy Rescue route uses
 its original console pin and separate Nix bootstrap archive.
 
-The [pinned standalone kexec runner](https://github.com/nix-community/nixos-images/blob/aa38dbbdf0e955baef7e03dfc4265ae3fdac4808/nix/kexec-installer/kexec-run.sh)
-and its [initrd handoff](https://github.com/nix-community/nixos-images/blob/aa38dbbdf0e955baef7e03dfc4265ae3fdac4808/nix/restore-remote-access.nix)
-carry the network state and SSH files. The controller calls the standalone
-runner over the already pinned connection and retains strict verification
-after the boot.
+The [pinned standalone kexec runner](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/kexec-installer/kexec-run.sh)
+and its [initrd handoff](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/restore-remote-access.nix)
+carry the network state and SSH files. The installer uses upstream's locked
+NixOS 26.05, which still exposes its required initrd option. The app and Disko
+keep their existing pins. The controller retains strict SSH verification
+throughout.
