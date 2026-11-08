@@ -175,8 +175,13 @@ RAM against the compressed and unpacked sizes, verifies the private mount
 and removes the compressed copy before kexec. An upload failure removes the
 new mount and leaf. The connection can close during the switch. If the dispatch
 receipt exists, check the new boot instead of dispatching again.
+The upstream runner alone runs with umask 022 inside that 0700 tmpfs. It copies
+`/etc/machine-id` with plain `cp`; a root-only copy stops networkd from
+starting its DHCP clients, which fails the restored link before any address.
 Verification requires the same SSH pin, a different kernel
 boot ID, the pinned installer marker and the RAM-backed root and store.
+NixOS remounts the store read-only over itself, so every mount stacked at
+`/nix/store` must be an overlay.
 The probe-only cohort ends here. A full cohort can subsequently run the
 whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
 on this route because the RAM installer supplies Nix. Disko still requires the
@@ -251,3 +256,11 @@ On 2026-11-07 the pinned base reached a Debian login prompt in a separate
 25-second offline BIOS boot with standard VGA and no NIC or cloud-init seed.
 The trust fixture includes that display hardware while keeping display
 rendering disabled. The boot-only check did not exercise SSH or kexec.
+
+On 2026-11-07 the offline proof of source `584574b` passed in 82 seconds with
+the archive SHA256 `62ea7c1419a927d3400831de0340613a971471e1fbdb114b8587de6287257831`.
+The RAM guest completed one DHCP exchange and kept the fixture address. The
+same pin authenticated a new boot, a wrong pin and wrong-key Nix copy were
+rejected, and the reviewed copy verified. A separate offline-only diagnostic
+measured the earlier failure as networkd `failed` with DHCP client permission
+errors. Provider networking still needs its own probe.
