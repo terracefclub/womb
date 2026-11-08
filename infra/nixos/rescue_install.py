@@ -34,6 +34,18 @@ BY_ID = re.compile(r"/dev/disk/by-id/[A-Za-z0-9][A-Za-z0-9_.:+-]{0,220}")
 STORE = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+_.-]+")
 KEY_PREFIX = b"\0\0\0\x0bssh-ed25519\0\0\0\x20"
 BINDING_FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt"}
+BOOT_ID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
+RAM_PROBE = """
+test "$(id -u)" = 0 && test "$(uname -m)" = x86_64
+test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
+test "$(findmnt -rn -o FSTYPE --mountpoint /)" = tmpfs
+test "$(findmnt -rn -o FSTYPE --mountpoint /nix/.ro-store)" = squashfs
+test "$(findmnt -rn -o FSTYPE --mountpoint /nix/.rw-store)" = tmpfs
+# NixOS remounts the store read-only over itself, so expect stacked overlays.
+test "$(findmnt -rn -o FSTYPE --mountpoint /nix/store | sort -u)" = overlay
+test -x /run/current-system/sw/bin/nix-store
+cat /proc/sys/kernel/random/boot_id
+"""
 
 
 def require(condition, message):
@@ -115,7 +127,7 @@ def known_key(data, ipv4, expected):
     return encoded
 
 
-def ssh_options(directory, prefix):
+def ssh_options(directory, prefix, pin="rescue"):
     key = directory / "operator-ed25519"
     info = key.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
@@ -124,7 +136,7 @@ def ssh_options(directory, prefix):
     return [
         "-F", "/dev/null", "-i", str(key), "-o", "IdentitiesOnly=yes",
         "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-        "-o", f"UserKnownHostsFile={directory / (prefix + '-rescue-known-hosts')}",
+        "-o", f"UserKnownHostsFile={directory / (prefix + '-' + pin + '-known-hosts')}",
         "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlgorithms=ssh-ed25519",
         "-o", "UpdateHostKeys=no", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
     ]
@@ -206,6 +218,16 @@ printf '#!/bin/sh\nexec timeout --kill-after=10 %s {NIX_STORE} --option build-us
 chmod 0700 {NIX_SERVE}
 """
 
+RAM_SERVE = f"""
+set -euo pipefail
+umask 077
+case "$1" in 430|1810) ;; *) exit 1;; esac
+test -x /run/current-system/sw/bin/nix-store
+set -o noclobber
+printf '#!/bin/sh\nexec timeout --kill-after=10 %s /run/current-system/sw/bin/nix-store "$@"\n' "$1" >{NIX_SERVE}
+chmod 0700 {NIX_SERVE}
+"""
+
 DISK_GUARD = """
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
 test "$(readlink -e "$2")" = "$3"
@@ -241,7 +263,7 @@ sync -f /mnt
 
 def parse_probe(data, device):
     boot, canonical, inventory = data.decode("utf-8").split("\n", 2)
-    require(bool(re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", boot)),
+    require(BOOT_ID.fullmatch(boot),
             "invalid Rescue boot identity")
     require(DISK.fullmatch(canonical) and (device == canonical or BY_ID.fullmatch(device)),
             "disk alias did not resolve to an allowed whole disk")
@@ -261,7 +283,48 @@ def parse_probe(data, device):
             "majorMinor": disk["maj:min"], "bootId": boot}
 
 
-def authority(directory, phase, role):
+def reviewed_bootstrap(directory, phase, role):
+    from rehearsal_lease import reviewed_phase_input
+
+    config, _ = reviewed_phase_input(directory, phase)
+    if "bootstrapHostKeys" not in config:
+        return None
+    role_key = config["bootstrapHostKeys"][role]
+    require(config["image"] == "debian-13", "unexpected stock bootstrap image")
+    return role_key["publicKey"]
+
+
+def bootstrap_authority(directory, phase, role):
+    reviewed = reviewed_bootstrap(directory, phase, role)
+    require(reviewed is not None, "stock bootstrap was not reviewed")
+    binding = lease_binding(directory, phase, role, time.time())
+    prefix = f"{phase}-{role}"
+    ipv4 = binding["ipv4"]
+    key = known_key(read_private(directory / f"{prefix}-bootstrap-known-hosts", 4096), ipv4,
+                    read_private(directory / f"{prefix}-bootstrap-fingerprint", 128))
+    require(reviewed == "ssh-ed25519 " + key, "stock pin differs from the reviewed host key")
+    options = ssh_options(directory, prefix, "bootstrap")
+    return binding, key, options, ["ssh", *options, "root@" + ipv4]
+
+
+def ram_boot_id(ssh):
+    boot_id = remote(ssh, 20, "set -euo pipefail\n" + RAM_PROBE, capture=True).decode("ascii").strip()
+    require(BOOT_ID.fullmatch(boot_id), "invalid RAM installer boot identity")
+    return boot_id
+
+
+def authority(directory, phase, role, *, ram=False):
+    if ram:
+        binding, key, options, ssh = bootstrap_authority(directory, phase, role)
+        prefix = f"{phase}-{role}"
+        dispatch, dispatch_sha = read_json(directory / f"{prefix}-kexec-dispatched.json")
+        ready, _ = read_json(directory / f"{prefix}-ram-ready.json")
+        require(dispatch["binding"] == binding and dispatch["bootstrapKey"] == key
+                and ready["dispatchSha256"] == dispatch_sha
+                and ready["bootId"] != dispatch["stockBootId"]
+                and ready["bootId"] == ram_boot_id(ssh), "RAM installer changed after kexec")
+        return binding, key, options, ssh
+
     binding = lease_binding(directory, phase, role, time.time())
     prefix = f"{phase}-{role}"
     ipv4 = binding["ipv4"]
@@ -273,7 +336,9 @@ def authority(directory, phase, role):
 
 def inspect(directory, phase, role, device):
     require(valid_disk(device), "invalid whole-disk syntax")
-    binding, key, _, ssh = authority(directory, phase, role)
+    require(not reviewed_probe_mode(directory, phase), "probe cannot inspect an install disk")
+    ram = reviewed_bootstrap(directory, phase, role) is not None
+    binding, key, _, ssh = authority(directory, phase, role, ram=ram)
     disk = parse_probe(remote(ssh, 20, PROBE, device, capture=True), device)
     write_private(directory / f"{phase}-{role}-disk.json",
                   {"binding": binding, "rescueKey": key, "disk": disk})
@@ -310,10 +375,11 @@ def remaining(directory, binding, limit):
 
 def install(directory, phase, role, approved, archive):
     require(not reviewed_probe_mode(directory, phase), "console probe cannot write a disk")
+    ram = reviewed_bootstrap(directory, phase, role) is not None
     prefix = f"{phase}-{role}"
     target_seconds = TARGET_COPY_SECONDS[role]
     require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")
-    binding, key, options, ssh = authority(directory, phase, role)
+    binding, key, options, ssh = authority(directory, phase, role, ram=ram)
     reviewed, disk_digest = read_json(directory / f"{prefix}-disk.json")
     require(reviewed["binding"] == binding and reviewed["rescueKey"] == key,
             "install target changed after review")
@@ -332,18 +398,22 @@ def install(directory, phase, role, approved, archive):
     device = disk["device"]
     require(valid_disk(device) and parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
             "Rescue disk identity changed")
-    descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as source:
-        info = os.fstat(source.fileno())
-        require(stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= 100_000_000
-                and hashlib.file_digest(source, "sha256").hexdigest() == NIX_SHA,
-                "Rescue Nix archive rejected")
-        source.seek(0)
-        remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, str(target_seconds + 10), stdin=source)
+    if ram:
+        remote(ssh, remaining(directory, binding, 20), RAM_SERVE, str(target_seconds + 10))
+    else:
+        require(archive is not None, "Rescue Nix archive is required")
+        descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            require(stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= 100_000_000
+                    and hashlib.file_digest(source, "sha256").hexdigest() == NIX_SHA,
+                    "Rescue Nix archive rejected")
+            source.seek(0)
+            remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, str(target_seconds + 10), stdin=source)
     copy_store(binding, options, remaining(directory, binding, 240), [plan["disko"], plan["installer"]])
     # Provider controller may refresh observedAt. The immutable binding and
     # Rescue pin must still match, immediately before any disk write.
-    fresh, fresh_key, _, _ = authority(directory, phase, role)
+    fresh, fresh_key, _, _ = authority(directory, phase, role, ram=ram)
     require(fresh == binding and fresh_key == key, "install target changed before formatting")
     require(parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
             "Rescue disk identity changed before formatting")
@@ -380,7 +450,6 @@ def main():
             inspect(directory, args.phase, args.role, args.inspect_disk)
             message = "Pinned Rescue host and whole-disk probe recorded privately."
         else:
-            require(args.bootstrap_archive is not None, "Rescue Nix archive is required")
             install(directory, args.phase, args.role, args.install_approved_sha, args.bootstrap_archive)
             message = "Reviewed NixOS installed to the verified disk. Reboot is separate."
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):

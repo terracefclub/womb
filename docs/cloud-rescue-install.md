@@ -131,3 +131,136 @@ provider rehearsal.
 ```sh
 direnv exec . python3 -B infra/nixos/test_rescue_install.py -v
 ```
+
+## Pinned Debian-to-RAM bootstrap
+
+The stock route starts with a reviewed disposable Debian 13 cohort whose
+cloud-init data installs the per-host Ed25519 key. The reviewed input carries
+the matching public key. Keep the bootstrap key and cloud-init payload private
+and use a separate installed host key. The provider and stock guest receive the
+bootstrap private key, including through the guest-local metadata endpoint.
+The installer archive and Nix store receive no private material. The runtime
+installer copies the bootstrap key across kexec in RAM.
+
+Build the public archive on Falcon under the shared build lock. Verify and
+record the exact archive SHA256 before dispatch:
+
+```sh
+direnv exec . nix eval --json --impure --file infra/nixos/kexec-installer.nix proof
+direnv exec . nix build --impure --file infra/nixos/kexec-installer.nix archive \
+  --no-link --print-out-paths --max-jobs 1 --option builders ""
+```
+
+Use the resulting `nixos-kexec-installer-x86_64-linux.tar.gz`. For each host,
+stage the reviewed public key in the owner-private lease directory as
+`<phase>-<role>-bootstrap-known-hosts` and its fingerprint as
+`<phase>-<role>-bootstrap-fingerprint`. Use the authenticated provider binding
+for the known-hosts IP. The controller checks the local pin against the public
+key bound to the dispatched review before SSH. These commands assume a fresh
+provider binding at both steps:
+
+```sh
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
+  --dispatch "$archive" "$archive_sha256"
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
+```
+
+Dispatch checks the sole operator key and exact Ed25519 host key on stock
+Debian. Cloud-init writes the reviewed public key without a terminal newline.
+The check accepts that one-line file with or without the newline. It verifies
+the archive in a private, size-bounded tmpfs mounted on a new leaf under
+`/run`. A 4 GiB Debian fixture had only 410,771,456 free bytes on its
+existing `/run`, too little for this installer. Dispatch checks available
+RAM against the compressed and unpacked sizes, verifies the private mount
+and removes the compressed copy before kexec. An upload failure removes the
+new mount and leaf. The connection can close during the switch. If the dispatch
+receipt exists, check the new boot instead of dispatching again.
+The upstream runner alone runs with umask 022 inside that 0700 tmpfs. It copies
+`/etc/machine-id` with plain `cp`; a root-only copy stops networkd from
+starting its DHCP clients, which fails the restored link before any address.
+Verification requires the same SSH pin, a different kernel
+boot ID, the pinned installer marker and the RAM-backed root and store.
+NixOS remounts the store read-only over itself, so every mount stacked at
+`/nix/store` must be an overlay.
+The probe-only cohort ends here. A full cohort can subsequently run the
+whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
+on this route because the RAM installer supplies Nix. Disko still requires the
+separate reviewed disk and install-plan digests. The legacy Rescue route uses
+its original console pin and separate Nix bootstrap archive.
+
+The [pinned standalone kexec runner](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/kexec-installer/kexec-run.sh)
+and its [initrd handoff](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/restore-remote-access.nix)
+carry the network state and SSH files. The installer uses upstream's locked
+NixOS 26.05, which still exposes its required initrd option. The app and Disko
+keep their existing pins. The controller retains strict SSH verification
+throughout.
+The archive keeps upstream's runner and static kexec binary. The runner's
+three network-inventory calls use the authenticated stock guest's
+[Debian iproute2 binary](https://packages.debian.org/trixie/amd64/iproute2/filelist).
+
+### Offline trust proof
+
+Use the [Debian 13 genericcloud image and published SHA512 list](https://cloud.debian.org/images/cloud/trixie/20261103-2651/)
+for build 20261103-2651. The test verifies the exact amd64 QCOW2 digest
+before and after use. Supply the evaluated archive and its reviewed SHA256.
+The fixture creates temporary keys and calls the same cloud-config renderer
+as the creator. It attaches a private read-only NoCloud CIDATA drive, as
+described in the [cloud-init NoCloud documentation](https://github.com/canonical/cloud-init/blob/25.1.4/doc/rtd/reference/datasources/nocloud.rst).
+
+On Falcon, hold the shared build lock and use one supervised service scope.
+Set the public store sentinel to a small file added with `nix store add-file`,
+then point the tool variables at the reviewed Linux binaries. Use a fresh
+owner-only output directory outside the checkout and an unused loopback port.
+
+```sh
+systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
+  --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 \
+  --property=KillMode=control-group \
+  direnv exec . python3 -B infra/nixos/test_stock_kexec_native.py "$output" \
+    --base "$debian_image" --archive "$archive" --archive-sha256 "$archive_sha256" \
+    --store-probe "$sentinel_store_path" --port "$loopback_port" \
+    --qemu "$qemu" --qemu-img "$qemu_img" --mkfs-vfat "$mkfs_vfat" --mcopy "$mcopy"
+```
+
+The single BIOS/KVM guest uses a disposable overlay, and its only forwarded
+port binds loopback. The NoCloud seed assigns a fixed IPv4 address to the
+fixture NIC by MAC and checks that address on both boots. This isolates the
+offline trust handoff from QEMU DHCP, following the [upstream static-address test](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/kexec-installer/test.nix).
+Provider networking still needs its own probe.
+The test substitutes the lease transport for that local port, uses the
+production SSH settings and remote checks, and requires
+OpenSSH to reject a wrong key on both boots. It requires Nix store copy to
+reject the wrong key and leave the public sentinel absent, then copies the
+sentinel with the reviewed key and verifies its digest in RAM. A stock-boot
+failure records fixed boot markers and, if reached, the SSH stage and failing
+stock check line and status. When cloud-init's completion check fails, it
+records only the numeric status, allowlisted state and error counts.
+If the upload fails, the fixture records its failing line and status plus
+the two tmpfs checks, free byte counts and available memory from the same
+pinned guest.
+For the handoff it records the kexec command status and fixed boot markers.
+A RAM readiness failure records SSH authentication, whether the boot ID
+changed and the failing RAM check when the reviewed host key authenticates.
+The fixture classifies selected systemd units from the bounded serial data.
+If SSH gives no banner, it can read 4,000 bytes of local VGA text memory
+through a private Unix QMP socket and retain only fixed boot facts.
+For network diagnostics it attaches a capture filter after the archive
+upload. The filter writes to a private FIFO, and the fixture reads a
+bounded memory buffer and reports only fixed DHCP, ARP and SSH header
+counts. No packet capture file is retained.
+The test discards raw diagnostics and the bounded serial
+sample and removes the temporary overlay and keys after stopping the guest.
+No disk formatter or application starts in this proof.
+
+On 2026-11-07 the pinned base reached a Debian login prompt in a separate
+25-second offline BIOS boot with standard VGA and no NIC or cloud-init seed.
+The trust fixture includes that display hardware while keeping display
+rendering disabled. The boot-only check did not exercise SSH or kexec.
+
+On 2026-11-07 the offline proof of source `584574b` passed in 82 seconds with
+the archive SHA256 `62ea7c1419a927d3400831de0340613a971471e1fbdb114b8587de6287257831`.
+The RAM guest completed one DHCP exchange and kept the fixture address. The
+same pin authenticated a new boot, a wrong pin and wrong-key Nix copy were
+rejected, and the reviewed copy verified. A separate offline-only diagnostic
+measured the earlier failure as networkd `failed` with DHCP client permission
+errors. Provider networking still needs its own probe.

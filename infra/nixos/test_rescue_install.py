@@ -1,13 +1,23 @@
 import base64
 import hashlib
+import io
 import json
 from pathlib import Path
+import struct
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import rescue_install as rescue
+import stock_kexec
+from test_stock_kexec_native import (
+    FIXTURE_IP, FIXTURE_MAC, boot_unit_facts, capacity_facts, cloud_status_facts, diagnostic_command,
+    fixture_ipv4_facts,
+)
+from test_stock_kexec_packets import EXPECTED, SNAPLEN, packet_facts
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -61,6 +71,242 @@ class RescueInstallTest(unittest.TestCase):
         for address, expected in [("8.8.8.8", fingerprint), ("1.1.1.1", b"SHA256:wrong")]:
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
+
+    def test_stock_pin_must_match_dispatched_key_before_ssh(self):
+        blob = rescue.KEY_PREFIX + b"x" * 32
+        encoded = base64.b64encode(blob).decode()
+        fingerprint = b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
+        for name, contents in [
+            ("original-relay-bootstrap-known-hosts", f"1.1.1.1 ssh-ed25519 {encoded}\n".encode()),
+            ("original-relay-bootstrap-fingerprint", fingerprint),
+            ("operator-ed25519", b"fixture"),
+        ]:
+            path = self.directory / name
+            path.write_bytes(contents)
+            path.chmod(0o600)
+        binding = {"ipv4": "1.1.1.1"}
+        with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
+            rescue, "reviewed_bootstrap", return_value="ssh-ed25519 " + encoded
+        ) as reviewed:
+            _, key, options, ssh = rescue.bootstrap_authority(self.directory, "original", "relay")
+            self.assertEqual(key, encoded)
+            self.assertIn("StrictHostKeyChecking=yes", options)
+            self.assertTrue(any(x.endswith("original-relay-bootstrap-known-hosts") for x in options))
+            self.assertEqual(ssh[-1], "root@1.1.1.1")
+            reviewed.return_value = "ssh-ed25519 another"
+            with self.assertRaisesRegex(rescue.Rejected, "reviewed host key"):
+                rescue.bootstrap_authority(self.directory, "original", "relay")
+
+    def test_stock_published_key_accepts_one_exact_line_with_or_without_lf(self):
+        path = self.directory / "host.pub"
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        start = next(index for index, line in enumerate(lines) if line.startswith("mapfile -t -n 2 published "))
+        script = 'set -euo pipefail\nkeys=(unused "$2")\n' + "\n".join(lines[start:start + 3])
+        key = b"ssh-ed25519 synthetic"
+        for data, expected in [(key, 0), (key + b"\n", 0), (key + b"\n\n", 1),
+                               (key + b" comment\n", 1), (key + b"\nssh-ed25519 other\n", 1)]:
+            path.write_bytes(data)
+            result = subprocess.run(["bash", "-c", script, "fixture", "synthetic", str(path)], timeout=5)
+            self.assertEqual(result.returncode, expected)
+
+    def test_stock_dispatch_checks_archive_and_rebinds_before_kexec(self):
+        archive = self.directory / "installer.tar.gz"
+        self.stock_archive(archive)
+        digest = rescue.sha(archive.read_bytes())
+        binding = {"run": RUN, "ipv4": "1.1.1.1"}
+        boot = "abcd0123-1234-1234-1234-1234567890ab"
+        other = {**binding, "ipv4": "8.8.8.8"}
+        initial = (binding, "fixture", [], ["ssh"])
+        with patch.object(rescue, "bootstrap_authority", return_value=initial) as authority, patch.object(
+            stock_kexec, "stock_boot", return_value=boot
+        ), patch.object(rescue, "remaining", return_value=60), patch.object(rescue, "remote") as remote:
+            with self.assertRaisesRegex(rescue.Rejected, "archive rejected"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, "0" * 64)
+            remote.assert_not_called()
+            authority.side_effect = [initial, (other, "fixture", [], ["ssh"])]
+            with self.assertRaisesRegex(rescue.Rejected, "target changed"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+            self.assertEqual(remote.call_count, 1)
+            self.assertEqual(remote.call_args.args[2], stock_kexec.UPLOAD)
+            authority.side_effect = None
+            stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+            self.assertEqual(remote.call_args.args[2], stock_kexec.KEXEC)
+            sent, _ = rescue.read_json(self.directory / "original-relay-kexec-dispatched.json")
+            self.assertEqual(sent["archiveUnpackedBytes"], len(stock_kexec.ARCHIVE_FILES))
+            with self.assertRaisesRegex(rescue.Rejected, "already dispatched"):
+                stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
+
+    def test_runner_copies_a_readable_machine_id(self):
+        # Only the upstream runner runs under 022, after the 0700 scratch checks.
+        self.assertIn("umask 077\n", stock_kexec.UPLOAD)
+        lines = stock_kexec.KEXEC.strip().splitlines()
+        self.assertEqual(lines[1], "umask 077")
+        self.assertEqual(lines[-2:], ["umask 022", "exec setsid --wait timeout --kill-after=5 90 ./kexec/run"])
+
+    def stock_archive(self, path, names=None):
+        with tarfile.open(path, "w:gz") as archive:
+            root = tarfile.TarInfo("kexec")
+            root.type = tarfile.DIRTYPE
+            archive.addfile(root)
+            for name in sorted(stock_kexec.ARCHIVE_FILES) if names is None else names:
+                entry = tarfile.TarInfo(name)
+                entry.size = 1
+                archive.addfile(entry, io.BytesIO(b"x"))
+
+    def test_stock_archive_requires_exact_entries_and_measures_unpacked_size(self):
+        path = self.directory / "installer.tar.gz"
+        self.stock_archive(path)
+        with path.open("rb") as stream:
+            self.assertEqual(stock_kexec.archive_unpacked_bytes(stream), 5)
+        for extra in ("kexec/run", "kexec/extra", "../escaping"):
+            self.stock_archive(path, [*stock_kexec.ARCHIVE_FILES, extra])
+            with path.open("rb") as stream, self.assertRaisesRegex(rescue.Rejected, "unexpected installer"):
+                stock_kexec.archive_unpacked_bytes(stream)
+        self.stock_archive(path, ["kexec/run"])
+        with path.open("rb") as stream, self.assertRaisesRegex(rescue.Rejected, "entry missing"):
+            stock_kexec.archive_unpacked_bytes(stream)
+
+    def test_native_diagnostic_pipes_are_capped_and_timed(self):
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"], 5
+        ), (0, b"out\n", b"err\n"))
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "print('x' * 8192)"], 5
+        ), (125, b"", b""))
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "print('x' * 8192)"], 5, truncate=True
+        ), (0, b"x" * 8192, b""))
+        self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "import time; time.sleep(10)"], 0.05
+        ), (124, b"", b""))
+        with tempfile.TemporaryFile() as data:
+            data.write(b"exact synthetic input")
+            data.seek(0)
+            self.assertEqual(diagnostic_command(
+                [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                5, stdin=data,
+            ), (0, b"exact synthetic input", b""))
+
+    def test_cloud_status_keeps_only_known_states_and_counts(self):
+        status = {"status": "done", "extended_status": "degraded done", "errors": [],
+                  "recoverable_errors": {"WARNING": ["synthetic private message"]}}
+        self.assertEqual(cloud_status_facts(2, json.dumps(status)), {
+            "statusReadRc": 2, "status": "done", "extendedStatus": "degraded done",
+            "fatalErrorCount": 0, "recoverableErrorCount": 1,
+        })
+        self.assertIsNone(cloud_status_facts(1, b'{"status":"synthetic private message"}')["status"])
+        self.assertIsNone(cloud_status_facts(125, b"")["recoverableErrorCount"])
+
+    def test_upload_capacity_diagnostics_keep_only_flags_and_numbers(self):
+        self.assertEqual(capacity_facts(b"tmpfs\nfixture-type\n12\n34\n56\n"), {
+            "runTmpfs": True, "shmTmpfs": False, "runFreeBytes": 12,
+            "shmFreeBytes": 34, "memAvailableKiB": 56,
+        })
+        self.assertIsNone(capacity_facts(b"tmpfs\ntmpfs\nraw-private\n34\n56\n"))
+
+    def test_upload_failure_cleanup_targets_its_exact_leaf(self):
+        leaf = self.directory / "owned-upload"
+        leaf.mkdir()
+        cleanup = "cleanup() {" + stock_kexec.UPLOAD.split("cleanup() {", 1)[1].split("trap cleanup", 1)[0]
+        script = """
+set -euo pipefail
+scratch=$1
+mountpoint() { test "$3" = "$scratch"; }
+findmnt() { test "${@: -1}" = "$scratch"; printf 'tmpfs\\n'; }
+umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
+""" + cleanup + 'trap cleanup EXIT\ncd "$scratch"\nexit 7'
+        result = subprocess.run(["bash", "-c", script, "fixture", str(leaf)], capture_output=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout), (7, (str(leaf) + "\n").encode()))
+        self.assertFalse(leaf.exists())
+
+    def test_boot_diagnostics_classify_only_known_units_and_errors(self):
+        raw = (b"\x1b[32m[ OK ]\x1b[0m Started SSH Daemon.\r\n"
+               b"Starting restore-state-from-initrd.service...\n"
+               b"systemd-networkd.service: Failed with result 'fixture-private'.\n"
+               b"sshd: Bind to port 22 complete.\n"
+               b"DHCPv4 request timed out.\n")
+        facts = boot_unit_facts(raw)
+        self.assertEqual(facts["units"]["sshd"], {"begin": False, "success": True, "failure": False})
+        self.assertTrue(facts["units"]["restoreState"]["begin"])
+        self.assertTrue(facts["units"]["networkd"]["failure"])
+        self.assertFalse(facts["sshBindError"])
+        self.assertTrue(facts["dhcpError"])
+        self.assertNotIn("fixture-private", json.dumps(facts))
+
+    def test_packet_diagnostics_separate_leases_and_late_ssh_headers(self):
+        other = bytes([10, 0, 2, 16])
+
+        def ipv4(protocol, source, destination, payload):
+            header = bytearray(20)
+            header[0], header[9] = 0x45, protocol
+            header[12:16], header[16:20] = source, destination
+            return bytes(12) + b"\x08\x00" + header + payload
+
+        def dhcp(message, lease, reply):
+            data = bytearray(240)
+            data[16:20], data[236:240] = lease, b"\x63\x82\x53\x63"
+            ports = (67, 68) if reply else (68, 67)
+            return ipv4(17, other, EXPECTED,
+                        struct.pack(">HHHH", *ports, 252, 0) + data + bytes([53, 1, message, 255]))
+
+        def tcp(source_port, target_port, flags, payload=b""):
+            header = bytearray(20)
+            struct.pack_into(">HH", header, 0, source_port, target_port)
+            header[12:14] = bytes([0x50, flags])
+            source, destination = (EXPECTED, other) if source_port == 22 else (other, EXPECTED)
+            return ipv4(6, source, destination, header + payload)
+
+        def record(frame):
+            return struct.pack("<IIII", 1, 0, len(frame), len(frame)) + frame
+
+        initial = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, SNAPLEN, 1)
+        initial += b"".join(map(record, [dhcp(3, EXPECTED, False), dhcp(5, EXPECTED, True),
+                                        dhcp(5, other, True), tcp(22, 1234, 0x12)]))
+        late = b"".join(map(record, [tcp(1234, 22, 0x02), tcp(22, 1234, 0x12),
+                                     tcp(22, 1234, 0x18, b"SSH-2.0-synthetic")]))
+        facts = packet_facts(initial + late, len(initial))
+        for key in ("dhcpRequest", "dhcpAckExpected", "dhcpAckAlternate", "lateTcpSynToExpected",
+                    "lateTcpSynAckFromExpected", "lateBannerFromExpected"):
+            self.assertEqual(facts[key], 1)
+        self.assertTrue(facts["completeRecords"])
+        self.assertNotIn("synthetic", json.dumps(facts))
+
+    def test_fixture_ipv4_matches_mac_and_requires_static_stock_address(self):
+        address = {"family": "inet", "local": FIXTURE_IP, "prefixlen": 24}
+        ipv6 = {"family": "inet6", "local": "fe80::1", "prefixlen": 64}
+        interface = {"address": FIXTURE_MAC, "addr_info": [address, ipv6]}
+        self.assertFalse(fixture_ipv4_facts(json.dumps([{"addr_info": [address]}]), static=True))
+        self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=True))
+        address["dynamic"] = True
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=True))
+        self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=False))
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface, interface]), static=False))
+        interface["addr_info"].append(dict(address, local="10.0.2.16"))
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=False))
+
+    def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
+        old = "abcd0123-1234-1234-1234-1234567890ab"
+        new = "abcd0123-1234-1234-1234-1234567890cd"
+        binding = {"run": RUN, "ipv4": "1.1.1.1"}
+        dispatch = self.write("original-relay-kexec-dispatched.json", {
+            "binding": binding, "bootstrapKey": "fixture", "stockBootId": old,
+        })
+        value = (binding, "fixture", [], ["ssh"])
+        with patch.object(rescue, "bootstrap_authority", return_value=value), patch.object(
+            rescue, "ram_boot_id", return_value=old
+        ) as boot:
+            with self.assertRaisesRegex(rescue.Rejected, "stock boot is still running"):
+                stock_kexec.verify_ram(self.directory, "original", "relay")
+            boot.return_value = new
+            stock_kexec.verify_ram(self.directory, "original", "relay")
+            self.assertEqual(rescue.authority(self.directory, "original", "relay", ram=True), value)
+            boot.return_value = old
+            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                rescue.authority(self.directory, "original", "relay", ram=True)
+            boot.return_value = new
+            dispatch.write_bytes(dispatch.read_bytes() + b" ")
+            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                rescue.authority(self.directory, "original", "relay", ram=True)
 
     def test_console_probe_cannot_dispatch_an_install(self):
         cfg = {"run": RUN, "phase": "original", "probeOnly": True}
@@ -116,7 +362,9 @@ class RescueInstallTest(unittest.TestCase):
         self.assertEqual(checked.call_args.kwargs["env"]["NIX_SSHOPTS"], "-o StrictHostKeyChecking=yes")
 
     def test_all_fixed_remote_scripts_parse_without_execution(self):
-        for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH]:
+        for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH,
+                       rescue.RAM_PROBE, rescue.RAM_SERVE,
+                       stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC]:
             subprocess.run(["bash", "-n"], input=script, text=True, check=True, timeout=5)
 
 
