@@ -13,7 +13,10 @@ from unittest.mock import patch
 
 import rescue_install as rescue
 import stock_kexec
-from test_stock_kexec_native import boot_unit_facts, capacity_facts, cloud_status_facts, diagnostic_command
+from test_stock_kexec_native import (
+    FIXTURE_IP, FIXTURE_MAC, boot_unit_facts, capacity_facts, cloud_status_facts, diagnostic_command,
+    fixture_ipv4_facts,
+)
 from test_stock_kexec_packets import EXPECTED, SNAPLEN, packet_facts
 from test_rehearsal_lease import RUN, write_reviewed_input
 
@@ -260,6 +263,15 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             self.assertEqual(facts[key], 1)
         self.assertTrue(facts["completeRecords"])
         self.assertNotIn("synthetic", json.dumps(facts))
+
+    def test_fixture_ipv4_matches_mac_and_requires_static_stock_address(self):
+        address = {"family": "inet", "local": FIXTURE_IP, "prefixlen": 24}
+        interface = {"address": FIXTURE_MAC, "addr_info": [address]}
+        self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=True))
+        address["dynamic"] = True
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=True))
+        self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=False))
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface, interface]), static=False))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"

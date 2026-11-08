@@ -218,8 +218,12 @@ systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
 ```
 
 The single BIOS/KVM guest uses a disposable overlay, and its only forwarded
-port binds loopback. The test substitutes the lease transport for that local
-port, uses the production SSH settings and remote checks, and requires
+port binds loopback. The NoCloud seed assigns a fixed IPv4 address to the
+fixture NIC by MAC and checks that address on both boots. This isolates the
+offline trust handoff from QEMU DHCP, following the [upstream static-address test](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/kexec-installer/test.nix).
+Provider networking still needs its own probe.
+The test substitutes the lease transport for that local port, uses the
+production SSH settings and remote checks, and requires
 OpenSSH to reject a wrong key on both boots. It requires Nix store copy to
 reject the wrong key and leave the public sentinel absent, then copies the
 sentinel with the reviewed key and verifies its digest in RAM. A stock-boot

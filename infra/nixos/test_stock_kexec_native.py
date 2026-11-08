@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import rescue_install as install
 import stock_kexec
-from test_stock_kexec_packets import SNAPLEN, packet_facts, packet_pipe
+from test_stock_kexec_packets import EXPECTED, SNAPLEN, packet_facts, packet_pipe
 
 
 BASE_SHA512 = (
@@ -31,6 +31,8 @@ BASE_SHA512 = (
 )
 ALIAS = "terrace-stock-kexec-fixture"
 PREFIX = "original-relay"
+FIXTURE_MAC = "52:54:00:12:34:56"
+FIXTURE_IP = socket.inet_ntoa(EXPECTED)
 SERIAL_LIMIT = 256 * 1024
 SERIAL_MARKERS = {
     "seaBios": (b"SeaBIOS",),
@@ -111,13 +113,22 @@ process.stdout.write(renderBootstrapCloudConfig(hostPublicKey, hostPrivateKey, o
     install.require(user_data.startswith("#cloud-config\n"), "creator did not return cloud config")
     data = directory / "user-data"
     metadata = directory / "meta-data"
+    network = directory / "network-config"
     private_text(data, user_data)
     private_text(metadata, f"instance-id: {ALIAS}\nlocal-hostname: {ALIAS}\n")
+    private_text(network, json.dumps({
+        "version": 2,
+        "ethernets": {"fixture": {
+            "match": {"macaddress": FIXTURE_MAC}, "dhcp4": False, "dhcp6": False,
+            "addresses": [FIXTURE_IP + "/24"],
+            "routes": [{"to": "0.0.0.0/0", "via": "10.0.2.2"}],
+        }},
+    }) + "\n")
     with seed.open("xb") as stream:
         stream.truncate(2 * 1024 * 1024)
     install.checked_process([args.mkfs_vfat, "-n", "CIDATA", str(seed)], 15)
     install.checked_process(
-        [args.mcopy, "-i", str(seed), str(data), str(metadata), "::/"], 15
+        [args.mcopy, "-i", str(seed), str(data), str(metadata), str(network), "::/"], 15
     )
 
 
@@ -130,8 +141,8 @@ def guest(args, overlay, seed, serial, facts, qmp):
         "-qmp", f"unix:{qmp},server=on,wait=off",
         "-drive", f"file={overlay},format=qcow2,if=virtio",
         "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
-        "-netdev", f"user,id=proofnet,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-10.0.2.15:22",
-        "-device", "virtio-net-pci,netdev=proofnet",
+        "-netdev", f"user,id=proofnet,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-{FIXTURE_IP}:22",
+        "-device", f"virtio-net-pci,netdev=proofnet,mac={FIXTURE_MAC}",
     ]
     with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, start_new_session=True) as process:
@@ -173,6 +184,22 @@ def wrong_host_rejected(ssh):
     install.require(probe.returncode == 255 and not probe.stdout
                     and b"Host key verification failed." in probe.stderr,
                     "wrong host key was not rejected by OpenSSH")
+
+
+def fixture_ipv4_facts(data, *, static):
+    interfaces = json.loads(data)
+    matches = [row for row in interfaces if row.get("address") == FIXTURE_MAC]
+    if len(matches) != 1:
+        return False
+    addresses = matches[0]["addr_info"]
+    return len(addresses) == 1 and (
+        addresses[0]["family"], addresses[0]["local"], addresses[0]["prefixlen"]
+    ) == ("inet", FIXTURE_IP, 24) and (not static or addresses[0].get("dynamic", False) is False)
+
+
+def require_fixture_ipv4(ssh, *, static):
+    data = install.remote(ssh, 8, "ip -4 --json addr", capture=True)
+    install.require(fixture_ipv4_facts(data, static=static), "fixture IPv4 was not observed")
 
 
 def diagnostic_command(argv, seconds, *, stdin=None, truncate=False):
@@ -471,6 +498,8 @@ def exercise(args, directory, seed, overlay, facts):
             except install.Rejected:
                 facts["stockDiagnostics"] = stock_diagnostics(args.port, ssh, public, operator)
                 raise
+            require_fixture_ipv4(ssh, static=True)
+            facts["stockStaticIpv4"] = True
             wrong_host_rejected(wrong)
             facts["stockWrongKeyRejected"] = True
             facts["stage"] = "dispatch"
@@ -495,6 +524,8 @@ def exercise(args, directory, seed, overlay, facts):
                 if not facts["ramDiagnostics"]["sshBanner"]:
                     facts["ramQmp"] = qmp_failure_facts(Path(monitor) / "qmp.sock")
                 raise
+            require_fixture_ipv4(ssh, static=False)
+            facts["ramIpv4Retained"] = True
             wrong_host_rejected(wrong)
             facts["ramWrongKeyRejected"] = True
             facts["stage"] = "ram-store"
