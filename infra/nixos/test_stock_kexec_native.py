@@ -65,6 +65,8 @@ BOOT_UNITS = {
     "sshd": (b"sshd.service", b"ssh daemon"),
     "multiUser": (b"multi-user.target", b"multi-user system"),
 }
+RAM_MOUNTS = ("/", "/nix/.ro-store", "/nix/.rw-store", "/nix/store")
+MOUNT_TYPES = {"tmpfs", "ramfs", "rootfs", "squashfs", "overlay", "ext4"}
 CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
@@ -329,7 +331,20 @@ trap 'printf "ram-line:%d:%d\\n" "$LINENO" "$?"' ERR
         match = re.fullmatch(rb"ram-line:([1-9][0-9]{0,2}):[1-9][0-9]{0,2}\n", out)
         if match:
             facts["ramCheckLine"] = int(match[1])
+            facts["ramMountTypes"] = ram_mount_types(ssh)
     return facts
+
+
+def ram_mount_types(ssh):
+    """Return allowlisted filesystem types stacked at each RAM installer mountpoint."""
+    probe = 'for m in "$@"; do findmnt -rn -o FSTYPE --mountpoint "$m" | head -n 4 | tr "\\n" " "; echo; done'
+    command = shlex.join(["timeout", "5", "bash", "-c", probe, "terrace", *RAM_MOUNTS])
+    code, out, _ = diagnostic_command([*ssh, command], 10)
+    lines = out.decode("ascii", errors="replace").splitlines()
+    if code != 0 or len(lines) != len(RAM_MOUNTS):
+        return None
+    return {mount: [kind if kind in MOUNT_TYPES else "other" for kind in line.split()]
+            for mount, line in zip(RAM_MOUNTS, lines)}
 
 
 def boot_unit_facts(data):

@@ -41,7 +41,8 @@ test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
 test "$(findmnt -rn -o FSTYPE --mountpoint /)" = tmpfs
 test "$(findmnt -rn -o FSTYPE --mountpoint /nix/.ro-store)" = squashfs
 test "$(findmnt -rn -o FSTYPE --mountpoint /nix/.rw-store)" = tmpfs
-test "$(findmnt -rn -o FSTYPE --mountpoint /nix/store)" = overlay
+# NixOS remounts the store read-only over itself, so expect stacked overlays.
+test "$(findmnt -rn -o FSTYPE --mountpoint /nix/store | sort -u)" = overlay
 test -x /run/current-system/sw/bin/nix-store
 cat /proc/sys/kernel/random/boot_id
 """
