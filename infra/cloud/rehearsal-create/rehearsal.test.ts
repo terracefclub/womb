@@ -153,6 +153,14 @@ test("only reads the exact bound nonce sibling and renders no private key", () =
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
     writeFileSync(privatePath, syntheticNonce);
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
+    const weak = "ab".repeat(32) + "\n";
+    writeFileSync(privatePath, weak);
+    writeFileSync(inputPath, JSON.stringify({ ...cohort, probeOnly: true, ...bootstrapFields,
+      bootstrapProofs: { relay: proof(createHash("sha256").update(weak).digest("hex")) } }));
+    const weakInput = readInput(inputPath, "original");
+    if (weakInput.phase !== "original") throw new Error("wrong fixture phase");
+    expect(() => readBootstrapUserData(inputPath, weakInput)).toThrow();
+    writeFileSync(inputPath, JSON.stringify({ ...cohort, probeOnly: true, ...bootstrapFields }));
     unlinkSync(privatePath);
     writeFileSync(extra, nonceFile, { mode: 0o600 });
     symlinkSync(extra, privatePath);

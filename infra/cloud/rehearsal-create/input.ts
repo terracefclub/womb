@@ -205,7 +205,9 @@ export function readBootstrapUserData(path: string | undefined, input: Cohort): 
       throw new Error("bootstrap proof nonce digest mismatch");
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    if (!NONCE_FILE.test(text)) throw new Error("invalid bootstrap proof nonce encoding");
+    if (!NONCE_FILE.test(text) || new Set(text.trimEnd()).size < 8) {
+      throw new Error("invalid bootstrap proof nonce encoding");
+    }
     result[role] = renderBootstrapCloudConfig(
       { nonce: text.trimEnd(), run: input.run, phase: input.phase, role },
       input.bootstrapOperatorPublicKey,

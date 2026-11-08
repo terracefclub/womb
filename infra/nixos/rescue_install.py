@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import signal
 import stat
@@ -295,7 +296,23 @@ def reviewed_bootstrap(directory, phase, role):
     if "bootstrapProofs" not in config:
         return None
     require(config["image"] == "debian-13", "unexpected stock bootstrap image")
-    return config["run"], config["bootstrapProofs"][role]["nonceSha256"]
+    proof = config["bootstrapProofs"][role]
+    require(isinstance(proof, dict) and set(proof) == {"nonceSha256"}
+            and re.fullmatch(r"[a-f0-9]{64}", proof["nonceSha256"]), "reviewed bootstrap proof rejected")
+    return config["run"], proof["nonceSha256"]
+
+
+def strong_nonce(text):
+    """A 256-bit lowercase hex nonce that is not an obvious placeholder."""
+    return bool(re.fullmatch(r"[a-f0-9]{64}", text)) and len(set(text)) >= 8
+
+
+def write_proof_nonce(path):
+    """Create one private CSPRNG proof nonce file; never reuse or hand-type one."""
+    nonce = secrets.token_hex(32)
+    require(strong_nonce(nonce), "generated nonce rejected")
+    write_new_text(path, nonce + "\n")
+    return hashlib.sha256((nonce + "\n").encode("ascii")).hexdigest()
 
 
 def proof_mac(nonce, run, phase, role, public):
@@ -358,7 +375,8 @@ def verified_host_key(nonce, context, target, extra, seconds):
 
 def proof_nonce(directory, prefix, digest):
     nonce = read_private(directory / f"{prefix}-bootstrap-nonce", 65)
-    require(sha(nonce) == digest and re.fullmatch(rb"[a-f0-9]{64}\n", nonce),
+    require(sha(nonce) == digest and re.fullmatch(rb"[a-f0-9]{64}\n", nonce)
+            and strong_nonce(nonce.decode("ascii").strip()),
             "bootstrap proof nonce differs from approved input")
     return nonce.decode("ascii").strip()
 
@@ -389,6 +407,10 @@ def prove_host_key(directory, phase, role, *, seconds=300, delay=5):
             break
         require(time.monotonic() + delay < deadline, "host key proof was not published in time")
         time.sleep(delay)
+    # The provider must still bind the same server and address after the attempt.
+    current = lease_binding(directory, phase, role, time.time())
+    require((current["serverId"], current["ipv4"]) == (binding["serverId"], binding["ipv4"]),
+            "provider binding changed during the host key proof")
     fingerprint = ed25519_key(key)
     write_private(outputs[2], {"run": run, "serverId": binding["serverId"], "ipv4": binding["ipv4"],
                                "publicKey": "ssh-ed25519 " + key, "nonceSha256": digest,

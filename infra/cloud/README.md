@@ -170,13 +170,15 @@ the operator pins the key only when that MAC verifies for the key presented in
 the same session (see `docs/cloud-rescue-install.md`).
 
 The pinned hcloud bridge copies raw user data into unencrypted plan metadata, so
-the nonce can appear in the private plan and backend. It is single-use and
-worthless once the pin is recorded. Any private key in Pulumi output, the plan
-or its artifacts is rejected. Inputs with `bootstrapHostKeys` are refused.
+the nonce can appear in the private plan and backend. The pin step uses it once
+and writes the pin exactly once, after which it vouches for nothing new. Generate
+it only with `rescue_install.write_proof_nonce` (CSPRNG); placeholder-like values
+are refused. Any private-key armor in Pulumi output, the plan or its artifacts is
+rejected. Inputs with `bootstrapHostKeys` are refused.
 
 Replacement preserves the original bootstrap mode and requires a different
-nonce for every host. The saved plan and final checkpoint must still contain
-encrypted user data.
+nonce for every host. The `userData` input and state values in the saved plan
+and final checkpoint must still be encrypted envelopes.
 The controller uses Pulumi's text renderer for secret-bearing updates.
 The pinned CLI can include raw secret values in JSON update events even
 with `--show-secrets=false`. The controller also checks bounded private

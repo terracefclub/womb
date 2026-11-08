@@ -49,17 +49,17 @@ class RehearsalApplyTest(unittest.TestCase):
         operator = "ssh-ed25519 " + "z" * 68
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            old_nonce = b"a" * 64 + b"\n"
+            old_nonce = b"0123456789abcdef" * 4 + b"\n"
             original = {"app": {"nonceSha256": hashlib.sha256(old_nonce).hexdigest()}}
             write_reviewed_input(root, {"run": RUN, "phase": "original", "bootstrapProofs": original})
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator})
             with self.assertRaisesRegex(lease.Rejected, "mode differs"):
                 apply.bootstrap_material(root, "replacement", {}, probe_only=False)
             for role in ("app", "relay"):
-                (root / f"replacement-{role}-bootstrap-nonce").write_bytes(old_nonce if role == "relay" else b"b" * 64 + b"\n")
+                (root / f"replacement-{role}-bootstrap-nonce").write_bytes(old_nonce if role == "relay" else b"fedcba9876543210" * 4 + b"\n")
                 (root / f"replacement-{role}-bootstrap-nonce").chmod(0o600)
             cfg = {"bootstrapOperatorPublicKey": operator, "bootstrapProofs": {
-                "relay": original["app"], "app": {"nonceSha256": hashlib.sha256(b"b" * 64 + b"\n").hexdigest()}}}
+                "relay": original["app"], "app": {"nonceSha256": hashlib.sha256(b"fedcba9876543210" * 4 + b"\n").hexdigest()}}}
             with self.assertRaisesRegex(lease.Rejected, "nonces must differ"):
                 apply.bootstrap_material(root, "replacement", cfg, probe_only=False)
 
@@ -88,6 +88,10 @@ class RehearsalApplyTest(unittest.TestCase):
                     apply.reject_plaintext(leak, needles)
             # The low-value proof nonce may appear in bridge metadata.
             apply.reject_plaintext(nonce, needles)
+            path.write_bytes(b"ab" * 32 + b"\n")
+            with self.assertRaisesRegex(lease.Rejected, "nonce differs"):
+                apply.bootstrap_material(root, "original", {**cfg, "bootstrapProofs": {"relay": {
+                    "nonceSha256": hashlib.sha256(b"ab" * 32 + b"\n").hexdigest()}}}, probe_only=True)
             path.write_bytes(b"0" * 64 + b"\n")
             with self.assertRaisesRegex(lease.Rejected, "nonce differs"):
                 apply.bootstrap_material(root, "original", cfg, probe_only=True)

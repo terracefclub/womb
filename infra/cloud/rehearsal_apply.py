@@ -142,9 +142,11 @@ def bootstrap_material(directory, phase, config, *, probe_only):
                                    for old in original_proofs.values()):
             raise lease.Rejected("replacement proof nonces must differ from the original")
         nonce = lease.read_private(directory / f"{phase}-{role}-bootstrap-nonce", 65)
-        if hashlib.sha256(nonce).hexdigest() != proof["nonceSha256"] or not re.fullmatch(rb"[a-f0-9]{64}\n", nonce):
+        if (hashlib.sha256(nonce).hexdigest() != proof["nonceSha256"] or not re.fullmatch(rb"[a-f0-9]{64}\n", nonce)
+                or len(set(nonce.strip())) < 8):
             raise lease.Rejected("bootstrap proof nonce differs from approved input")
-    # Any OpenSSH or PEM private key is rejected in output, plan and state.
+    # No private key is an input any more. Still reject any PEM or OpenSSH
+    # private-key armor marker in output, plan and artifacts.
     return (b"PRIVATE KEY-----",)
 
 
