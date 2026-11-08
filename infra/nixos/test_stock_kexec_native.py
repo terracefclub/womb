@@ -191,14 +191,14 @@ def fixture_ipv4_facts(data, *, static):
     matches = [row for row in interfaces if row.get("address") == FIXTURE_MAC]
     if len(matches) != 1:
         return False
-    addresses = matches[0]["addr_info"]
+    addresses = [row for row in matches[0].get("addr_info", []) if row.get("family") == "inet"]
     return len(addresses) == 1 and (
         addresses[0]["family"], addresses[0]["local"], addresses[0]["prefixlen"]
     ) == ("inet", FIXTURE_IP, 24) and (not static or addresses[0].get("dynamic", False) is False)
 
 
 def require_fixture_ipv4(ssh, *, static):
-    data = install.remote(ssh, 8, "ip -4 --json addr", capture=True)
+    data = install.remote(ssh, 8, "ip --json addr", capture=True)
     install.require(fixture_ipv4_facts(data, static=static), "fixture IPv4 was not observed")
 
 
@@ -498,6 +498,7 @@ def exercise(args, directory, seed, overlay, facts):
             except install.Rejected:
                 facts["stockDiagnostics"] = stock_diagnostics(args.port, ssh, public, operator)
                 raise
+            facts["stockReady"] = True
             require_fixture_ipv4(ssh, static=True)
             facts["stockStaticIpv4"] = True
             wrong_host_rejected(wrong)

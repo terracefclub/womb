@@ -266,12 +266,16 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
 
     def test_fixture_ipv4_matches_mac_and_requires_static_stock_address(self):
         address = {"family": "inet", "local": FIXTURE_IP, "prefixlen": 24}
-        interface = {"address": FIXTURE_MAC, "addr_info": [address]}
+        ipv6 = {"family": "inet6", "local": "fe80::1", "prefixlen": 64}
+        interface = {"address": FIXTURE_MAC, "addr_info": [address, ipv6]}
+        self.assertFalse(fixture_ipv4_facts(json.dumps([{"addr_info": [address]}]), static=True))
         self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=True))
         address["dynamic"] = True
         self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=True))
         self.assertTrue(fixture_ipv4_facts(json.dumps([interface]), static=False))
         self.assertFalse(fixture_ipv4_facts(json.dumps([interface, interface]), static=False))
+        interface["addr_info"].append(dict(address, local="10.0.2.16"))
+        self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=False))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"
