@@ -197,8 +197,10 @@ Run the offline cleanup tests from the repository shell with
    authorized creation and teardown. Obtain the operator's `.pub` file and
    narrow SSH source CIDR. Use an ignored local Pulumi backend for **preview only**.
 2. Fill the non-secret stack config and run `bun install --frozen-lockfile`,
-   `bun test`, and `bun run typecheck`. Select the `bootstrap` stack in this
-   project and run the guarded preview from the repository root:
+   `bun test`, and `bun run typecheck`. CI runs the same three commands in the
+   `oci-metadata` job; Pulumi type-checks the program before every preview.
+   Select the `bootstrap` stack in this project and run the guarded preview
+   from the repository root:
 
    ```sh
    direnv exec . ./infra/cloud/preview.sh bootstrap --review-file /protected/terrace/preview.json
