@@ -19,7 +19,7 @@ type BootstrapInput = {
   bootstrapOperatorPublicKey: string;
 };
 
-type Cohort = {
+type CohortBase = {
   run: string;
   phase: "original" | "replacement";
   sshKeyId: number;
@@ -29,7 +29,9 @@ type Cohort = {
   appType: string;
   relayType: string;
   probeOnly?: true;
-} & (BootstrapInput | { bootstrapHostKeys?: never; bootstrapOperatorPublicKey?: never });
+};
+
+type Cohort = CohortBase & (BootstrapInput | { bootstrapHostKeys?: never; bootstrapOperatorPublicKey?: never });
 
 export type RehearsalInput = Foundation | Cohort;
 
@@ -139,7 +141,7 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     || typeof appType !== "string" || typeof relayType !== "string") {
     throw new Error("invalid rehearsal image, location or server types");
   }
-  return {
+  const cohort: CohortBase = {
     run,
     phase: stack,
     image,
@@ -149,8 +151,9 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     sshKeyId: inputId(record.sshKeyId),
     firewallId: inputId(record.firewallId),
     ...(probeOnly ? { probeOnly: true as const } : {}),
-    ...(bootstrap ? parseBootstrap(record, cohortRoles(probeOnly ? true : undefined)) : {}),
   };
+  // Pulumi type-checks this program before it runs; keep each branch exact.
+  return bootstrap ? { ...cohort, ...parseBootstrap(record, cohortRoles(probeOnly ? true : undefined)) } : cohort;
 }
 
 function readPrivateFile(path: string, limit: number): Buffer {

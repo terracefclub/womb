@@ -18,7 +18,7 @@ const keyBlob = Buffer.concat([
 const sshPublicKey = "ssh-ed25519 " + keyBlob.toString("base64");
 const foundation = { run, phase: "foundation" as const, sshPublicKey, sshCidrs: ["192.0.2.30/32"] };
 const cohort = {
-  run, phase: "original", sshKeyId: 11, firewallId: 12, image: "debian-13",
+  run, phase: "original" as const, sshKeyId: 11, firewallId: 12, image: "debian-13" as const,
   location: "nbg1", appType: "cx43", relayType: "cx23",
 };
 const syntheticPrivate = "-----BEGIN OPENSSH PRIVATE KEY-----\nZml4dHVyZQ==\n-----END OPENSSH PRIVATE KEY-----\n";
@@ -77,9 +77,9 @@ test("allows only explicit original console probe mode", () => {
 });
 
 test("requires exactly the planned bootstrap roles and distinct canonical public keys", () => {
-  const probe = { ...cohort, probeOnly: true, ...bootstrapFields };
+  const probe = { ...cohort, probeOnly: true as const, ...bootstrapFields };
   expect(parseInput(probe, "original")).toEqual(probe);
-  const full = { ...cohort, phase: "replacement",
+  const full = { ...cohort, phase: "replacement" as const,
     ...bootstrapFields, bootstrapHostKeys: { app: hostKey(3, "a".repeat(64)), relay: relayKey } };
   expect(parseInput(full, "replacement")).toEqual(full);
   expect(() => parseInput({ ...foundation, ...bootstrapFields }, "foundation")).toThrow();

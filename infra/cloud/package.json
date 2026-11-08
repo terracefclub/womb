@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p rehearsal-create"
   },
   "dependencies": {
     "@pulumi/hcloud": "1.42.0",
