@@ -134,13 +134,23 @@ direnv exec . python3 -B infra/nixos/test_rescue_install.py -v
 
 ## Pinned Debian-to-RAM bootstrap
 
-The stock route starts with a reviewed disposable Debian 13 cohort whose
-cloud-init data installs the per-host Ed25519 key. The reviewed input carries
-the matching public key. Keep the bootstrap key and cloud-init payload private
-and use a separate installed host key. The provider and stock guest receive the
-bootstrap private key, including through the guest-local metadata endpoint.
-The installer archive and Nix store receive no private material. The runtime
-installer copies the bootstrap key across kexec in RAM.
+The stock route starts with a reviewed disposable Debian 13 cohort. Cloud-init
+deletes the image host keys and generates a fresh Ed25519 key on the host, so no
+host private key leaves it. User data carries only a one-use proof nonce and the
+public run, phase and role. A first-boot script publishes
+`terrace-hostkey-proof v1 <HMAC-SHA256(nonce, "terrace-hostkey-v1|run|phase|role|<public key>")>`
+as the SSH pre-authentication banner, then removes its nonce copy. Use a separate
+installed host key. The installer archive and Nix store receive no private
+material. The runtime installer copies the self-generated key across kexec in RAM.
+
+The pin step opens one SSH session that offers no client authentication, records
+the presented Ed25519 key only in a throwaway file and reads the banner from the
+same encrypted transport. The key is pinned only when the MAC verifies with the
+reviewed nonce. A missing proof is retried for a bounded time; a wrong one aborts.
+A network attacker cannot produce a valid MAC for a substituted key, and nothing
+is sent before verification. The nonce is still in the provider, the guest
+metadata service and, through the hcloud bridge, the private plan. It is a
+low-value secret: one host key, one run, used once.
 
 Build the public archive on Falcon under the shared build lock. Verify and
 record the exact archive SHA256 before dispatch:
@@ -152,14 +162,14 @@ direnv exec . nix build --impure --file infra/nixos/kexec-installer.nix archive 
 ```
 
 Use the resulting `nixos-kexec-installer-x86_64-linux.tar.gz`. For each host,
-stage the reviewed public key in the owner-private lease directory as
-`<phase>-<role>-bootstrap-known-hosts` and its fingerprint as
-`<phase>-<role>-bootstrap-fingerprint`. Use the authenticated provider binding
-for the known-hosts IP. The controller checks the local pin against the public
-key bound to the dispatched review before SSH. These commands assume a fresh
-provider binding at both steps:
+the pin step writes `<phase>-<role>-bootstrap-known-hosts`, its fingerprint and
+`<phase>-<role>-bootstrap-proof.json` exactly once, bound to the authenticated
+provider binding. Later steps require that proof receipt for the same server
+and address before SSH. These commands assume a fresh provider binding at each
+step:
 
 ```sh
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --pin-proof
 direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
   --dispatch "$archive" "$archive_sha256"
 direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
@@ -203,8 +213,10 @@ three network-inventory calls use the authenticated stock guest's
 Use the [Debian 13 genericcloud image and published SHA512 list](https://cloud.debian.org/images/cloud/trixie/20261103-2651/)
 for build 20261103-2651. The test verifies the exact amd64 QCOW2 digest
 before and after use. Supply the evaluated archive and its reviewed SHA256.
-The fixture creates temporary keys and calls the same cloud-config renderer
-as the creator. It attaches a private read-only NoCloud CIDATA drive, as
+The fixture creates a temporary operator key and proof nonce and calls the same
+cloud-config renderer as the creator. The guest generates its own host key; the
+fixture pins it only through the keyed banner proof, and requires a wrong nonce
+and a wrong phase context to be rejected against the live guest. It attaches a private read-only NoCloud CIDATA drive, as
 described in the [cloud-init NoCloud documentation](https://github.com/canonical/cloud-init/blob/25.1.4/doc/rtd/reference/datasources/nocloud.rst).
 
 On Falcon, hold the shared build lock and use one supervised service scope.

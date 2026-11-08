@@ -159,19 +159,24 @@ use the confirmed pin for a read-only SSH check. Keep password entry private.
 This mode cannot format a disk, boot an installation, or authorize
 replacement. Clean up and verify the project baseline as with a full lease.
 
-For the known-host bootstrap, the reviewed cohort input carries
-`bootstrapHostKeys` for its exact roles. Each entry binds the public
-Ed25519 key and the hash of its private sibling file. The controller
-derives and checks the public key before preview or apply. It also binds
-the root operator key to the previously verified foundation key. The provider
-receives the one-use host key as secret cloud-init user data. Keep the
-private file and backend outside Git and use a different installed key.
-Treat guest metadata as accessible to the temporary host and run no
-application services there.
+For the known-host bootstrap, each host generates its own Ed25519 host key on
+first boot. The reviewed cohort input carries `bootstrapProofs` for its exact
+roles: each entry binds the SHA-256 of a private one-use proof nonce in the
+sibling file `<phase>-<role>-bootstrap-nonce`. It also binds the root operator
+key to the previously verified foundation key. Cloud-init user data carries the
+nonce and the public run, phase and role, never a private key. The host publishes
+`HMAC-SHA256(nonce, context and public key)` as its SSH pre-authentication banner;
+the operator pins the key only when that MAC verifies for the key presented in
+the same session (see `docs/cloud-rescue-install.md`).
+
+The pinned hcloud bridge copies raw user data into unencrypted plan metadata, so
+the nonce can appear in the private plan and backend. It is single-use and
+worthless once the pin is recorded. Any private key in Pulumi output, the plan
+or its artifacts is rejected. Inputs with `bootstrapHostKeys` are refused.
 
 Replacement preserves the original bootstrap mode and requires a different
-bootstrap key for every host. The saved plan and final checkpoint must
-contain encrypted user data.
+nonce for every host. The saved plan and final checkpoint must still contain
+encrypted user data.
 The controller uses Pulumi's text renderer for secret-bearing updates.
 The pinned CLI can include raw secret values in JSON update events even
 with `--show-secrets=false`. The controller also checks bounded private
