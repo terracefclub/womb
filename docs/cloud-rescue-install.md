@@ -235,6 +235,10 @@ changed and the failing RAM check when the reviewed host key authenticates.
 The fixture classifies selected systemd units from the bounded serial data.
 If SSH gives no banner, it can read 4,000 bytes of local VGA text memory
 through a private Unix QMP socket and retain only fixed boot facts.
+For network diagnostics it attaches a capture filter after the archive
+upload. The filter writes to a private FIFO, and the fixture reads a
+bounded memory buffer and reports only fixed DHCP, ARP and SSH header
+counts. No packet capture file is retained.
 The test discards raw diagnostics and the bounded serial
 sample and removes the temporary overlay and keys after stopping the guest.
 No disk formatter or application starts in this proof.

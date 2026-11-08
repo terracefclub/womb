@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tarfile
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import rescue_install as rescue
 import stock_kexec
 from test_stock_kexec_native import boot_unit_facts, capacity_facts, cloud_status_facts, diagnostic_command
+from test_stock_kexec_packets import EXPECTED, SNAPLEN, packet_facts
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -220,6 +222,44 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         self.assertFalse(facts["sshBindError"])
         self.assertTrue(facts["dhcpError"])
         self.assertNotIn("fixture-private", json.dumps(facts))
+
+    def test_packet_diagnostics_separate_leases_and_late_ssh_headers(self):
+        other = bytes([10, 0, 2, 16])
+
+        def ipv4(protocol, source, destination, payload):
+            header = bytearray(20)
+            header[0], header[9] = 0x45, protocol
+            header[12:16], header[16:20] = source, destination
+            return bytes(12) + b"\x08\x00" + header + payload
+
+        def dhcp(message, lease, reply):
+            data = bytearray(240)
+            data[16:20], data[236:240] = lease, b"\x63\x82\x53\x63"
+            ports = (67, 68) if reply else (68, 67)
+            return ipv4(17, other, EXPECTED,
+                        struct.pack(">HHHH", *ports, 252, 0) + data + bytes([53, 1, message, 255]))
+
+        def tcp(source_port, target_port, flags, payload=b""):
+            header = bytearray(20)
+            struct.pack_into(">HH", header, 0, source_port, target_port)
+            header[12:14] = bytes([0x50, flags])
+            source, destination = (EXPECTED, other) if source_port == 22 else (other, EXPECTED)
+            return ipv4(6, source, destination, header + payload)
+
+        def record(frame):
+            return struct.pack("<IIII", 1, 0, len(frame), len(frame)) + frame
+
+        initial = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, SNAPLEN, 1)
+        initial += b"".join(map(record, [dhcp(3, EXPECTED, False), dhcp(5, EXPECTED, True),
+                                        dhcp(5, other, True), tcp(22, 1234, 0x12)]))
+        late = b"".join(map(record, [tcp(1234, 22, 0x02), tcp(22, 1234, 0x12),
+                                     tcp(22, 1234, 0x18, b"SSH-2.0-synthetic")]))
+        facts = packet_facts(initial + late, len(initial))
+        for key in ("dhcpRequest", "dhcpAckExpected", "dhcpAckAlternate", "lateTcpSynToExpected",
+                    "lateTcpSynAckFromExpected", "lateBannerFromExpected"):
+            self.assertEqual(facts[key], 1)
+        self.assertTrue(facts["completeRecords"])
+        self.assertNotIn("synthetic", json.dumps(facts))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"

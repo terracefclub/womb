@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import rescue_install as install
 import stock_kexec
+from test_stock_kexec_packets import SNAPLEN, packet_facts, packet_pipe
 
 
 BASE_SHA512 = (
@@ -129,7 +130,8 @@ def guest(args, overlay, seed, serial, facts, qmp):
         "-qmp", f"unix:{qmp},server=on,wait=off",
         "-drive", f"file={overlay},format=qcow2,if=virtio",
         "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
-        "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-:22",
+        "-netdev", f"user,id=proofnet,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-10.0.2.15:22",
+        "-device", "virtio-net-pci,netdev=proofnet",
     ]
     with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, start_new_session=True) as process:
@@ -328,34 +330,39 @@ def boot_unit_facts(data):
     }
 
 
-def qmp_failure_facts(qmp):
+@contextmanager
+def qmp_commands(qmp):
     deadline = time.monotonic() + 6
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(2)
+        conn.connect(str(qmp))
+        with conn.makefile("rb", buffering=0) as stream:
+            def read():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError
+                conn.settimeout(left)
+                return json.loads(stream.readline(16384))
+
+            def ask(command, **args):
+                conn.sendall(json.dumps({"execute": command, "arguments": args}).encode() + b"\n")
+                while True:
+                    event = read()
+                    if "return" in event:
+                        return event["return"]
+                    if "error" in event:
+                        return None
+
+            install.require("QMP" in read() and ask("qmp_capabilities") == {}, "private QMP handshake failed")
+            yield ask
+
+
+def qmp_failure_facts(qmp):
     memory = qmp.parent / "vga.bin"
     try:
-        with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(2)
-            conn.connect(str(qmp))
-            with conn.makefile("rwb", buffering=0) as stream:
-                def read():
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        raise TimeoutError
-                    conn.settimeout(left)
-                    return json.loads(stream.readline(16384))
-
-                def ask(command, **args):
-                    stream.write(json.dumps({"execute": command, "arguments": args}).encode() + b"\n")
-                    while True:
-                        event = read()
-                        if "return" in event:
-                            return event["return"]
-                        if "error" in event:
-                            return None
-
-                if "QMP" not in read() or ask("qmp_capabilities") != {}:
-                    return None
-                status = ask("query-status")
-                saved = ask("pmemsave", val=0xb8000, size=4000, filename=str(memory))
+        with qmp_commands(qmp) as ask:
+            status = ask("query-status")
+            saved = ask("pmemsave", val=0xb8000, size=4000, filename=str(memory))
         data = b""
         if saved == {}:
             with memory.open("rb") as stream:
@@ -372,6 +379,17 @@ def qmp_failure_facts(qmp):
         return None
     finally:
         memory.unlink(missing_ok=True)
+
+
+def start_packet_capture(qmp):
+    try:
+        with qmp_commands(qmp) as ask:
+            return ask("object-add", **{
+                "qom-type": "filter-dump", "id": "proof-headers", "netdev": "proofnet",
+                "file": str(qmp.parent / "headers.pipe"), "maxlen": SNAPLEN, "queue": "all",
+            }) == {}
+    except (OSError, ValueError, TypeError, RecursionError):
+        return False
 
 
 def capacity_facts(data):
@@ -408,9 +426,10 @@ trap 'printf "upload-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
     facts["archiveUploadPassed"] = True
 
 
-def observe_dispatch(facts, serial, remote, ssh, seconds, script, *args, stdin=None, capture=False):
+def observe_dispatch(facts, serial, qmp, remote, ssh, seconds, script, *args, stdin=None, capture=False):
     if script != stock_kexec.KEXEC:
         return observe_upload(facts, remote, ssh, seconds, script, *args, stdin=stdin, capture=capture)
+    facts["packetCaptureStarted"] = start_packet_capture(qmp)
     facts["postDispatchSerialStart"] = len(serial)
     command = shlex.join(["timeout", "--kill-after=10", str(seconds), "bash", "-c",
                           script, "terrace", *args])
@@ -437,8 +456,11 @@ def exercise(args, directory, seed, overlay, facts):
     serial = bytearray()
     original_remote = install.remote
     monitor = None
+    late_packets = None
     try:
-        with tempfile.TemporaryDirectory(prefix="terrace-kexec-qmp-", dir="/tmp") as monitor, guest(
+        with tempfile.TemporaryDirectory(prefix="terrace-kexec-qmp-", dir="/tmp") as monitor, packet_pipe(
+            Path(monitor) / "headers.pipe"
+        ) as packets, guest(
             args, overlay, seed, serial, facts, Path(monitor) / "qmp.sock"
         ) as process, patch.object(
             install, "bootstrap_authority", return_value=(binding, public, options, ssh)
@@ -454,7 +476,7 @@ def exercise(args, directory, seed, overlay, facts):
             facts["stage"] = "dispatch"
             try:
                 with patch.object(install, "remote", side_effect=lambda *args, **kwargs: observe_dispatch(
-                    facts, serial, original_remote, *args, **kwargs
+                    facts, serial, Path(monitor) / "qmp.sock", original_remote, *args, **kwargs
                 )):
                     stock_kexec.dispatch(directory, "original", "relay", args.archive, args.archive_sha256)
             except install.Rejected:
@@ -468,6 +490,7 @@ def exercise(args, directory, seed, overlay, facts):
             try:
                 await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
             except install.Rejected:
+                late_packets = len(packets)
                 facts["ramDiagnostics"] = ram_diagnostics(args.port, ssh, public, sent["stockBootId"])
                 if not facts["ramDiagnostics"]["sshBanner"]:
                     facts["ramQmp"] = qmp_failure_facts(Path(monitor) / "qmp.sock")
@@ -492,6 +515,8 @@ def exercise(args, directory, seed, overlay, facts):
                            store, install.sha(Path(store).read_bytes()))
             facts["ramStoreCopy"] = True
     finally:
+        if facts.get("packetCaptureStarted"):
+            facts["packetFacts"] = packet_facts(packets, late_packets)
         if monitor is not None:
             facts["qmpScratchGone"] = not Path(monitor).exists()
             install.require(facts["qmpScratchGone"], "private monitor scratch survived cleanup")
