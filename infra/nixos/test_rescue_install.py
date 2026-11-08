@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import rescue_install as rescue
 import stock_kexec
-from test_stock_kexec_native import cloud_status_facts, diagnostic_command
+from test_stock_kexec_native import capacity_facts, cloud_status_facts, diagnostic_command
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -164,6 +164,13 @@ class RescueInstallTest(unittest.TestCase):
         self.assertEqual(diagnostic_command(
             [sys.executable, "-c", "import time; time.sleep(10)"], 0.05
         ), (124, b"", b""))
+        with tempfile.TemporaryFile() as data:
+            data.write(b"exact synthetic input")
+            data.seek(0)
+            self.assertEqual(diagnostic_command(
+                [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                5, stdin=data,
+            ), (0, b"exact synthetic input", b""))
 
     def test_cloud_status_keeps_only_known_states_and_counts(self):
         status = {"status": "done", "extended_status": "degraded done", "errors": [],
@@ -174,6 +181,13 @@ class RescueInstallTest(unittest.TestCase):
         })
         self.assertIsNone(cloud_status_facts(1, b'{"status":"synthetic private message"}')["status"])
         self.assertIsNone(cloud_status_facts(125, b"")["recoverableErrorCount"])
+
+    def test_upload_capacity_diagnostics_keep_only_flags_and_numbers(self):
+        self.assertEqual(capacity_facts(b"tmpfs\nfixture-type\n12\n34\n56\n"), {
+            "runTmpfs": True, "shmTmpfs": False, "runFreeBytes": 12,
+            "shmFreeBytes": 34, "memAvailableKiB": 56,
+        })
+        self.assertIsNone(capacity_facts(b"tmpfs\ntmpfs\nraw-private\n34\n56\n"))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"

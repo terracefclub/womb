@@ -224,6 +224,9 @@ sentinel with the reviewed key and verifies its digest in RAM. A stock-boot
 failure records fixed boot markers and, if reached, the SSH stage and failing
 stock check line and status. When cloud-init's completion check fails, it
 records only the numeric status, allowlisted state and error counts.
+If the upload fails, the fixture records its failing line and status plus
+the two tmpfs checks, free byte counts and available memory from the same
+pinned guest.
 The test discards raw diagnostics and the bounded serial
 sample and removes the temporary overlay and keys after stopping the guest.
 No disk formatter or application starts in this proof.

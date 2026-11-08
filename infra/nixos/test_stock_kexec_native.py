@@ -48,6 +48,14 @@ CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
 }
+CAPACITY_PROBE = """
+set -eu
+printf '%s\n' "$(findmnt -rn -o FSTYPE --mountpoint /run || true)"
+printf '%s\n' "$(findmnt -rn -o FSTYPE --mountpoint /dev/shm || true)"
+df -PB1 /run | awk 'NR == 2 {print $4}'
+df -PB1 /dev/shm | awk 'NR == 2 {print $4}'
+awk '/^MemAvailable:/ {print $2}' /proc/meminfo
+"""
 
 
 def base_digest(path):
@@ -146,11 +154,12 @@ def wrong_host_rejected(ssh):
                     "wrong host key was not rejected by OpenSSH")
 
 
-def diagnostic_command(argv, seconds):
+def diagnostic_command(argv, seconds, *, stdin=None):
     deadline = time.monotonic() + seconds
     output = [bytearray(), bytearray()]
-    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE) as process, selectors.DefaultSelector() as ready:
+    with subprocess.Popen(argv, stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=True) as process, selectors.DefaultSelector() as ready:
         ready.register(process.stdout, selectors.EVENT_READ, 0)
         ready.register(process.stderr, selectors.EVENT_READ, 1)
         try:
@@ -173,7 +182,10 @@ def diagnostic_command(argv, seconds):
             return 124, b"", b""
         finally:
             if process.poll() is None:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait(timeout=5)
 
 
@@ -245,6 +257,40 @@ trap 'printf "stock-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
     return facts
 
 
+def capacity_facts(data):
+    fields = data.splitlines()
+    if len(fields) != 5 or any(not re.fullmatch(rb"[0-9]{1,16}", value) for value in fields[2:]):
+        return None
+    run_free, shm_free, memory = map(int, fields[2:])
+    return {"runTmpfs": fields[0] == b"tmpfs", "shmTmpfs": fields[1] == b"tmpfs",
+            "runFreeBytes": run_free, "shmFreeBytes": shm_free, "memAvailableKiB": memory}
+
+
+def observe_upload(facts, remote, ssh, seconds, script, *args, stdin=None, capture=False):
+    if script != stock_kexec.UPLOAD:
+        return remote(ssh, seconds, script, *args, stdin=stdin, capture=capture)
+    # Observe this exact mutation only once. A failed upload is never retried.
+    script = script.replace(
+        "set -euo pipefail", """set -Eeuo pipefail
+trap 'printf "upload-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
+    )
+    command = shlex.join(["timeout", "--kill-after=10", str(seconds), "bash", "-c",
+                          script, "terrace", *args])
+    code, output, _ = diagnostic_command([*ssh, command], seconds + 20, stdin=stdin)
+    if code != 0:
+        result = {"commandRc": code, "uploadLine": None, "uploadRc": None}
+        matches = re.findall(rb"^upload-line:([1-9][0-9]{0,2}):([1-9][0-9]{0,2})$", output, re.M)
+        if matches:
+            result["uploadLine"], result["uploadRc"] = map(int, matches[-1])
+        facts["uploadDiagnostics"] = result
+        try:
+            result["capacity"] = capacity_facts(remote(ssh, 8, CAPACITY_PROBE, capture=True))
+        except install.Rejected:
+            result["capacity"] = None
+        raise install.Rejected("verified archive upload rejected")
+    facts["archiveUploadPassed"] = True
+
+
 def exercise(args, directory, seed, overlay, facts):
     binding = {"ipv4": "127.0.0.1"}
     options = [*install.ssh_options(directory, PREFIX, "bootstrap"),
@@ -256,6 +302,7 @@ def exercise(args, directory, seed, overlay, facts):
     public = (directory / "stock-ed25519.pub").read_text().split()[1]
     operator = (directory / "operator-ed25519.pub").read_text().split()[1]
     serial = bytearray()
+    original_remote = install.remote
     try:
         with guest(args, overlay, seed, serial, facts) as process, patch.object(
             install, "bootstrap_authority", return_value=(binding, public, options, ssh)
@@ -270,7 +317,10 @@ def exercise(args, directory, seed, overlay, facts):
             facts["stockWrongKeyRejected"] = True
             facts["stage"] = "dispatch"
             try:
-                stock_kexec.dispatch(directory, "original", "relay", args.archive, args.archive_sha256)
+                with patch.object(install, "remote", side_effect=lambda *args, **kwargs: observe_upload(
+                    facts, original_remote, *args, **kwargs
+                )):
+                    stock_kexec.dispatch(directory, "original", "relay", args.archive, args.archive_sha256)
             except install.Rejected:
                 # The live SSH session can end during the kernel switch.
                 if not (directory / f"{PREFIX}-kexec-dispatched.json").is_file():
