@@ -106,6 +106,10 @@ test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
 test "$(findmnt -rn -o TARGET,FSTYPE --mountpoint {SCRATCH})" = "{SCRATCH} tmpfs"
 test "$(stat -c '%u:%g:%a' {SCRATCH})" = 0:0:700
 cd {SCRATCH}
+# The upstream runner copies /etc/machine-id with plain cp. Under umask 077 the
+# RAM system gets a root-only ID, networkd cannot start its DHCP clients and the
+# restored link fails. Its scratch stays in this 0700 tmpfs; cp -a keeps key modes.
+umask 022
 exec setsid --wait timeout --kill-after=5 90 ./kexec/run
 """
 

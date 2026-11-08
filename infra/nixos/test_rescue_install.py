@@ -136,6 +136,13 @@ class RescueInstallTest(unittest.TestCase):
             with self.assertRaisesRegex(rescue.Rejected, "already dispatched"):
                 stock_kexec.dispatch(self.directory, "original", "relay", archive, digest)
 
+    def test_runner_copies_a_readable_machine_id(self):
+        # Only the upstream runner runs under 022, after the 0700 scratch checks.
+        self.assertIn("umask 077\n", stock_kexec.UPLOAD)
+        lines = stock_kexec.KEXEC.strip().splitlines()
+        self.assertEqual(lines[1], "umask 077")
+        self.assertEqual(lines[-2:], ["umask 022", "exec setsid --wait timeout --kill-after=5 90 ./kexec/run"])
+
     def stock_archive(self, path, names=None):
         with tarfile.open(path, "w:gz") as archive:
             root = tarfile.TarInfo("kexec")
