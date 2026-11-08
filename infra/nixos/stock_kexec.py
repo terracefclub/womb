@@ -51,7 +51,9 @@ read -r kind key _ < <(ssh-keygen -y -f "${keys[0]}")
 test "$kind $key" = "ssh-ed25519 $1"
 mapfile -t -n 2 published <"${keys[1]}"
 test "${#published[@]}" = 1
-test "${published[0]}" = "ssh-ed25519 $1"
+# The host generated this key itself, so ssh-keygen appended a root@host comment.
+read -r kind key _ <<<"${published[0]}"
+test "$kind $key" = "ssh-ed25519 $1"
 auth=/root/.ssh/authorized_keys
 test -f "$auth" && test ! -L "$auth"
 test "$(stat -c '%u:%h' "$auth")" = 0:1
