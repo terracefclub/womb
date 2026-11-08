@@ -72,7 +72,7 @@ class RescueInstallTest(unittest.TestCase):
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
 
-    def test_stock_pin_must_match_dispatched_key_before_ssh(self):
+    def test_stock_pin_must_match_the_proven_key_before_ssh(self):
         blob = rescue.KEY_PREFIX + b"x" * 32
         encoded = base64.b64encode(blob).decode()
         fingerprint = b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
@@ -84,18 +84,86 @@ class RescueInstallTest(unittest.TestCase):
             path = self.directory / name
             path.write_bytes(contents)
             path.chmod(0o600)
-        binding = {"ipv4": "1.1.1.1"}
+        proof = {"run": RUN, "serverId": 7, "ipv4": "1.1.1.1", "publicKey": "ssh-ed25519 " + encoded,
+                 "nonceSha256": "d" * 64, "fingerprint": fingerprint.decode()}
+        rescue.write_private(self.directory / "original-relay-bootstrap-proof.json", proof)
+        binding = {"ipv4": "1.1.1.1", "serverId": 7}
         with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
-            rescue, "reviewed_bootstrap", return_value="ssh-ed25519 " + encoded
+            rescue, "reviewed_bootstrap", return_value=(RUN, "d" * 64)
         ) as reviewed:
             _, key, options, ssh = rescue.bootstrap_authority(self.directory, "original", "relay")
             self.assertEqual(key, encoded)
             self.assertIn("StrictHostKeyChecking=yes", options)
             self.assertTrue(any(x.endswith("original-relay-bootstrap-known-hosts") for x in options))
             self.assertEqual(ssh[-1], "root@1.1.1.1")
-            reviewed.return_value = "ssh-ed25519 another"
-            with self.assertRaisesRegex(rescue.Rejected, "reviewed host key"):
+            reviewed.return_value = (RUN, "e" * 64)
+            with self.assertRaisesRegex(rescue.Rejected, "proven host key"):
                 rescue.bootstrap_authority(self.directory, "original", "relay")
+            reviewed.return_value = (RUN, "d" * 64)
+            binding["serverId"] = 8
+            with self.assertRaisesRegex(rescue.Rejected, "proven host key"):
+                rescue.bootstrap_authority(self.directory, "original", "relay")
+
+    def fake_session(self, key, banners):
+        """Simulate one SSH session that records `key` and prints `banners` on stderr."""
+        def run(argv, **_kwargs):
+            known = next(Path(x.split("=", 1)[1]) for x in argv if x.startswith("UserKnownHostsFile="))
+            if key is not None:
+                known.write_text(f"1.1.1.1 ssh-ed25519 {key}\n")
+            self.assertIn("PubkeyAuthentication=no", argv)
+            self.assertIn("StrictHostKeyChecking=accept-new", argv)
+            self.assertIn("HostKeyAlgorithms=ssh-ed25519", argv)
+            stderr = b"Warning: Permanently added '1.1.1.1' (ED25519) to the list of known hosts.\r\n"
+            stderr += b"".join(b"terrace-hostkey-proof v1 " + mac.encode() + b"\r\n" for mac in banners)
+            return subprocess.CompletedProcess(argv, 255, b"", stderr + b"root@1.1.1.1: Permission denied (publickey).\r\n")
+        return patch.object(rescue.subprocess, "run", side_effect=run)
+
+    def test_host_key_proof_binds_nonce_context_and_presented_key(self):
+        nonce = "0123456789abcdef" * 4
+        context = (RUN, "original", "relay")
+        genuine = base64.b64encode(rescue.KEY_PREFIX + b"g" * 32).decode()
+        attacker = base64.b64encode(rescue.KEY_PREFIX + b"a" * 32).decode()
+        mac = rescue.proof_mac(nonce, *context, "ssh-ed25519 " + genuine)
+        with self.fake_session(genuine, [mac]):
+            self.assertEqual(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5), genuine)
+        # A relayed genuine banner does not vouch for a substituted key.
+        with self.fake_session(attacker, [mac]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+            rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        for wrong in (rescue.proof_mac("f" * 64, *context, "ssh-ed25519 " + genuine),
+                      rescue.proof_mac(nonce, RUN, "replacement", "relay", "ssh-ed25519 " + genuine)):
+            with self.fake_session(genuine, [wrong]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+                rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        with self.fake_session(genuine, [mac, mac]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+            rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        # Not yet published: retry later rather than trust anything.
+        for key, banners in ((genuine, []), (None, [])):
+            with self.fake_session(key, banners):
+                self.assertIsNone(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5))
+
+    def test_proof_pins_exactly_once_from_the_reviewed_nonce(self):
+        nonce = "0123456789abcdef" * 4
+        digest = hashlib.sha256((nonce + "\n").encode()).hexdigest()
+        path = self.directory / "original-relay-bootstrap-nonce"
+        path.write_text(nonce + "\n")
+        path.chmod(0o600)
+        genuine = base64.b64encode(rescue.KEY_PREFIX + b"g" * 32).decode()
+        mac = rescue.proof_mac(nonce, RUN, "original", "relay", "ssh-ed25519 " + genuine)
+        binding = {"ipv4": "1.1.1.1", "serverId": 7}
+        with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
+            rescue, "reviewed_bootstrap", return_value=(RUN, digest)
+        ), patch.object(rescue, "remaining", return_value=20), patch.object(rescue.time, "sleep"):
+            with self.fake_session(genuine, []), self.assertRaisesRegex(rescue.Rejected, "not published in time"):
+                rescue.prove_host_key(self.directory, "original", "relay", seconds=1, delay=5)
+            self.assertFalse((self.directory / "original-relay-bootstrap-known-hosts").exists())
+            with self.fake_session(genuine, [mac]):
+                self.assertEqual(rescue.prove_host_key(self.directory, "original", "relay"), genuine)
+            self.assertEqual((self.directory / "original-relay-bootstrap-known-hosts").read_text(),
+                             f"1.1.1.1 ssh-ed25519 {genuine}\n")
+            with self.fake_session(genuine, [mac]), self.assertRaisesRegex(rescue.Rejected, "already pinned"):
+                rescue.prove_host_key(self.directory, "original", "relay")
+        with patch.object(rescue, "reviewed_bootstrap", return_value=(RUN, "0" * 64)):
+            with self.assertRaisesRegex(rescue.Rejected, "nonce differs"):
+                rescue.proof_nonce(self.directory, "original-relay", "0" * 64)
 
     def test_stock_published_key_accepts_one_exact_line_with_or_without_lf(self):
         path = self.directory / "host.pub"

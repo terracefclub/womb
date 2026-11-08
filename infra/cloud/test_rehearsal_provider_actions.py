@@ -136,7 +136,7 @@ class ProviderActionsTest(unittest.TestCase):
                 with self.assertRaisesRegex(lease.Rejected, "probe action scope"):
                     actions.operate("boot-installed", *args)
                 dispatch.assert_not_called()
-                write_reviewed_input(root, {**config, "bootstrapHostKeys": {"relay": {}}})
+                write_reviewed_input(root, {**config, "bootstrapProofs": {"relay": {}}})
                 for mode in ("rescue", "console"):
                     with self.assertRaisesRegex(lease.Rejected, "does not use provider Rescue"):
                         actions.operate(mode, *args)

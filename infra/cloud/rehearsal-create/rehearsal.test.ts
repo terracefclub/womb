@@ -21,13 +21,11 @@ const cohort = {
   run, phase: "original" as const, sshKeyId: 11, firewallId: 12, image: "debian-13" as const,
   location: "nbg1", appType: "cx43", relayType: "cx23",
 };
-const syntheticPrivate = "-----BEGIN OPENSSH PRIVATE KEY-----\nZml4dHVyZQ==\n-----END OPENSSH PRIVATE KEY-----\n";
-const hostKey = (byte: number, privateKeySha256: string) => ({
-  publicKey: "ssh-ed25519 " + Buffer.concat([keyBlob.subarray(0, 19), Buffer.alloc(32, byte)]).toString("base64"),
-  privateKeySha256,
-});
-const relayKey = hostKey(2, createHash("sha256").update(syntheticPrivate).digest("hex"));
-const bootstrapFields = { bootstrapHostKeys: { relay: relayKey }, bootstrapOperatorPublicKey: sshPublicKey };
+const syntheticNonce = "0123456789abcdef".repeat(4);
+const nonceFile = syntheticNonce + "\n";
+const proof = (nonceSha256: string) => ({ nonceSha256 });
+const relayProof = proof(createHash("sha256").update(nonceFile).digest("hex"));
+const bootstrapFields = { bootstrapProofs: { relay: relayProof }, bootstrapOperatorPublicKey: sshPublicKey };
 
 test("rejects mismatched leases and unsupported resource inputs", () => {
   for (const changed of [
@@ -76,60 +74,70 @@ test("allows only explicit original console probe mode", () => {
   expect(() => parseInput({ ...foundation, probeOnly: true }, "foundation")).toThrow();
 });
 
-test("requires exactly the planned bootstrap roles and distinct canonical public keys", () => {
+test("requires exactly the planned bootstrap roles and distinct proof nonces", () => {
   const probe = { ...cohort, probeOnly: true as const, ...bootstrapFields };
   expect(parseInput(probe, "original")).toEqual(probe);
   const full = { ...cohort, phase: "replacement" as const,
-    ...bootstrapFields, bootstrapHostKeys: { app: hostKey(3, "a".repeat(64)), relay: relayKey } };
+    ...bootstrapFields, bootstrapProofs: { app: proof("a".repeat(64)), relay: relayProof } };
   expect(parseInput(full, "replacement")).toEqual(full);
   expect(() => parseInput({ ...foundation, ...bootstrapFields }, "foundation")).toThrow();
   for (const changes of [
     { bootstrapOperatorPublicKey: undefined },
     { bootstrapOperatorPublicKey: sshPublicKey + " comment" },
-    { bootstrapHostKeys: {} },
-    { bootstrapHostKeys: { relay: { ...relayKey, publicKey: sshPublicKey } } },
-    { bootstrapHostKeys: { relay: { ...relayKey, privateKeySha256: "A".repeat(64) } } },
-    { bootstrapHostKeys: { relay: { ...relayKey, path: "outside" } } },
-    { bootstrapHostKeys: full.bootstrapHostKeys },
+    { bootstrapProofs: {} },
+    { bootstrapProofs: { relay: proof("A".repeat(64)) } },
+    { bootstrapProofs: { relay: { ...relayProof, publicKey: sshPublicKey } } },
+    { bootstrapProofs: { relay: { ...relayProof, path: "outside" } } },
+    { bootstrapProofs: full.bootstrapProofs },
+    { bootstrapHostKeys: { relay: relayProof } },
   ]) {
     expect(() => parseInput({ ...probe, ...changes }, "original")).toThrow();
   }
-  expect(() => parseInput({ ...full, bootstrapHostKeys: { relay: relayKey, app: relayKey } }, "replacement")).toThrow();
-  expect(() => parseInput({ ...full, bootstrapHostKeys: {
-    relay: relayKey, app: hostKey(3, relayKey.privateKeySha256),
-  } }, "replacement")).toThrow();
-  expect(() => parseInput({ ...full, bootstrapHostKeys: { relay: relayKey } }, "replacement")).toThrow();
+  expect(() => parseInput({ ...full, bootstrapProofs: { relay: relayProof, app: relayProof } }, "replacement")).toThrow();
+  expect(() => parseInput({ ...full, bootstrapProofs: { relay: relayProof } }, "replacement")).toThrow();
 });
 
-test("only reads the exact bound private sibling and renders one root key", () => {
+test("only reads the exact bound nonce sibling and renders no private key", () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), "terrace-bootstrap-test-"));
   try {
     const inputPath = join(directory, "original-input.json");
-    const privatePath = join(directory, "original-relay-bootstrap-ed25519");
+    const privatePath = join(directory, "original-relay-bootstrap-nonce");
     writeFileSync(inputPath, JSON.stringify({ ...cohort, probeOnly: true, ...bootstrapFields }), { mode: 0o600 });
     const input = readInput(inputPath, "original");
     if (input.phase !== "original") throw new Error("wrong fixture phase");
-    writeFileSync(privatePath, syntheticPrivate, { mode: 0o600 });
-    const expected = renderBootstrapCloudConfig(relayKey.publicKey, syntheticPrivate, sshPublicKey);
+    writeFileSync(privatePath, nonceFile, { mode: 0o600 });
+    const context = { nonce: syntheticNonce, run, phase: "original", role: "relay" };
+    const expected = renderBootstrapCloudConfig(context, sshPublicKey);
     expect(readBootstrapUserData(inputPath, input)).toEqual({ relay: expected });
     expect(expected.startsWith("#cloud-config\n")).toBe(true);
+    expect(expected).not.toContain("PRIVATE KEY");
     const config = JSON.parse(expected.slice("#cloud-config\n".length));
-    expect(config).not.toHaveProperty("ssh_genkeytypes");
-    expect(config).toEqual({
+    expect(config).not.toHaveProperty("ssh_keys");
+    const { runcmd, ...rest } = config;
+    expect(rest).toEqual({
       users: [{ name: "root", lock_passwd: true, ssh_authorized_keys: [sshPublicKey] }],
       disable_root: false, allow_public_ssh_keys: false, ssh_pwauth: false,
-      ssh_deletekeys: true,
-      ssh_keys: { ed25519_public: relayKey.publicKey, ed25519_private: syntheticPrivate },
+      ssh_deletekeys: true, ssh_genkeytypes: ["ed25519"],
       ssh_quiet_keygen: true, ssh_publish_hostkeys: { enabled: false },
       ssh: { emit_keys_to_console: false }, no_ssh_fingerprints: true,
       write_files: [{
         path: "/etc/ssh/sshd_config.d/00-terrace-bootstrap.conf", owner: "root:root", permissions: "0644",
         content: "HostKey /etc/ssh/ssh_host_ed25519_key\nAllowUsers root\nPubkeyAuthentication yes\n"
           + "AuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-          + "HostbasedAuthentication no\nGSSAPIAuthentication no\nPermitRootLogin prohibit-password\n",
+          + "HostbasedAuthentication no\nGSSAPIAuthentication no\nPermitRootLogin prohibit-password\n"
+          + "Banner /etc/ssh/terrace-hostkey-proof\n",
+      }, {
+        path: "/run/terrace-bootstrap/proof.json", owner: "root:root", permissions: "0600",
+        content: JSON.stringify(context),
       }],
-      runcmd: [["systemctl", "reload-or-restart", "ssh.service"]],
     });
+    expect(runcmd.length).toBe(2);
+    expect(runcmd[0].slice(0, 2)).toEqual(["python3", "-c"]);
+    expect(runcmd[1]).toEqual(["systemctl", "reload-or-restart", "ssh.service"]);
+    for (const bad of [{ ...context, nonce: "A".repeat(64) }, { ...context, run: "x" },
+      { ...context, phase: "foundation" }, { ...context, role: "other" }]) {
+      expect(() => renderBootstrapCloudConfig(bad, sshPublicKey)).toThrow();
+    }
     expect(() => readBootstrapUserData(join(directory, "replacement-input.json"), input)).toThrow();
     chmodSync(directory, 0o755);
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
@@ -141,12 +149,12 @@ test("only reads the exact bound private sibling and renders one root key", () =
     linkSync(privatePath, extra);
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
     unlinkSync(extra);
-    writeFileSync(privatePath, "x".repeat(2049));
+    writeFileSync(privatePath, "x".repeat(66));
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
-    writeFileSync(privatePath, syntheticPrivate + "\n");
+    writeFileSync(privatePath, syntheticNonce);
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
     unlinkSync(privatePath);
-    writeFileSync(extra, syntheticPrivate, { mode: 0o600 });
+    writeFileSync(extra, nonceFile, { mode: 0o600 });
     symlinkSync(extra, privatePath);
     expect(() => readBootstrapUserData(inputPath, input)).toThrow();
   } finally {
@@ -169,7 +177,7 @@ test("marks provider user data secret before registering the only probe server",
     }, "terrace-cloud-rehearsal", "original", false);
     const inputPath = join(directory, "original-input.json");
     writeFileSync(inputPath, JSON.stringify({ ...cohort, probeOnly: true, ...bootstrapFields }), { mode: 0o600 });
-    writeFileSync(join(directory, "original-relay-bootstrap-ed25519"), syntheticPrivate, { mode: 0o600 });
+    writeFileSync(join(directory, "original-relay-bootstrap-nonce"), nonceFile, { mode: 0o600 });
     const output = declareResources(readInput(inputPath, "original"), inputPath);
     expect(await new Promise(resolve => output.apply(resolve))).toEqual({
       servers: [16], primary_ips: [14], firewalls: [], ssh_keys: [],
@@ -177,7 +185,8 @@ test("marks provider user data secret before registering the only probe server",
     expect([...resources.keys()].sort()).toEqual(["relay", "relay-ip"]);
     const userData = resources.get("relay")?.inputs.userData;
     expect(isRpcSecret(userData)).toBe(true);
-    expect(unwrapRpcSecret(userData)).toEqual(renderBootstrapCloudConfig(relayKey.publicKey, syntheticPrivate, sshPublicKey));
+    expect(unwrapRpcSecret(userData)).toEqual(renderBootstrapCloudConfig(
+      { nonce: syntheticNonce, run, phase: "original", role: "relay" }, sshPublicKey));
     expect(resources.get("relay-ip")?.inputs.userData).toBeUndefined();
   } finally {
     rmSync(directory, { recursive: true, force: true });
