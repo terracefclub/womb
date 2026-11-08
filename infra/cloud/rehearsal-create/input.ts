@@ -13,9 +13,11 @@ type Foundation = {
 };
 
 type HostRole = "app" | "relay";
-type BootstrapKey = { publicKey: string; privateKeySha256: string };
+// Each role's one-use proof nonce stays in a private file beside the input.
+// The reviewed input binds only its digest; no host private key exists here.
+type BootstrapProof = { nonceSha256: string };
 type BootstrapInput = {
-  bootstrapHostKeys: Partial<Record<HostRole, BootstrapKey>>;
+  bootstrapProofs: Partial<Record<HostRole, BootstrapProof>>;
   bootstrapOperatorPublicKey: string;
 };
 
@@ -31,12 +33,12 @@ type CohortBase = {
   probeOnly?: true;
 };
 
-type Cohort = CohortBase & (BootstrapInput | { bootstrapHostKeys?: never; bootstrapOperatorPublicKey?: never });
+type Cohort = CohortBase & (BootstrapInput | { bootstrapProofs?: never; bootstrapOperatorPublicKey?: never });
 
 export type RehearsalInput = Foundation | Cohort;
 
 const MAX_INPUT = 4096;
-const MAX_PRIVATE_KEY = 2048;
+const NONCE_FILE = /^[a-f0-9]{64}\n$/;
 const ED25519_PREFIX = Buffer.from("0000000b7373682d6564323535313900000020", "hex");
 
 export function cohortRoles(probeOnly?: true): readonly HostRole[] {
@@ -83,25 +85,21 @@ function canonicalPublicKey(value: unknown): string {
 
 function parseBootstrap(record: Record<string, unknown>, roles: readonly HostRole[]): BootstrapInput {
   const operator = canonicalPublicKey(record.bootstrapOperatorPublicKey);
-  const supplied = recordOf(record.bootstrapHostKeys);
+  const supplied = recordOf(record.bootstrapProofs);
   exactKeys(supplied, [...roles]);
-  const hostKeys: BootstrapInput["bootstrapHostKeys"] = {};
-  const keys = new Set([operator]);
+  const proofs: BootstrapInput["bootstrapProofs"] = {};
   const hashes = new Set<string>();
   for (const role of roles) {
     const entry = recordOf(supplied[role]);
-    exactKeys(entry, ["publicKey", "privateKeySha256"]);
-    const key = canonicalPublicKey(entry.publicKey);
-    const hash = entry.privateKeySha256;
-    if (typeof hash !== "string" || hash.length !== 64 || !/^[a-f0-9]+$/.test(hash)
-      || keys.has(key) || hashes.has(hash)) {
-      throw new Error("invalid or reused bootstrap host key");
+    exactKeys(entry, ["nonceSha256"]);
+    const hash = entry.nonceSha256;
+    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash) || hashes.has(hash)) {
+      throw new Error("invalid or reused bootstrap proof nonce");
     }
-    keys.add(key);
     hashes.add(hash);
-    hostKeys[role] = { publicKey: key, privateKeySha256: hash };
+    proofs[role] = { nonceSha256: hash };
   }
-  return { bootstrapHostKeys: hostKeys, bootstrapOperatorPublicKey: operator };
+  return { bootstrapProofs: proofs, bootstrapOperatorPublicKey: operator };
 }
 
 export function parseInput(value: unknown, stack: string): RehearsalInput {
@@ -132,9 +130,9 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     if (stack !== "original" || record.probeOnly !== true) throw new Error("invalid console probe mode");
     expected.push("probeOnly");
   }
-  const bootstrap = Object.prototype.hasOwnProperty.call(record, "bootstrapHostKeys")
+  const bootstrap = Object.prototype.hasOwnProperty.call(record, "bootstrapProofs")
     || Object.prototype.hasOwnProperty.call(record, "bootstrapOperatorPublicKey");
-  if (bootstrap) expected.push("bootstrapHostKeys", "bootstrapOperatorPublicKey");
+  if (bootstrap) expected.push("bootstrapProofs", "bootstrapOperatorPublicKey");
   exactKeys(record, expected);
   const { image, location, appType, relayType } = record;
   if (image !== "debian-13" || typeof location !== "string"
@@ -189,7 +187,7 @@ export function readInput(path: string | undefined, stack: string): RehearsalInp
 }
 
 export function readBootstrapUserData(path: string | undefined, input: Cohort): Partial<Record<HostRole, string>> {
-  if (!input.bootstrapHostKeys) return {};
+  if (!input.bootstrapProofs) return {};
   if (!path || !isAbsolute(path) || basename(path) !== input.phase + "-input.json") {
     throw new Error("invalid bootstrap input path");
   }
@@ -201,16 +199,19 @@ export function readBootstrapUserData(path: string | undefined, input: Cohort): 
   }
   const result: Partial<Record<HostRole, string>> = {};
   for (const role of cohortRoles(input.probeOnly)) {
-    const key = input.bootstrapHostKeys[role];
-    const bytes = readPrivateFile(join(directory, input.phase + "-" + role + "-bootstrap-ed25519"), MAX_PRIVATE_KEY);
-    if (!key || createHash("sha256").update(bytes).digest("hex") !== key.privateKeySha256) {
-      throw new Error("bootstrap private key digest mismatch");
+    const proof = input.bootstrapProofs[role];
+    const bytes = readPrivateFile(join(directory, input.phase + "-" + role + "-bootstrap-nonce"), 65);
+    if (!proof || createHash("sha256").update(bytes).digest("hex") !== proof.nonceSha256) {
+      throw new Error("bootstrap proof nonce digest mismatch");
     }
-    const privateKey = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    if (!/^-----BEGIN OPENSSH PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]+\n)+-----END OPENSSH PRIVATE KEY-----\n$/.test(privateKey)) {
-      throw new Error("invalid bootstrap private key encoding");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (!NONCE_FILE.test(text) || new Set(text.trimEnd()).size < 8) {
+      throw new Error("invalid bootstrap proof nonce encoding");
     }
-    result[role] = renderBootstrapCloudConfig(key.publicKey, privateKey, input.bootstrapOperatorPublicKey);
+    result[role] = renderBootstrapCloudConfig(
+      { nonce: text.trimEnd(), run: input.run, phase: input.phase, role },
+      input.bootstrapOperatorPublicKey,
+    );
   }
   return result;
 }

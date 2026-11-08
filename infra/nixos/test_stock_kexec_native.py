@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import selectors
 import shlex
 import signal
@@ -30,6 +31,8 @@ BASE_SHA512 = (
     "a91d64465a9bfd8f2a78c566fcbcb0842eacc91c09efdef72d719d9f13b535"
 )
 ALIAS = "terrace-stock-kexec-fixture"
+FIXTURE_RUN = "f1" * 16
+PROOF_CONTEXT = (FIXTURE_RUN, "original", "relay")
 PREFIX = "original-relay"
 FIXTURE_MAC = "52:54:00:12:34:56"
 FIXTURE_IP = socket.inet_ntoa(EXPECTED)
@@ -99,19 +102,20 @@ def private_text(path, text):
         stream.write(text)
 
 
-def render_seed(args, directory, seed, stock_public, operator_public):
+def render_seed(args, directory, seed, nonce, operator_public):
     renderer = Path(__file__).resolve().parents[1] / "cloud/rehearsal-create/bootstrap.ts"
     script = """
 import { pathToFileURL } from "node:url";
-const [renderer, privateKeyPath, hostPublicKey, operatorPublicKey] = process.argv.slice(1);
+const [renderer, noncePath, run, phase, role, operatorPublicKey] = process.argv.slice(1);
 const { renderBootstrapCloudConfig } = await import(pathToFileURL(renderer).href);
-const hostPrivateKey = await Bun.file(privateKeyPath).text();
-process.stdout.write(renderBootstrapCloudConfig(hostPublicKey, hostPrivateKey, operatorPublicKey));
+const nonce = (await Bun.file(noncePath).text()).trim();
+process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, operatorPublicKey));
 """
     user_data = install.checked_process(
-        ["bun", "-e", script, str(renderer), str(directory / "stock-ed25519"),
-         stock_public, operator_public], 10, capture=True
+        ["bun", "-e", script, str(renderer), str(directory / f"{PREFIX}-bootstrap-nonce"),
+         *PROOF_CONTEXT, operator_public], 10, capture=True
     ).decode("utf-8")
+    install.require("PRIVATE KEY" not in user_data and nonce in user_data, "unexpected bootstrap user data")
     install.require(user_data.startswith("#cloud-config\n"), "creator did not return cloud config")
     data = directory / "user-data"
     metadata = directory / "meta-data"
@@ -169,6 +173,17 @@ def guest(args, overlay, seed, serial, facts, qmp):
             reader.join(timeout=5)
             facts["qemuOff"] = process.poll() is not None and not Path(f"/proc/{process.pid}").exists()
             install.require(facts["qemuOff"] and not reader.is_alive(), "offline guest did not stop")
+
+
+def await_proof(process, seconds, nonce, target):
+    """Wait for the guest's keyed banner; a wrong proof fails at once."""
+    deadline = time.monotonic() + seconds
+    while process.poll() is None and time.monotonic() < deadline:
+        key = install.verified_host_key(nonce, PROOF_CONTEXT, "root@127.0.0.1", target, 20)
+        if key is not None:
+            return key
+        time.sleep(2)
+    raise install.Rejected("offline guest did not publish its host key proof")
 
 
 def await_fact(process, seconds, action):
@@ -493,7 +508,9 @@ def exercise(args, directory, seed, overlay, facts):
     wrong_options = [*install.ssh_options(directory, PREFIX, "wrong"),
                      "-o", "HostKeyAlias=" + ALIAS, "-p", str(args.port)]
     wrong = ["ssh", *wrong_options, "root@127.0.0.1"]
-    public = (directory / "stock-ed25519.pub").read_text().split()[1]
+    nonce = (directory / f"{PREFIX}-bootstrap-nonce").read_text().strip()
+    proof_target = ["-p", str(args.port), "-o", "HostKeyAlias=" + ALIAS]
+    public = None
     operator = (directory / "operator-ed25519.pub").read_text().split()[1]
     serial = bytearray()
     original_remote = install.remote
@@ -505,8 +522,22 @@ def exercise(args, directory, seed, overlay, facts):
         ) as packets, guest(
             args, overlay, seed, serial, facts, Path(monitor) / "qmp.sock"
         ) as process, patch.object(
-            install, "bootstrap_authority", return_value=(binding, public, options, ssh)
+            install, "bootstrap_authority", side_effect=lambda *_args: (binding, public, options, ssh)
         ), patch.object(install, "remaining", side_effect=lambda _directory, _binding, limit: limit):
+            facts["stage"] = "proof"
+            public = await_proof(process, 180, nonce, proof_target)
+            facts["proofPinned"] = True
+            private_text(directory / f"{PREFIX}-bootstrap-known-hosts", f"{ALIAS} ssh-ed25519 {public}\n")
+            for name, wrong_nonce, context in (
+                ("proofWrongNonceRejected", secrets.token_hex(32), PROOF_CONTEXT),
+                ("proofWrongContextRejected", nonce, (FIXTURE_RUN, "replacement", "relay")),
+            ):
+                try:
+                    install.verified_host_key(wrong_nonce, context, "root@127.0.0.1", proof_target, 20)
+                except install.Rejected:
+                    facts[name] = True
+                else:
+                    raise install.Rejected("a wrong host key proof was accepted")
             facts["stage"] = "stock"
             try:
                 await_fact(process, 150, lambda: stock_kexec.stock_boot(ssh, public, directory))
@@ -567,9 +598,8 @@ def exercise(args, directory, seed, overlay, facts):
         if monitor is not None:
             facts["qmpScratchGone"] = not Path(monitor).exists()
             install.require(facts["qmpScratchGone"], "private monitor scratch survived cleanup")
-        private = (directory / "stock-ed25519").read_bytes()
         operator = (directory / "operator-ed25519").read_bytes()
-        forbidden = {b"PRIVATE KEY-----", *private.splitlines()[1:-1], *operator.splitlines()[1:-1]}
+        forbidden = {b"PRIVATE KEY-----", *operator.splitlines()[1:-1]}
         facts["serialPrivateKeyFound"] = any(marker in serial for marker in forbidden if marker)
         lower_serial = serial.lower()
         facts["serialBootMarkers"] = {
@@ -606,13 +636,13 @@ def main():
         install.require(base_digest(args.base) == BASE_SHA512, "Debian base digest differs")
         with tempfile.TemporaryDirectory(prefix="guest-", dir=output) as scratch:
             directory = Path(scratch)
-            stock_public = key(directory / "stock-ed25519")
+            nonce = secrets.token_hex(32)
+            private_text(directory / f"{PREFIX}-bootstrap-nonce", nonce + "\n")
             operator_public = key(directory / "operator-ed25519")
             wrong_public = key(directory / "wrong-ed25519")
-            private_text(directory / f"{PREFIX}-bootstrap-known-hosts", f"{ALIAS} {stock_public}\n")
             private_text(directory / f"{PREFIX}-wrong-known-hosts", f"{ALIAS} {wrong_public}\n")
             seed = directory / "seed.img"
-            render_seed(args, directory, seed, stock_public, operator_public)
+            render_seed(args, directory, seed, nonce, operator_public)
             overlay = directory / "guest.qcow2"
             install.checked_process([args.qemu_img, "create", "-f", "qcow2", "-F", "qcow2",
                                      "-b", str(args.base.resolve()), str(overlay)], 10)

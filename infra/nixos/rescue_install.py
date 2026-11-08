@@ -3,11 +3,13 @@
 import argparse
 import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import signal
 import stat
@@ -35,6 +37,8 @@ STORE = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+_.-]+
 KEY_PREFIX = b"\0\0\0\x0bssh-ed25519\0\0\0\x20"
 BINDING_FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt"}
 BOOT_ID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
+PROOF_LINE = re.compile(rb"terrace-hostkey-proof v1 ([0-9a-f]{64})")
+PROOF_OUTPUT_LIMIT = 65536
 RAM_PROBE = """
 test "$(id -u)" = 0 && test "$(uname -m)" = x86_64
 test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
@@ -284,14 +288,136 @@ def parse_probe(data, device):
 
 
 def reviewed_bootstrap(directory, phase, role):
+    """Return the reviewed run and proof-nonce digest for a known-host bootstrap."""
     from rehearsal_lease import reviewed_phase_input
 
     config, _ = reviewed_phase_input(directory, phase)
-    if "bootstrapHostKeys" not in config:
+    require("bootstrapHostKeys" not in config, "host private keys must not pass through user data")
+    if "bootstrapProofs" not in config:
         return None
-    role_key = config["bootstrapHostKeys"][role]
     require(config["image"] == "debian-13", "unexpected stock bootstrap image")
-    return role_key["publicKey"]
+    proof = config["bootstrapProofs"][role]
+    require(isinstance(proof, dict) and set(proof) == {"nonceSha256"}
+            and re.fullmatch(r"[a-f0-9]{64}", proof["nonceSha256"]), "reviewed bootstrap proof rejected")
+    return config["run"], proof["nonceSha256"]
+
+
+def strong_nonce(text):
+    """A 256-bit lowercase hex nonce that is not an obvious placeholder."""
+    return bool(re.fullmatch(r"[a-f0-9]{64}", text)) and len(set(text)) >= 8
+
+
+def write_proof_nonce(path):
+    """Create one private CSPRNG proof nonce file; never reuse or hand-type one."""
+    nonce = secrets.token_hex(32)
+    require(strong_nonce(nonce), "generated nonce rejected")
+    write_new_text(path, nonce + "\n")
+    return hashlib.sha256((nonce + "\n").encode("ascii")).hexdigest()
+
+
+def proof_mac(nonce, run, phase, role, public):
+    """The MAC the first-boot script publishes for its self-generated host key."""
+    message = "|".join(("terrace-hostkey-v1", run, phase, role, public)).encode("ascii")
+    return hmac.new(bytes.fromhex(nonce), message, hashlib.sha256).hexdigest()
+
+
+def ed25519_key(encoded):
+    blob = base64.b64decode(encoded, validate=True)
+    require(blob.startswith(KEY_PREFIX) and len(blob) == len(KEY_PREFIX) + 32, "invalid Ed25519 host key")
+    return b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
+
+
+def presented_host_key(target, extra, seconds):
+    """Return the host key and proof MACs observed in one unauthenticated SSH session.
+
+    The client offers no authentication method and records the presented key only in
+    a throwaway file. The banner arrives inside the same encrypted transport.
+    """
+    with tempfile.TemporaryDirectory(prefix="terrace-hostkey-proof-") as scratch:
+        known = Path(scratch) / "known_hosts"
+        known.touch(mode=0o600)
+        argv = [
+            "ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={known}", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no",
+            "-o", "HashKnownHosts=no", "-o", "ControlMaster=no", "-o", "ConnectTimeout=10",
+            "-o", "PreferredAuthentications=publickey", "-o", "PubkeyAuthentication=no",
+            "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
+            "-o", "GSSAPIAuthentication=no", "-o", "HostbasedAuthentication=no",
+            "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "ForwardAgent=no",
+            "-o", "ClearAllForwardings=yes", "-o", "LogLevel=INFO", *extra, target, "true",
+        ]
+        try:
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=seconds, check=False)
+        except subprocess.TimeoutExpired:
+            return None, []
+        recorded = known.read_bytes()
+        lines = [line.split() for line in recorded.splitlines() if line.strip()]
+    if len(result.stderr) > PROOF_OUTPUT_LIMIT or not lines:
+        return None, []
+    require(len(lines) == 1 and len(lines[0]) == 3 and lines[0][1] == b"ssh-ed25519",
+            "unexpected presented host key")
+    key = lines[0][2].decode("ascii")
+    ed25519_key(key)
+    return key, [match.decode("ascii") for match in PROOF_LINE.findall(result.stderr)]
+
+
+def verified_host_key(nonce, context, target, extra, seconds):
+    """Return the presented key only if the banner MAC proves it; None if not yet published."""
+    key, macs = presented_host_key(target, extra, seconds)
+    if key is None or not macs:
+        return None
+    expected = proof_mac(nonce, *context, "ssh-ed25519 " + key)
+    require(len(macs) == 1 and hmac.compare_digest(macs[0], expected), "host key proof rejected")
+    return key
+
+
+def proof_nonce(directory, prefix, digest):
+    nonce = read_private(directory / f"{prefix}-bootstrap-nonce", 65)
+    require(sha(nonce) == digest and re.fullmatch(rb"[a-f0-9]{64}\n", nonce)
+            and strong_nonce(nonce.decode("ascii").strip()),
+            "bootstrap proof nonce differs from approved input")
+    return nonce.decode("ascii").strip()
+
+
+def write_new_text(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def prove_host_key(directory, phase, role, *, seconds=300, delay=5):
+    """Pin the self-generated stock host key once, from its keyed banner proof."""
+    reviewed = reviewed_bootstrap(directory, phase, role)
+    require(reviewed is not None, "stock bootstrap was not reviewed")
+    run, digest = reviewed
+    prefix = f"{phase}-{role}"
+    outputs = [directory / f"{prefix}-bootstrap-{name}" for name in ("known-hosts", "fingerprint", "proof.json")]
+    require(not any(os.path.lexists(path) for path in outputs), "bootstrap host key already pinned")
+    nonce = proof_nonce(directory, prefix, digest)
+    deadline = time.monotonic() + seconds
+    while True:
+        binding = lease_binding(directory, phase, role, time.time())
+        key = verified_host_key(nonce, (run, phase, role), "root@" + binding["ipv4"], [],
+                                remaining(directory, binding, 20))
+        if key is not None:
+            break
+        require(time.monotonic() + delay < deadline, "host key proof was not published in time")
+        time.sleep(delay)
+    # The provider must still bind the same server and address after the attempt.
+    current = lease_binding(directory, phase, role, time.time())
+    require((current["serverId"], current["ipv4"]) == (binding["serverId"], binding["ipv4"]),
+            "provider binding changed during the host key proof")
+    fingerprint = ed25519_key(key)
+    write_private(outputs[2], {"run": run, "serverId": binding["serverId"], "ipv4": binding["ipv4"],
+                               "publicKey": "ssh-ed25519 " + key, "nonceSha256": digest,
+                               "fingerprint": fingerprint.decode("ascii")})
+    write_new_text(outputs[0], f"{binding['ipv4']} ssh-ed25519 {key}\n")
+    write_new_text(outputs[1], fingerprint.decode("ascii") + "\n")
+    return key
 
 
 def bootstrap_authority(directory, phase, role):
@@ -302,7 +428,11 @@ def bootstrap_authority(directory, phase, role):
     ipv4 = binding["ipv4"]
     key = known_key(read_private(directory / f"{prefix}-bootstrap-known-hosts", 4096), ipv4,
                     read_private(directory / f"{prefix}-bootstrap-fingerprint", 128))
-    require(reviewed == "ssh-ed25519 " + key, "stock pin differs from the reviewed host key")
+    proof, _ = read_json(directory / f"{prefix}-bootstrap-proof.json")
+    require(proof == {"run": reviewed[0], "serverId": binding["serverId"], "ipv4": ipv4,
+                      "publicKey": "ssh-ed25519 " + key, "nonceSha256": reviewed[1],
+                      "fingerprint": ed25519_key(key).decode("ascii")},
+            "stock pin differs from the proven host key")
     options = ssh_options(directory, prefix, "bootstrap")
     return binding, key, options, ["ssh", *options, "root@" + ipv4]
 

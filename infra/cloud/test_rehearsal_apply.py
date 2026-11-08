@@ -1,5 +1,4 @@
 import copy
-import base64
 import hashlib
 import json
 import os
@@ -46,51 +45,55 @@ def saved_plan(phase, *, probe_only=False):
 
 
 class RehearsalApplyTest(unittest.TestCase):
-    def test_replacement_keeps_bootstrap_mode_and_rejects_previous_keys(self):
-        original = {"app": {"publicKey": "ssh-ed25519 " + "x" * 68, "privateKeySha256": "a" * 64}}
-        fresh = {"publicKey": "ssh-ed25519 " + "y" * 68, "privateKeySha256": "b" * 64}
+    def test_replacement_keeps_bootstrap_mode_and_rejects_previous_nonces(self):
         operator = "ssh-ed25519 " + "z" * 68
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            write_reviewed_input(root, {"run": RUN, "phase": "original", "bootstrapHostKeys": original})
+            old_nonce = b"0123456789abcdef" * 4 + b"\n"
+            original = {"app": {"nonceSha256": hashlib.sha256(old_nonce).hexdigest()}}
+            write_reviewed_input(root, {"run": RUN, "phase": "original", "bootstrapProofs": original})
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator})
             with self.assertRaisesRegex(lease.Rejected, "mode differs"):
                 apply.bootstrap_material(root, "replacement", {}, probe_only=False)
-            for field in ("publicKey", "privateKeySha256"):
-                cfg = {"bootstrapOperatorPublicKey": operator, "bootstrapHostKeys": {
-                    "relay": {**fresh, field: original["app"][field]}, "app": fresh}}
-                with self.assertRaisesRegex(lease.Rejected, "keys must differ"):
-                    apply.bootstrap_material(root, "replacement", cfg, probe_only=False)
+            for role in ("app", "relay"):
+                (root / f"replacement-{role}-bootstrap-nonce").write_bytes(old_nonce if role == "relay" else b"fedcba9876543210" * 4 + b"\n")
+                (root / f"replacement-{role}-bootstrap-nonce").chmod(0o600)
+            cfg = {"bootstrapOperatorPublicKey": operator, "bootstrapProofs": {
+                "relay": original["app"], "app": {"nonceSha256": hashlib.sha256(b"fedcba9876543210" * 4 + b"\n").hexdigest()}}}
+            with self.assertRaisesRegex(lease.Rejected, "nonces must differ"):
+                apply.bootstrap_material(root, "replacement", cfg, probe_only=False)
 
-    def test_bootstrap_key_is_bound_to_reviewed_bytes_and_public_pin(self):
-        body = b"syntheticPrivateKeyBodyOnly" * 3
-        private = b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + body + b"\n-----END OPENSSH PRIVATE KEY-----\n"
-        public = "ssh-ed25519 " + "x" * 68
+    def test_bootstrap_proof_is_bound_to_reviewed_nonce_and_rejects_private_keys(self):
+        nonce = b"0123456789abcdef" * 4 + b"\n"
         operator = "ssh-ed25519 " + "y" * 68
         cfg = {"bootstrapOperatorPublicKey": operator,
-               "bootstrapHostKeys": {"relay": {"publicKey": public,
-                                                  "privateKeySha256": hashlib.sha256(private).hexdigest()}}}
+               "bootstrapProofs": {"relay": {"nonceSha256": hashlib.sha256(nonce).hexdigest()}}}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator + " comment"})
-            path = root / "original-relay-bootstrap-ed25519"
-            path.write_bytes(private)
+            path = root / "original-relay-bootstrap-nonce"
+            path.write_bytes(nonce)
             path.chmod(0o600)
-            with patch.object(apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, public.encode())):
-                needles = apply.bootstrap_material(root, "original", cfg, probe_only=True)
-                with self.assertRaises(lease.Rejected):
-                    apply.bootstrap_material(root, "original", cfg, probe_only=False)
-                with self.assertRaisesRegex(lease.Rejected, "differs from the foundation"):
-                    apply.bootstrap_material(root, "original", {**cfg, "bootstrapOperatorPublicKey": public},
-                                             probe_only=True)
-            for leak in (private, body, base64.b64encode(b"x" + body)):
+            needles = apply.bootstrap_material(root, "original", cfg, probe_only=True)
+            self.assertEqual(needles, (b"PRIVATE KEY-----",))
+            with self.assertRaises(lease.Rejected):
+                apply.bootstrap_material(root, "original", cfg, probe_only=False)
+            with self.assertRaisesRegex(lease.Rejected, "differs from the foundation"):
+                apply.bootstrap_material(root, "original", {**cfg, "bootstrapOperatorPublicKey": "ssh-ed25519 " + "x" * 68},
+                                         probe_only=True)
+            with self.assertRaisesRegex(lease.Rejected, "must not pass through user data"):
+                apply.bootstrap_material(root, "original", {**cfg, "bootstrapHostKeys": {}}, probe_only=True)
+            for leak in (b"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA", b"-----BEGIN PRIVATE KEY-----"):
                 with self.assertRaisesRegex(lease.Rejected, "unencrypted"):
                     apply.reject_plaintext(leak, needles)
-            with patch.object(apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"wrong pin")):
-                with self.assertRaisesRegex(lease.Rejected, "does not match approved private key"):
-                    apply.bootstrap_material(root, "original", cfg, probe_only=True)
-            path.write_bytes(private + b"changed")
-            with self.assertRaisesRegex(lease.Rejected, "bytes differ"):
+            # The low-value proof nonce may appear in bridge metadata.
+            apply.reject_plaintext(nonce, needles)
+            path.write_bytes(b"ab" * 32 + b"\n")
+            with self.assertRaisesRegex(lease.Rejected, "nonce differs"):
+                apply.bootstrap_material(root, "original", {**cfg, "bootstrapProofs": {"relay": {
+                    "nonceSha256": hashlib.sha256(b"ab" * 32 + b"\n").hexdigest()}}}, probe_only=True)
+            path.write_bytes(b"0" * 64 + b"\n")
+            with self.assertRaisesRegex(lease.Rejected, "nonce differs"):
                 apply.bootstrap_material(root, "original", cfg, probe_only=True)
 
     def test_bootstrap_plan_and_checkpoint_require_ciphertext(self):

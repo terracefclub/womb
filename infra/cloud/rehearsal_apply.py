@@ -1,7 +1,6 @@
 """Preview and apply exact create-only Pulumi plans for an armed cloud lease."""
 
 import argparse
-import base64
 from collections import Counter
 import fcntl
 import hashlib
@@ -105,52 +104,50 @@ def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False)
 
 
 def bootstrap_material(directory, phase, config, *, probe_only):
-    original_keys = None
+    """Validate the reviewed host-key proof scope and return private-key needles.
+
+    Bootstrap hosts generate their own SSH host key. User data carries only a one-use
+    proof nonce, which may appear in the plan and backend: the hcloud bridge copies
+    raw user data into unencrypted plan metadata. No private key may appear anywhere.
+    """
+    original_proofs = None
     if phase == "replacement":
         original, _ = lease.reviewed_phase_input(directory, "original")
-        original_keys = original.get("bootstrapHostKeys")
-        if ("bootstrapHostKeys" in original) != ("bootstrapHostKeys" in config):
+        original_proofs = original.get("bootstrapProofs")
+        if ("bootstrapProofs" in original) != ("bootstrapProofs" in config):
             raise lease.Rejected("replacement bootstrap mode differs from the original")
-    if "bootstrapHostKeys" not in config:
+    if "bootstrapHostKeys" in config:
+        raise lease.Rejected("host private keys must not pass through user data")
+    if "bootstrapProofs" not in config:
         if "bootstrapOperatorPublicKey" in config:
             raise lease.Rejected("bootstrap operator key is outside a bootstrap phase")
         return ()
-    keys = config["bootstrapHostKeys"]
+    proofs = config["bootstrapProofs"]
     roles = {"relay"} if probe_only else set(lease.ROLES)
-    if phase not in lease.PHASES or not isinstance(keys, dict) or set(keys) != roles:
-        raise lease.Rejected("bootstrap host key scope rejected")
+    if phase not in lease.PHASES or not isinstance(proofs, dict) or set(proofs) != roles:
+        raise lease.Rejected("bootstrap proof scope rejected")
     operator = config.get("bootstrapOperatorPublicKey", "")
     foundation = read_json(directory / "foundation-input.json")["sshPublicKey"]
     if (not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", operator)
             or operator != " ".join(foundation.split()[:2])):
         raise lease.Rejected("bootstrap operator key differs from the foundation")
-    needles = {b"-----BEGIN OPENSSH PRIVATE KEY-----"}
-    for role, key in keys.items():
-        if (not isinstance(key, dict) or set(key) != {"publicKey", "privateKeySha256"}
-                or not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}", key["publicKey"])
-                or not re.fullmatch(r"[a-f0-9]{64}", key["privateKeySha256"])):
-            raise lease.Rejected("bootstrap key format rejected")
-        if original_keys and any(
-            key[field] == original[field]
-            for original in original_keys.values() for field in ("publicKey", "privateKeySha256")
-        ):
-            raise lease.Rejected("replacement bootstrap keys must differ from the original")
-        path = directory / f"{phase}-{role}-bootstrap-ed25519"
-        private = lease.read_private(path, 8192)
-        if hashlib.sha256(private).hexdigest() != key["privateKeySha256"]:
-            raise lease.Rejected("bootstrap key bytes differ from approved input")
-        result = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", str(path)],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                check=False, timeout=5)
-        if (result.returncode or b" ".join(result.stdout.split()[:2]) != key["publicKey"].encode("ascii")
-                or lease.read_private(path, 8192) != private):
-            raise lease.Rejected("bootstrap public key does not match approved private key")
-        for line in private.splitlines()[1:-1]:
-            if len(line) >= 48:
-                needles.add(line)
-                # Detect plaintext or a base64 wrapper with any byte alignment.
-                needles.update(base64.b64encode(line[i:i + 45]) for i in range(3))
-    return tuple(needles)
+    seen = set()
+    for role, proof in proofs.items():
+        if (not isinstance(proof, dict) or set(proof) != {"nonceSha256"}
+                or not re.fullmatch(r"[a-f0-9]{64}", proof["nonceSha256"])
+                or proof["nonceSha256"] in seen):
+            raise lease.Rejected("bootstrap proof format rejected")
+        seen.add(proof["nonceSha256"])
+        if original_proofs and any(proof["nonceSha256"] == old["nonceSha256"]
+                                   for old in original_proofs.values()):
+            raise lease.Rejected("replacement proof nonces must differ from the original")
+        nonce = lease.read_private(directory / f"{phase}-{role}-bootstrap-nonce", 65)
+        if (hashlib.sha256(nonce).hexdigest() != proof["nonceSha256"] or not re.fullmatch(rb"[a-f0-9]{64}\n", nonce)
+                or len(set(nonce.strip())) < 8):
+            raise lease.Rejected("bootstrap proof nonce differs from approved input")
+    # No private key is an input any more. Still reject any PEM or OpenSSH
+    # private-key armor marker in output, plan and artifacts.
+    return (b"PRIVATE KEY-----",)
 
 
 def reject_plaintext(data, needles):

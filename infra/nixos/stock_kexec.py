@@ -51,7 +51,9 @@ read -r kind key _ < <(ssh-keygen -y -f "${keys[0]}")
 test "$kind $key" = "ssh-ed25519 $1"
 mapfile -t -n 2 published <"${keys[1]}"
 test "${#published[@]}" = 1
-test "${published[0]}" = "ssh-ed25519 $1"
+# The host generated this key itself, so ssh-keygen appended a root@host comment.
+read -r kind key _ <<<"${published[0]}"
+test "$kind $key" = "ssh-ed25519 $1"
 auth=/root/.ssh/authorized_keys
 test -f "$auth" && test ! -L "$auth"
 test "$(stat -c '%u:%h' "$auth")" = 0:1
@@ -189,12 +191,16 @@ def main():
     parser.add_argument("phase", choices=install.PHASES)
     parser.add_argument("role", choices=install.ROLES)
     action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--pin-proof", action="store_true")
     action.add_argument("--dispatch", nargs=2, metavar=("ARCHIVE", "SHA256"))
     action.add_argument("--verify-ram", action="store_true")
     args = parser.parse_args()
     try:
         directory = install.private_directory(args.directory)
-        if args.dispatch:
+        if args.pin_proof:
+            install.prove_host_key(directory, args.phase, args.role)
+            print("Self-generated stock host key pinned from its keyed proof.")
+        elif args.dispatch:
             dispatch(directory, args.phase, args.role, *args.dispatch)
             print("Pinned stock host accepted the verified RAM installer dispatch.")
         else:

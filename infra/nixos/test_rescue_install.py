@@ -72,7 +72,7 @@ class RescueInstallTest(unittest.TestCase):
             with self.assertRaises(rescue.Rejected):
                 rescue.known_key(known, address, expected)
 
-    def test_stock_pin_must_match_dispatched_key_before_ssh(self):
+    def test_stock_pin_must_match_the_proven_key_before_ssh(self):
         blob = rescue.KEY_PREFIX + b"x" * 32
         encoded = base64.b64encode(blob).decode()
         fingerprint = b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
@@ -84,27 +84,158 @@ class RescueInstallTest(unittest.TestCase):
             path = self.directory / name
             path.write_bytes(contents)
             path.chmod(0o600)
-        binding = {"ipv4": "1.1.1.1"}
+        proof = {"run": RUN, "serverId": 7, "ipv4": "1.1.1.1", "publicKey": "ssh-ed25519 " + encoded,
+                 "nonceSha256": "d" * 64, "fingerprint": fingerprint.decode()}
+        rescue.write_private(self.directory / "original-relay-bootstrap-proof.json", proof)
+        binding = {"ipv4": "1.1.1.1", "serverId": 7}
         with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
-            rescue, "reviewed_bootstrap", return_value="ssh-ed25519 " + encoded
+            rescue, "reviewed_bootstrap", return_value=(RUN, "d" * 64)
         ) as reviewed:
             _, key, options, ssh = rescue.bootstrap_authority(self.directory, "original", "relay")
             self.assertEqual(key, encoded)
             self.assertIn("StrictHostKeyChecking=yes", options)
             self.assertTrue(any(x.endswith("original-relay-bootstrap-known-hosts") for x in options))
             self.assertEqual(ssh[-1], "root@1.1.1.1")
-            reviewed.return_value = "ssh-ed25519 another"
-            with self.assertRaisesRegex(rescue.Rejected, "reviewed host key"):
+            reviewed.return_value = (RUN, "e" * 64)
+            with self.assertRaisesRegex(rescue.Rejected, "proven host key"):
+                rescue.bootstrap_authority(self.directory, "original", "relay")
+            reviewed.return_value = (RUN, "d" * 64)
+            binding["serverId"] = 8
+            with self.assertRaisesRegex(rescue.Rejected, "proven host key"):
                 rescue.bootstrap_authority(self.directory, "original", "relay")
 
-    def test_stock_published_key_accepts_one_exact_line_with_or_without_lf(self):
+    SAFE_SESSION = ("BatchMode=yes", "StrictHostKeyChecking=accept-new", "GlobalKnownHostsFile=/dev/null",
+                    "HostKeyAlgorithms=ssh-ed25519", "UpdateHostKeys=no", "CheckHostIP=no", "HashKnownHosts=no",
+                    "ControlMaster=no", "PreferredAuthentications=publickey", "PubkeyAuthentication=no",
+                    "PasswordAuthentication=no", "KbdInteractiveAuthentication=no", "GSSAPIAuthentication=no",
+                    "HostbasedAuthentication=no", "IdentitiesOnly=yes", "IdentityAgent=none", "ForwardAgent=no",
+                    "ClearAllForwardings=yes")
+
+    def fake_session(self, key, banners, *, known_text=None, stderr_extra=b""):
+        """Simulate one SSH session that records `key` and prints `banners` on stderr."""
+        def run(argv, **_kwargs):
+            known = next(Path(x.split("=", 1)[1]) for x in argv if x.startswith("UserKnownHostsFile="))
+            if known_text is not None:
+                known.write_text(known_text)
+            elif key is not None:
+                known.write_text(f"1.1.1.1 ssh-ed25519 {key}\n")
+            self.assertEqual(argv[:3], ["ssh", "-F", "/dev/null"])
+            self.assertEqual(argv[-1], "true")
+            for option in self.SAFE_SESSION:
+                self.assertIn(option, argv)
+            self.assertFalse(any(x == "-i" or x.startswith("IdentityFile") for x in argv))
+            stderr = b"Warning: Permanently added '1.1.1.1' (ED25519) to the list of known hosts.\r\n"
+            stderr += b"".join(b"terrace-hostkey-proof v1 " + mac.encode() + b"\r\n" for mac in banners)
+            return subprocess.CompletedProcess(argv, 255, b"", stderr + stderr_extra
+                                               + b"root@1.1.1.1: Permission denied (publickey).\r\n")
+        return patch.object(rescue.subprocess, "run", side_effect=run)
+
+    def test_host_key_proof_session_rejects_odd_records_and_bounds_output(self):
+        nonce = "0123456789abcdef" * 4
+        context = (RUN, "original", "relay")
+        genuine = base64.b64encode(rescue.KEY_PREFIX + b"g" * 32).decode()
+        mac = rescue.proof_mac(nonce, *context, "ssh-ed25519 " + genuine)
+        for text in (f"1.1.1.1 ssh-ed25519 {genuine}\n1.1.1.1 ssh-ed25519 {genuine}\n",
+                     f"1.1.1.1 ssh-rsa {genuine}\n",
+                     "1.1.1.1 ssh-ed25519 " + base64.b64encode(b"x" * 51).decode() + "\n"):
+            with self.fake_session(genuine, [mac], known_text=text), self.assertRaises(rescue.Rejected):
+                rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        with self.fake_session(genuine, [mac], stderr_extra=b"x" * rescue.PROOF_OUTPUT_LIMIT):
+            self.assertIsNone(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5))
+        with patch.object(rescue.subprocess, "run", side_effect=subprocess.TimeoutExpired(["ssh"], 5)):
+            self.assertIsNone(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5))
+
+    def test_proof_nonce_generation_and_entropy(self):
+        path = self.directory / "original-relay-bootstrap-nonce"
+        digest = rescue.write_proof_nonce(path)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(rescue.proof_nonce(self.directory, "original-relay", digest), path.read_text().strip())
+        with self.assertRaises(FileExistsError):
+            rescue.write_proof_nonce(path)
+        self.assertFalse(rescue.strong_nonce("a" * 64))
+        self.assertFalse(rescue.strong_nonce("ab" * 32))
+        weak = self.directory / "replacement-relay-bootstrap-nonce"
+        weak.write_text("ab" * 32 + "\n")
+        weak.chmod(0o600)
+        with self.assertRaisesRegex(rescue.Rejected, "nonce differs"):
+            rescue.proof_nonce(self.directory, "replacement-relay", hashlib.sha256(weak.read_bytes()).hexdigest())
+
+    def test_host_key_proof_binds_nonce_context_and_presented_key(self):
+        nonce = "0123456789abcdef" * 4
+        context = (RUN, "original", "relay")
+        genuine = base64.b64encode(rescue.KEY_PREFIX + b"g" * 32).decode()
+        attacker = base64.b64encode(rescue.KEY_PREFIX + b"a" * 32).decode()
+        mac = rescue.proof_mac(nonce, *context, "ssh-ed25519 " + genuine)
+        with self.fake_session(genuine, [mac]):
+            self.assertEqual(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5), genuine)
+        # A relayed genuine banner does not vouch for a substituted key.
+        with self.fake_session(attacker, [mac]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+            rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        for wrong in (rescue.proof_mac("f" * 64, *context, "ssh-ed25519 " + genuine),
+                      rescue.proof_mac(nonce, RUN, "replacement", "relay", "ssh-ed25519 " + genuine)):
+            with self.fake_session(genuine, [wrong]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+                rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        with self.fake_session(genuine, [mac, mac]), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+            rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5)
+        # Not yet published: retry later rather than trust anything.
+        for key, banners in ((genuine, []), (None, [])):
+            with self.fake_session(key, banners):
+                self.assertIsNone(rescue.verified_host_key(nonce, context, "root@1.1.1.1", [], 5))
+
+    def test_proof_pins_exactly_once_from_the_reviewed_nonce(self):
+        nonce = "0123456789abcdef" * 4
+        digest = hashlib.sha256((nonce + "\n").encode()).hexdigest()
+        path = self.directory / "original-relay-bootstrap-nonce"
+        path.write_text(nonce + "\n")
+        path.chmod(0o600)
+        genuine = base64.b64encode(rescue.KEY_PREFIX + b"g" * 32).decode()
+        mac = rescue.proof_mac(nonce, RUN, "original", "relay", "ssh-ed25519 " + genuine)
+        binding = {"ipv4": "1.1.1.1", "serverId": 7}
+        with patch.object(rescue, "lease_binding", return_value=binding), patch.object(
+            rescue, "reviewed_bootstrap", return_value=(RUN, digest)
+        ), patch.object(rescue, "remaining", return_value=20), patch.object(rescue.time, "sleep"):
+            with self.fake_session(genuine, []), self.assertRaisesRegex(rescue.Rejected, "not published in time"):
+                rescue.prove_host_key(self.directory, "original", "relay", seconds=1, delay=5)
+            self.assertFalse((self.directory / "original-relay-bootstrap-known-hosts").exists())
+            with self.fake_session(genuine, [mac]):
+                self.assertEqual(rescue.prove_host_key(self.directory, "original", "relay"), genuine)
+            self.assertEqual((self.directory / "original-relay-bootstrap-known-hosts").read_text(),
+                             f"1.1.1.1 ssh-ed25519 {genuine}\n")
+            with self.fake_session(genuine, [mac]), self.assertRaisesRegex(rescue.Rejected, "already pinned"):
+                rescue.prove_host_key(self.directory, "original", "relay")
+        for name in ("known-hosts", "fingerprint", "proof.json"):
+            (self.directory / f"original-relay-bootstrap-{name}").unlink()
+        attacker = base64.b64encode(rescue.KEY_PREFIX + b"a" * 32).decode()
+        bindings = [{"ipv4": "1.1.1.1", "serverId": 7}, {"ipv4": "1.1.1.1", "serverId": 8}]
+        with patch.object(rescue, "reviewed_bootstrap", return_value=(RUN, digest)), patch.object(
+            rescue, "remaining", return_value=20
+        ), patch.object(rescue.time, "sleep") as sleep:
+            # A wrong proof aborts at once instead of retrying until a forgery fits.
+            with patch.object(rescue, "lease_binding", return_value=bindings[0]), self.fake_session(
+                attacker, [mac]
+            ), self.assertRaisesRegex(rescue.Rejected, "proof rejected"):
+                rescue.prove_host_key(self.directory, "original", "relay")
+            sleep.assert_not_called()
+            with patch.object(rescue, "lease_binding", side_effect=bindings), self.fake_session(
+                genuine, [mac]
+            ), self.assertRaisesRegex(rescue.Rejected, "binding changed"):
+                rescue.prove_host_key(self.directory, "original", "relay")
+        self.assertFalse((self.directory / "original-relay-bootstrap-known-hosts").exists())
+        with patch.object(rescue, "reviewed_bootstrap", return_value=(RUN, "0" * 64)):
+            with self.assertRaisesRegex(rescue.Rejected, "nonce differs"):
+                rescue.proof_nonce(self.directory, "original-relay", "0" * 64)
+
+    def test_stock_published_key_accepts_one_line_with_optional_comment(self):
         path = self.directory / "host.pub"
         lines = stock_kexec.STOCK_PROBE.splitlines()
         start = next(index for index, line in enumerate(lines) if line.startswith("mapfile -t -n 2 published "))
-        script = 'set -euo pipefail\nkeys=(unused "$2")\n' + "\n".join(lines[start:start + 3])
+        end = next(index for index, line in enumerate(lines) if line.startswith("auth="))
+        script = 'set -euo pipefail\nkeys=(unused "$2")\n' + "\n".join(lines[start:end])
         key = b"ssh-ed25519 synthetic"
         for data, expected in [(key, 0), (key + b"\n", 0), (key + b"\n\n", 1),
-                               (key + b" comment\n", 1), (key + b"\nssh-ed25519 other\n", 1)]:
+                               (key + b" root@debian\n", 0), (key + b"\nssh-ed25519 other\n", 1),
+                               (b"ssh-ed25519 other root@debian\n", 1), (b"ssh-rsa synthetic\n", 1),
+                               (b"ssh-ed25519 synthetic2\n", 1), (b"", 1)]:
             path.write_bytes(data)
             result = subprocess.run(["bash", "-c", script, "fixture", "synthetic", str(path)], timeout=5)
             self.assertEqual(result.returncode, expected)

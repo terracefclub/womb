@@ -65,7 +65,7 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     probe_only = "probeOnly" in config
     if probe_only and (role != "relay" or mode == "boot-installed"):
         raise lease.Rejected("console probe action scope rejected")
-    if "bootstrapHostKeys" in config and mode in ("rescue", "console"):
+    if "bootstrapProofs" in config and mode in ("rescue", "console"):
         raise lease.Rejected("known-host bootstrap does not use provider Rescue")
     host = api.get("servers", sid)
     if (host is None or host["id"] != sid or host["status"] != "running"
