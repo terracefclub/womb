@@ -54,6 +54,14 @@ RAM_SERIAL_MARKERS = {
     "sshService": SERIAL_MARKERS["sshService"],
     "kernelPanic": SERIAL_MARKERS["kernelPanic"],
 }
+BOOT_UNITS = {
+    "restoreState": (b"restore-state-from-initrd.service",),
+    "restoreNetwork": (b"restore-network.service",),
+    "networkd": (b"systemd-networkd.service", b"network configuration"),
+    "sshdKeygen": (b"sshd-keygen.service", b"ssh host keys generation"),
+    "sshd": (b"sshd.service", b"ssh daemon"),
+    "multiUser": (b"multi-user.target", b"multi-user system"),
+}
 CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
@@ -113,11 +121,12 @@ process.stdout.write(renderBootstrapCloudConfig(hostPublicKey, hostPrivateKey, o
 
 
 @contextmanager
-def guest(args, overlay, seed, serial, facts):
+def guest(args, overlay, seed, serial, facts, qmp):
     command = [
         args.qemu, "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "4096", "-smp", "2",
         "-nodefaults", "-boot", "order=c", "-vga", "std", "-display", "none",
         "-monitor", "none", "-serial", "stdio",
+        "-qmp", f"unix:{qmp},server=on,wait=off",
         "-drive", f"file={overlay},format=qcow2,if=virtio",
         "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
         "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-:22",
@@ -294,6 +303,77 @@ trap 'printf "ram-line:%d:%d\\n" "$LINENO" "$?"' ERR
     return facts
 
 
+def boot_unit_facts(data):
+    data = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", data).lower()
+    units = {name: {"begin": False, "success": False, "failure": False} for name in BOOT_UNITS}
+    lines = data.splitlines()
+    for line in lines:
+        for name, markers in BOOT_UNITS.items():
+            if not any(marker in line for marker in markers):
+                continue
+            states = units[name]
+            states["begin"] |= b"starting " in line
+            states["success"] |= any(marker in line for marker in (b"started ", b"finished ", b"reached target "))
+            states["failure"] |= b"failed" in line or b"timed out" in line
+    return {
+        "units": units,
+        "sshHostKeyError": any(marker in data for marker in (b"no hostkeys available", b"unable to load host key")),
+        "sshBindError": any(
+            b"bind to port 22" in line and any(marker in line for marker in (
+                b"failed", b"address already in use", b"cannot assign requested address"
+            )) for line in lines
+        ),
+        "dhcpError": any(b"dhcp" in line and (b"failed" in line or b"timed out" in line) for line in lines),
+        "waitOnlineTimedOut": any(b"wait-online" in line and b"timed out" in line for line in lines),
+    }
+
+
+def qmp_failure_facts(qmp):
+    deadline = time.monotonic() + 6
+    memory = qmp.parent / "vga.bin"
+    try:
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(2)
+            conn.connect(str(qmp))
+            with conn.makefile("rwb", buffering=0) as stream:
+                def read():
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise TimeoutError
+                    conn.settimeout(left)
+                    return json.loads(stream.readline(16384))
+
+                def ask(command, **args):
+                    stream.write(json.dumps({"execute": command, "arguments": args}).encode() + b"\n")
+                    while True:
+                        event = read()
+                        if "return" in event:
+                            return event["return"]
+                        if "error" in event:
+                            return None
+
+                if "QMP" not in read() or ask("qmp_capabilities") != {}:
+                    return None
+                status = ask("query-status")
+                saved = ask("pmemsave", val=0xb8000, size=4000, filename=str(memory))
+        data = b""
+        if saved == {}:
+            with memory.open("rb") as stream:
+                raw = stream.read(4001)
+            if len(raw) == 4000:
+                cells = raw[::2].lower()
+                data = b"\n".join(cells[i:i + 80].strip(b"\x00 ") for i in range(0, len(cells), 80))
+        return {"running": isinstance(status, dict) and status.get("status") == "running",
+                "vgaTextRead": any(33 <= char < 127 for char in data), "nixos": b"nixos" in data,
+                "loginPrompt": b"login:" in data,
+                "emergencyMode": b"emergency mode" in data,
+                "bootUnits": boot_unit_facts(data)}
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+    finally:
+        memory.unlink(missing_ok=True)
+
+
 def capacity_facts(data):
     fields = data.splitlines()
     if len(fields) != 5 or any(not re.fullmatch(rb"[0-9]{1,16}", value) for value in fields[2:]):
@@ -356,8 +436,11 @@ def exercise(args, directory, seed, overlay, facts):
     operator = (directory / "operator-ed25519.pub").read_text().split()[1]
     serial = bytearray()
     original_remote = install.remote
+    monitor = None
     try:
-        with guest(args, overlay, seed, serial, facts) as process, patch.object(
+        with tempfile.TemporaryDirectory(prefix="terrace-kexec-qmp-", dir="/tmp") as monitor, guest(
+            args, overlay, seed, serial, facts, Path(monitor) / "qmp.sock"
+        ) as process, patch.object(
             install, "bootstrap_authority", return_value=(binding, public, options, ssh)
         ), patch.object(install, "remaining", side_effect=lambda _directory, _binding, limit: limit):
             facts["stage"] = "stock"
@@ -386,6 +469,8 @@ def exercise(args, directory, seed, overlay, facts):
                 await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
             except install.Rejected:
                 facts["ramDiagnostics"] = ram_diagnostics(args.port, ssh, public, sent["stockBootId"])
+                if not facts["ramDiagnostics"]["sshBanner"]:
+                    facts["ramQmp"] = qmp_failure_facts(Path(monitor) / "qmp.sock")
                 raise
             wrong_host_rejected(wrong)
             facts["ramWrongKeyRejected"] = True
@@ -407,6 +492,9 @@ def exercise(args, directory, seed, overlay, facts):
                            store, install.sha(Path(store).read_bytes()))
             facts["ramStoreCopy"] = True
     finally:
+        if monitor is not None:
+            facts["qmpScratchGone"] = not Path(monitor).exists()
+            install.require(facts["qmpScratchGone"], "private monitor scratch survived cleanup")
         private = (directory / "stock-ed25519").read_bytes()
         operator = (directory / "operator-ed25519").read_bytes()
         forbidden = {b"PRIVATE KEY-----", *private.splitlines()[1:-1], *operator.splitlines()[1:-1]}
@@ -422,6 +510,7 @@ def exercise(args, directory, seed, overlay, facts):
                 "bytes": len(tail), "kernelStarts": tail.count(b"linux version "),
                 **{name: any(marker.lower() in tail for marker in markers)
                    for name, markers in RAM_SERIAL_MARKERS.items()},
+                "unitFacts": boot_unit_facts(tail),
             }
         facts["serialBytesCaptured"] = len(serial)
         install.require(not facts["serialPrivateKeyFound"], "guest serial contained private key material")

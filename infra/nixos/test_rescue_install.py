@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import rescue_install as rescue
 import stock_kexec
-from test_stock_kexec_native import capacity_facts, cloud_status_facts, diagnostic_command
+from test_stock_kexec_native import boot_unit_facts, capacity_facts, cloud_status_facts, diagnostic_command
 from test_rehearsal_lease import RUN, write_reviewed_input
 
 
@@ -206,6 +206,20 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         result = subprocess.run(["bash", "-c", script, "fixture", str(leaf)], capture_output=True, timeout=5)
         self.assertEqual((result.returncode, result.stdout), (7, (str(leaf) + "\n").encode()))
         self.assertFalse(leaf.exists())
+
+    def test_boot_diagnostics_classify_only_known_units_and_errors(self):
+        raw = (b"\x1b[32m[ OK ]\x1b[0m Started SSH Daemon.\r\n"
+               b"Starting restore-state-from-initrd.service...\n"
+               b"systemd-networkd.service: Failed with result 'fixture-private'.\n"
+               b"sshd: Bind to port 22 complete.\n"
+               b"DHCPv4 request timed out.\n")
+        facts = boot_unit_facts(raw)
+        self.assertEqual(facts["units"]["sshd"], {"begin": False, "success": True, "failure": False})
+        self.assertTrue(facts["units"]["restoreState"]["begin"])
+        self.assertTrue(facts["units"]["networkd"]["failure"])
+        self.assertFalse(facts["sshBindError"])
+        self.assertTrue(facts["dhcpError"])
+        self.assertNotIn("fixture-private", json.dumps(facts))
 
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"
