@@ -44,6 +44,16 @@ SERIAL_MARKERS = {
     "noCloud": (b"DataSourceNoCloud",),
     "sshService": (b"OpenBSD Secure Shell server", b"sshd["),
 }
+RAM_SERIAL_MARKERS = {
+    "kexec": (b"kexec",),
+    "nixos": (b"nixos",),
+    "initrdStarted": (b"running in initrd", b"initrd-root-fs.target"),
+    "rootSwitch": (b"switching root", b"initrd-switch-root.service"),
+    "restoreNetwork": (b"restore-network",),
+    "networkd": (b"systemd-networkd",),
+    "sshService": SERIAL_MARKERS["sshService"],
+    "kernelPanic": SERIAL_MARKERS["kernelPanic"],
+}
 CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
@@ -154,7 +164,7 @@ def wrong_host_rejected(ssh):
                     "wrong host key was not rejected by OpenSSH")
 
 
-def diagnostic_command(argv, seconds, *, stdin=None):
+def diagnostic_command(argv, seconds, *, stdin=None, truncate=False):
     deadline = time.monotonic() + seconds
     output = [bytearray(), bytearray()]
     with subprocess.Popen(argv, stdin=stdin if stdin is not None else subprocess.DEVNULL,
@@ -173,9 +183,10 @@ def diagnostic_command(argv, seconds, *, stdin=None):
                         ready.unregister(stream.fd)
                         continue
                     buffer = output[stream.data]
-                    if len(buffer) + len(data) > 8192:
+                    space = 8192 - len(buffer)
+                    if len(data) > space and not truncate:
                         return 125, b"", b""
-                    buffer.extend(data)
+                    buffer.extend(data[:space])
             code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
             return code, bytes(output[0]), bytes(output[1])
         except subprocess.TimeoutExpired:
@@ -211,9 +222,9 @@ def cloud_status_facts(code, data):
     return facts
 
 
-def stock_diagnostics(port, ssh, public, operator):
+def ssh_diagnostics(port, ssh, public):
     facts = {"tcpConnected": False, "sshBanner": False, "ed25519Match": None,
-             "pinnedSsh": "unobserved", "stockCheckLine": None, "stockCheckRc": None}
+             "pinnedSsh": "unobserved"}
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as conn:
             facts["tcpConnected"] = True
@@ -238,7 +249,13 @@ def stock_diagnostics(port, ssh, public, operator):
         facts["pinnedSsh"] = "public-key-rejected"
     else:
         facts["pinnedSsh"] = "timeout" if code == 124 else "transport-error"
-    if code == 0:
+    return facts
+
+
+def stock_diagnostics(port, ssh, public, operator):
+    facts = ssh_diagnostics(port, ssh, public)
+    facts.update(stockCheckLine=None, stockCheckRc=None)
+    if facts["pinnedSsh"] == "authenticated":
         # Repeat the same read-only checks with a fixed line number on failure.
         probe = stock_kexec.STOCK_PROBE.replace(
             "set -euo pipefail", """set -Eeuo pipefail
@@ -254,6 +271,26 @@ trap 'printf "stock-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
             if line <= len(lines) and lines[line - 1] == "cloud-init status --wait >/dev/null":
                 code, status, _ = diagnostic_command([*ssh, "timeout 10 cloud-init status --format json"], 15)
                 facts["cloudInitStatus"] = cloud_status_facts(code, status)
+    return facts
+
+
+def ram_diagnostics(port, ssh, public, old_boot):
+    facts = ssh_diagnostics(port, ssh, public)
+    facts.update(bootIdChanged=None, ramCheckLine=None, ramCheckRc=None)
+    if facts["pinnedSsh"] == "authenticated":
+        code, out, _ = diagnostic_command([*ssh, "timeout 5 cat /proc/sys/kernel/random/boot_id"], 10)
+        boot = out.decode("ascii", errors="replace").strip()
+        if code == 0 and install.BOOT_ID.fullmatch(boot):
+            facts["bootIdChanged"] = boot != old_boot
+        probe = """set -Eeuo pipefail
+trap 'printf "ram-line:%d:%d\\n" "$LINENO" "$?"' ERR
+""" + install.RAM_PROBE
+        command = shlex.join(["timeout", "15", "bash", "-c", probe])
+        code, out, _ = diagnostic_command([*ssh, command], 20)
+        facts["ramCheckRc"] = code
+        match = re.fullmatch(rb"ram-line:([1-9][0-9]{0,2}):[1-9][0-9]{0,2}\n", out)
+        if match:
+            facts["ramCheckLine"] = int(match[1])
     return facts
 
 
@@ -291,6 +328,22 @@ trap 'printf "upload-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
     facts["archiveUploadPassed"] = True
 
 
+def observe_dispatch(facts, serial, remote, ssh, seconds, script, *args, stdin=None, capture=False):
+    if script != stock_kexec.KEXEC:
+        return observe_upload(facts, remote, ssh, seconds, script, *args, stdin=stdin, capture=capture)
+    facts["postDispatchSerialStart"] = len(serial)
+    command = shlex.join(["timeout", "--kill-after=10", str(seconds), "bash", "-c",
+                          script, "terrace", *args])
+    code, out, err = diagnostic_command([*ssh, command], seconds + 20, truncate=True)
+    facts["kexecInvocation"] = {
+        "commandRc": code,
+        "scheduled": b"machine will boot into nixos" in out,
+        "loadFailed": b"kexec failed, dumping dmesg" in out + err,
+        "operationNotPermitted": b"operation not permitted" in (out + err).lower(),
+    }
+    install.require(code == 0, "kexec invocation did not return success")
+
+
 def exercise(args, directory, seed, overlay, facts):
     binding = {"ipv4": "127.0.0.1"}
     options = [*install.ssh_options(directory, PREFIX, "bootstrap"),
@@ -317,8 +370,8 @@ def exercise(args, directory, seed, overlay, facts):
             facts["stockWrongKeyRejected"] = True
             facts["stage"] = "dispatch"
             try:
-                with patch.object(install, "remote", side_effect=lambda *args, **kwargs: observe_upload(
-                    facts, original_remote, *args, **kwargs
+                with patch.object(install, "remote", side_effect=lambda *args, **kwargs: observe_dispatch(
+                    facts, serial, original_remote, *args, **kwargs
                 )):
                     stock_kexec.dispatch(directory, "original", "relay", args.archive, args.archive_sha256)
             except install.Rejected:
@@ -329,7 +382,11 @@ def exercise(args, directory, seed, overlay, facts):
             facts["archiveBytes"] = sent["archiveBytes"]
             facts["archiveUnpackedBytes"] = sent["archiveUnpackedBytes"]
             facts["stage"] = "ram"
-            await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
+            try:
+                await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
+            except install.Rejected:
+                facts["ramDiagnostics"] = ram_diagnostics(args.port, ssh, public, sent["stockBootId"])
+                raise
             wrong_host_rejected(wrong)
             facts["ramWrongKeyRejected"] = True
             facts["stage"] = "ram-store"
@@ -359,6 +416,13 @@ def exercise(args, directory, seed, overlay, facts):
             name: any(marker.lower() in lower_serial for marker in markers)
             for name, markers in SERIAL_MARKERS.items()
         }
+        if "postDispatchSerialStart" in facts:
+            tail = lower_serial[facts["postDispatchSerialStart"]:]
+            facts["postDispatchSerial"] = {
+                "bytes": len(tail), "kernelStarts": tail.count(b"linux version "),
+                **{name: any(marker.lower() in tail for marker in markers)
+                   for name, markers in RAM_SERIAL_MARKERS.items()},
+            }
         facts["serialBytesCaptured"] = len(serial)
         install.require(not facts["serialPrivateKeyFound"], "guest serial contained private key material")
 

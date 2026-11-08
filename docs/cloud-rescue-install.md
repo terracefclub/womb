@@ -229,6 +229,9 @@ records only the numeric status, allowlisted state and error counts.
 If the upload fails, the fixture records its failing line and status plus
 the two tmpfs checks, free byte counts and available memory from the same
 pinned guest.
+For the handoff it records the kexec command status and fixed boot markers.
+A RAM readiness failure records SSH authentication, whether the boot ID
+changed and the failing RAM check when the reviewed host key authenticates.
 The test discards raw diagnostics and the bounded serial
 sample and removes the temporary overlay and keys after stopping the guest.
 No disk formatter or application starts in this proof.

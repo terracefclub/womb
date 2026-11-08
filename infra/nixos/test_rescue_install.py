@@ -162,6 +162,9 @@ class RescueInstallTest(unittest.TestCase):
             [sys.executable, "-c", "print('x' * 8192)"], 5
         ), (125, b"", b""))
         self.assertEqual(diagnostic_command(
+            [sys.executable, "-c", "print('x' * 8192)"], 5, truncate=True
+        ), (0, b"x" * 8192, b""))
+        self.assertEqual(diagnostic_command(
             [sys.executable, "-c", "import time; time.sleep(10)"], 0.05
         ), (124, b"", b""))
         with tempfile.TemporaryFile() as data:
