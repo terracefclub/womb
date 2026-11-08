@@ -68,25 +68,43 @@ set -euo pipefail
 umask 077
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
-test "$(findmnt -rn -o FSTYPE --mountpoint /dev/shm)" = tmpfs
-test "$(df -PB1 /dev/shm | awk 'NR == 2 {{print $4}}')" -gt "$3"
-test "$(df -PB1 /run | awk 'NR == 2 {{print $4}}')" -gt "$(( $4 + 16777216 ))"
 test "$(awk '/^MemAvailable:/ {{print $2}}' /proc/meminfo)" -gt "$(( ($3 + 2 * $4) / 1024 + 524288 ))"
-staged="$(mktemp -d /dev/shm/terrace-stock-kexec.XXXXXXXX)"
-trap 'rm -f -- "$staged/installer.tar.gz"; rmdir -- "$staged"' EXIT
-head -c "$(( $3 + 1 ))" > "$staged/installer.tar.gz"
-test "$(stat -c %s "$staged/installer.tar.gz")" = "$3"
-printf '%s  %s\n' "$2" "$staged/installer.tar.gz" | sha256sum --check --status
-mkdir -m 0700 {SCRATCH}
-cd {SCRATCH}
-tar --no-same-owner -xzf "$staged/installer.tar.gz"
+page_size="$(getconf PAGESIZE)"
+limit="$(( ($3 + $4 + 16777216 + page_size - 1) / page_size * page_size ))"
+scratch={SCRATCH}
+mkdir -m 0700 -- "$scratch"
+cleanup() {{
+  status=$?
+  cd /
+  if mountpoint -q -- "$scratch"; then
+    test "$(findmnt -rn -o FSTYPE --mountpoint "$scratch")" = tmpfs && umount -- "$scratch" || status=1
+  fi
+  rmdir -- "$scratch" || status=1
+  exit "$status"
+}}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mount -t tmpfs -o "size=$limit,mode=0700,nosuid,nodev" tmpfs "$scratch"
+test "$(findmnt -rn -o TARGET,FSTYPE --mountpoint "$scratch")" = "$scratch tmpfs"
+test "$(stat -c '%u:%g:%a' "$scratch")" = 0:0:700
+options="$(findmnt -rn -o OPTIONS --mountpoint "$scratch")"
+[[ ",$options," == *,nosuid,* && ",$options," == *,nodev,* && ",$options," != *,noexec,* ]]
+test "$(df -PB1 "$scratch" | awk 'NR == 2 {{print $2}}')" -eq "$limit"
+cd "$scratch"
+head -c "$(( $3 + 1 ))" >installer.tar.gz
+test "$(stat -c %s installer.tar.gz)" = "$3"
+printf '%s  installer.tar.gz\n' "$2" | sha256sum --check --status
+tar --no-same-owner -xzf installer.tar.gz
+rm -- installer.tar.gz
 test -x kexec/run && test -f kexec/run && test ! -L kexec/run
+trap - EXIT
 """
 KEXEC = f"""
 set -euo pipefail
 umask 077
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
-test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
+test "$(findmnt -rn -o TARGET,FSTYPE --mountpoint {SCRATCH})" = "{SCRATCH} tmpfs"
+test "$(stat -c '%u:%g:%a' {SCRATCH})" = 0:0:700
 cd {SCRATCH}
 exec setsid --wait timeout --kill-after=5 90 ./kexec/run
 """

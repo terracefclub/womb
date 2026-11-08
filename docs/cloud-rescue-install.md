@@ -168,10 +168,12 @@ direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --
 Dispatch checks the sole operator key and exact Ed25519 host key on stock
 Debian. Cloud-init writes the reviewed public key without a terminal newline.
 The check accepts that one-line file with or without the newline. It verifies
-the archive in a private directory under `/dev/shm` and unpacks it under `/run` so the
-compressed and unpacked copies do not compete for the same tmpfs limit. It
-checks both mount capacities and available RAM against the measured archive
-sizes. The connection can close during the switch. If the dispatch
+the archive in a private, size-bounded tmpfs mounted on a new leaf under
+`/run`. A 4 GiB Debian fixture had only 410,771,456 free bytes on its
+existing `/run`, too little for this installer. Dispatch checks available
+RAM against the compressed and unpacked sizes, verifies the private mount
+and removes the compressed copy before kexec. An upload failure removes the
+new mount and leaf. The connection can close during the switch. If the dispatch
 receipt exists, check the new boot instead of dispatching again.
 Verification requires the same SSH pin, a different kernel
 boot ID, the pinned installer marker and the RAM-backed root and store.

@@ -189,6 +189,21 @@ class RescueInstallTest(unittest.TestCase):
         })
         self.assertIsNone(capacity_facts(b"tmpfs\ntmpfs\nraw-private\n34\n56\n"))
 
+    def test_upload_failure_cleanup_targets_its_exact_leaf(self):
+        leaf = self.directory / "owned-upload"
+        leaf.mkdir()
+        cleanup = "cleanup() {" + stock_kexec.UPLOAD.split("cleanup() {", 1)[1].split("trap cleanup", 1)[0]
+        script = """
+set -euo pipefail
+scratch=$1
+mountpoint() { test "$3" = "$scratch"; }
+findmnt() { test "${@: -1}" = "$scratch"; printf 'tmpfs\\n'; }
+umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
+""" + cleanup + 'trap cleanup EXIT\ncd "$scratch"\nexit 7'
+        result = subprocess.run(["bash", "-c", script, "fixture", str(leaf)], capture_output=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout), (7, (str(leaf) + "\n").encode()))
+        self.assertFalse(leaf.exists())
+
     def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
         old = "abcd0123-1234-1234-1234-1234567890ab"
         new = "abcd0123-1234-1234-1234-1234567890cd"
