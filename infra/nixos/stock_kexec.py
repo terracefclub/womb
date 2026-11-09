@@ -26,7 +26,12 @@ set -euo pipefail
 trap 'printf "stock-check-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
 test "$(id -u)" = 0
 test "$(uname -m)" = x86_64
-test ! -e /sys/firmware/efi
+# The install layout is UEFI only. A kernel locked down by Secure Boot would refuse
+# the unsigned kexec, so require no lockdown wherever the kernel reports it.
+test -d /sys/firmware/efi
+if test -e /sys/kernel/security/lockdown; then
+  grep -q '\\[none\\]' /sys/kernel/security/lockdown
+fi
 grep -qx 'ID=debian' /etc/os-release
 grep -Eq '^VERSION_ID="?13"?$' /etc/os-release
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs

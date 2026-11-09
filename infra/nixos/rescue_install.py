@@ -194,7 +194,8 @@ PROBE = """
 set -euo pipefail
 test "$(id -u)" = 0
 test "$(uname -m)" = x86_64
-test ! -e /sys/firmware/efi
+# The install layout is UEFI only (an ESP with systemd-boot), like Hetzner's server types.
+test -d /sys/firmware/efi
 case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) exit 1;; esac
 if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
 dev="$(readlink -e "$1")"
@@ -248,6 +249,11 @@ mounted="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint /mnt)"
 read -r source kind <<<"$mounted"
 test "$kind" = ext4
 test "$(lsblk -dn -o PKNAME -- "$source")" = "${3##*/}"
+esp="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint /mnt/boot)"
+read -r esp_source esp_kind <<<"$esp"
+test "$esp_kind" = vfat
+test "$(lsblk -dn -o PKNAME -- "$esp_source")" = "${3##*/}"
+test "$(lsblk -dn -o PARTTYPE -- "$esp_source")" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b
 """
 
 FORMAT = "set -euo pipefail\n" + DISK_GUARD + """
@@ -257,6 +263,10 @@ if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
 
 FINISH = "set -euo pipefail\n" + DISK_GUARD + MOUNT_GUARD + """
 "$6/bin/nixos-install" --root /mnt --system "$7" --no-root-passwd --no-channel-copy
+# No firmware variables are written, so the disk must boot from the removable path.
+test -f /mnt/boot/EFI/BOOT/BOOTX64.EFI
+test ! -L /mnt/boot/EFI/BOOT/BOOTX64.EFI
+test -f /mnt/boot/loader/loader.conf
 umask 077
 install -d -m 0755 /mnt/etc/ssh
 test ! -L /mnt/etc/ssh

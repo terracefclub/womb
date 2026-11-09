@@ -35,9 +35,15 @@
           terrace.hetzner.authorizedKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEoUtCnNlZBsJyHCk+HjpH1L4sIv9N4G3mFVL/+UuUYQ test-only"];
           terrace.cloudDisk.device = "/dev/vda";
           disko.tests.extraConfig.services.k3s.enable = lib.mkForce false;
+          # systemd-boot makes Disko boot this test under OVMF with read-only
+          # variables, so the installed disk must start from its fallback path.
           disko.tests.extraChecks = ''
             machine.wait_for_unit("multi-user.target")
             machine.succeed("findmnt -no FSTYPE / | grep -qx ext4")
+            machine.succeed("test -d /sys/firmware/efi")
+            machine.succeed("findmnt -no FSTYPE /boot | grep -qx vfat")
+            machine.succeed("test -f /boot/EFI/BOOT/BOOTX64.EFI")
+            machine.succeed("bootctl is-installed")
           '';
         })
       ];

@@ -205,8 +205,13 @@ Three allowances cover provider differences without widening trust:
   project SSH key. `authorized_keys` may hold one to four lines, each that
   same key with no options.
 
-The check stays strict on BIOS boot, `cpio` and `gzip`: the upstream runner
-packs the carried state with `cpio` and `gzip`. The QEMU fixture offers the
+The check requires UEFI boot (`/sys/firmware/efi`) because the install layout
+is UEFI only, and refuses a kernel under lockdown, which would block the
+unsigned kexec. It stays strict on `cpio` and `gzip`: the upstream runner
+packs the carried state with them. Rescue's probe also requires UEFI. Format
+and install verify that the vfat `/mnt/boot` is the EFI system partition
+(type `c12a7328-…`) of the same disk, and that `nixos-install` left
+`EFI/BOOT/BOOTX64.EFI` and `loader/loader.conf`. The QEMU fixture offers the
 operator key as metadata `public-keys` like Hetzner does. It also proves that a
 mismatched operator key is reported at the `authorized_keys` comparison line.
 
@@ -264,10 +269,12 @@ systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
   direnv exec . python3 -B infra/nixos/test_stock_kexec_native.py "$output" \
     --base "$debian_image" --archive "$archive" --archive-sha256 "$archive_sha256" \
     --store-probe "$sentinel_store_path" --port "$loopback_port" \
-    --qemu "$qemu" --qemu-img "$qemu_img" --mkfs-vfat "$mkfs_vfat" --mcopy "$mcopy"
+    --qemu "$qemu" --qemu-img "$qemu_img" --mkfs-vfat "$mkfs_vfat" --mcopy "$mcopy" \
+    --ovmf-code "$ovmf/FV/OVMF_CODE.fd" --ovmf-vars "$ovmf/FV/OVMF_VARS.fd"
 ```
 
-The single BIOS/KVM guest uses a disposable overlay, and its only forwarded
+The single UEFI/KVM guest boots OVMF from the pinned nixpkgs (`OVMF.fd`) with
+a private writable copy of the variable store, uses a disposable overlay, and its only forwarded
 port binds loopback. The NoCloud seed assigns a fixed IPv4 address to the
 fixture NIC by MAC and checks that address on both boots. This isolates the
 offline trust handoff from QEMU DHCP, following the [upstream static-address test](https://github.com/nix-community/nixos-images/blob/50939ddf1a0339f289a9dbd810bdfd4e4fba6df4/nix/kexec-installer/test.nix).
@@ -284,6 +291,8 @@ If the upload fails, the fixture records its failing line and status plus
 the two tmpfs checks, free byte counts and available memory from the same
 pinned guest.
 For the handoff it records the kexec command status and fixed boot markers.
+It also records, without requiring it, whether the RAM installer still sees
+EFI after kexec; installation writes no firmware variables.
 A RAM readiness failure records SSH authentication, whether the boot ID
 changed and the failing RAM check when the reviewed host key authenticates.
 The fixture classifies selected systemd units from the bounded serial data.

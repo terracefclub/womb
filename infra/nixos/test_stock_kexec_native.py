@@ -40,6 +40,7 @@ SERIAL_LIMIT = 256 * 1024
 SERIAL_MARKERS = {
     "seaBios": (b"SeaBIOS",),
     "firmwareDiskBoot": (b"Booting from Hard Disk",),
+    "uefiFirmware": (b"BdsDxe", b"EDK II"),
     "grub": (b"GRUB",),
     "loaderError": (b"no such device", b"unknown filesystem", b"no bootable device",
                     b"you need to load the kernel first", b"disk read error", b"grub rescue>"),
@@ -141,11 +142,15 @@ process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, ope
 
 
 @contextmanager
-def guest(args, overlay, seed, serial, facts, qmp):
+def guest(args, overlay, seed, serial, facts, qmp, efi_vars):
+    # Hetzner's server types boot UEFI, so the fixture does too: read-only OVMF code
+    # and this run's private copy of the variable store, like a server's NVRAM.
     command = [
         args.qemu, "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "4096", "-smp", "2",
         "-nodefaults", "-boot", "order=c", "-vga", "std", "-display", "none",
         "-monitor", "none", "-serial", "stdio",
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={efi_vars}",
         "-qmp", f"unix:{qmp},server=on,wait=off",
         "-drive", f"file={overlay},format=qcow2,if=virtio",
         "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
@@ -520,7 +525,7 @@ def exercise(args, directory, seed, overlay, facts):
         with tempfile.TemporaryDirectory(prefix="terrace-kexec-qmp-", dir="/tmp") as monitor, packet_pipe(
             Path(monitor) / "headers.pipe"
         ) as packets, guest(
-            args, overlay, seed, serial, facts, Path(monitor) / "qmp.sock"
+            args, overlay, seed, serial, facts, Path(monitor) / "qmp.sock", directory / "efi-vars.fd"
         ) as process, patch.object(
             install, "bootstrap_authority", side_effect=lambda *_args: (binding, public, options, ssh)
         ), patch.object(install, "remaining", side_effect=lambda _directory, _binding, limit: limit):
@@ -582,6 +587,9 @@ def exercise(args, directory, seed, overlay, facts):
                 raise
             require_fixture_ipv4(ssh, static=False)
             facts["ramIpv4Retained"] = True
+            # Recorded, not required: the install's bootctl writes no firmware variables.
+            code, _, _ = diagnostic_command([*ssh, "test -d /sys/firmware/efi"], 15)
+            facts["ramEfi"] = code == 0
             wrong_host_rejected(wrong)
             facts["ramWrongKeyRejected"] = True
             facts["stage"] = "ram-store"
@@ -635,7 +643,7 @@ def main():
     parser.add_argument("--archive-sha256", required=True)
     parser.add_argument("--store-probe", required=True)
     parser.add_argument("--port", type=int, required=True)
-    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy"):
+    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy", "ovmf-code", "ovmf-vars"):
         parser.add_argument("--" + tool, required=True)
     args = parser.parse_args()
     facts = {"stage": "inputs"}
@@ -653,6 +661,11 @@ def main():
             seed = directory / "seed.img"
             render_seed(args, directory, seed, nonce, operator_public)
             overlay = directory / "guest.qcow2"
+            template = Path(args.ovmf_vars).read_bytes()
+            install.require(0 < len(template) <= 8 * 1024 * 1024, "unexpected OVMF variable store")
+            with os.fdopen(os.open(directory / "efi-vars.fd", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
+                           "wb") as stream:
+                stream.write(template)
             install.checked_process([args.qemu_img, "create", "-f", "qcow2", "-F", "qcow2",
                                      "-b", str(args.base.resolve()), str(overlay)], 10)
             try:

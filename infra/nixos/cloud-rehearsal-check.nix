@@ -35,7 +35,11 @@ let
   errors = cfg: map (a: a.message) (builtins.filter (a: !a.assertion) cfg.assertions);
   check = cfg:
     lib.assertMsg (errors cfg == []) (lib.concatStringsSep "\n" (errors cfg))
-    && cfg.boot.loader.grub.devices == ["/dev/vda"]
+    && !cfg.boot.loader.grub.enable
+    && cfg.boot.loader.systemd-boot.enable
+    && !cfg.boot.loader.efi.canTouchEfiVariables
+    && cfg.disko.devices.disk.system.device == "/dev/vda"
+    && cfg.disko.devices.disk.system.content.partitions.ESP.type == "EF00"
     && lib.unique cfg.networking.firewall.allowedTCPPorts == [22]
     && cfg.networking.firewall.allowedUDPPorts == []
     && cfg.terrace.backup.targets.primary.repository == "rest:http://127.0.0.1:22422/repository"
