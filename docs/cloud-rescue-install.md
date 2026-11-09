@@ -175,9 +175,42 @@ direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" \
 direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --verify-ram
 ```
 
-Dispatch checks the sole operator key and exact Ed25519 host key on stock
-Debian. Cloud-init writes the reviewed public key without a terminal newline.
-The check accepts that one-line file with or without the newline. It verifies
+Dispatch checks the operator key and the proven Ed25519 host key on stock
+Debian. The published host key line may carry ssh-keygen's `root@host` comment;
+only its type and key are compared. Each check is its own command, because
+under `set -e` a failure inside an `&&` list neither stops the script nor
+fires its trap. A failed check prints only its line number in the fixed
+script and its status. Dispatch rejects and reports just those two integers:
+`Stock host check failed at line N (status S)`. Any other output is
+rejected without detail.
+
+The effective sshd settings, evaluated from `/` for the session's own
+addresses and port, must also leave no other login route. `AuthorizedKeysFile` is the Debian
+default; `AuthorizedKeysCommand`, `AuthorizedPrincipalsCommand`,
+`AuthorizedPrincipalsFile`, `TrustedUserCAKeys` and `HostKeyAgent` are
+`none`; there is no `HostCertificate`.
+
+Three allowances cover provider differences without widening trust:
+
+- Cloud-init may exit 2 only when its JSON status is `done`, its extended status
+  is `degraded done`, it lists no errors and no module failed. The module check
+  matches cloud-init's "Running module … failed" wording, so a differently worded
+  failure is bounded only by the independent checks. Provider datasources and vendor
+  data can raise recoverable warnings, and every trust-relevant effect is
+  checked independently afterwards.
+- A provider sshd drop-in may name other `HostKey` paths only if each one is a
+  plain absolute path that does not exist, since sshd serves only existing keys.
+  The Ed25519 key pair must still be the only `ssh_host_*` files.
+- Provider metadata can repeat the operator key, as Hetzner offers the
+  project SSH key. `authorized_keys` may hold one to four lines, each that
+  same key with no options.
+
+The check stays strict on BIOS boot, `cpio` and `gzip`: the upstream runner
+packs the carried state with `cpio` and `gzip`. The QEMU fixture offers the
+operator key as metadata `public-keys` like Hetzner does. It also proves that a
+mismatched operator key is reported at the `authorized_keys` comparison line.
+
+Dispatch verifies
 the archive in a private, size-bounded tmpfs mounted on a new leaf under
 `/run`. A 4 GiB Debian fixture had only 410,771,456 free bytes on its
 existing `/run`, too little for this installer. Dispatch checks available

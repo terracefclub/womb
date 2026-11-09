@@ -121,7 +121,9 @@ process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, ope
     metadata = directory / "meta-data"
     network = directory / "network-config"
     private_text(data, user_data)
-    private_text(metadata, f"instance-id: {ALIAS}\nlocal-hostname: {ALIAS}\n")
+    # Like Hetzner metadata, offer the project SSH key; user data refuses to import it.
+    private_text(metadata, f"instance-id: {ALIAS}\nlocal-hostname: {ALIAS}\n"
+                           f"public-keys: {json.dumps([operator_public])}\n")
     private_text(network, json.dumps({
         "version": 2,
         "ethernets": {"fixture": {
@@ -311,19 +313,17 @@ def stock_diagnostics(port, ssh, public, operator):
     facts = ssh_diagnostics(port, ssh, public)
     facts.update(stockCheckLine=None, stockCheckRc=None)
     if facts["pinnedSsh"] == "authenticated":
-        # Repeat the same read-only checks with a fixed line number on failure.
-        probe = stock_kexec.STOCK_PROBE.replace(
-            "set -euo pipefail", """set -Eeuo pipefail
-trap 'printf "stock-line:%d:%d\\n" "$LINENO" "$?"' ERR""", 1
-        )
+        # Repeat the same read-only checks; the probe itself reports a failed line.
+        probe = stock_kexec.STOCK_PROBE
         command = shlex.join(["timeout", "20", "bash", "-c", probe, "terrace", public, operator])
         _, out, _ = diagnostic_command([*ssh, command], 25)
-        match = re.fullmatch(rb"stock-line:([1-9][0-9]{0,2}):([1-9][0-9]{0,2})\n", out)
+        match = stock_kexec.STOCK_FAILURE.fullmatch(out)
         if match:
             line, rc = map(int, match.groups())
             facts.update(stockCheckLine=line, stockCheckRc=rc)
             lines = probe.splitlines()
-            if line <= len(lines) and lines[line - 1] == "cloud-init status --wait >/dev/null":
+            start = lines.index("cloud_init=0")
+            if start < line <= lines.index("fi", start) + 1:
                 code, status, _ = diagnostic_command([*ssh, "timeout 10 cloud-init status --format json"], 15)
                 facts["cloudInitStatus"] = cloud_status_facts(code, status)
     return facts
@@ -545,6 +545,15 @@ def exercise(args, directory, seed, overlay, facts):
                 facts["stockDiagnostics"] = stock_diagnostics(args.port, ssh, public, operator)
                 raise
             facts["stockReady"] = True
+            # A mismatched operator key must be reported at the authorized_keys comparison.
+            expected = stock_kexec.STOCK_PROBE.splitlines().index('  test "$kind $key" = "ssh-ed25519 $2"') + 1
+            try:
+                stock_kexec.stock_check(ssh, public, public)
+            except stock_kexec.StockCheckFailed as failure:
+                install.require((failure.line, failure.status) == (expected, 1), "wrong stock check line reported")
+            else:
+                raise install.Rejected("a mismatched operator key passed the stock check")
+            facts["stockFailureLineReported"] = expected
             require_fixture_ipv4(ssh, static=True)
             facts["stockStaticIpv4"] = True
             wrong_host_rejected(wrong)

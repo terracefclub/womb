@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -239,6 +240,159 @@ class RescueInstallTest(unittest.TestCase):
             path.write_bytes(data)
             result = subprocess.run(["bash", "-c", script, "fixture", "synthetic", str(path)], timeout=5)
             self.assertEqual(result.returncode, expected)
+
+    def stock_segment(self, first, last):
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        start = lines.index(first)
+        end = next(index for index in range(start, len(lines)) if lines[index] == last)
+        return "\n".join(lines[start:end + 1])
+
+    def run_stock(self, body, *args, fake=None):
+        # The real header (strict mode and the failure trap) around one part of the probe.
+        header = "\n".join(stock_kexec.STOCK_PROBE.splitlines()[1:3])
+        env = None
+        if fake:
+            bin_dir = self.directory / "bin"
+            bin_dir.mkdir(exist_ok=True)
+            for name, text in fake.items():
+                path = bin_dir / name
+                path.write_text("#!/bin/sh\n" + text)
+                path.chmod(0o700)
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        result = subprocess.run(["bash", "-c", header + "\n" + body + "\necho passed", "probe", *args],
+                                capture_output=True, timeout=10, env=env)
+        self.assertEqual(result.returncode, 0)
+        if result.stdout == b"passed\n":
+            return True
+        self.assertRegex(result.stdout, rb"^stock-check-failed [1-9][0-9]{0,2} [1-9][0-9]{0,2}\n$")
+        return False
+
+    def test_stock_probe_reports_only_the_failed_line_and_status(self):
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        result = subprocess.run(["bash", "-c", stock_kexec.STOCK_PROBE, "probe", "host", "operator"],
+                                capture_output=True, timeout=10,
+                                env={**os.environ, "PATH": f"{self.directory}:{os.environ['PATH']}"}
+                                if self.fake_id() else None)
+        expected = lines.index('test "$(id -u)" = 0') + 1
+        self.assertEqual((result.returncode, result.stdout), (0, f"stock-check-failed {expected} 1\n".encode()))
+        with patch.object(stock_kexec.install, "remote", return_value=result.stdout):
+            with self.assertRaises(stock_kexec.StockCheckFailed) as caught:
+                stock_kexec.stock_check(["ssh"], "host", "operator")
+        self.assertEqual((caught.exception.line, caught.exception.status), (expected, 1))
+
+    def fake_id(self):
+        path = self.directory / "id"
+        path.write_text("#!/bin/sh\necho 1000\n")
+        path.chmod(0o700)
+        return True
+
+    def test_stock_check_accepts_only_a_boot_id_or_an_exact_report(self):
+        boot = b"abcd0123-1234-1234-1234-1234567890ab\n"
+        with patch.object(stock_kexec.install, "remote", return_value=boot):
+            self.assertEqual(stock_kexec.stock_check(["ssh"], "host", "operator"), boot.decode().strip())
+        for output in [b"stock-check-failed 12 1\nextra\n", b"stock-check-failed 0 1\n",
+                       b"stock-check-failed 12 1", b"stock-check-failed 1234 1\n", b"x" + boot]:
+            with patch.object(stock_kexec.install, "remote", return_value=output):
+                with self.assertRaises(rescue.Rejected) as caught:
+                    stock_kexec.stock_check(["ssh"], "host", "operator")
+                self.assertNotIsInstance(caught.exception, stock_kexec.StockCheckFailed)
+
+    def test_stock_failure_message_carries_only_line_and_status(self):
+        argv = ["stock_kexec.py", str(self.directory), "original", "relay", "--dispatch", "a", "b"]
+        with patch.object(sys, "argv", argv), patch.object(stock_kexec, "dispatch",
+                                                           side_effect=stock_kexec.StockCheckFailed(41, 1)):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(stock_kexec.main(), 1)
+        self.assertEqual(stderr.getvalue(),
+                         "Stock host check failed at line 41 (status 1). Private inputs suppressed.\n")
+
+    def test_stock_probe_checks_are_never_hidden_in_and_lists(self):
+        for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH, rescue.RAM_PROBE,
+                       rescue.RAM_SERVE, stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC]:
+            for line in script.splitlines():
+                if "||" not in line:  # A list that handles its own failure, like UPLOAD's cleanup.
+                    self.assertNotRegex(line, r"\btest\b[^|&]*&&")
+        for line in stock_kexec.STOCK_PROBE.splitlines()[3:]:
+            self.assertNotIn("&&", line)
+            if "||" in line:
+                self.assertIn(line.strip(), {"cloud-init status --wait >/dev/null || cloud_init=$?",
+                                             'cloud_status="$(cloud-init status --format json)" || test "$?" = 2'})
+
+    def test_stock_cloud_init_allows_only_finished_degraded_runs(self):
+        body = self.stock_segment("cloud_init=0", "fi")
+        good = json.dumps({"status": "done", "extended_status": "degraded done", "errors": [],
+                           "recoverable_errors": {"WARNING": ["datasource"]}})
+        fake = ('case "$*" in\n"status --wait") exit "$WAIT";;\n'
+                '"status --format json") printf "%s\\n" "$STATUS"; exit "$JSON";;\nesac\nexit 9\n')
+        cases = [("0", "{}", "0", True), ("2", good, "2", True),
+                 ("1", good, "1", False), ("3", good, "2", False), ("2", good, "1", False),
+                 ("2", good.replace("degraded done", "done"), "2", False),
+                 ("2", good.replace('"done"', '"error"', 1), "2", False),
+                 ("2", good.replace('"errors": []', '"errors": ["x"]'), "2", False),
+                 ("2", "not json", "2", False), ("2", "{}", "2", False),
+                 ("2", good.replace('["datasource"]', '["Running module ssh (cc_ssh) failed"]'), "2", False),
+                 ("2", good.replace('{"WARNING": ["datasource"]}', '[]'), "2", False)]
+        for wait, status, json_rc, expected in cases:
+            with self.subTest(wait=wait, status=status, json_rc=json_rc):
+                with patch.dict("os.environ", {"WAIT": wait, "STATUS": status, "JSON": json_rc}):
+                    self.assertIs(self.run_stock(body, fake={"cloud-init": fake}), expected)
+
+    def test_stock_hostkeys_allow_only_absent_extra_paths(self):
+        body = 'settings="$(cat "$1")"\n' + self.stock_segment(
+            'hostkeys="$(grep \'^hostkey \' <<<"$settings")"', 'done <<<"$hostkeys"')
+        present = self.directory / "present_key"
+        present.write_text("x")
+        dangling = self.directory / "dangling_key"
+        dangling.symlink_to(self.directory / "missing")
+        ours = "hostkey /etc/ssh/ssh_host_ed25519_key"
+        cases = [(ours, True), (f"{ours}\nhostkey /nonexistent/ssh_host_rsa_key", True),
+                 (f"hostkey /nonexistent/ssh_host_rsa_key\n{ours}", True),
+                 (f"{ours}\nhostkey {present}", False), (f"{ours}\nhostkey {dangling}", False),
+                 ("hostkey /nonexistent/ssh_host_rsa_key", False), ("port 22", False),
+                 (f"{ours}_extra", False), (f"{ours}\nhostkey {present} ", False),
+                 (f"{ours}\nhostkey relative_key", False), (f"{ours}\nhostkey /no such/key", False),
+                 (f"{ours}\nhostkey /nonexistent/*", False)]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                settings = self.directory / "settings"
+                settings.write_text("port 22\n" + text + "\n")
+                self.assertIs(self.run_stock(body, str(settings)), expected)
+
+    def test_stock_sshd_settings_allow_no_other_login_route(self):
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        start = lines.index("# No login route besides the authorized_keys files checked below.") + 1
+        end = lines.index("fi", start)
+        body = 'settings="$(cat "$1")"\n' + "\n".join(lines[start:end + 1])
+        base = ["authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2", "authorizedkeyscommand none",
+                "authorizedprincipalscommand none", "authorizedprincipalsfile none", "trustedusercakeys none",
+                "hostkeyagent none"]
+        cases = [(base, True), (["authorizedkeysfile .ssh/authorized_keys", *base[1:]], True),
+                 (["authorizedkeysfile .ssh/authorized_keys /etc/ssh/keys/%u", *base[1:]], False),
+                 ([*base, "hostcertificate /etc/ssh/cert.pub"], False)]
+        for index in range(1, len(base)):
+            changed = list(base)
+            changed[index] = changed[index].replace(" none", " /usr/bin/true")
+            cases.append((changed, False))
+        for settings_lines, expected in cases:
+            with self.subTest(settings=settings_lines):
+                settings = self.directory / "settings"
+                settings.write_text("\n".join(["port 22", *settings_lines]) + "\n")
+                self.assertIs(self.run_stock(body, str(settings)), expected)
+
+    def test_stock_authorized_keys_allow_only_repeats_of_the_operator(self):
+        body = 'auth="$1"\n' + self.stock_segment("mapfile -t -n 5 lines < \"$auth\"", "done")
+        line = "ssh-ed25519 operator"
+        cases = [(line + "\n", True), (line, True), (f"{line} terrace\n{line} hetzner\n", True),
+                 ((line + "\n") * 4, True), ((line + "\n") * 5, False), ("", False),
+                 (f"{line}\n\n", False), (f"{line}\nssh-ed25519 other\n", False),
+                 (f'command="true" {line}\n', False), (f"{line}\n# note\n", False),
+                 ("ssh-rsa operator\n", False), ("ssh-ed25519 operator2\n", False),
+                 (f"{line}\r\n", False), ("ssh-ed25519\toperator\n", True), (f"  {line}\n", True)]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                auth = self.directory / "authorized_keys"
+                auth.write_text(text)
+                self.assertIs(self.run_stock(body, str(auth), "operator"), expected)
 
     def test_stock_dispatch_checks_archive_and_rebinds_before_kexec(self):
         archive = self.directory / "installer.tar.gz"
