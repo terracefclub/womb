@@ -17,15 +17,31 @@ ARCHIVE_LIMIT = 1_073_741_824
 ARCHIVE_SHA = re.compile(r"[a-f0-9]{64}")
 ARCHIVE_FILES = {"kexec/bzImage", "kexec/initrd", "kexec/ip", "kexec/kexec", "kexec/run"}
 SCRATCH = "/run/terrace-stock-kexec"
+# Every check is its own simple command: under set -e a failure inside an && list
+# neither exits nor fires the ERR trap. A failed check prints only its line number in
+# this fixed script and its status, then stops; nothing the host holds is echoed.
+# Dispatch reports that line, and the Python side still accepts only a boot ID.
 STOCK_PROBE = """
 set -euo pipefail
-test "$(id -u)" = 0 && test "$(uname -m)" = x86_64
+trap 'printf "stock-check-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
+test "$(id -u)" = 0
+test "$(uname -m)" = x86_64
 test ! -e /sys/firmware/efi
 grep -qx 'ID=debian' /etc/os-release
 grep -Eq '^VERSION_ID="?13"?$' /etc/os-release
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
-cloud-init status --wait >/dev/null
-read -r client _ <<<"${SSH_CLIENT:?}"
+# Allowance: cloud-init exits 2 when it finished with recoverable errors only, such as
+# warnings a provider datasource or vendor data raises. Accept exactly that state:
+# done, degraded and no errors. Every effect that matters for trust is checked below.
+cloud_init=0
+cloud-init status --wait >/dev/null || cloud_init=$?
+if test "$cloud_init" != 0; then
+  test "$cloud_init" = 2
+  cloud_status="$(cloud-init status --format json)" || test "$?" = 2
+  python3 -I -c 'import json, sys; s = json.loads(sys.argv[1]); sys.exit(not (s.get("status") == "done" and s.get("extended_status") == "degraded done" and s.get("errors") == []))' "$cloud_status"
+fi
+test -n "${SSH_CLIENT:-}"
+read -r client _ <<<"$SSH_CLIENT"
 settings="$(/usr/sbin/sshd -T -C "user=root,host=$client,addr=$client")"
 grep -qx 'pubkeyauthentication yes' <<<"$settings"
 grep -qx 'authenticationmethods publickey' <<<"$settings"
@@ -35,16 +51,29 @@ grep -qx 'kbdinteractiveauthentication no' <<<"$settings"
 grep -qx 'hostbasedauthentication no' <<<"$settings"
 grep -qx 'gssapiauthentication no' <<<"$settings"
 grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$settings"
-test "$(grep '^hostkey ' <<<"$settings")" = 'hostkey /etc/ssh/ssh_host_ed25519_key'
-test -x /usr/bin/ip && test "$(stat -Lc '%u:%g:%a' /usr/bin/ip)" = 0:0:755
+hostkeys="$(grep '^hostkey ' <<<"$settings")"
+grep -qx 'hostkey /etc/ssh/ssh_host_ed25519_key' <<<"$hostkeys"
+# Allowance: a provider drop-in may name other HostKey files. sshd serves only keys
+# that exist, so each other path must be absent; the key files are counted below.
+while read -r _ path; do
+  if test "$path" != /etc/ssh/ssh_host_ed25519_key; then
+    test ! -e "$path"
+    test ! -L "$path"
+  fi
+done <<<"$hostkeys"
+test -x /usr/bin/ip
+test "$(stat -Lc '%u:%g:%a' /usr/bin/ip)" = 0:0:755
 /usr/bin/ip --json addr >/dev/null
+# The upstream kexec runner packs the carried state with cpio and gzip.
 command -v cpio >/dev/null
+command -v gzip >/dev/null
 keys=(/etc/ssh/ssh_host_*)
 test "${#keys[@]}" = 2
 test "${keys[0]}" = /etc/ssh/ssh_host_ed25519_key
 test "${keys[1]}" = /etc/ssh/ssh_host_ed25519_key.pub
 for key in "${keys[@]}"; do
-  test -f "$key" && test ! -L "$key"
+  test -f "$key"
+  test ! -L "$key"
 done
 test "$(stat -c '%u:%a:%h' "${keys[0]}")" = 0:600:1
 read -r kind key _ < <(ssh-keygen -y -f "${keys[0]}")
@@ -55,16 +84,25 @@ test "${#published[@]}" = 1
 read -r kind key _ <<<"${published[0]}"
 test "$kind $key" = "ssh-ed25519 $1"
 auth=/root/.ssh/authorized_keys
-test -f "$auth" && test ! -L "$auth"
+test -f "$auth"
+test ! -L "$auth"
 test "$(stat -c '%u:%h' "$auth")" = 0:1
-test ! -e /root/.ssh/authorized_keys2 && test ! -L /root/.ssh/authorized_keys2
-test ! -e /etc/ssh/authorized_keys.d/root && test ! -L /etc/ssh/authorized_keys.d/root
-mapfile -t lines < "$auth"
-test "${#lines[@]}" = 1
-read -r kind key _ <<<"${lines[0]}"
-test "$kind $key" = "ssh-ed25519 $2"
+test ! -e /root/.ssh/authorized_keys2
+test ! -L /root/.ssh/authorized_keys2
+test ! -e /etc/ssh/authorized_keys.d/root
+test ! -L /etc/ssh/authorized_keys.d/root
+# Allowance: provider metadata can add the operator key a second time. Accept up to four
+# lines that are all that one key: no other key, no options and no other kind of line.
+mapfile -t -n 5 lines < "$auth"
+test "${#lines[@]}" -ge 1
+test "${#lines[@]}" -le 4
+for line in "${lines[@]}"; do
+  read -r kind key _ <<<"$line"
+  test "$kind $key" = "ssh-ed25519 $2"
+done
 cat /proc/sys/kernel/random/boot_id
 """
+STOCK_FAILURE = re.compile(rb"stock-check-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
 UPLOAD = f"""
 set -euo pipefail
 umask 077
@@ -98,7 +136,9 @@ test "$(stat -c %s installer.tar.gz)" = "$3"
 printf '%s  installer.tar.gz\n' "$2" | sha256sum --check --status
 tar --no-same-owner -xzf installer.tar.gz
 rm -- installer.tar.gz
-test -x kexec/run && test -f kexec/run && test ! -L kexec/run
+test -x kexec/run
+test -f kexec/run
+test ! -L kexec/run
 trap - EXIT
 """
 KEXEC = f"""
@@ -122,12 +162,28 @@ def boot_id(data):
     return value
 
 
+class StockCheckFailed(install.Rejected):
+    """A stock host check failed; only its line in STOCK_PROBE and its status are kept."""
+
+    def __init__(self, line, status):
+        super().__init__("stock host check failed")
+        self.line, self.status = line, status
+
+
+def stock_check(ssh, key, operator):
+    output = install.remote(ssh, 60, STOCK_PROBE, key, operator, capture=True)
+    failure = STOCK_FAILURE.fullmatch(output)
+    if failure:
+        raise StockCheckFailed(*map(int, failure.groups()))
+    return boot_id(output)
+
+
 def stock_boot(ssh, key, directory):
     public = install.checked_process(
         ["ssh-keygen", "-y", "-f", str(directory / "operator-ed25519")], 5, capture=True
     ).decode("ascii").split()
     install.require(len(public) >= 2 and public[0] == "ssh-ed25519", "invalid operator key")
-    return boot_id(install.remote(ssh, 60, STOCK_PROBE, key, public[1], capture=True))
+    return stock_check(ssh, key, public[1])
 
 
 def archive_unpacked_bytes(source):
@@ -206,6 +262,11 @@ def main():
         else:
             verify_ram(directory, args.phase, args.role)
             print("The pinned host now runs the RAM installer on a new boot.")
+    except StockCheckFailed as failure:
+        # Both values are integers about this fixed script, never host or private data.
+        print(f"Stock host check failed at line {failure.line:d} (status {failure.status:d}). "
+              "Private inputs suppressed.", file=sys.stderr)
+        return 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError):
         print("Stock kexec operation rejected. Private inputs suppressed.", file=sys.stderr)
         return 1

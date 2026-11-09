@@ -40,7 +40,8 @@ BOOT_ID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 PROOF_LINE = re.compile(rb"terrace-hostkey-proof v1 ([0-9a-f]{64})")
 PROOF_OUTPUT_LIMIT = 65536
 RAM_PROBE = """
-test "$(id -u)" = 0 && test "$(uname -m)" = x86_64
+test "$(id -u)" = 0
+test "$(uname -m)" = x86_64
 test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
 test "$(findmnt -rn -o FSTYPE --mountpoint /)" = tmpfs
 test "$(findmnt -rn -o FSTYPE --mountpoint /nix/.ro-store)" = squashfs
@@ -191,7 +192,8 @@ def remote(ssh, seconds, script, *args, stdin=None, capture=False):
 
 PROBE = """
 set -euo pipefail
-test "$(id -u)" = 0 && test "$(uname -m)" = x86_64
+test "$(id -u)" = 0
+test "$(uname -m)" = x86_64
 test ! -e /sys/firmware/efi
 case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) exit 1;; esac
 if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
@@ -206,8 +208,10 @@ BOOTSTRAP = f"""
 set -euo pipefail
 umask 077
 case "$1" in 430|1810) ;; *) exit 1;; esac
-test ! -e /nix && test ! -L /nix
-test ! -e {NIX_SERVE} && test ! -L {NIX_SERVE}
+test ! -e /nix
+test ! -L /nix
+test ! -e {NIX_SERVE}
+test ! -L {NIX_SERVE}
 scratch="$(mktemp -d /tmp/terrace-rescue-nix.XXXXXXXX)"
 trap 'rm -rf -- "$scratch"' EXIT
 cat >"$scratch/nix.tar.xz"
@@ -257,7 +261,8 @@ umask 077
 install -d -m 0755 /mnt/etc/ssh
 test ! -L /mnt/etc/ssh
 key=/mnt/etc/ssh/ssh_host_ed25519_key
-test ! -e "$key" && test ! -L "$key"
+test ! -e "$key"
+test ! -L "$key"
 set -o noclobber
 cat >"$key"
 test "$(ssh-keygen -y -f "$key" | cut -d ' ' -f 2)" = "$8"
