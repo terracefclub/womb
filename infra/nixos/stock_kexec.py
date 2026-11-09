@@ -63,7 +63,7 @@ grep -qx 'hostbasedauthentication no' <<<"$settings"
 grep -qx 'gssapiauthentication no' <<<"$settings"
 grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$settings"
 # No login route besides the authorized_keys files checked below.
-grep -Eqx 'authorizedkeysfile \.ssh/authorized_keys( \.ssh/authorized_keys2)?' <<<"$settings"
+grep -Eqx 'authorizedkeysfile \\.ssh/authorized_keys( \\.ssh/authorized_keys2)?' <<<"$settings"
 grep -qx 'authorizedkeyscommand none' <<<"$settings"
 grep -qx 'authorizedprincipalscommand none' <<<"$settings"
 grep -qx 'authorizedprincipalsfile none' <<<"$settings"
