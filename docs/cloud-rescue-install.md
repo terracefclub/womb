@@ -184,15 +184,21 @@ script and its status. Dispatch rejects and reports just those two integers:
 `Stock host check failed at line N (status S)`. Any other output is
 rejected without detail.
 
+The effective sshd settings, evaluated for the session's own addresses and
+port, must also leave no other login route. `AuthorizedKeysFile` is the Debian
+default; `AuthorizedKeysCommand`, `AuthorizedPrincipalsCommand`,
+`AuthorizedPrincipalsFile`, `TrustedUserCAKeys` and `HostKeyAgent` are
+`none`; there is no `HostCertificate`.
+
 Three allowances cover provider differences without widening trust:
 
 - Cloud-init may exit 2 only when its JSON status is `done`, its extended status
-  is `degraded done` and it lists no errors. Provider datasources and vendor
+  is `degraded done`, it lists no errors and no module failed. Provider datasources and vendor
   data can raise recoverable warnings, and every trust-relevant effect is
   checked independently afterwards.
-- A provider sshd drop-in may name other `HostKey` paths only if none of them
-  exists, since sshd serves only existing keys. The Ed25519 key pair must still
-  be the only `ssh_host_*` files.
+- A provider sshd drop-in may name other `HostKey` paths only if each one is a
+  plain absolute path that does not exist, since sshd serves only existing keys.
+  The Ed25519 key pair must still be the only `ssh_host_*` files.
 - Provider metadata can repeat the operator key, as Hetzner offers the
   project SSH key. `authorized_keys` may hold one to four lines, each that
   same key with no options.

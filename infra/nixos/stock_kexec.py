@@ -32,17 +32,26 @@ grep -Eq '^VERSION_ID="?13"?$' /etc/os-release
 test "$(findmnt -rn -o FSTYPE --mountpoint /run)" = tmpfs
 # Allowance: cloud-init exits 2 when it finished with recoverable errors only, such as
 # warnings a provider datasource or vendor data raises. Accept exactly that state:
-# done, degraded and no errors. Every effect that matters for trust is checked below.
+# done, degraded, no errors and no failed module. Trust-relevant effects are checked below.
 cloud_init=0
 cloud-init status --wait >/dev/null || cloud_init=$?
 if test "$cloud_init" != 0; then
   test "$cloud_init" = 2
   cloud_status="$(cloud-init status --format json)" || test "$?" = 2
-  python3 -I -c 'import json, sys; s = json.loads(sys.argv[1]); sys.exit(not (s.get("status") == "done" and s.get("extended_status") == "degraded done" and s.get("errors") == []))' "$cloud_status"
+  python3 -I -c '
+import json, sys
+s = json.loads(sys.argv[1])
+found = s.get("recoverable_errors")
+sys.exit(not (s.get("status") == "done" and s.get("extended_status") == "degraded done"
+              and s.get("errors") == [] and isinstance(found, dict)
+              and all(isinstance(items, list) and all(isinstance(item, str) and not (
+                  "Running module" in item and "failed" in item) for item in items)
+                      for items in found.values())))
+' "$cloud_status"
 fi
-test -n "${SSH_CLIENT:-}"
-read -r client _ <<<"$SSH_CLIENT"
-settings="$(/usr/sbin/sshd -T -C "user=root,host=$client,addr=$client")"
+test -n "${SSH_CONNECTION:-}"
+read -r client _ laddr lport <<<"$SSH_CONNECTION"
+settings="$(/usr/sbin/sshd -T -C "user=root,host=$client,addr=$client,laddr=$laddr,lport=$lport")"
 grep -qx 'pubkeyauthentication yes' <<<"$settings"
 grep -qx 'authenticationmethods publickey' <<<"$settings"
 grep -qx 'allowusers root' <<<"$settings"
@@ -51,12 +60,25 @@ grep -qx 'kbdinteractiveauthentication no' <<<"$settings"
 grep -qx 'hostbasedauthentication no' <<<"$settings"
 grep -qx 'gssapiauthentication no' <<<"$settings"
 grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$settings"
+# No login route besides the authorized_keys files checked below.
+grep -Eqx 'authorizedkeysfile \.ssh/authorized_keys( \.ssh/authorized_keys2)?' <<<"$settings"
+grep -qx 'authorizedkeyscommand none' <<<"$settings"
+grep -qx 'authorizedprincipalscommand none' <<<"$settings"
+grep -qx 'authorizedprincipalsfile none' <<<"$settings"
+grep -qx 'trustedusercakeys none' <<<"$settings"
+grep -qx 'hostkeyagent none' <<<"$settings"
+if grep -q '^hostcertificate ' <<<"$settings"; then
+  false
+fi
 hostkeys="$(grep '^hostkey ' <<<"$settings")"
 grep -qx 'hostkey /etc/ssh/ssh_host_ed25519_key' <<<"$hostkeys"
 # Allowance: a provider drop-in may name other HostKey files. sshd serves only keys
-# that exist, so each other path must be absent; the key files are counted below.
-while read -r _ path; do
+# that exist, so each other path must be plain, absolute and absent; the key files
+# are counted below. The raw read keeps any whitespace that would hide a path.
+while IFS= read -r line; do
+  path="${line#hostkey }"
   if test "$path" != /etc/ssh/ssh_host_ed25519_key; then
+    [[ $path =~ ^/[A-Za-z0-9_./-]+$ ]]
     test ! -e "$path"
     test ! -L "$path"
   fi

@@ -264,7 +264,7 @@ class RescueInstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         if result.stdout == b"passed\n":
             return True
-        self.assertRegex(result.stdout, rb"^stock-check-failed [1-9][0-9]* [1-9][0-9]*\n$")
+        self.assertRegex(result.stdout, rb"^stock-check-failed [1-9][0-9]{0,2} [1-9][0-9]{0,2}\n$")
         return False
 
     def test_stock_probe_reports_only_the_failed_line_and_status(self):
@@ -329,7 +329,9 @@ class RescueInstallTest(unittest.TestCase):
                  ("2", good.replace("degraded done", "done"), "2", False),
                  ("2", good.replace('"done"', '"error"', 1), "2", False),
                  ("2", good.replace('"errors": []', '"errors": ["x"]'), "2", False),
-                 ("2", "not json", "2", False), ("2", "{}", "2", False)]
+                 ("2", "not json", "2", False), ("2", "{}", "2", False),
+                 ("2", good.replace('["datasource"]', '["Running module ssh (cc_ssh) failed"]'), "2", False),
+                 ("2", good.replace('{"WARNING": ["datasource"]}', '[]'), "2", False)]
         for wait, status, json_rc, expected in cases:
             with self.subTest(wait=wait, status=status, json_rc=json_rc):
                 with patch.dict("os.environ", {"WAIT": wait, "STATUS": status, "JSON": json_rc}):
@@ -347,11 +349,34 @@ class RescueInstallTest(unittest.TestCase):
                  (f"hostkey /nonexistent/ssh_host_rsa_key\n{ours}", True),
                  (f"{ours}\nhostkey {present}", False), (f"{ours}\nhostkey {dangling}", False),
                  ("hostkey /nonexistent/ssh_host_rsa_key", False), ("port 22", False),
-                 (f"{ours}_extra", False)]
+                 (f"{ours}_extra", False), (f"{ours}\nhostkey {present} ", False),
+                 (f"{ours}\nhostkey relative_key", False), (f"{ours}\nhostkey /no such/key", False),
+                 (f"{ours}\nhostkey /nonexistent/*", False)]
         for text, expected in cases:
             with self.subTest(text=text):
                 settings = self.directory / "settings"
                 settings.write_text("port 22\n" + text + "\n")
+                self.assertIs(self.run_stock(body, str(settings)), expected)
+
+    def test_stock_sshd_settings_allow_no_other_login_route(self):
+        lines = stock_kexec.STOCK_PROBE.splitlines()
+        start = lines.index("# No login route besides the authorized_keys files checked below.") + 1
+        end = lines.index("fi", start)
+        body = 'settings="$(cat "$1")"\n' + "\n".join(lines[start:end + 1])
+        base = ["authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2", "authorizedkeyscommand none",
+                "authorizedprincipalscommand none", "authorizedprincipalsfile none", "trustedusercakeys none",
+                "hostkeyagent none"]
+        cases = [(base, True), (["authorizedkeysfile .ssh/authorized_keys", *base[1:]], True),
+                 (["authorizedkeysfile .ssh/authorized_keys /etc/ssh/keys/%u", *base[1:]], False),
+                 ([*base, "hostcertificate /etc/ssh/cert.pub"], False)]
+        for index in range(1, len(base)):
+            changed = list(base)
+            changed[index] = changed[index].replace(" none", " /usr/bin/true")
+            cases.append((changed, False))
+        for settings_lines, expected in cases:
+            with self.subTest(settings=settings_lines):
+                settings = self.directory / "settings"
+                settings.write_text("\n".join(["port 22", *settings_lines]) + "\n")
                 self.assertIs(self.run_stock(body, str(settings)), expected)
 
     def test_stock_authorized_keys_allow_only_repeats_of_the_operator(self):
@@ -361,7 +386,8 @@ class RescueInstallTest(unittest.TestCase):
                  ((line + "\n") * 4, True), ((line + "\n") * 5, False), ("", False),
                  (f"{line}\n\n", False), (f"{line}\nssh-ed25519 other\n", False),
                  (f'command="true" {line}\n', False), (f"{line}\n# note\n", False),
-                 ("ssh-rsa operator\n", False), ("ssh-ed25519 operator2\n", False)]
+                 ("ssh-rsa operator\n", False), ("ssh-ed25519 operator2\n", False),
+                 (f"{line}\r\n", False), ("ssh-ed25519\toperator\n", True), (f"  {line}\n", True)]
         for text, expected in cases:
             with self.subTest(text=text):
                 auth = self.directory / "authorized_keys"
