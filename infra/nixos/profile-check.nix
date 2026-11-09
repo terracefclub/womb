@@ -44,17 +44,21 @@ let
   in
     lib.assertMsg (failures == []) (lib.concatMapStringsSep "\n" (entry: entry.message) failures);
   bootAndSSH = cfg: let
-    grub = cfg.boot.loader.grub;
+    loader = cfg.boot.loader;
     layout = cfg.disko.devices.disk.system;
+    esp = layout.content.partitions.ESP;
     ssh = cfg.services.openssh;
   in
-    grub.enable
-    && !grub.efiSupport
-    && grub.device == ""
-    && grub.devices == [disk]
+    !loader.grub.enable
+    && loader.systemd-boot.enable
+    && !loader.efi.canTouchEfiVariables
     && layout.device == disk
     && layout.content.type == "gpt"
-    && layout.content.partitions.bios.type == "EF02"
+    && lib.attrNames layout.content.partitions == ["ESP" "root"]
+    && esp.type == "EF00"
+    && esp.content.format == "vfat"
+    && esp.content.mountpoint == "/boot"
+    && cfg.fileSystems."/boot".fsType == "vfat"
     && layout.content.partitions.root.content.format == "ext4"
     && layout.content.partitions.root.content.mountpoint == "/"
     && ssh.enable

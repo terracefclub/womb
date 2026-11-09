@@ -1,8 +1,15 @@
 # Hetzner system disk profile
 
 `flake.nix` exports `nixosModules.cloud-host`. It composes the pinned Disko
-module with Terrace's K3s/SSH host profile and the BIOS/GPT disk layout in
-`disk.nix`: a 1 MiB EF02 BIOS boot partition and an ext4 root partition.
+module with Terrace's K3s/SSH host profile and the UEFI/GPT disk layout in
+`disk.nix`: a 512 MiB EF00 EFI system partition mounted at `/boot` and an ext4
+root partition. Hetzner's current server types boot UEFI: on 2026-11-08 a
+disposable CPX22 probe (run `d9840b5d`) failed the former BIOS-only stock
+check, so the layout replaces the pinned platform profile's BIOS GRUB with
+systemd-boot. `boot.loader.efi.canTouchEfiVariables` is false:
+`bootctl` writes no firmware variables and installs the removable fallback
+`EFI/BOOT/BOOTX64.EFI`, which a fresh disk boots without an NVRAM entry. BIOS
+boot is not supported.
 The disk device is **required** and has no default. The build-only test uses
 `/dev/vda` in a disposable VM; this says nothing about the future cloud disk.
 The flake locks the platform module to Womb commit
@@ -23,7 +30,7 @@ check cannot prove where a by-id symlink points; verify that in Rescue.
 ## Independent recovery relay
 
 Use the `cloud-disk` export when composing the disk layout with a separately
-pinned platform revision. It supplies Disko, GPT, BIOS and ext4 disk settings
+pinned platform revision. It supplies Disko, GPT, UEFI and ext4 disk settings
 without activating services. Import the `hetzner` and `relay` modules from
 that same current platform revision and set `terrace.hetzner.enable = true`,
 `terrace.hetzner.enableK3s = false` and `terrace.relay.enable = true`.
@@ -65,7 +72,7 @@ module containing at least:
 ```
 
 Evaluate the complete NixOS configuration and inspect its `fileSystems`,
-`boot.loader.grub.devices`, SSH settings and firewall before allowing Disko's
+`boot.loader.systemd-boot.enable`, SSH settings and firewall before allowing Disko's
 destructive `disko` mode. Then use the pinned Disko tooling to partition and
 mount the verified disk and `nixos-install --flake` for that same configuration.
 Reboot through Hetzner Console, verify operator-key SSH, K3s service and a
@@ -73,12 +80,13 @@ single Ready node, and verify port 6443 is unreachable from an external host.
 The VM result below checks disk installation and boot; it does not replace
 these cloud checks.
 
-The EF02 partition makes Disko supply the whole disk as the sole GRUB
-device. Setting the legacy singular `boot.loader.grub.device` as well would
-add the same disk twice and cause NixOS to reject the configuration.
+The platform profile's GRUB settings remain, but `disk.nix` disables GRUB with
+`mkForce`, so no GRUB device is installed.
 
 The install test runs Disko's NixOS installer in an isolated VM, boots the
-result under BIOS/GRUB, and checks the root filesystem. It disables K3s only
+result under OVMF with read-only firmware variables, so the disk must start
+from its fallback path. It checks the ext4 root, the vfat `/boot`, the fallback
+loader and `bootctl is-installed`. It disables K3s only
 inside that installer test; the separate `platform` VM test covers K3s. Run
 only on a Linux builder under the shared heavy-build lock, with distributed
 builders disabled:

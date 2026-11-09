@@ -29,7 +29,7 @@ the repository root on the Linux builder, supply the verified host inputs:
 args=(--impure --file infra/nixos/rehearsal-config.nix
       --argstr role relay --arg localModule /absolute/private/relay-host.nix
       --argstr privateIPv4 "$REHEARSAL_RELAY_IPV4")
-direnv exec . nix eval "${args[@]}" config.boot.loader.grub.devices
+direnv exec . nix eval "${args[@]}" config.boot.loader.systemd-boot.enable
 direnv exec . nix eval "${args[@]}" config.fileSystems
 ```
 
@@ -47,7 +47,7 @@ has a separate closure and receives no app archives.
 On the matched, leased Rescue host with a working Nix store, copy the three
 reviewed closures using host-key-pinned SSH. The following is the direct
 install sequence **only after rechecking the leased ID, verified whole disk,
-BIOS mode, empty `/mnt` and fresh disposable role**:
+UEFI mode, empty `/mnt` and fresh disposable role**:
 
 ```sh
 "$DISKO_SCRIPT"
@@ -56,8 +56,9 @@ findmnt --mountpoint /mnt --noheadings --output SOURCE,FSTYPE
 ```
 
 The Disko script destroys and formats the single configured disk. Verify
-that the mounted ext4 root belongs to the same verified whole disk before
-running the installer. Obtain and pin the installed host key independently
+that the mounted ext4 root and the vfat `/mnt/boot` EFI system partition
+belong to the same verified whole disk before running the installer, and that
+`/mnt/boot/EFI/BOOT/BOOTX64.EFI` exists after it. Obtain and pin the installed host key independently
 before operator SSH. Rescue availability, actual firmware, disk, reboot and
 service health are measured provider steps.
 

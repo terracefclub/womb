@@ -379,6 +379,60 @@ class RescueInstallTest(unittest.TestCase):
                 settings.write_text("\n".join(["port 22", *settings_lines]) + "\n")
                 self.assertIs(self.run_stock(body, str(settings)), expected)
 
+    def test_stock_requires_uefi_without_lockdown(self):
+        body = self.stock_segment("test -d /sys/firmware/efi", "fi")
+        efi = self.directory / "efi"
+        lockdown = self.directory / "lockdown"
+        body = body.replace("/sys/firmware/efi", str(efi)).replace("/sys/kernel/security/lockdown", str(lockdown))
+        cases = [(True, None, True), (False, None, False), (True, "[none] integrity confidentiality", True),
+                 (True, "", False),
+                 (True, "none [integrity] confidentiality", False), (True, "none integrity [confidentiality]", False)]
+        for has_efi, mode, expected in cases:
+            with self.subTest(efi=has_efi, lockdown=mode):
+                if has_efi:
+                    efi.mkdir(exist_ok=True)
+                elif efi.exists():
+                    efi.rmdir()
+                if mode is None:
+                    lockdown.unlink(missing_ok=True)
+                else:
+                    lockdown.write_text(mode + "\n")
+                self.assertIs(self.run_stock(body), expected)
+
+    def test_install_scripts_require_uefi_and_a_fallback_boot_path(self):
+        # The stock host proves the firmware before kexec; the RAM installer's EFI view is not required.
+        self.assertIn("\ntest -d /sys/firmware/efi\n", stock_kexec.STOCK_PROBE)
+        for script in (rescue.PROBE, stock_kexec.STOCK_PROBE):
+            self.assertNotIn("! -e /sys/firmware/efi", script)
+        self.assertNotIn("/sys/firmware/efi", rescue.PROBE)
+        for script in (rescue.FORMAT, rescue.FINISH):
+            self.assertIn(rescue.MOUNT_GUARD, script)
+        install_line = rescue.FINISH.index("nixos-install")
+        for check in ("test -f /mnt/boot/EFI/BOOT/BOOTX64.EFI", "test ! -L /mnt/boot/EFI/BOOT/BOOTX64.EFI",
+                      "test -f /mnt/boot/loader/loader.conf"):
+            self.assertGreater(rescue.FINISH.index(check), install_line)
+
+    def test_mount_guard_requires_ext4_root_and_esp_on_the_same_disk(self):
+        esp_guid = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+        fake = {
+            "findmnt": 'case "$*" in\n*"--mountpoint /mnt/boot"*) test -n "$BOOT" || exit 1; echo "$BOOT";;\n'
+                       '*"--mountpoint /mnt"*) echo "$ROOT";;\nesac\n',
+            "lsblk": 'case "$*" in\n*PKNAME*/dev/sda2*) echo "$ROOT_DISK";;\n*PKNAME*) echo "$ESP_DISK";;\n'
+                     '*PARTTYPE*) echo "$ESP_TYPE";;\nesac\n',
+            "udevadm": "exit 0\n",
+        }
+        good = {"ROOT": "/dev/sda2 ext4", "BOOT": "/dev/sda1 vfat", "ROOT_DISK": "sda", "ESP_DISK": "sda",
+                "ESP_TYPE": esp_guid}
+        cases = [({}, True), ({"ESP_TYPE": esp_guid.upper()}, True), ({"BOOT": ""}, False),
+                 ({"BOOT": "/dev/sda1 ext4"}, False), ({"ESP_DISK": "sdb"}, False),
+                 ({"ESP_TYPE": "0fc63daf-8483-4772-8e79-3d69d8477de4"}, False), ({"ESP_TYPE": ""}, False),
+                 ({"ROOT": "/dev/sda2 vfat"}, False), ({"ROOT_DISK": "sdb"}, False)]
+        for change, expected in cases:
+            with self.subTest(change=change):
+                with patch.dict("os.environ", {**good, **change}):
+                    self.assertIs(self.run_stock(rescue.MOUNT_GUARD, "boot", "/dev/sda", "/dev/sda",
+                                                 fake=fake), expected)
+
     def test_stock_authorized_keys_allow_only_repeats_of_the_operator(self):
         body = 'auth="$1"\n' + self.stock_segment("mapfile -t -n 5 lines < \"$auth\"", "done")
         line = "ssh-ed25519 operator"
