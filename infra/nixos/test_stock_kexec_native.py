@@ -322,7 +322,8 @@ def stock_diagnostics(port, ssh, public, operator):
             line, rc = map(int, match.groups())
             facts.update(stockCheckLine=line, stockCheckRc=rc)
             lines = probe.splitlines()
-            if line <= len(lines) and "cloud" in lines[line - 1]:
+            start = lines.index("cloud_init=0")
+            if start < line <= lines.index("fi", start) + 1:
                 code, status, _ = diagnostic_command([*ssh, "timeout 10 cloud-init status --format json"], 15)
                 facts["cloudInitStatus"] = cloud_status_facts(code, status)
     return facts

@@ -184,8 +184,8 @@ script and its status. Dispatch rejects and reports just those two integers:
 `Stock host check failed at line N (status S)`. Any other output is
 rejected without detail.
 
-The effective sshd settings, evaluated for the session's own addresses and
-port, must also leave no other login route. `AuthorizedKeysFile` is the Debian
+The effective sshd settings, evaluated from `/` for the session's own
+addresses and port, must also leave no other login route. `AuthorizedKeysFile` is the Debian
 default; `AuthorizedKeysCommand`, `AuthorizedPrincipalsCommand`,
 `AuthorizedPrincipalsFile`, `TrustedUserCAKeys` and `HostKeyAgent` are
 `none`; there is no `HostCertificate`.
@@ -193,7 +193,9 @@ default; `AuthorizedKeysCommand`, `AuthorizedPrincipalsCommand`,
 Three allowances cover provider differences without widening trust:
 
 - Cloud-init may exit 2 only when its JSON status is `done`, its extended status
-  is `degraded done`, it lists no errors and no module failed. Provider datasources and vendor
+  is `degraded done`, it lists no errors and no module failed. The module check
+  matches cloud-init's "Running module … failed" wording, so a differently worded
+  failure is bounded only by the independent checks. Provider datasources and vendor
   data can raise recoverable warnings, and every trust-relevant effect is
   checked independently afterwards.
 - A provider sshd drop-in may name other `HostKey` paths only if each one is a

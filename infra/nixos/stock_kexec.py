@@ -51,6 +51,8 @@ sys.exit(not (s.get("status") == "done" and s.get("extended_status") == "degrade
 fi
 test -n "${SSH_CONNECTION:-}"
 read -r client _ laddr lport <<<"$SSH_CONNECTION"
+# sshd -T resolves relative paths against its cwd; the daemon runs from /.
+cd /
 settings="$(/usr/sbin/sshd -T -C "user=root,host=$client,addr=$client,laddr=$laddr,lport=$lport")"
 grep -qx 'pubkeyauthentication yes' <<<"$settings"
 grep -qx 'authenticationmethods publickey' <<<"$settings"
