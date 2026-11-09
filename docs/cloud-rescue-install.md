@@ -208,7 +208,9 @@ Three allowances cover provider differences without widening trust:
 The check requires UEFI boot (`/sys/firmware/efi`) because the install layout
 is UEFI only, and refuses a kernel under lockdown, which would block the
 unsigned kexec. It stays strict on `cpio` and `gzip`: the upstream runner
-packs the carried state with them. Rescue's probe also requires UEFI. Format
+packs the carried state with them. The disk probe, which also runs in the
+kexec'd installer, does not require the installer to see EFI; the stock check
+before kexec is the firmware gate. Format
 and install verify that the vfat `/mnt/boot` is the EFI system partition
 (type `c12a7328-…`) of the same disk, and that `nixos-install` left
 `EFI/BOOT/BOOTX64.EFI` and `loader/loader.conf`. The QEMU fixture offers the
@@ -273,7 +275,8 @@ systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
     --ovmf-code "$ovmf/FV/OVMF_CODE.fd" --ovmf-vars "$ovmf/FV/OVMF_VARS.fd"
 ```
 
-The single UEFI/KVM guest boots OVMF from the pinned nixpkgs (`OVMF.fd`) with
+Here `$ovmf` is the `fd` output of the pinned nixpkgs `OVMF` package. The
+single UEFI/KVM guest boots its read-only `OVMF_CODE.fd` with
 a private writable copy of the variable store, uses a disposable overlay, and its only forwarded
 port binds loopback. The NoCloud seed assigns a fixed IPv4 address to the
 fixture NIC by MAC and checks that address on both boots. This isolates the

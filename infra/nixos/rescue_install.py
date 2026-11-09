@@ -194,8 +194,6 @@ PROBE = """
 set -euo pipefail
 test "$(id -u)" = 0
 test "$(uname -m)" = x86_64
-# The install layout is UEFI only (an ESP with systemd-boot), like Hetzner's server types.
-test -d /sys/firmware/efi
 case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) exit 1;; esac
 if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
 dev="$(readlink -e "$1")"
@@ -253,7 +251,9 @@ esp="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint /mnt/boot)"
 read -r esp_source esp_kind <<<"$esp"
 test "$esp_kind" = vfat
 test "$(lsblk -dn -o PKNAME -- "$esp_source")" = "${3##*/}"
-test "$(lsblk -dn -o PARTTYPE -- "$esp_source")" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+udevadm settle --timeout=30
+esp_type="$(lsblk -dn -o PARTTYPE -- "$esp_source")"
+test "${esp_type,,}" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b
 """
 
 FORMAT = "set -euo pipefail\n" + DISK_GUARD + """

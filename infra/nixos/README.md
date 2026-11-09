@@ -3,9 +3,10 @@
 `flake.nix` exports `nixosModules.cloud-host`. It composes the pinned Disko
 module with Terrace's K3s/SSH host profile and the UEFI/GPT disk layout in
 `disk.nix`: a 512 MiB EF00 EFI system partition mounted at `/boot` and an ext4
-root partition. Hetzner's current server types (CPX22 was measured on
-2026-11-08) boot UEFI, so the layout replaces the pinned platform profile's BIOS
-GRUB with systemd-boot. `boot.loader.efi.canTouchEfiVariables` is false:
+root partition. Hetzner's current server types boot UEFI: on 2026-11-08 a
+disposable CPX22 probe (run `d9840b5d`) failed the former BIOS-only stock
+check, so the layout replaces the pinned platform profile's BIOS GRUB with
+systemd-boot. `boot.loader.efi.canTouchEfiVariables` is false:
 `bootctl` writes no firmware variables and installs the removable fallback
 `EFI/BOOT/BOOTX64.EFI`, which a fresh disk boots without an NVRAM entry. BIOS
 boot is not supported.
