@@ -578,13 +578,22 @@ def exercise(args, directory, seed, overlay, facts):
             facts["archiveUnpackedBytes"] = sent["archiveUnpackedBytes"]
             facts["stage"] = "ram"
             try:
-                await_fact(process, 150, lambda: stock_kexec.verify_ram(directory, "original", "relay"))
-            except install.Rejected:
+                # The production wait: no fixture retry around it.
+                stock_kexec.verify_ram(directory, "original", "relay")
+            except install.Rejected as failure:
+                if isinstance(failure, stock_kexec.RamNotReady):
+                    facts["ramReport"] = failure.report()
                 late_packets = len(packets)
                 facts["ramDiagnostics"] = ram_diagnostics(args.port, ssh, public, sent["stockBootId"])
                 if not facts["ramDiagnostics"]["sshBanner"]:
                     facts["ramQmp"] = qmp_failure_facts(Path(monitor) / "qmp.sock")
                 raise
+            ready, _ = install.read_json(directory / f"{PREFIX}-ram-ready.json")
+            facts["ramWait"] = {"waitSeconds": ready["waitSeconds"], "timeline": ready["timeline"]}
+            facts["ramBoot"] = boot = ready["boot"]
+            install.require(boot is not None and boot["efi"]
+                            and 0 < boot["initrdStartMs"] <= boot["userspaceStartMs"] <= boot["sshdActiveMs"]
+                            <= boot["uptimeSeconds"] * 1000 + 1000, "RAM boot facts are missing or out of order")
             require_fixture_ipv4(ssh, static=False)
             facts["ramIpv4Retained"] = True
             # Recorded, not required: the install's bootctl writes no firmware variables.

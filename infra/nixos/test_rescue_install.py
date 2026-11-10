@@ -4,6 +4,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import struct
 import subprocess
 import sys
@@ -623,29 +625,190 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         interface["addr_info"].append(dict(address, local="10.0.2.16"))
         self.assertFalse(fixture_ipv4_facts(json.dumps([interface]), static=False))
 
-    def test_ram_receipt_binds_new_boot_and_stock_dispatch(self):
-        old = "abcd0123-1234-1234-1234-1234567890ab"
-        new = "abcd0123-1234-1234-1234-1234567890cd"
+    def ram_dispatch(self, old):
         binding = {"run": RUN, "ipv4": "1.1.1.1"}
         dispatch = self.write("original-relay-kexec-dispatched.json", {
             "binding": binding, "bootstrapKey": "fixture", "stockBootId": old,
         })
-        value = (binding, "fixture", [], ["ssh"])
+        return dispatch, (binding, "fixture", [], ["ssh"])
+
+    def fake_clock(self, attempts):
+        """Each attempt takes its stated seconds; sleeping advances the same clock."""
+        clock = {"now": 1000.0}
+        steps = iter(attempts)
+
+        def attempt(_ssh, budget):
+            seconds, state, boot = next(steps)
+            self.assertLessEqual(budget, stock_kexec.RAM_ATTEMPT_SECONDS)
+            # A real attempt is bounded by its budget.
+            clock["now"] += min(seconds, budget)
+            return state, boot
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        return [patch.object(stock_kexec.time, "monotonic", side_effect=lambda: clock["now"]),
+                patch.object(stock_kexec.time, "sleep", side_effect=sleep),
+                patch.object(stock_kexec, "ram_attempt", side_effect=attempt),
+                patch.object(rescue, "remaining", side_effect=lambda _d, _b, limit: limit)]
+
+    def test_ram_wait_records_states_until_a_new_boot_answers(self):
+        old = "abcd0123-1234-1234-1234-1234567890ab"
+        new = "abcd0123-1234-1234-1234-1234567890cd"
+        dispatch, value = self.ram_dispatch(old)
+        attempts = [(1, "not-ram", None), (10, "no-answer", None), (10, "no-answer", None),
+                    (0, "closed", None), (1, "ready", old), (1, "ready", new)]
+        facts = {"efi": True, "uptimeSeconds": 40}
         with patch.object(rescue, "bootstrap_authority", return_value=value), patch.object(
-            rescue, "ram_boot_id", return_value=old
-        ) as boot:
-            with self.assertRaisesRegex(rescue.Rejected, "stock boot is still running"):
+            stock_kexec, "ram_boot_facts", return_value=facts
+        ):
+            patches = self.fake_clock(attempts)
+            for item in patches:
+                item.start()
+            try:
                 stock_kexec.verify_ram(self.directory, "original", "relay")
-            boot.return_value = new
-            stock_kexec.verify_ram(self.directory, "original", "relay")
-            self.assertEqual(rescue.authority(self.directory, "original", "relay", ram=True), value)
-            boot.return_value = old
-            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
-                rescue.authority(self.directory, "original", "relay", ram=True)
-            boot.return_value = new
+            finally:
+                for item in patches:
+                    item.stop()
+            ready, _ = rescue.read_json(self.directory / "original-relay-ram-ready.json")
+            self.assertEqual(ready["bootId"], new)
+            self.assertEqual(ready["timeline"], [["not-ram", 0], ["no-answer", 3], ["closed", 27],
+                                                 ["stock-boot", 29], ["ready", 32]])
+            self.assertEqual(ready["waitSeconds"], 32)
+            self.assertEqual(ready["boot"], facts)
+            with patch.object(rescue, "ram_boot_id", return_value=new):
+                self.assertEqual(rescue.authority(self.directory, "original", "relay", ram=True), value)
+            with patch.object(rescue, "ram_boot_id", return_value=old):
+                with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                    rescue.authority(self.directory, "original", "relay", ram=True)
             dispatch.write_bytes(dispatch.read_bytes() + b" ")
-            with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
-                rescue.authority(self.directory, "original", "relay", ram=True)
+            with patch.object(rescue, "ram_boot_id", return_value=new):
+                with self.assertRaisesRegex(rescue.Rejected, "RAM installer changed"):
+                    rescue.authority(self.directory, "original", "relay", ram=True)
+
+    def test_ram_wait_gives_up_with_a_fixed_report(self):
+        old = "abcd0123-1234-1234-1234-1234567890ab"
+        _, value = self.ram_dispatch(old)
+        operator_line = re.compile(
+            r"RAM installer not ready after [0-9]{1,3} s; observed( [a-z-]{1,12}@[0-9]{1,3}){1,16}[.] "
+            r"Private inputs suppressed[.]")
+        for attempts, report in [
+            ([(1, "not-ram", None)] + [(10, "no-answer", None)] * 14,
+             "RAM installer not ready after 150 s; observed not-ram@0 no-answer@3."),
+            ([(0, "host-key", None)], "RAM installer not ready after 0 s; observed host-key@0."),
+            ([(0, "not-ram", None), (0, "denied", None)],
+             "RAM installer not ready after 2 s; observed not-ram@0 denied@2."),
+            ([(0, "refused" if n % 2 else "closed", None) for n in range(75)],
+             None),
+        ]:
+            with self.subTest(report=report), patch.object(rescue, "bootstrap_authority", return_value=value):
+                patches = self.fake_clock(attempts)
+                for item in patches:
+                    item.start()
+                try:
+                    with self.assertRaises(stock_kexec.RamNotReady) as caught:
+                        stock_kexec.verify_ram(self.directory, "original", "relay")
+                finally:
+                    for item in patches:
+                        item.stop()
+                line = caught.exception.report()
+                self.assertRegex(line, operator_line)
+                self.assertLessEqual(len(caught.exception.timeline), stock_kexec.RAM_TIMELINE_LIMIT)
+                if report:
+                    self.assertEqual(line, report + " Private inputs suppressed.")
+                else:
+                    self.assertTrue(line.endswith(" closed@148. Private inputs suppressed."), line)
+                self.assertFalse((self.directory / "original-relay-ram-ready.json").exists())
+
+    def test_ram_wait_rechecks_the_binding_before_its_receipt(self):
+        old = "abcd0123-1234-1234-1234-1234567890ab"
+        new = "abcd0123-1234-1234-1234-1234567890cd"
+        _, value = self.ram_dispatch(old)
+        moved = ({"run": RUN, "ipv4": "1.1.1.2"}, *value[1:])
+        with patch.object(rescue, "bootstrap_authority", side_effect=[value, moved]):
+            patches = self.fake_clock([(1, "ready", new)])
+            for item in patches:
+                item.start()
+            try:
+                with self.assertRaisesRegex(rescue.Rejected, "changed while waiting"):
+                    stock_kexec.verify_ram(self.directory, "original", "relay")
+            finally:
+                for item in patches:
+                    item.stop()
+        self.assertFalse((self.directory / "original-relay-ram-ready.json").exists())
+
+    def test_ram_attempt_keeps_only_a_fixed_state(self):
+        boot = "abcd0123-1234-1234-1234-1234567890cd"
+
+        def fake(stderr, code, stdout=""):
+            script = f"printf '%s' {shlex.quote(stdout)}; printf '%s\\n' {shlex.quote(stderr)} >&2; exit {code}"
+            return ["bash", "-c", script, "fake-ssh"]
+
+        cases = [
+            (fake("ssh: connect to host 192.0.2.1 port 22: Connection timed out", 255), "no-answer"),
+            (fake("ssh: connect to host 192.0.2.1 port 22: No route to host", 255), "no-answer"),
+            (fake("Connection timed out during banner exchange", 255), "no-banner"),
+            (fake("Connection closed by 192.0.2.1 port 22\nHost key verification failed.", 255), "host-key"),
+            # Text a peer echoes inside ssh's own line before key exchange is never final.
+            (fake("Bad remote protocol version identification: 'SSH-Host key verification failed.'", 255),
+             "ssh-other"),
+            (fake("Bad remote protocol version identification: 'SSH- Permission denied (publickey).'", 255),
+             "ssh-other"),
+            (fake("ssh: connect to host 192.0.2.1 port 22: Connection refused", 255), "refused"),
+            (fake("kex_exchange_identification: read: Connection reset by peer", 255), "closed"),
+            (fake("Connection closed by 192.0.2.1 port 22", 255), "closed"),
+            (fake("Host key verification failed.", 255), "host-key"),
+            (fake("root@192.0.2.1: Permission denied (publickey).", 255), "denied"),
+            (fake("something unexpected", 255), "ssh-other"),
+            (fake("", 1), "not-ram"),
+            (fake("", 0, "not-a-boot-id"), "not-ram"),
+            (fake("", 0, boot * 4), "not-ram"),
+        ]
+        for ssh, state in cases:
+            with self.subTest(state=state):
+                self.assertEqual(stock_kexec.ram_attempt(ssh, 5), (state, None))
+        self.assertEqual(stock_kexec.ram_attempt(fake("", 0, boot + "\n"), 5), ("ready", boot))
+        self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "sleep 5", "x"], 1), ("no-answer", None))
+        with patch.object(stock_kexec, "RAM_CONNECT_SECONDS", 0.5):
+            self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "sleep 5", "x"], 1), ("stalled", None))
+        self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "kill -9 $$", "x"], 5), ("ssh-other", None))
+        flood = ["bash", "-c", "head -c 100000 /dev/zero | tr '\\0' x >&2; sleep 5", "x"]
+        self.assertEqual(stock_kexec.ram_attempt(flood, 5), ("ssh-other", None))
+        for _, state in cases:
+            self.assertIn(state, stock_kexec.RAM_STATES)
+
+    def test_ram_report_is_the_only_failure_output(self):
+        argv = ["stock_kexec.py", str(self.directory), "original", "relay", "--verify-ram"]
+        failure = stock_kexec.RamNotReady(150, [["closed", 0], ["no-answer", 9]])
+        with patch.object(sys, "argv", argv), patch.object(stock_kexec, "verify_ram", side_effect=failure):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(stock_kexec.main(), 1)
+        self.assertEqual(stderr.getvalue(), "RAM installer not ready after 150 s; observed closed@0 "
+                                            "no-answer@9. Private inputs suppressed.\n")
+
+    def test_ram_boot_facts_are_numbers_and_never_a_gate(self):
+        with patch.object(rescue, "remote", return_value=b"1 41.27 2650000 19800000 23400123\n"):
+            self.assertEqual(stock_kexec.ram_boot_facts(["ssh"]), {
+                "efi": True, "uptimeSeconds": 41, "initrdStartMs": 2650,
+                "userspaceStartMs": 19800, "sshdActiveMs": 23400})
+        for output in [b"", b"1 41.27 x 1 1", b"2 41.27 1 1 1", b"1 41.27 1 1 1 extra"]:
+            with self.subTest(output=output), patch.object(rescue, "remote", return_value=output):
+                self.assertIsNone(stock_kexec.ram_boot_facts(["ssh"]))
+        with patch.object(rescue, "remote", side_effect=rescue.Rejected("install command rejected")):
+            self.assertIsNone(stock_kexec.ram_boot_facts(["ssh"]))
+
+    @unittest.skipUnless(Path("/proc/uptime").exists(), "needs Linux /proc")
+    def test_ram_boot_facts_script_output_matches_its_parser(self):
+        with tempfile.TemporaryDirectory() as tools:
+            fake = Path(tools) / "systemctl"
+            fake.write_text("#!/bin/sh\ncase \"$*\" in *InitRD*) echo 2650000;; *Userspace*) echo 19800000;;"
+                            " *sshd*) echo 23400123;; *) exit 1;; esac\n")
+            fake.chmod(0o700)
+            env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
+            output = subprocess.run(["bash", "-c", stock_kexec.RAM_BOOT_FACTS], env=env, capture_output=True,
+                                    text=True, check=True, timeout=5).stdout.strip()
+        self.assertRegex(output, stock_kexec.RAM_BOOT_LINE)
+        self.assertTrue(output.endswith(" 2650000 19800000 23400123"))
 
     def test_console_probe_cannot_dispatch_an_install(self):
         cfg = {"run": RUN, "phase": "original", "probeOnly": True}
@@ -703,7 +866,8 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
     def test_all_fixed_remote_scripts_parse_without_execution(self):
         for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH,
                        rescue.RAM_PROBE, rescue.RAM_SERVE,
-                       stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC]:
+                       stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC,
+                       stock_kexec.RAM_BOOT_FACTS]:
             subprocess.run(["bash", "-n"], input=script, text=True, check=True, timeout=5)
 
 

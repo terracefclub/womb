@@ -232,6 +232,37 @@ Verification requires the same SSH pin, a different kernel
 boot ID, the pinned installer marker and the RAM-backed root and store.
 NixOS remounts the store read-only over itself, so every mount stacked at
 `/nix/store` must be an overlay.
+
+The runner kexecs 6 s after dispatch returns, and the kernel then unpacks the
+xz initrd that carries the whole RAM system. Verification therefore retries
+for up to 150 s, which the native fixture also uses, and rechecks the provider binding
+before it writes `<phase>-<role>-ram-ready.json`. It reduces each attempt to one
+fixed state:
+- `not-ram`: something with the pin answered but failed the RAM checks, as stock Debian does before the switch.
+- `stock-boot`.
+- `no-answer`: no connection within ssh's 10 s limit, or within the last attempt's shorter budget.
+- `refused` or `closed`.
+- `no-banner` or `stalled`: the connection was made, but sshd stayed silent.
+- `ssh-other`, including output over 4 KiB.
+- `ready`.
+
+ssh's whole `Host key verification failed.` or `Permission denied` line
+stops the wait at once as `host-key` or `denied`. Text a peer echoes inside
+ssh's other messages before key exchange is never final. ssh's own messages
+are never kept. On failure, verification
+prints only the state transitions and whole seconds, at most 16 of them,
+keeping the first 15 and the last, for example
+`RAM installer not ready after 150 s; observed not-ram@0 no-answer@3. Private
+inputs suppressed.` A timeline that ends in `no-answer` after earlier answers
+means the host did not come back on the network within the wait. A late
+`ready` means a slow boot.
+On success the receipt adds the timeline and, as best effort, the RAM system's own
+boot timing: EFI visibility, uptime, and when the initrd, the switched root and
+`sshd` started.
+On 2026-11-09 the OVMF fixture of `20010fb` observed
+`not-ram@0 no-banner@6 ready@18`. QEMU's user network accepts TCP while the
+guest is down. The RAM system saw EFI and started its initrd at 4.9 s, its
+switched root at 8.9 s and `sshd` at 12.7 s after kernel start.
 The probe-only cohort ends here. A full cohort can subsequently run the
 whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
 on this route because the RAM installer supplies Nix. Disko still requires the
