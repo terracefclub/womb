@@ -5,10 +5,12 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 import sys
 import tarfile
+import time
 
 import rescue_install as install
 
@@ -258,16 +260,131 @@ def dispatch(directory, phase, role, archive, archive_sha):
     install.remote(ssh, seconds, KEXEC, old_boot)
 
 
+# The runner kexecs 6 s after dispatch returns, then the kernel unpacks the xz initrd
+# that holds the whole RAM system. Wait as long as the native fixture does.
+RAM_WAIT_SECONDS = 150
+RAM_RETRY_DELAY = 2
+RAM_ATTEMPT_SECONDS = 35
+RAM_TIMELINE_LIMIT = 16
+# Each attempt is reduced to one fixed state; ssh's own messages are never kept.
+# host-key and denied are final: the pinned key or the operator key did not match.
+RAM_SSH_STATES = (
+    ("host-key", (b"host key verification failed", b"remote host identification has changed")),
+    ("denied", (b"permission denied",)),
+    ("refused", (b"connection refused",)),
+    ("no-answer", (b"timed out", b"no route to host", b"network is unreachable",
+                   b"host is unreachable")),
+    ("closed", (b"kex_exchange_identification", b"connection closed", b"connection reset",
+                b"broken pipe")),
+)
+RAM_FINAL_STATES = {"host-key", "denied"}
+RAM_STATES = {state for state, _ in RAM_SSH_STATES} | {"ssh-other", "not-ram", "stock-boot", "ready"}
+# Boot timing from the RAM installer's own clock, for telling a slow boot from a stuck one:
+# EFI visibility, uptime, and when the initrd, the switched root and sshd started.
+RAM_BOOT_FACTS = """
+set -euo pipefail
+if test -d /sys/firmware/efi; then efi=1; else efi=0; fi
+read -r uptime _ </proc/uptime
+initrd="$(systemctl show --property=InitRDTimestampMonotonic --value)"
+userspace="$(systemctl show --property=UserspaceTimestampMonotonic --value)"
+sshd="$(systemctl show sshd.service --property=ActiveEnterTimestampMonotonic --value)"
+printf '%s %s %s %s %s\n' "$efi" "$uptime" "$initrd" "$userspace" "$sshd"
+"""
+RAM_BOOT_LINE = re.compile(r"([01]) ([0-9]{1,9})[.][0-9]{1,3} ([0-9]{1,15}) ([0-9]{1,15}) ([0-9]{1,15})")
+
+
+class RamNotReady(install.Rejected):
+    """The RAM installer did not answer in time; only fixed states and seconds are kept."""
+
+    def __init__(self, seconds, timeline):
+        super().__init__("RAM installer not ready")
+        self.seconds, self.timeline = seconds, timeline
+
+    def report(self):
+        observed = " ".join(f"{state}@{second:d}" for state, second in self.timeline)
+        return (f"RAM installer not ready after {self.seconds:d} s; observed {observed}. "
+                "Private inputs suppressed.")
+
+
+def ssh_state(code, stderr):
+    if code == 0:
+        return "ready"
+    if code != 255:
+        return "not-ram"
+    lower = stderr.lower()
+    for state, markers in RAM_SSH_STATES:
+        if any(marker in lower for marker in markers):
+            return state
+    return "ssh-other"
+
+
+def ram_attempt(ssh, seconds):
+    """Run the RAM probe once; return a fixed state and, when ready, the boot ID."""
+    command = shlex.join(["timeout", "--kill-after=5", "20", "bash", "-c",
+                          "set -euo pipefail\n" + install.RAM_PROBE, "terrace"])
+    try:
+        result = subprocess.run([*ssh, command], stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=seconds, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return "no-answer", None
+    state = ssh_state(result.returncode, result.stderr[-4096:])
+    if state != "ready":
+        return state, None
+    boot = result.stdout.decode("ascii", "replace").strip()
+    if len(result.stdout) > 128 or not install.BOOT_ID.fullmatch(boot):
+        return "not-ram", None
+    return "ready", boot
+
+
+def ram_boot_facts(ssh):
+    """Best effort: a diagnostic, never a gate."""
+    try:
+        output = install.remote(ssh, 20, RAM_BOOT_FACTS, capture=True).decode("ascii").strip()
+    except (install.Rejected, OSError, UnicodeDecodeError, subprocess.SubprocessError):
+        return None
+    match = RAM_BOOT_LINE.fullmatch(output)
+    if not match:
+        return None
+    efi, uptime, initrd, userspace, sshd = match.groups()
+    return {"efi": efi == "1", "uptimeSeconds": int(uptime), "initrdStartMs": int(initrd) // 1000,
+            "userspaceStartMs": int(userspace) // 1000, "sshdActiveMs": int(sshd) // 1000}
+
+
+def compact_timeline(timeline):
+    if len(timeline) <= RAM_TIMELINE_LIMIT:
+        return list(timeline)
+    return timeline[:RAM_TIMELINE_LIMIT - 1] + timeline[-1:]
+
+
 def verify_ram(directory, phase, role):
     binding, key, _, ssh = install.bootstrap_authority(directory, phase, role)
     prefix = f"{phase}-{role}"
     sent, digest = install.read_json(directory / f"{prefix}-kexec-dispatched.json")
     install.require(sent["binding"] == binding and sent["bootstrapKey"] == key,
                     "RAM target does not match stock dispatch")
-    boot = install.ram_boot_id(ssh)
-    install.require(boot != sent["stockBootId"], "stock boot is still running")
+    start = time.monotonic()
+    deadline = start + install.remaining(directory, binding, RAM_WAIT_SECONDS)
+    timeline = []
+    while True:
+        second = int(time.monotonic() - start)
+        budget = max(1, min(RAM_ATTEMPT_SECONDS, int(deadline - time.monotonic())))
+        state, boot = ram_attempt(ssh, budget)
+        if state == "ready" and boot == sent["stockBootId"]:
+            state = "stock-boot"
+        install.require(state in RAM_STATES, "unknown RAM wait state")
+        if not timeline or timeline[-1][0] != state:
+            timeline.append([state, second])
+        if state == "ready":
+            break
+        if state in RAM_FINAL_STATES or time.monotonic() + RAM_RETRY_DELAY >= deadline:
+            raise RamNotReady(int(time.monotonic() - start), compact_timeline(timeline))
+        time.sleep(RAM_RETRY_DELAY)
+    # The wait can outlast one provider binding; the server must still be the dispatched one.
+    fresh, fresh_key, _, _ = install.bootstrap_authority(directory, phase, role)
+    install.require((fresh, fresh_key) == (binding, key), "RAM target changed while waiting")
     install.write_private(directory / f"{prefix}-ram-ready.json",
-                          {"dispatchSha256": digest, "bootId": boot})
+                          {"dispatchSha256": digest, "bootId": boot, "waitSeconds": second,
+                           "timeline": compact_timeline(timeline), "boot": ram_boot_facts(ssh)})
 
 
 def main():
@@ -291,6 +408,10 @@ def main():
         else:
             verify_ram(directory, args.phase, args.role)
             print("The pinned host now runs the RAM installer on a new boot.")
+    except RamNotReady as failure:
+        # Fixed state names and integer seconds only; ssh's own messages are never shown.
+        print(failure.report(), file=sys.stderr)
+        return 1
     except StockCheckFailed as failure:
         # Both values are integers about this fixed script, never host or private data.
         print(f"Stock host check failed at line {failure.line:d} (status {failure.status:d}). "
