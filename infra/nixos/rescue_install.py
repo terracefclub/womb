@@ -191,6 +191,7 @@ def remote(ssh, seconds, script, *args, stdin=None, capture=False):
 
 
 # A failed check prints only its line and status, never host output (see parse_probe).
+# Without a NAME column lsblk prints a flat list, so --tree keeps partitions under their disk.
 PROBE = """
 set -euo pipefail
 trap 'printf "probe-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
@@ -202,7 +203,7 @@ dev="$(readlink -e "$1")"
 test -b "$dev"
 cat /proc/sys/kernel/random/boot_id
 printf '%s\n' "$dev"
-lsblk --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"
+lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"
 """
 PROBE_FAILURE = re.compile(rb"probe-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
 

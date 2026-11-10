@@ -536,7 +536,7 @@ def await_target_label(ssh, label, seconds=30):
 
 def stock_layout(ssh):
     """The stock image's partitions as the RAM installer sees them: types, filesystems, sizes."""
-    raw = install.remote(ssh, 20, 'lsblk --bytes --json --paths --output PATH,TYPE,SIZE,PARTTYPE,FSTYPE -- "$1"',
+    raw = install.remote(ssh, 20, 'lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,PARTTYPE,FSTYPE -- "$1"',
                          FIXTURE_DISK, capture=True)
     disk, = json.loads(raw)["blockdevices"]
     parts = [{"path": row["path"], "type": PARTITION_TYPES.get((row.get("parttype") or "").lower(), "other"),

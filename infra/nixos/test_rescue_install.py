@@ -835,6 +835,12 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
 
         alias = "/dev/disk/by-id/scsi-test"
         self.assertEqual(rescue.parse_probe(facts({**row, "children": [part]}), alias)["canonical"], "/dev/vda")
+        # lsblk without NAME and without --tree lists partitions beside their disk.
+        flat = ("abcd0123-1234-1234-1234-1234567890ab\n/dev/vda\n"
+                + json.dumps({"blockdevices": [row, part]})).encode()
+        with self.assertRaisesRegex(rescue.Rejected, "one whole disk"):
+            rescue.parse_probe(flat, alias)
+        self.assertIn(" --tree ", rescue.PROBE)
         # Newer util-linux prints an unmounted device as [] instead of [null].
         newer = {**row, "mountpoints": [], "children": [{**part, "mountpoints": []}]}
         self.assertEqual(rescue.parse_probe(facts(newer), alias)["canonical"], "/dev/vda")
@@ -993,7 +999,8 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             ("findmnt", 'if [ "$2" = --mountpoint ]; then exit 1; fi; echo ext4\n',
              'case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) false;; esac'),
             ("readlink", "exit 1\n", 'dev="$(readlink -e "$1")"'),
-            ("lsblk", "exit 32\n", 'lsblk --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"'),
+            ("lsblk", "exit 32\n",
+             'lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"'),
         ]:
             with self.subTest(name=name, marker=marker):
                 if name == "lsblk" and block is None:
