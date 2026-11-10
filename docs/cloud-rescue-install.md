@@ -263,8 +263,27 @@ On 2026-11-09 the OVMF fixture of `20010fb` observed
 `not-ram@0 no-banner@6 ready@18`. QEMU's user network accepts TCP while the
 guest is down. The RAM system saw EFI and started its initrd at 4.9 s, its
 switched root at 8.9 s and `sshd` at 12.7 s after kernel start.
-The probe-only cohort ends here. A full cohort can subsequently run the
-whole-disk probe and reviewed install above. Omit the Rescue bootstrap archive
+The probe-only cohort ends here. A full cohort next checks the RAM installer
+as an install target, then records its whole-disk probe:
+
+```sh
+direnv exec . python3 -B infra/nixos/stock_kexec.py "$lease" "$phase" "$role" --inspect-target "$disk_gb"
+```
+
+`$disk_gb` is the server type's disk class: 320 for the CPX42 app and 80
+for the CPX22 relay. The check requires a KVM or QEMU guest whose route to the
+internet leaves from the bound address, and exactly one whole `sd`, `vd`,
+`xvd` or `nvme` disk. A CD-ROM beside it is allowed. The disk must be writable,
+non-removable and unmounted, and between `N`×10⁹ bytes and `N` GiB with 4 MiB of slack.
+The whole-disk probe then checks every stock partition as before and writes
+`<phase>-<role>-disk.json`. A failure prints one fixed line, for example
+`Install target check failed: single-disk. Private inputs suppressed.` The
+labels are `ram-authority`, `target-facts`, `virtualization`, `route-source`,
+`single-disk`, `disk-name`, `disk-state`, `disk-size`, `whole-disk-probe`,
+`probe-boot-id`, `probe-alias`, `probe-whole-disk`, `probe-identity`,
+`probe-partition-state`, `probe-holders` and `disk-receipt`. A failing line
+in either fixed script adds only its line number and status, as in
+`whole-disk-probe line 9 status 1`. After that the reviewed install above runs. Omit the Rescue bootstrap archive
 on this route because the RAM installer supplies Nix. Disko still requires the
 separate reviewed disk and install-plan digests. The legacy Rescue route uses
 its original console pin and separate Nix bootstrap archive.
@@ -287,8 +306,22 @@ before and after use. Supply the evaluated archive and its reviewed SHA256.
 The fixture creates a temporary operator key and proof nonce and calls the same
 cloud-config renderer as the creator. The guest generates its own host key; the
 fixture pins it only through the keyed banner proof, and requires a wrong nonce
-and a wrong phase context to be rejected against the live guest. It attaches a private read-only NoCloud CIDATA drive, as
-described in the [cloud-init NoCloud documentation](https://github.com/canonical/cloud-init/blob/25.1.4/doc/rtd/reference/datasources/nocloud.rst).
+and a wrong phase context to be rejected against the live guest. It attaches a private read-only NoCloud CIDATA
+CD-ROM, as described in the [cloud-init NoCloud documentation](https://github.com/canonical/cloud-init/blob/25.1.4/doc/rtd/reference/datasources/nocloud.rst),
+formatted with 2048-byte sectors to suit the CD-ROM's block size.
+The disk is shaped like the CPX42 app disk: one 320 GiB virtio-SCSI disk,
+`/dev/sda`, beside the CD-ROM `sr0`. The stock image keeps its GPT layout,
+an ext4 root that cloud-init grows to fill the disk, BIOS boot and the EFI
+system partition. In the RAM installer, the fixture requires the install
+target check to accept that disk. It then requires these four rejections:
+- a wrong bound address gives `route-source`;
+- an 80 GB class gives `disk-size`;
+- a second disk hot-plugged over QMP gives `single-disk`;
+- a mounted stock ESP gives `probe-partition-state`.
+
+Finally it writes the whole-disk receipt. Hetzner's own Debian 13 image layout
+and its disk bus are not measured by any receipt yet, so the provider run reports
+them through the same labels.
 
 On Falcon, hold the shared build lock and use one supervised service scope.
 Set the public store sentinel to a small file added with `nix store add-file`,
