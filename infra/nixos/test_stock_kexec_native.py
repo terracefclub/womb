@@ -545,19 +545,37 @@ def stock_layout(ssh):
     return disk["size"], parts
 
 
+def block_devices(ssh):
+    """Diagnostic only: each whole device's path, type and size."""
+    try:
+        raw = install.remote(ssh, 20, "lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE", capture=True)
+        return [[row["path"], row["type"], row["size"]] for row in json.loads(raw)["blockdevices"]]
+    except (install.Rejected, ValueError, KeyError, TypeError):
+        return None
+
+
 def exercise_target(directory, ssh, public, options, qmp, facts):
     """The install plan's RAM target checks and whole-disk probe against the stock disk."""
-    target = stock_kexec.ram_target_check(ssh, FIXTURE_IP, FIXTURE_DISK_GB)
+    facts["ramTargetStep"] = "target"
+    try:
+        target = stock_kexec.ram_target_check(ssh, FIXTURE_IP, FIXTURE_DISK_GB)
+    except stock_kexec.TargetCheckFailed as failure:
+        facts["ramTargetFailure"] = {"label": failure.label, "line": failure.line, "status": failure.status}
+        facts["ramBlockDevices"] = block_devices(ssh)
+        raise
+    facts["ramTarget"] = target
     install.require(target == {"device": FIXTURE_DISK, "size": FIXTURE_DISK_GB * stock_kexec.GIB},
                     "fixture install target differs")
-    facts["ramTarget"] = target
+    facts["ramTargetStep"] = "layout"
     size, parts = stock_layout(ssh)
+    facts["stockDiskBytes"] = size
     facts["stockLayout"] = [{key: value for key, value in part.items() if key != "path"} for part in parts]
     kinds = [part["type"] for part in parts]
     esp = next((part for part in parts if part["type"] == "esp"), None)
     install.require(size == target["size"] and esp is not None and esp["fstype"] == "vfat"
                     and any(part["fstype"] == "ext4" and part["sizeMiB"] > 300 * 1024 for part in parts),
                     "stock layout lacks its ESP or grown ext4 root")
+    facts["ramTargetStep"] = "rejects"
     rejects = {"routeSource": target_label(ssh, "10.0.2.99", FIXTURE_DISK_GB),
                "diskSize": target_label(ssh, FIXTURE_IP, 80)}
     # A second disk, hot-plugged and removed again, must stop the plan.
@@ -565,12 +583,15 @@ def exercise_target(directory, ssh, public, options, qmp, facts):
         install.require(ask("blockdev-add", driver="null-co", size=1024 ** 3, **{"node-name": "extra"}) == {}
                         and ask("device_add", driver="scsi-hd", drive="extra", id="extra0", bus="scsi0.0") == {},
                         "second disk hot-plug failed")
+    facts["ramTargetStep"] = "second-disk"
     rejects["secondDisk"] = await_target_label(ssh, "single-disk")
     with qmp_commands(qmp) as ask:
         install.require(ask("device_del", id="extra0") == {}, "second disk removal failed")
     await_target_label(ssh, None)
     with qmp_commands(qmp) as ask:
         install.require(ask("blockdev-del", **{"node-name": "extra"}) == {}, "second disk node survived")
+    facts["ramTargetRejects"] = rejects
+    facts["ramTargetStep"] = "whole-disk"
     bound = ({"ipv4": FIXTURE_IP}, public, options, ssh)
     with patch.object(install, "authority", return_value=bound), \
             patch.object(install, "reviewed_probe_mode", return_value=False), \
