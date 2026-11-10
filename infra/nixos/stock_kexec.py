@@ -447,10 +447,10 @@ set -euo pipefail
 trap 'printf "target-facts-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
 test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
 virt="$(systemd-detect-virt --vm)" || test "$?" = 1
-printf '%s\\n' "$virt"
 route="$(ip -o -4 route get 1.1.1.1)"
-printf '%s\\n' "$route"
-lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS
+devices="$(lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS)"
+# Printed together, so a failure above emits only the trap's marker.
+printf '%s\\n%s\\n%s\\n' "$virt" "$route" "$devices"
 """
 TARGET_FAILURE = re.compile(rb"target-facts-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
 TARGET_LABELS = (
@@ -541,7 +541,7 @@ def inspect_ram_target(directory, phase, role, capacity_gb):
         raise TargetCheckFailed("whole-disk-probe", failure.line, failure.status) from None
     except install.Rejected as failure:
         raise TargetCheckFailed(PROBE_LABELS.get(str(failure), "whole-disk-probe")) from None
-    except (OSError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         raise TargetCheckFailed("whole-disk-probe") from None
     reviewed, digest = install.read_json(directory / f"{prefix}-disk.json")
     if (reviewed["binding"] != binding or reviewed["rescueKey"] != key

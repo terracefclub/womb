@@ -966,17 +966,18 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             ("cat", "echo other\n", 'test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1'),
             ("systemd-detect-virt", "exit 3\n", 'virt="$(systemd-detect-virt --vm)" || test "$?" = 1'),
             ("ip", "exit 2\n", 'route="$(ip -o -4 route get 1.1.1.1)"'),
-            ("lsblk", "exit 32\n", "lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS"),
+            ("lsblk", "exit 32\n",
+             'devices="$(lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS)"'),
         ]:
             with self.subTest(name=name):
                 result = subprocess.run(["bash", "-c", stock_kexec.TARGET_FACTS, "target"], capture_output=True,
                                         timeout=10, env=self.fake_bin({**good, name: text}))
                 self.assertEqual(result.returncode, 0)
                 line = lines.index(marker) + 1
-                self.assertRegex(result.stdout, rb"(?:^|\n)target-facts-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
-                tail = result.stdout.splitlines()[-1] + b"\n"
+                # The whole output, not just its last line: a failure prints the marker alone.
+                self.assertRegex(result.stdout, rb"^target-facts-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
                 with self.assertRaises(stock_kexec.TargetCheckFailed) as caught:
-                    stock_kexec.check_target(tail, "10.0.2.15", 320)
+                    stock_kexec.check_target(result.stdout, "10.0.2.15", 320)
                 self.assertEqual((caught.exception.label, caught.exception.line), ("target-facts", line))
 
     def test_whole_disk_probe_reports_only_the_failed_line(self):
@@ -999,21 +1000,22 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             ("findmnt", 'if [ "$2" = --mountpoint ]; then exit 1; fi; echo ext4\n',
              'case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) false;; esac'),
             ("readlink", "exit 1\n", 'dev="$(readlink -e "$1")"'),
+            ("cat", "exit 1\n", 'boot="$(cat /proc/sys/kernel/random/boot_id)"'),
             ("lsblk", "exit 32\n",
-             'lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"'),
+             'inventory="$(lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev")"'),
         ]:
             with self.subTest(name=name, marker=marker):
-                if name == "lsblk" and block is None:
+                if name in ("lsblk", "cat") and block is None:
                     continue
                 env = self.fake_bin({**good, name: text})
                 result = subprocess.run(["bash", "-c", rescue.PROBE, "probe", "/dev/sda"], capture_output=True,
                                         timeout=10, env=env)
                 self.assertEqual(result.returncode, 0)
                 line = lines.index(marker) + 1
-                tail = result.stdout.splitlines()[-1] + b"\n"
-                self.assertRegex(tail, rb"^probe-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
+                # The whole output, not just its last line: a failure prints the marker alone.
+                self.assertRegex(result.stdout, rb"^probe-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
                 with self.assertRaises(rescue.ProbeFailed) as caught:
-                    rescue.parse_probe(tail, "/dev/sda")
+                    rescue.parse_probe(result.stdout, "/dev/sda")
                 self.assertEqual(caught.exception.line, line)
 
     def test_inspect_ram_target_keeps_only_fixed_labels(self):
@@ -1037,6 +1039,7 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
                          ("probe-partition-state", None))
         self.assertEqual(label(inspect={"side_effect": rescue.Rejected("install command rejected")}),
                          ("whole-disk-probe", None))
+        self.assertEqual(label(inspect={"side_effect": json.JSONDecodeError("x", "y", 0)}), ("whole-disk-probe", None))
         disk = {"device": "/dev/sda", "canonical": "/dev/sda", "size": 320 * 1024 ** 3,
                 "majorMinor": "8:0", "bootId": "abcd0123-1234-1234-1234-1234567890ab"}
 
