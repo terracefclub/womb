@@ -263,13 +263,12 @@ def dispatch(directory, phase, role, archive, archive_sha):
 
 
 # The runner kexecs 6 s after dispatch returns, then the kernel unpacks the xz initrd
-# that holds the whole RAM system. Wait as long as the native fixture does.
+# that holds the whole RAM system. The native fixture uses this same wait.
 RAM_WAIT_SECONDS = 150
 RAM_RETRY_DELAY = 2
 RAM_ATTEMPT_SECONDS = 35
 RAM_TIMELINE_LIMIT = 16
 # Each attempt is reduced to one fixed state; ssh's own messages are never kept.
-# host-key and denied are final: the pinned key or the operator key did not match.
 # host-key and denied are final, so they count only as ssh's own whole lines. A peer can
 # echo text inside ssh's "Bad remote protocol version identification" line before key
 # exchange, but it cannot produce a separate line, so it can only delay, never stop, the wait.
