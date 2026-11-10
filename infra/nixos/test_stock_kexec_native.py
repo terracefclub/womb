@@ -569,7 +569,13 @@ def exercise_target(directory, ssh, public, options, qmp, facts):
     install.require(target == {"device": FIXTURE_DISK, "size": FIXTURE_DISK_GB * stock_kexec.GIB},
                     "fixture install target differs")
     facts["ramTargetStep"] = "layout"
-    size, parts = stock_layout(ssh)
+    try:
+        size, parts = stock_layout(ssh)
+    except (install.Rejected, ValueError, KeyError, TypeError) as error:
+        # Diagnostic only: the error class and, for a remote rejection, the fixed message.
+        facts["stockLayoutError"] = [type(error).__name__, str(error) if isinstance(error, install.Rejected) else None]
+        facts["ramBlockDevices"] = block_devices(ssh)
+        raise
     facts["stockDiskBytes"] = size
     facts["stockLayout"] = [{key: value for key, value in part.items() if key != "path"} for part in parts]
     kinds = [part["type"] for part in parts]
