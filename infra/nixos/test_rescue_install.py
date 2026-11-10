@@ -747,6 +747,13 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         cases = [
             (fake("ssh: connect to host 192.0.2.1 port 22: Connection timed out", 255), "no-answer"),
             (fake("ssh: connect to host 192.0.2.1 port 22: No route to host", 255), "no-answer"),
+            (fake("Connection timed out during banner exchange", 255), "no-banner"),
+            (fake("Connection closed by 192.0.2.1 port 22\nHost key verification failed.", 255), "host-key"),
+            # Text a peer echoes inside ssh's own line before key exchange is never final.
+            (fake("Bad remote protocol version identification: 'SSH-Host key verification failed.'", 255),
+             "ssh-other"),
+            (fake("Bad remote protocol version identification: 'SSH- Permission denied (publickey).'", 255),
+             "ssh-other"),
             (fake("ssh: connect to host 192.0.2.1 port 22: Connection refused", 255), "refused"),
             (fake("kex_exchange_identification: read: Connection reset by peer", 255), "closed"),
             (fake("Connection closed by 192.0.2.1 port 22", 255), "closed"),
@@ -762,6 +769,11 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
                 self.assertEqual(stock_kexec.ram_attempt(ssh, 5), (state, None))
         self.assertEqual(stock_kexec.ram_attempt(fake("", 0, boot + "\n"), 5), ("ready", boot))
         self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "sleep 5", "x"], 1), ("no-answer", None))
+        with patch.object(stock_kexec, "RAM_CONNECT_SECONDS", 0.5):
+            self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "sleep 5", "x"], 1), ("stalled", None))
+        self.assertEqual(stock_kexec.ram_attempt(["bash", "-c", "kill -9 $$", "x"], 5), ("ssh-other", None))
+        flood = ["bash", "-c", "head -c 100000 /dev/zero | tr '\\0' x >&2; sleep 5", "x"]
+        self.assertEqual(stock_kexec.ram_attempt(flood, 5), ("ssh-other", None))
         for _, state in cases:
             self.assertIn(state, stock_kexec.RAM_STATES)
 

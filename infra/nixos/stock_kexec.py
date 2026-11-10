@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 
 import rescue_install as install
@@ -268,17 +270,28 @@ RAM_ATTEMPT_SECONDS = 35
 RAM_TIMELINE_LIMIT = 16
 # Each attempt is reduced to one fixed state; ssh's own messages are never kept.
 # host-key and denied are final: the pinned key or the operator key did not match.
+# host-key and denied are final, so they count only as ssh's own whole lines. A peer can
+# echo text inside ssh's "Bad remote protocol version identification" line before key
+# exchange, but it cannot produce a separate line, so it can only delay, never stop, the wait.
+RAM_FINAL_LINES = (
+    ("host-key", re.compile(rb"Host key verification failed[.]")),
+    ("denied", re.compile(rb"root@[0-9.]{7,15}: Permission denied [(][a-z,-]{1,64}[)][.]")),
+)
 RAM_SSH_STATES = (
-    ("host-key", (b"host key verification failed", b"remote host identification has changed")),
-    ("denied", (b"permission denied",)),
     ("refused", (b"connection refused",)),
+    # Connected, but sshd sent no identification in time.
+    ("no-banner", (b"timed out during banner exchange",)),
     ("no-answer", (b"timed out", b"no route to host", b"network is unreachable",
                    b"host is unreachable")),
     ("closed", (b"kex_exchange_identification", b"connection closed", b"connection reset",
                 b"broken pipe")),
 )
-RAM_FINAL_STATES = {"host-key", "denied"}
-RAM_STATES = {state for state, _ in RAM_SSH_STATES} | {"ssh-other", "not-ram", "stock-boot", "ready"}
+RAM_FINAL_STATES = {state for state, _ in RAM_FINAL_LINES}
+RAM_STATES = (RAM_FINAL_STATES | {state for state, _ in RAM_SSH_STATES}
+              | {"stalled", "ssh-other", "not-ram", "stock-boot", "ready"})
+RAM_OUTPUT_LIMIT = 4096
+# ssh's own ConnectTimeout is 10 s: an attempt that runs longer had connected.
+RAM_CONNECT_SECONDS = 11
 # Boot timing from the RAM installer's own clock, for telling a slow boot from a stuck one:
 # EFI visibility, uptime, and when the initrd, the switched root and sshd started.
 RAM_BOOT_FACTS = """
@@ -309,8 +322,14 @@ class RamNotReady(install.Rejected):
 def ssh_state(code, stderr):
     if code == 0:
         return "ready"
+    if code < 0:
+        return "ssh-other"
     if code != 255:
         return "not-ram"
+    lines = stderr.splitlines()
+    for state, line in RAM_FINAL_LINES:
+        if any(line.fullmatch(item.strip()) for item in lines):
+            return state
     lower = stderr.lower()
     for state, markers in RAM_SSH_STATES:
         if any(marker in lower for marker in markers):
@@ -318,20 +337,54 @@ def ssh_state(code, stderr):
     return "ssh-other"
 
 
+def bounded_run(argv, seconds):
+    """Run argv with at most RAM_OUTPUT_LIMIT bytes per stream.
+
+    Returns ("done", code, stdout, stderr), ("timeout", elapsed) or ("overflow",)."""
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                   start_new_session=True)
+        start = time.monotonic()
+        try:
+            while process.poll() is None:
+                if time.monotonic() - start >= seconds:
+                    return "timeout", time.monotonic() - start
+                if max(os.fstat(stdout.fileno()).st_size,
+                       os.fstat(stderr.fileno()).st_size) > RAM_OUTPUT_LIMIT:
+                    return ("overflow",)
+                time.sleep(0.05)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+        streams = []
+        for stream in (stdout, stderr):
+            stream.seek(0)
+            streams.append(stream.read(RAM_OUTPUT_LIMIT + 1))
+        if max(map(len, streams)) > RAM_OUTPUT_LIMIT:
+            return ("overflow",)
+        return "done", process.returncode, *streams
+
+
 def ram_attempt(ssh, seconds):
     """Run the RAM probe once; return a fixed state and, when ready, the boot ID."""
     command = shlex.join(["timeout", "--kill-after=5", "20", "bash", "-c",
                           "set -euo pipefail\n" + install.RAM_PROBE, "terrace"])
-    try:
-        result = subprocess.run([*ssh, command], stdin=subprocess.DEVNULL, capture_output=True,
-                                timeout=seconds, start_new_session=True)
-    except subprocess.TimeoutExpired:
-        return "no-answer", None
-    state = ssh_state(result.returncode, result.stderr[-4096:])
+    result = bounded_run([*ssh, command], seconds)
+    if result[0] == "overflow":
+        return "ssh-other", None
+    if result[0] == "timeout":
+        # Past ssh's ConnectTimeout the attempt had connected and then stalled.
+        return ("stalled" if result[1] >= RAM_CONNECT_SECONDS else "no-answer"), None
+    _, code, stdout, stderr = result
+    state = ssh_state(code, stderr)
     if state != "ready":
         return state, None
-    boot = result.stdout.decode("ascii", "replace").strip()
-    if len(result.stdout) > 128 or not install.BOOT_ID.fullmatch(boot):
+    boot = stdout.decode("ascii", "replace").strip()
+    if len(stdout) > 128 or not install.BOOT_ID.fullmatch(boot):
         return "not-ram", None
     return "ready", boot
 
