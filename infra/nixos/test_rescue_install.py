@@ -835,7 +835,12 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
 
         alias = "/dev/disk/by-id/scsi-test"
         self.assertEqual(rescue.parse_probe(facts({**row, "children": [part]}), alias)["canonical"], "/dev/vda")
+        # Newer util-linux prints an unmounted device as [] instead of [null].
+        newer = {**row, "mountpoints": [], "children": [{**part, "mountpoints": []}]}
+        self.assertEqual(rescue.parse_probe(facts(newer), alias)["canonical"], "/dev/vda")
         for changed in [{**row, "children": [{**part, "mountpoints": ["/mnt"]}]},
+                        {**row, "children": [{**part, "mountpoints": [None, "/boot"]}]},
+                        {**row, "mountpoints": ["/"]}, {**row, "mountpoints": None},
                         {**row, "children": [{**part, "children": [row]}]},
                         {**row, "type": "part"}, {**row, "rm": True}]:
             with self.assertRaises(rescue.Rejected):
@@ -883,6 +888,8 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
                          {"device": "/dev/sda", "size": 320 * 1024 ** 3})
         self.assertEqual(stock_kexec.check_target(self.target_output(virt="qemu"), "203.0.113.9", 320)["device"],
                          "/dev/sda")
+        newer = self.target_output(disks=lambda d, r: [{**d, "mountpoints": []}, {**r, "mountpoints": []}])
+        self.assertEqual(stock_kexec.check_target(newer, "203.0.113.9", 320)["device"], "/dev/sda")
 
     def test_install_target_reports_each_check_by_label(self):
         cases = [
@@ -899,6 +906,8 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             (self.target_output(disks=lambda d, r: [{**d, "rm": True}]), "disk-state"),
             (self.target_output(disks=lambda d, r: [{**d, "ro": "0"}]), "disk-state"),
             (self.target_output(disks=lambda d, r: [{**d, "mountpoints": ["/"]}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "mountpoints": [None, "/x"]}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "mountpoints": None}]), "disk-state"),
             (self.target_output(disks=lambda d, r: [{**d, "size": 80 * 1024 ** 3}]), "disk-size"),
             (self.target_output(disks=lambda d, r: [{**d, "size": "343597383680"}]), "disk-size"),
             (b"kvm\nroute only\n", "target-facts"),

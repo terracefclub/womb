@@ -283,6 +283,12 @@ sync -f /mnt
 """
 
 
+def unmounted(row):
+    # lsblk prints an unmounted device's MOUNTPOINTS as [null] in older util-linux and
+    # as [] in newer releases (Falcon's 2.42.3 does); anything else is a mount.
+    return row.get("mountpoints") in ([], [None])
+
+
 class ProbeFailed(Rejected):
     """A whole-disk probe check failed; only its line in PROBE and its status are kept."""
 
@@ -307,7 +313,7 @@ def parse_probe(data, device):
             and re.fullmatch(r"[0-9]+:[0-9]+", disk["maj:min"]),
             "invalid disk identity")
     for row in [disk, *disk.get("children", [])]:
-        require(row["ro"] is False and row["rm"] is False and row["mountpoints"] == [None],
+        require(row["ro"] is False and row["rm"] is False and unmounted(row),
                 "disk is read-only, removable or mounted")
         if row is not disk:
             require(row["type"] == "part" and not row.get("children"), "disk has holders")

@@ -548,8 +548,10 @@ def stock_layout(ssh):
 def block_devices(ssh):
     """Diagnostic only: each whole device's path, type and size."""
     try:
-        raw = install.remote(ssh, 20, "lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE", capture=True)
-        return [[row["path"], row["type"], row["size"]] for row in json.loads(raw)["blockdevices"]]
+        raw = install.remote(ssh, 20, "lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS",
+                             capture=True)
+        return [[row["path"], row["type"], row["size"], row["ro"], row["rm"], row["mountpoints"]]
+                for row in json.loads(raw)["blockdevices"]]
     except (install.Rejected, ValueError, KeyError, TypeError):
         return None
 

@@ -511,7 +511,7 @@ def check_target(output, ipv4, capacity_gb):
     disk = disks[0]
     if not install.valid_disk(disk.get("path")) or not install.DISK.fullmatch(disk["path"]):
         raise TargetCheckFailed("disk-name")
-    if disk.get("ro") is not False or disk.get("rm") is not False or disk.get("mountpoints") != [None]:
+    if disk.get("ro") is not False or disk.get("rm") is not False or not install.unmounted(disk):
         raise TargetCheckFailed("disk-state")
     if not disk_size_fits(disk.get("size"), capacity_gb):
         raise TargetCheckFailed("disk-size")
