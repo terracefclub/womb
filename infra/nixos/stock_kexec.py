@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -439,6 +440,116 @@ def verify_ram(directory, phase, role):
                            "timeline": compact_timeline(timeline), "boot": ram_boot_facts(ssh)})
 
 
+# Install target checks on the RAM installer, before its whole-disk receipt is written.
+# A failure keeps one fixed label; the facts script adds only its line and status.
+TARGET_FACTS = """
+set -euo pipefail
+trap 'printf "target-facts-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
+test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1
+virt="$(systemd-detect-virt --vm)" || test "$?" = 1
+route="$(ip -o -4 route get 1.1.1.1)"
+devices="$(lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS)"
+# Printed together, so a failure above emits only the trap's marker.
+printf '%s\\n%s\\n%s\\n' "$virt" "$route" "$devices"
+"""
+TARGET_FAILURE = re.compile(rb"target-facts-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
+TARGET_LABELS = (
+    "ram-authority", "target-facts", "virtualization", "route-source", "single-disk", "disk-name",
+    "disk-state", "disk-size", "whole-disk-probe", "probe-boot-id", "probe-alias", "probe-whole-disk",
+    "probe-identity", "probe-partition-state", "probe-holders", "disk-receipt",
+)
+# parse_probe's fixed messages, as labels.
+PROBE_LABELS = {
+    "invalid Rescue boot identity": "probe-boot-id",
+    "disk alias did not resolve to an allowed whole disk": "probe-alias",
+    "probe did not resolve one whole disk": "probe-whole-disk",
+    "invalid disk identity": "probe-identity",
+    "disk is read-only, removable or mounted": "probe-partition-state",
+    "disk has holders": "probe-holders",
+}
+MIB = 1024 ** 2
+GIB = 1024 ** 3
+
+
+class TargetCheckFailed(install.Rejected):
+    """An install target check failed; only a fixed label and script line and status are kept."""
+
+    def __init__(self, label, line=None, status=None):
+        super().__init__("install target check failed")
+        install.require(label in TARGET_LABELS, "unknown install target label")
+        self.label, self.line, self.status = label, line, status
+
+    def report(self):
+        where = "" if self.line is None else f" line {self.line:d} status {self.status:d}"
+        return f"Install target check failed: {self.label}{where}. Private inputs suppressed."
+
+
+def disk_size_fits(size, capacity_gb):
+    # A provider's "N GB" disk is N decimal gigabytes or N GiB; allow either, with 4 MiB slack.
+    return type(size) is int and capacity_gb * 10 ** 9 - 4 * MIB <= size <= capacity_gb * GIB + 4 * MIB
+
+
+def check_target(output, ipv4, capacity_gb):
+    """Check the RAM host's target facts; return its single whole disk."""
+    if failure := TARGET_FAILURE.fullmatch(output):
+        raise TargetCheckFailed("target-facts", *map(int, failure.groups()))
+    try:
+        virt, route, raw = output.decode("ascii").split("\n", 2)
+        devices = json.loads(raw)["blockdevices"]
+        install.require(isinstance(devices, list) and all(isinstance(row, dict) for row in devices),
+                        "invalid block device facts")
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        raise TargetCheckFailed("target-facts") from None
+    if virt not in ("kvm", "qemu"):
+        raise TargetCheckFailed("virtualization")
+    items = route.split()
+    if "src" not in items[:-1] or items[items.index("src") + 1] != ipv4:
+        raise TargetCheckFailed("route-source")
+    disks = [row for row in devices if row.get("type") == "disk"]
+    if len(disks) != 1:
+        raise TargetCheckFailed("single-disk")
+    disk = disks[0]
+    if not install.valid_disk(disk.get("path")) or not install.DISK.fullmatch(disk["path"]):
+        raise TargetCheckFailed("disk-name")
+    if disk.get("ro") is not False or disk.get("rm") is not False or not install.unmounted(disk):
+        raise TargetCheckFailed("disk-state")
+    if not disk_size_fits(disk.get("size"), capacity_gb):
+        raise TargetCheckFailed("disk-size")
+    return {"device": disk["path"], "size": disk["size"]}
+
+
+def ram_target_check(ssh, ipv4, capacity_gb):
+    install.require(type(capacity_gb) is int and 10 <= capacity_gb <= 4000, "invalid disk capacity")
+    try:
+        output = install.remote(ssh, 20, TARGET_FACTS, capture=True)
+    except install.Rejected:
+        raise TargetCheckFailed("target-facts") from None
+    return check_target(output, ipv4, capacity_gb)
+
+
+def inspect_ram_target(directory, phase, role, capacity_gb):
+    """Check the kexec'd RAM installer as an install target, then record its whole-disk probe."""
+    prefix = f"{phase}-{role}"
+    try:
+        binding, key, _, ssh = install.authority(directory, phase, role, ram=True)
+    except (install.Rejected, OSError, KeyError, TypeError, subprocess.SubprocessError):
+        raise TargetCheckFailed("ram-authority") from None
+    target = ram_target_check(ssh, binding["ipv4"], capacity_gb)
+    try:
+        install.inspect(directory, phase, role, target["device"])
+    except install.ProbeFailed as failure:
+        raise TargetCheckFailed("whole-disk-probe", failure.line, failure.status) from None
+    except install.Rejected as failure:
+        raise TargetCheckFailed(PROBE_LABELS.get(str(failure), "whole-disk-probe")) from None
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        raise TargetCheckFailed("whole-disk-probe") from None
+    reviewed, digest = install.read_json(directory / f"{prefix}-disk.json")
+    if (reviewed["binding"] != binding or reviewed["rescueKey"] != key
+            or reviewed["disk"]["device"] != target["device"] or reviewed["disk"]["size"] != target["size"]):
+        raise TargetCheckFailed("disk-receipt")
+    return binding, key, reviewed["disk"], digest
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
@@ -448,6 +559,7 @@ def main():
     action.add_argument("--pin-proof", action="store_true")
     action.add_argument("--dispatch", nargs=2, metavar=("ARCHIVE", "SHA256"))
     action.add_argument("--verify-ram", action="store_true")
+    action.add_argument("--inspect-target", type=int, metavar="DISK_GB")
     args = parser.parse_args()
     try:
         directory = install.private_directory(args.directory)
@@ -457,10 +569,13 @@ def main():
         elif args.dispatch:
             dispatch(directory, args.phase, args.role, *args.dispatch)
             print("Pinned stock host accepted the verified RAM installer dispatch.")
-        else:
+        elif args.verify_ram:
             verify_ram(directory, args.phase, args.role)
             print("The pinned host now runs the RAM installer on a new boot.")
-    except RamNotReady as failure:
+        else:
+            inspect_ram_target(directory, args.phase, args.role, args.inspect_target)
+            print("RAM install target checked and its whole disk recorded.")
+    except (RamNotReady, TargetCheckFailed) as failure:
         # Fixed state names and integer seconds only; ssh's own messages are never shown.
         print(failure.report(), file=sys.stderr)
         return 1

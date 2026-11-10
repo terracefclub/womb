@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import struct
 import subprocess
 import sys
@@ -310,7 +311,8 @@ class RescueInstallTest(unittest.TestCase):
 
     def test_stock_probe_checks_are_never_hidden_in_and_lists(self):
         for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH, rescue.RAM_PROBE,
-                       rescue.RAM_SERVE, stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC]:
+                       rescue.RAM_SERVE, stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC,
+                       stock_kexec.TARGET_FACTS]:
             for line in script.splitlines():
                 if "||" not in line:  # A list that handles its own failure, like UPLOAD's cleanup.
                     self.assertNotRegex(line, r"\btest\b[^|&]*&&")
@@ -833,7 +835,18 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
 
         alias = "/dev/disk/by-id/scsi-test"
         self.assertEqual(rescue.parse_probe(facts({**row, "children": [part]}), alias)["canonical"], "/dev/vda")
+        # lsblk without NAME and without --tree lists partitions beside their disk.
+        flat = ("abcd0123-1234-1234-1234-1234567890ab\n/dev/vda\n"
+                + json.dumps({"blockdevices": [row, part]})).encode()
+        with self.assertRaisesRegex(rescue.Rejected, "one whole disk"):
+            rescue.parse_probe(flat, alias)
+        self.assertIn(" --tree ", rescue.PROBE)
+        # Newer util-linux prints an unmounted device as [] instead of [null].
+        newer = {**row, "mountpoints": [], "children": [{**part, "mountpoints": []}]}
+        self.assertEqual(rescue.parse_probe(facts(newer), alias)["canonical"], "/dev/vda")
         for changed in [{**row, "children": [{**part, "mountpoints": ["/mnt"]}]},
+                        {**row, "children": [{**part, "mountpoints": [None, "/boot"]}]},
+                        {**row, "mountpoints": ["/"]}, {**row, "mountpoints": None},
                         {**row, "children": [{**part, "children": [row]}]},
                         {**row, "type": "part"}, {**row, "rm": True}]:
             with self.assertRaises(rescue.Rejected):
@@ -863,11 +876,205 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         self.assertIn("remote-store=local%3Froot%3D%2Fmnt", args[3])
         self.assertEqual(checked.call_args.kwargs["env"]["NIX_SSHOPTS"], "-o StrictHostKeyChecking=yes")
 
+    def target_output(self, disks=None, virt="kvm", src="203.0.113.9"):
+        disk = {"path": "/dev/sda", "type": "disk", "size": 320 * 1024 ** 3, "ro": False, "rm": False,
+                "mountpoints": [None]}
+        rom = {"path": "/dev/sr0", "type": "rom", "size": 2048, "ro": True, "rm": True, "mountpoints": [None]}
+        route = f"1.1.1.1 via 172.31.1.1 dev eth0 src {src} uid 0 \\    cache "
+        rows = [disk, rom] if disks is None else disks(disk, rom)
+        return f"{virt}\n{route}\n{json.dumps({'blockdevices': rows})}\n".encode()
+
+    def target_label(self, output, capacity=320):
+        with self.assertRaises(stock_kexec.TargetCheckFailed) as caught:
+            stock_kexec.check_target(output, "203.0.113.9", capacity)
+        return caught.exception.label
+
+    def test_install_target_accepts_one_whole_disk_beside_a_cdrom(self):
+        self.assertEqual(stock_kexec.check_target(self.target_output(), "203.0.113.9", 320),
+                         {"device": "/dev/sda", "size": 320 * 1024 ** 3})
+        self.assertEqual(stock_kexec.check_target(self.target_output(virt="qemu"), "203.0.113.9", 320)["device"],
+                         "/dev/sda")
+        newer = self.target_output(disks=lambda d, r: [{**d, "mountpoints": []}, {**r, "mountpoints": []}])
+        self.assertEqual(stock_kexec.check_target(newer, "203.0.113.9", 320)["device"], "/dev/sda")
+
+    def test_install_target_reports_each_check_by_label(self):
+        cases = [
+            (self.target_output(virt="none"), "virtualization"),
+            (self.target_output(virt="docker"), "virtualization"),
+            (self.target_output(src="203.0.113.8"), "route-source"),
+            (b"kvm\n1.1.1.1 via 172.31.1.1 dev eth0 uid 0\n{\"blockdevices\": []}\n", "route-source"),
+            (self.target_output(disks=lambda d, r: [d, {**d, "path": "/dev/sdb"}]), "single-disk"),
+            (self.target_output(disks=lambda d, r: [d, {**d, "path": "/dev/zram0", "size": 1024}]), "single-disk"),
+            (self.target_output(disks=lambda d, r: [r]), "single-disk"),
+            (self.target_output(disks=lambda d, r: [{**d, "path": "/dev/zram0"}]), "disk-name"),
+            (self.target_output(disks=lambda d, r: [{**d, "path": "/dev/disk/by-id/scsi-x"}]), "disk-name"),
+            (self.target_output(disks=lambda d, r: [{**d, "ro": True}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "rm": True}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "ro": "0"}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "mountpoints": ["/"]}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "mountpoints": [None, "/x"]}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "mountpoints": None}]), "disk-state"),
+            (self.target_output(disks=lambda d, r: [{**d, "size": 80 * 1024 ** 3}]), "disk-size"),
+            (self.target_output(disks=lambda d, r: [{**d, "size": "343597383680"}]), "disk-size"),
+            (b"kvm\nroute only\n", "target-facts"),
+            (b"kvm\nroute src 203.0.113.9\nnot json\n", "target-facts"),
+            (b"kvm\nroute src 203.0.113.9\n{\"blockdevices\": [1]}\n", "target-facts"),
+            (b"\xff\nroute\n{}\n", "target-facts"),
+        ]
+        for output, label in cases:
+            with self.subTest(label=label, output=output[:60]):
+                self.assertEqual(self.target_label(output), label)
+        failure = stock_kexec.TargetCheckFailed("disk-size")
+        self.assertEqual(failure.report(), "Install target check failed: disk-size. Private inputs suppressed.")
+        with self.assertRaises(rescue.Rejected):
+            stock_kexec.TargetCheckFailed("not-a-label")
+
+    def test_install_target_size_accepts_decimal_or_binary_gigabytes(self):
+        mib, gib = 1024 ** 2, 1024 ** 3
+        for size, fits in [(320 * 10 ** 9, True), (320 * gib, True), (320 * 10 ** 9 - 4 * mib, True),
+                           (320 * gib + 4 * mib, True), (320 * 10 ** 9 - 5 * mib, False),
+                           (320 * gib + 5 * mib, False), (80 * gib, False), (float(320 * gib), False),
+                           (True, False)]:
+            self.assertEqual(stock_kexec.disk_size_fits(size, 320), fits, size)
+        self.assertTrue(stock_kexec.disk_size_fits(80 * gib, 80))
+        self.assertFalse(stock_kexec.disk_size_fits(40 * gib, 80))
+
+    def fake_bin(self, scripts):
+        bin_dir = self.directory / "fake-bin"
+        bin_dir.mkdir(exist_ok=True)
+        for name, text in scripts.items():
+            path = bin_dir / name
+            path.write_text("#!/bin/bash\n" + text)
+            path.chmod(0o700)
+        return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def test_target_facts_script_reports_only_the_failed_line(self):
+        lines = stock_kexec.TARGET_FACTS.splitlines()
+        good = {
+            "cat": 'if [ "$1" = /etc/terrace-ram-installer ]; then echo terrace-ram-installer-v1; else exit 7; fi\n',
+            "systemd-detect-virt": "echo kvm\n",
+            "ip": "echo '1.1.1.1 via 10.0.2.2 dev eth0 src 10.0.2.15 uid 0 \\    cache '\n",
+            "lsblk": "echo '{\"blockdevices\": []}'\n",
+        }
+        result = subprocess.run(["bash", "-c", stock_kexec.TARGET_FACTS, "target"], capture_output=True,
+                                timeout=10, env=self.fake_bin(good))
+        self.assertEqual(result.stdout.splitlines()[0], b"kvm")
+        not_vm = subprocess.run(["bash", "-c", stock_kexec.TARGET_FACTS, "target"], capture_output=True,
+                                timeout=10, env=self.fake_bin({**good, "systemd-detect-virt": "echo none; exit 1\n"}))
+        self.assertEqual(self.target_label(not_vm.stdout), "virtualization")
+        for name, text, marker in [
+            ("cat", "echo other\n", 'test "$(cat /etc/terrace-ram-installer)" = terrace-ram-installer-v1'),
+            ("systemd-detect-virt", "exit 3\n", 'virt="$(systemd-detect-virt --vm)" || test "$?" = 1'),
+            ("ip", "exit 2\n", 'route="$(ip -o -4 route get 1.1.1.1)"'),
+            ("lsblk", "exit 32\n",
+             'devices="$(lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS)"'),
+        ]:
+            with self.subTest(name=name):
+                result = subprocess.run(["bash", "-c", stock_kexec.TARGET_FACTS, "target"], capture_output=True,
+                                        timeout=10, env=self.fake_bin({**good, name: text}))
+                self.assertEqual(result.returncode, 0)
+                line = lines.index(marker) + 1
+                # The whole output, not just its last line: a failure prints the marker alone.
+                self.assertRegex(result.stdout, rb"^target-facts-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
+                with self.assertRaises(stock_kexec.TargetCheckFailed) as caught:
+                    stock_kexec.check_target(result.stdout, "10.0.2.15", 320)
+                self.assertEqual((caught.exception.label, caught.exception.line), ("target-facts", line))
+
+    def test_whole_disk_probe_reports_only_the_failed_line(self):
+        lines = rescue.PROBE.splitlines()
+        # `test -b` is a shell builtin, so the lsblk case needs any real block device.
+        block = next((str(path) for path in sorted(Path("/dev").iterdir())
+                      if not path.is_symlink() and stat.S_ISBLK(path.lstat().st_mode)
+                      and subprocess.run(["bash", "-c", 'test -b "$1"', "block", str(path)],
+                                         timeout=5).returncode == 0), None)
+        good = {
+            "id": "echo 0\n", "uname": "echo x86_64\n",
+            "findmnt": 'if [ "$3" = --mountpoint ] || [ "$2" = --mountpoint ]; then exit 1; fi; echo tmpfs\n',
+            "readlink": f"echo {block or '/dev/null'}\n", "lsblk": "echo '{}'\n",
+            "cat": "echo abcd0123-1234-1234-1234-1234567890ab\n",
+        }
+        for name, text, marker in [
+            ("id", "echo 1000\n", 'test "$(id -u)" = 0'),
+            ("findmnt", 'if [ "$2" = --mountpoint ]; then exit 0; fi; echo tmpfs\n',
+             'if findmnt -rn --mountpoint /mnt >/dev/null; then false; else test "$?" = 1; fi'),
+            ("findmnt", 'if [ "$2" = --mountpoint ]; then exit 1; fi; echo ext4\n',
+             'case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) false;; esac'),
+            ("readlink", "exit 1\n", 'dev="$(readlink -e "$1")"'),
+            ("cat", "exit 1\n", 'boot="$(cat /proc/sys/kernel/random/boot_id)"'),
+            ("lsblk", "exit 32\n",
+             'inventory="$(lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev")"'),
+        ]:
+            with self.subTest(name=name, marker=marker):
+                if name in ("lsblk", "cat") and block is None:
+                    continue
+                env = self.fake_bin({**good, name: text})
+                result = subprocess.run(["bash", "-c", rescue.PROBE, "probe", "/dev/sda"], capture_output=True,
+                                        timeout=10, env=env)
+                self.assertEqual(result.returncode, 0)
+                line = lines.index(marker) + 1
+                # The whole output, not just its last line: a failure prints the marker alone.
+                self.assertRegex(result.stdout, rb"^probe-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
+                with self.assertRaises(rescue.ProbeFailed) as caught:
+                    rescue.parse_probe(result.stdout, "/dev/sda")
+                self.assertEqual(caught.exception.line, line)
+
+    def test_inspect_ram_target_keeps_only_fixed_labels(self):
+        binding = {"ipv4": "203.0.113.9", "run": RUN}
+        ssh = ["ssh", "root@203.0.113.9"]
+
+        def label(**patches):
+            with patch.object(rescue, "authority", **patches.get("authority", {
+                    "return_value": (binding, "key", [], ssh)})), \
+                    patch.object(rescue, "remote", return_value=self.target_output()), \
+                    patch.object(rescue, "inspect", **patches.get("inspect", {"return_value": None})):
+                with self.assertRaises(stock_kexec.TargetCheckFailed) as caught:
+                    stock_kexec.inspect_ram_target(self.directory, "original", "app", 320)
+            return caught.exception.label, caught.exception.line
+
+        self.assertEqual(label(authority={"side_effect": rescue.Rejected("provider binding expired or stale")}),
+                         ("ram-authority", None))
+        self.assertEqual(label(inspect={"side_effect": rescue.ProbeFailed(12, 1)}), ("whole-disk-probe", 12))
+        self.assertEqual(label(inspect={"side_effect": rescue.Rejected("disk has holders")}), ("probe-holders", None))
+        self.assertEqual(label(inspect={"side_effect": rescue.Rejected("disk is read-only, removable or mounted")}),
+                         ("probe-partition-state", None))
+        self.assertEqual(label(inspect={"side_effect": rescue.Rejected("install command rejected")}),
+                         ("whole-disk-probe", None))
+        self.assertEqual(label(inspect={"side_effect": json.JSONDecodeError("x", "y", 0)}), ("whole-disk-probe", None))
+        disk = {"device": "/dev/sda", "canonical": "/dev/sda", "size": 320 * 1024 ** 3,
+                "majorMinor": "8:0", "bootId": "abcd0123-1234-1234-1234-1234567890ab"}
+
+        def record(directory, phase, role, device, *, size=disk["size"]):
+            rescue.write_private(directory / f"{phase}-{role}-disk.json",
+                                 {"binding": binding, "rescueKey": "key", "disk": {**disk, "size": size}})
+
+        self.assertEqual(label(inspect={"side_effect": lambda *a: record(*a, size=1)}), ("disk-receipt", None))
+        (self.directory / "original-app-disk.json").unlink()
+        with patch.object(rescue, "authority", return_value=(binding, "key", [], ssh)), \
+                patch.object(rescue, "remote", return_value=self.target_output()), \
+                patch.object(rescue, "inspect", side_effect=record):
+            result = stock_kexec.inspect_ram_target(self.directory, "original", "app", 320)
+        self.assertEqual(result[:3], (binding, "key", disk))
+
+    def test_install_target_failure_message_is_fixed(self):
+        argv = ["stock_kexec.py", str(self.directory), "original", "app", "--inspect-target", "320"]
+        for failure, line in [(stock_kexec.TargetCheckFailed("single-disk"),
+                               "Install target check failed: single-disk. Private inputs suppressed.\n"),
+                              (stock_kexec.TargetCheckFailed("whole-disk-probe", 9, 1),
+                               "Install target check failed: whole-disk-probe line 9 status 1. "
+                               "Private inputs suppressed.\n")]:
+            with patch.object(sys, "argv", argv), patch.object(stock_kexec, "inspect_ram_target",
+                                                               side_effect=failure):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(stock_kexec.main(), 1)
+            self.assertEqual(stderr.getvalue(), line)
+            self.assertRegex(line.strip(), r"Install target check failed: [a-z-]{1,24}"
+                             r"( line [0-9]{1,3} status [0-9]{1,3})?\. Private inputs suppressed\.")
+
     def test_all_fixed_remote_scripts_parse_without_execution(self):
         for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH,
                        rescue.RAM_PROBE, rescue.RAM_SERVE,
                        stock_kexec.STOCK_PROBE, stock_kexec.UPLOAD, stock_kexec.KEXEC,
-                       stock_kexec.RAM_BOOT_FACTS]:
+                       stock_kexec.RAM_BOOT_FACTS, stock_kexec.TARGET_FACTS]:
             subprocess.run(["bash", "-n"], input=script, text=True, check=True, timeout=5)
 
 

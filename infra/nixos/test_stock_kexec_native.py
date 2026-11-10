@@ -34,6 +34,14 @@ ALIAS = "terrace-stock-kexec-fixture"
 FIXTURE_RUN = "f1" * 16
 PROOF_CONTEXT = (FIXTURE_RUN, "original", "relay")
 PREFIX = "original-relay"
+# Shaped like Hetzner's CPX42 app disk: one 320 GB-class SCSI disk, the stock image's GPT
+# layout grown by cloud-init, and a CD-ROM beside it.
+FIXTURE_DISK_GB = 320
+FIXTURE_DISK = "/dev/sda"
+ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+PARTITION_TYPES = {ESP_TYPE: "esp", "21686148-6449-6e6f-744e-656564454649": "bios-boot",
+                   "4f68bce3-e8cd-4dd1-9616-60ef3a5b7e9b": "linux-root-x86-64",
+                   "0fc63daf-8483-4772-8e79-3d69d8477de4": "linux-data"}
 FIXTURE_MAC = "52:54:00:12:34:56"
 FIXTURE_IP = socket.inet_ntoa(EXPECTED)
 SERIAL_LIMIT = 256 * 1024
@@ -135,7 +143,8 @@ process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, ope
     }) + "\n")
     with seed.open("xb") as stream:
         stream.truncate(2 * 1024 * 1024)
-    install.checked_process([args.mkfs_vfat, "-n", "CIDATA", str(seed)], 15)
+    # The seed is a CD-ROM (2048-byte blocks), so the filesystem's sectors must be that large.
+    install.checked_process([args.mkfs_vfat, "-S", "2048", "-n", "CIDATA", str(seed)], 15)
     install.checked_process(
         [args.mcopy, "-i", str(seed), str(data), str(metadata), str(network), "::/"], 15
     )
@@ -152,8 +161,12 @@ def guest(args, overlay, seed, serial, facts, qmp, efi_vars):
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}",
         "-drive", f"if=pflash,format=raw,unit=1,file={efi_vars}",
         "-qmp", f"unix:{qmp},server=on,wait=off",
-        "-drive", f"file={overlay},format=qcow2,if=virtio",
-        "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
+        # One SCSI disk and a SCSI CD-ROM, like a Hetzner server's sda and sr0.
+        "-device", "virtio-scsi-pci,id=scsi0",
+        "-drive", f"file={overlay},format=qcow2,if=none,id=root",
+        "-device", "scsi-hd,drive=root,bus=scsi0.0,bootindex=0",
+        "-drive", f"file={seed},format=raw,if=none,id=seed,readonly=on",
+        "-device", "scsi-cd,drive=seed,bus=scsi0.0",
         "-netdev", f"user,id=proofnet,restrict=on,hostfwd=tcp:127.0.0.1:{args.port}-{FIXTURE_IP}:22",
         "-device", f"virtio-net-pci,netdev=proofnet,mac={FIXTURE_MAC}",
     ]
@@ -505,6 +518,111 @@ def observe_dispatch(facts, serial, qmp, remote, ssh, seconds, script, *args, st
     install.require(code == 0, "kexec invocation did not return success")
 
 
+def target_label(ssh, ipv4, capacity):
+    try:
+        stock_kexec.ram_target_check(ssh, ipv4, capacity)
+    except stock_kexec.TargetCheckFailed as failure:
+        return failure.label
+    return None
+
+
+def await_target_label(ssh, label, seconds=30):
+    deadline = time.monotonic() + seconds
+    while (observed := target_label(ssh, FIXTURE_IP, FIXTURE_DISK_GB)) != label:
+        install.require(time.monotonic() < deadline, "install target did not reach the expected state")
+        time.sleep(1)
+    return observed
+
+
+def stock_layout(ssh):
+    """The stock image's partitions as the RAM installer sees them: types, filesystems, sizes."""
+    raw = install.remote(ssh, 20, 'lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,PARTTYPE,FSTYPE -- "$1"',
+                         FIXTURE_DISK, capture=True)
+    disk, = json.loads(raw)["blockdevices"]
+    parts = [{"path": row["path"], "type": PARTITION_TYPES.get((row.get("parttype") or "").lower(), "other"),
+              "fstype": row.get("fstype"), "sizeMiB": row["size"] // (1024 * 1024)}
+             for row in disk.get("children", [])]
+    return disk["size"], parts
+
+
+def block_devices(ssh):
+    """Diagnostic only: each whole device's path, type and size."""
+    try:
+        raw = install.remote(ssh, 20, "lsblk --bytes --json --paths --nodeps --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS",
+                             capture=True)
+        return [[row["path"], row["type"], row["size"], row["ro"], row["rm"], row["mountpoints"]]
+                for row in json.loads(raw)["blockdevices"]]
+    except (install.Rejected, ValueError, KeyError, TypeError):
+        return None
+
+
+def exercise_target(directory, ssh, public, options, qmp, facts):
+    """The install plan's RAM target checks and whole-disk probe against the stock disk."""
+    facts["ramTargetStep"] = "target"
+    try:
+        target = stock_kexec.ram_target_check(ssh, FIXTURE_IP, FIXTURE_DISK_GB)
+    except stock_kexec.TargetCheckFailed as failure:
+        facts["ramTargetFailure"] = {"label": failure.label, "line": failure.line, "status": failure.status}
+        facts["ramBlockDevices"] = block_devices(ssh)
+        raise
+    facts["ramTarget"] = target
+    install.require(target == {"device": FIXTURE_DISK, "size": FIXTURE_DISK_GB * stock_kexec.GIB},
+                    "fixture install target differs")
+    facts["ramTargetStep"] = "layout"
+    try:
+        size, parts = stock_layout(ssh)
+    except (install.Rejected, ValueError, KeyError, TypeError) as error:
+        # Diagnostic only: the error class and, for a remote rejection, the fixed message.
+        facts["stockLayoutError"] = [type(error).__name__, str(error) if isinstance(error, install.Rejected) else None]
+        facts["ramBlockDevices"] = block_devices(ssh)
+        raise
+    facts["stockDiskBytes"] = size
+    facts["stockLayout"] = [{key: value for key, value in part.items() if key != "path"} for part in parts]
+    kinds = [part["type"] for part in parts]
+    esp = next((part for part in parts if part["type"] == "esp"), None)
+    install.require(size == target["size"] and esp is not None and esp["fstype"] == "vfat"
+                    and any(part["fstype"] == "ext4" and part["sizeMiB"] > 300 * 1024 for part in parts),
+                    "stock layout lacks its ESP or grown ext4 root")
+    facts["ramTargetStep"] = "rejects"
+    rejects = {"routeSource": target_label(ssh, "10.0.2.99", FIXTURE_DISK_GB),
+               "diskSize": target_label(ssh, FIXTURE_IP, 80)}
+    # A second disk, hot-plugged and removed again, must stop the plan.
+    with qmp_commands(qmp) as ask:
+        install.require(ask("blockdev-add", driver="null-co", size=1024 ** 3, **{"node-name": "extra"}) == {}
+                        and ask("device_add", driver="scsi-hd", drive="extra", id="extra0", bus="scsi0.0") == {},
+                        "second disk hot-plug failed")
+    facts["ramTargetStep"] = "second-disk"
+    rejects["secondDisk"] = await_target_label(ssh, "single-disk")
+    with qmp_commands(qmp) as ask:
+        install.require(ask("device_del", id="extra0") == {}, "second disk removal failed")
+    await_target_label(ssh, None)
+    with qmp_commands(qmp) as ask:
+        install.require(ask("blockdev-del", **{"node-name": "extra"}) == {}, "second disk node survived")
+    facts["ramTargetRejects"] = rejects
+    facts["ramTargetStep"] = "whole-disk"
+    bound = ({"ipv4": FIXTURE_IP}, public, options, ssh)
+    with patch.object(install, "authority", return_value=bound), \
+            patch.object(install, "reviewed_probe_mode", return_value=False), \
+            patch.object(install, "reviewed_bootstrap", return_value=(FIXTURE_RUN, "0" * 64)):
+        # A mounted stock partition must stop the whole-disk probe.
+        install.remote(ssh, 20, 'set -eu; mkdir -p /run/terrace-esp-check; mount -o ro "$1" /run/terrace-esp-check',
+                       esp["path"])
+        try:
+            stock_kexec.inspect_ram_target(directory, "original", "relay", FIXTURE_DISK_GB)
+        except stock_kexec.TargetCheckFailed as failure:
+            rejects["mountedPartition"] = failure.label
+        finally:
+            install.remote(ssh, 20, "set -eu; umount /run/terrace-esp-check; rmdir /run/terrace-esp-check")
+        _, _, disk, _ = stock_kexec.inspect_ram_target(directory, "original", "relay", FIXTURE_DISK_GB)
+    facts["ramTargetRejects"] = rejects
+    install.require(rejects == {"routeSource": "route-source", "diskSize": "disk-size",
+                                "secondDisk": "single-disk", "mountedPartition": "probe-partition-state"},
+                    "an install target fault was not reported by its label")
+    install.require(disk["canonical"] == FIXTURE_DISK and disk["size"] == target["size"],
+                    "whole-disk receipt differs from the target")
+    facts["wholeDiskProbe"] = {"partitions": len(kinds), "kinds": sorted(set(kinds)), "receipt": True}
+
+
 def exercise(args, directory, seed, overlay, facts):
     binding = {"ipv4": "127.0.0.1"}
     options = [*install.ssh_options(directory, PREFIX, "bootstrap"),
@@ -618,6 +736,8 @@ def exercise(args, directory, seed, overlay, facts):
             install.remote(ssh, 5, 'set -eu; test -f "$1"; test "$(sha256sum "$1" | cut -d " " -f1)" = "$2"',
                            store, install.sha(Path(store).read_bytes()))
             facts["ramStoreCopy"] = True
+            facts["stage"] = "ram-target"
+            exercise_target(directory, ssh, public, options, Path(monitor) / "qmp.sock", facts)
     finally:
         if facts.get("packetCaptureStarted"):
             facts["packetFacts"] = packet_facts(packets, late_packets)
@@ -676,7 +796,7 @@ def main():
                            "wb") as stream:
                 stream.write(template)
             install.checked_process([args.qemu_img, "create", "-f", "qcow2", "-F", "qcow2",
-                                     "-b", str(args.base.resolve()), str(overlay)], 10)
+                                     "-b", str(args.base.resolve()), str(overlay), f"{FIXTURE_DISK_GB}G"], 10)
             try:
                 exercise(args, directory, seed, overlay, facts)
             finally:

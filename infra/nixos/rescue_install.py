@@ -190,18 +190,23 @@ def remote(ssh, seconds, script, *args, stdin=None, capture=False):
     return checked_process([*ssh, command], seconds + 20, stdin=stdin, capture=capture)
 
 
+# A failed check prints only its line and status, never host output (see parse_probe):
+# facts are captured first and printed together at the end, so a failure emits the marker alone.
+# Without a NAME column lsblk prints a flat list, so --tree keeps partitions under their disk.
 PROBE = """
 set -euo pipefail
+trap 'printf "probe-failed %d %d\\n" "$LINENO" "$?"; exit 0' ERR
 test "$(id -u)" = 0
 test "$(uname -m)" = x86_64
-case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) exit 1;; esac
-if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
+case "$(findmnt -rn -o FSTYPE /)" in tmpfs|ramfs|overlay|rootfs|squashfs) ;; *) false;; esac
+if findmnt -rn --mountpoint /mnt >/dev/null; then false; else test "$?" = 1; fi
 dev="$(readlink -e "$1")"
 test -b "$dev"
-cat /proc/sys/kernel/random/boot_id
-printf '%s\n' "$dev"
-exec lsblk --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev"
+boot="$(cat /proc/sys/kernel/random/boot_id)"
+inventory="$(lsblk --tree --bytes --json --paths --output PATH,TYPE,SIZE,RO,RM,MOUNTPOINTS,MAJ:MIN -- "$dev")"
+printf '%s\n%s\n%s\n' "$boot" "$dev" "$inventory"
 """
+PROBE_FAILURE = re.compile(rb"probe-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
 
 BOOTSTRAP = f"""
 set -euo pipefail
@@ -280,7 +285,23 @@ sync -f /mnt
 """
 
 
+def unmounted(row):
+    # lsblk prints an unmounted device's MOUNTPOINTS as [null] in older util-linux and
+    # as [] in newer releases (Falcon's 2.42.3 does); anything else is a mount.
+    return row.get("mountpoints") in ([], [None])
+
+
+class ProbeFailed(Rejected):
+    """A whole-disk probe check failed; only its line in PROBE and its status are kept."""
+
+    def __init__(self, line, status):
+        super().__init__("whole-disk probe check failed")
+        self.line, self.status = line, status
+
+
 def parse_probe(data, device):
+    if failure := PROBE_FAILURE.fullmatch(data):
+        raise ProbeFailed(*map(int, failure.groups()))
     boot, canonical, inventory = data.decode("utf-8").split("\n", 2)
     require(BOOT_ID.fullmatch(boot),
             "invalid Rescue boot identity")
@@ -294,7 +315,7 @@ def parse_probe(data, device):
             and re.fullmatch(r"[0-9]+:[0-9]+", disk["maj:min"]),
             "invalid disk identity")
     for row in [disk, *disk.get("children", [])]:
-        require(row["ro"] is False and row["rm"] is False and row["mountpoints"] == [None],
+        require(row["ro"] is False and row["rm"] is False and unmounted(row),
                 "disk is read-only, removable or mounted")
         if row is not disk:
             require(row["type"] == "part" and not row.get("children"), "disk has holders")
