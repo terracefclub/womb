@@ -602,6 +602,15 @@ def listener(directory, manifest, rescue):
     return socket, receipt["expires"]
 
 
+# The first check on an installed host; the native install fixture runs the same text.
+# findmnt's raw output (-r) is unpadded, so the comparison is exact.
+INSTALLED_IDENTITY = r"""
+test "$(readlink -f /run/current-system)" = "$1"
+test "$(hostname)" = "$2"
+test "$(findmnt -rn -o FSTYPE --mountpoint /)" = ext4
+"""
+
+
 def authenticate_host(directory, phase, role, rescue, socket, expires):
     binding = rescue.lease_binding(directory, phase, role, time.time())
     prefix = phase + "-" + role
@@ -625,11 +634,7 @@ def authenticate_host(directory, phase, role, rescue, socket, expires):
     host = Host(directory, role, binding, ssh, rescue.checked_process, socket,
                 min(binding["expires"], expires))
     hostname = "gateway" if role == "app" else "relay"
-    host.run("installed-system-identity", r"""
-test "$(readlink -f /run/current-system)" = "$1"
-test "$(hostname)" = "$2"
-test "$(findmnt --mountpoint / -no FSTYPE)" = ext4
-""", installed["system"], hostname)
+    host.run("installed-system-identity", INSTALLED_IDENTITY, installed["system"], hostname)
     return host
 
 
