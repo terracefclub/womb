@@ -270,6 +270,7 @@ def step_script(name, body):
 
     All command output is discarded; fd 3 carries just "<name>-ok" or
     "<name>-failed LINE STATUS", so a failure names the line that stopped it.
+    Long-running tools get fd 3 closed, so nothing they leave behind holds the verdict.
     """
     return ("set -euo pipefail\n"
             "exec 3>&1 >/dev/null 2>&1\n"
@@ -279,11 +280,11 @@ def step_script(name, body):
 
 FORMAT = step_script("format", DISK_GUARD + """
 if findmnt -rn --mountpoint /mnt >/dev/null; then false; else test "$?" = 1; fi
-"$6"
+"$6" 3>&-
 """ + MOUNT_GUARD)
 
 FINISH = step_script("finish", DISK_GUARD + MOUNT_GUARD + """
-"$6/bin/nixos-install" --root /mnt --system "$7" --no-root-passwd --no-channel-copy
+"$6/bin/nixos-install" --root /mnt --system "$7" --no-root-passwd --no-channel-copy 3>&-
 # No firmware variables are written, so the disk must boot from the removable path.
 test -f /mnt/boot/EFI/BOOT/BOOTX64.EFI
 test ! -L /mnt/boot/EFI/BOOT/BOOTX64.EFI

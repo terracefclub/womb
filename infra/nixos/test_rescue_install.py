@@ -1088,7 +1088,7 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             "lsblk": 'case "$*" in\n'
                      '-drn\\ -o\\ MAJ:MIN*) echo "8:0";;\n*MAJ:MIN*) echo "  8:0  ";;\n'
                      '-drn\\ -o\\ PKNAME\\ --paths*) echo /dev/sda;;\n*PKNAME*) echo "sda   ";;\n'
-                     '*PARTTYPE*) echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b;;\nesac\n',
+                     '*PARTTYPE*) test -z "$PARTTYPE_FAIL" || exit 4; echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b;;\nesac\n',
             "findmnt": f'test -e {state}/mounted || exit 1\n'
                        'case "$*" in\n*"--mountpoint /mnt/boot"*) echo "/dev/sda1 vfat";;\n'
                        '*"--mountpoint /mnt"*) echo "/dev/sda2 ext4";;\nesac\n',
@@ -1113,7 +1113,10 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             (dict(args=[*disk[:3], "8:16", disk[4]]), 'test "$(lsblk -drn -o MAJ:MIN -- "$3")" = "$4"'),
             (dict(args=["c0" * 4, *disk[1:]]), 'test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"'),
             (dict(args=[*disk[:4], "1"]), 'test "$(blockdev --getsize64 "$3")" = "$5"'),
-            (dict(args=disk, DISKO="exit 3"), '"$6"'),
+            (dict(args=disk, DISKO="exit 3"), '"$6" 3>&-'),
+            # A noisy failing formatter still yields exactly the marker (and no stderr).
+            (dict(args=disk, DISKO="echo SECRET; echo SECRET >&2; exit 3"), '"$6" 3>&-'),
+            (dict(args=disk, PARTTYPE_FAIL="1"), 'esp_type="$(lsblk -drn -o PARTTYPE -- "$esp_source")"'),
         ]
         for case, marker in cases:
             with self.subTest(marker=marker):

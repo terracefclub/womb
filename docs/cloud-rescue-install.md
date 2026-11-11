@@ -340,7 +340,9 @@ padded while the raw output matches the receipt. Both disk steps must stop at
 their guards and name the line: `FORMAT` with a wrong `MAJ:MIN` and `FINISH`
 with a wrong boot ID. `rescue_install.install` then runs every stage on the
 Hetzner-shaped disk: store service, store copy, recheck, `FORMAT`, the target
-copy and `FINISH`. After a QMP reset, standing in for the provider's reboot,
+copy and `FINISH`. Only the lease binding, the bootstrap review and the store
+copy's address are substituted, so the copy reaches the guest through its
+loopback forward with the same pinned SSH options. After a QMP reset, standing in for the provider's reboot,
 the firmware must boot the disk through `\EFI\BOOT\BOOTX64.EFI` with no
 variable naming it. The installed relay must then:
 - pass the service phase's installed-identity check over the operator account

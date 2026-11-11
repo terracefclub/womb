@@ -85,7 +85,7 @@ CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
 }
-# The relay role is installed exactly as the private planner prepares it: this module
+# The relay role is built exactly as the private planner prepares it: this module
 # shape, the relay's synthetic private address, and the planner's three outputs.
 RELAY_PRIVATE_IPV4 = "10.71.0.8"
 HARDWARE_MODULE = """{{ modulesPath, ... }}: {{
@@ -687,6 +687,9 @@ def exercise_install(directory, ssh, public, options, plan, installed_public, fa
     reviewed, disk_digest = install.read_json(directory / f"{PREFIX}-disk.json")
     target = reviewed["disk"]
     facts["legacyGuards"] = legacy_guard_facts(ssh, target)
+    # The original fault reproduces here, and the raw listing the guards now use matches.
+    install.require(facts["legacyGuards"] == {"tableMajMinMatches": False, "tableMajMinPadded": True,
+                                              "rawMajMinMatches": True}, "MAJ:MIN listings differ from expectation")
     disk_args = [target["bootId"], target["device"], target["canonical"], target["majorMinor"], str(target["size"])]
     # Both disk steps stop at their guards, before any write, and name the line.
     lines = {name: script.splitlines() for name, script in (("format", install.FORMAT), ("finish", install.FINISH))}
@@ -1027,9 +1030,11 @@ def exercise(args, directory, seed, overlay, facts):
             facts["qmpScratchGone"] = not Path(monitor).exists()
             install.require(facts["qmpScratchGone"], "private monitor scratch survived cleanup")
         forbidden = {b"PRIVATE KEY-----"}
-        for name in ("operator-ed25519", f"{PREFIX}-installed-ed25519"):
+        for name in ("operator-ed25519", f"{PREFIX}-installed-ed25519", "tls/relay-key.pem", "repository-password"):
             if (directory / name).exists():
-                forbidden.update((directory / name).read_bytes().splitlines()[1:-1])
+                # PEM bodies line by line; a one-line secret such as the password whole.
+                lines = (directory / name).read_bytes().splitlines()
+                forbidden.update(lines[1:-1] if len(lines) > 2 else [line.strip() for line in lines])
         facts["serialPrivateKeyFound"] = any(marker in serial for marker in forbidden if marker)
         lower_serial = serial.lower()
         facts["serialBootMarkers"] = {
