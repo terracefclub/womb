@@ -760,6 +760,13 @@ def exercise_installed_boot(args, directory, process, qmp, ssh, installed, ram_b
     return booted
 
 
+NGINX_MARKERS = {
+    "certificate": b"cannot load certificate", "privateKey": b"cannot load certificate key",
+    "keyMismatch": b"key values mismatch", "permission": b"permission denied", "missingFile": b"no such file",
+    "bind": b"bind() to", "addressInUse": b"address already in use", "hostNotFound": b"host not found",
+    "unknownDirective": b"unknown directive", "emerg": b"[emerg]", "configTestFailed": b"test failed",
+    "startPreFailed": b"control process exited", "resolver": b"resolver", "user": b"getpwnam",
+}
 RELAY_UNITS = ("headscale", "nginx", "cloud-rehearsal-tls", "cloud-rehearsal-relay-address")
 RELAY_TOOLS = ("headscale", "jq", "curl", "sqlite3")
 
@@ -781,6 +788,11 @@ def relay_diagnostics(booted):
     _, out, _ = diagnostic_command([*booted, "for t in " + " ".join(RELAY_TOOLS) +
                                     "; do command -v $t >/dev/null && echo y || echo n; done"], 15)
     facts["tools"] = dict(zip(RELAY_TOOLS, out.decode("ascii", "replace").split()))
+    # Known nginx start failures, as booleans over its own bounded journal.
+    _, out, _ = diagnostic_command([*booted, "sudo -n journalctl -u nginx.service -b --no-pager -o cat | tail -n 200"],
+                                   20, truncate=True)
+    text = out.lower()
+    facts["nginxJournal"] = {name: marker in text for name, marker in NGINX_MARKERS.items()}
     return facts
 
 
