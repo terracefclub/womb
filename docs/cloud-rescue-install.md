@@ -124,9 +124,18 @@ record before formatting, verifies the
 mounted ext4 partition is on the reviewed disk, installs the exact
 closure, and stages the independently pinned installed host key. Reboot
 is a separate controller step. A failure after dispatch requires operator
-review and scoped lease cleanup. This procedure is offline-tested against
-synthetic inputs. Actual Rescue boot and installation still require the
-provider rehearsal.
+review and scoped lease cleanup.
+
+A failure prints one fixed line, for example
+`Install failed at format line 7 status 1. Private inputs suppressed.` The
+stages are `authority`, `disk-receipt`, `plan`, `installed-key`, `probe`,
+`store-service`, `store-copy`, `recheck`, `format`, `target-copy`, `finish`
+and `installed-receipt`. The `FORMAT` and `FINISH` scripts discard all command
+output and report only `ok` or their failing line and status, like the
+whole-disk probe. Their guards compare `lsblk` and `findmnt` raw output (`-r`)
+or JSON: the default table output pads columns, so `lsblk -dn -o MAJ:MIN`
+prints `  8:0  ` while the probe's JSON records `8:0`. That padding stopped
+known-full lease 2 at `FORMAT` before Disko ran.
 
 ```sh
 direnv exec . python3 -B infra/nixos/test_rescue_install.py -v
@@ -319,9 +328,48 @@ target check to accept that disk. It then requires these four rejections:
 - a second disk hot-plugged over QMP gives `single-disk`;
 - a mounted stock ESP gives `probe-partition-state`.
 
-Finally it writes the whole-disk receipt. Hetzner's own Debian 13 image layout
-and its disk bus are not measured by any receipt yet, so the provider run reports
-them through the same labels.
+Finally it writes the whole-disk receipt. Known-full lease 2 measured
+Hetzner's disks as `/dev/sda`: 327,684,194,304 bytes on the CPX42 and
+81,923,145,728 on the CPX22.
+
+The fixture then installs the relay role exactly as the private planner
+prepares it. It builds the relay's toplevel, Disko script and installer from
+`--install-source`, a checkout of the same revision, with the planner's
+hardware module. It records that the RAM installer's table `MAJ:MIN` output is
+padded while the raw output matches the receipt. Both disk steps must stop at
+their guards and name the line: `FORMAT` with a wrong `MAJ:MIN` and `FINISH`
+with a wrong boot ID. `rescue_install.install` then runs every stage on the
+Hetzner-shaped disk: store service, store copy, recheck, `FORMAT`, the target
+copy and `FINISH`. After a QMP reset, standing in for the provider's reboot,
+the firmware must boot the disk through `\EFI\BOOT\BOOTX64.EFI` with no
+variable naming it. The installed relay must then:
+- pass the service phase's installed-identity check over the operator account
+  and the independently pinned installed host key;
+- report a new boot ID and EFI;
+- reject the RAM installer's pin.
+
+Last, the fixture runs the relay half of the original service phase with the
+production `rehearsal_services` code over that pinned operator SSH. It uses the
+run's escrow material and a `rest-server` on a private Unix socket with the
+listener's flags. The relay must take its runtime inputs, bootstrap twice with
+the same identity, stop its writers, initialise the repository and run its
+native backup through the reverse forward. Off-host, `restic check --read-data`
+must pass with one relay snapshot. A restore must reproduce the headscale Noise
+and DERP keys and an intact database holding the synthetic user. This stage
+found that the relay's nginx, which runs as its own user, could not read the
+root-only leaf. The relay now receives it as a systemd credential, like the
+gateway.
+
+Still without an offline proof on this path:
+- the gateway role's install (its closure is about 10 GB) and its native
+  service phase;
+- the provider's reboot into the installed disk and Hetzner networking on the
+  installed system;
+- `retire-original`, which deletes provider servers;
+- the replacement phase's create, install and fresh-disk restore of both roles.
+
+The native VM rehearsal covers the service-level restore separately; see
+[the full rehearsal](full-rehearsal.md).
 
 On Falcon, hold the shared build lock and use one supervised service scope.
 Set the public store sentinel to a small file added with `nix store add-file`,
@@ -330,13 +378,14 @@ owner-only output directory outside the checkout and an unused loopback port.
 
 ```sh
 systemd-run --user --wait --collect --pipe --unit=terrace-stock-kexec-proof \
-  --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 \
+  --property=RuntimeMaxSec=2400 --property=TimeoutStopSec=15 \
   --property=KillMode=control-group \
   direnv exec . python3 -B infra/nixos/test_stock_kexec_native.py "$output" \
     --base "$debian_image" --archive "$archive" --archive-sha256 "$archive_sha256" \
     --store-probe "$sentinel_store_path" --port "$loopback_port" \
     --qemu "$qemu" --qemu-img "$qemu_img" --mkfs-vfat "$mkfs_vfat" --mcopy "$mcopy" \
-    --ovmf-code "$ovmf/FV/OVMF_CODE.fd" --ovmf-vars "$ovmf/FV/OVMF_VARS.fd"
+    --ovmf-code "$ovmf/FV/OVMF_CODE.fd" --ovmf-vars "$ovmf/FV/OVMF_VARS.fd" \
+    --install-source "$checkout" --openssl "$openssl" --rest-server "$rest_server" --restic "$restic"
 ```
 
 Here `$ovmf` is the `fd` output of the pinned nixpkgs `OVMF` package. The
@@ -371,7 +420,7 @@ bounded memory buffer and reports only fixed DHCP, ARP and SSH header
 counts. No packet capture file is retained.
 The test discards raw diagnostics and the bounded serial
 sample and removes the temporary overlay and keys after stopping the guest.
-No disk formatter or application starts in this proof.
+The Disko formatter writes only the disposable overlay.
 
 On 2026-11-07 the pinned base reached a Debian login prompt in a separate
 25-second offline BIOS boot with standard VGA and no NIC or cloud-init seed.
