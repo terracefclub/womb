@@ -49,11 +49,21 @@ in {
     enableACME = lib.mkForce false;
     onlySSL = true;
     forceSSL = lib.mkForce false;
-    sslCertificate = "/var/lib/terrace-rehearsal-tls/cert.pem";
-    sslCertificateKey = "/var/lib/terrace-rehearsal-tls/key.pem";
+    # nginx runs as its own user; systemd hands it the root-only leaf, as on the gateway.
+    sslCertificate = "/run/credentials/nginx.service/terrace-relay-cert";
+    sslCertificateKey = "/run/credentials/nginx.service/terrace-relay-key";
   };
   systemd.services =
-    lib.genAttrs ["headscale" "nginx"] (_: {wantedBy = lib.mkForce [];})
+    {
+      headscale.wantedBy = lib.mkForce [];
+      nginx = {
+        wantedBy = lib.mkForce [];
+        serviceConfig.LoadCredential = [
+          "terrace-relay-cert:/var/lib/terrace-rehearsal-tls/cert.pem"
+          "terrace-relay-key:/var/lib/terrace-rehearsal-tls/key.pem"
+        ];
+      };
+    }
     // {
       cloud-rehearsal-relay-address = {
         requiredBy = ["headscale.service"];
