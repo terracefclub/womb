@@ -801,7 +801,7 @@ def exercise_relay_backup(args, directory, socket_dir, booted, facts):
 
     try:
         run_relay_backup(args, directory, socket_dir, booted, facts, escrow)
-    except install.Rejected as failure:
+    except (install.Rejected, services.Rejected) as failure:
         # Our own fixed labels only (for example "relay relay-bootstrap failed").
         facts["relayBackupRejected"] = str(failure)
         raise
@@ -833,7 +833,7 @@ def run_relay_backup(args, directory, socket_dir, booted, facts, escrow):
         facts["relayBackupStep"] = "bootstrap"
         try:
             signature = services.bootstrap_relay(relay)
-        except install.Rejected:
+        except (install.Rejected, services.Rejected):
             facts["relayBootstrapDiagnostics"] = relay_diagnostics(booted)
             raise
         install.require(services.bootstrap_relay(relay) == signature, "second relay bootstrap changed identity")
