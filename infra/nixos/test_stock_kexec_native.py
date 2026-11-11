@@ -760,6 +760,30 @@ def exercise_installed_boot(args, directory, process, qmp, ssh, installed, ram_b
     return booted
 
 
+RELAY_UNITS = ("headscale", "nginx", "cloud-rehearsal-tls", "cloud-rehearsal-relay-address")
+RELAY_TOOLS = ("headscale", "jq", "curl", "sqlite3")
+
+
+def relay_diagnostics(booted):
+    """Diagnostic only: the failing bootstrap line, fixed unit states and tool presence."""
+    facts = {}
+    probe = "set -Eeuo pipefail\ntrap 'printf \"relay-line:%d:%d\\n\" \"$LINENO\" \"$?\"' ERR\n" + services.BOOTSTRAP_RELAY
+    command = shlex.join(["timeout", "120", "sudo", "-n", "bash", "-c", probe])
+    _, out, _ = diagnostic_command([*booted, command], 130, truncate=True)
+    match = re.search(rb"^relay-line:([1-9][0-9]{0,2}):([1-9][0-9]{0,2})$", out, re.M)
+    facts["line"] = list(map(int, match.groups())) if match else None
+    states = {"active", "inactive", "failed", "activating", "deactivating", "success", "exit-code", "timeout",
+              "signal", "core-dump", "start-limit-hit", "resources", "dependency"}
+    _, out, _ = diagnostic_command([*booted, shlex.join(["systemctl", "show", "-p", "ActiveState", "-p", "Result",
+                                                         *(name + ".service" for name in RELAY_UNITS)])], 15)
+    values = [line.split("=", 1)[1] for line in out.decode("ascii", "replace").splitlines() if "=" in line]
+    facts["units"] = [value if value in states else "other" for value in values]
+    _, out, _ = diagnostic_command([*booted, "for t in " + " ".join(RELAY_TOOLS) +
+                                    "; do command -v $t >/dev/null && echo y || echo n; done"], 15)
+    facts["tools"] = dict(zip(RELAY_TOOLS, out.decode("ascii", "replace").split()))
+    return facts
+
+
 def restic(args, repository, password, *command, capture=False):
     return install.checked_process([args.restic, "--repo", str(repository), "--password-file", str(password),
                                     "--no-cache", *command], 300, capture=capture)
@@ -774,6 +798,16 @@ def exercise_relay_backup(args, directory, socket_dir, booted, facts):
     restore are not part of this run.
     """
     import rehearsal_escrow as escrow
+
+    try:
+        run_relay_backup(args, directory, socket_dir, booted, facts, escrow)
+    except install.Rejected as failure:
+        # Our own fixed labels only (for example "relay relay-bootstrap failed").
+        facts["relayBackupRejected"] = str(failure)
+        raise
+
+
+def run_relay_backup(args, directory, socket_dir, booted, facts, escrow):
 
     escrow.generate_material(directory, Path(args.openssl))
     repository = directory / "repository-data"
@@ -797,7 +831,11 @@ def exercise_relay_backup(args, directory, socket_dir, booted, facts):
         inputs["repository-password"] = install.read_private(directory / "repository-password", 4096)
         services.install_runtime(relay, inputs)
         facts["relayBackupStep"] = "bootstrap"
-        signature = services.bootstrap_relay(relay)
+        try:
+            signature = services.bootstrap_relay(relay)
+        except install.Rejected:
+            facts["relayBootstrapDiagnostics"] = relay_diagnostics(booted)
+            raise
         install.require(services.bootstrap_relay(relay) == signature, "second relay bootstrap changed identity")
         identity = relay.run("relay-identity", services.RELAY_SIGNATURE, capture=True).decode("ascii")
         # sha256sum lines of the Noise and DERP private keys; the digests stay in memory only.
