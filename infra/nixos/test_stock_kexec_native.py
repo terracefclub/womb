@@ -757,6 +757,92 @@ def exercise_installed_boot(args, directory, process, qmp, ssh, installed, ram_b
     facts["installedSystemState"] = state if state in {"running", "degraded", "starting"} else "other"
     wrong_host_rejected(ssh)
     facts["installedRejectsRamPin"] = True
+    return booted
+
+
+def restic(args, repository, password, *command, capture=False):
+    return install.checked_process([args.restic, "--repo", str(repository), "--password-file", str(password),
+                                    "--no-cache", *command], 300, capture=capture)
+
+
+def exercise_relay_backup(args, directory, socket_dir, booted, facts):
+    """The relay half of the original service phase, against a local repository listener.
+
+    The production service code runs over the installed host's pinned SSH and its reverse
+    forward to a private Unix socket, as on a lease. The fixture then checks and restores
+    the encrypted snapshot off-host. Provider retirement and a fresh-disk replacement
+    restore are not part of this run.
+    """
+    import rehearsal_escrow as escrow
+
+    escrow.generate_material(directory, Path(args.openssl))
+    repository = directory / "repository-data"
+    repository.mkdir(mode=0o700)
+    socket = socket_dir / "rest.sock"
+    listener = subprocess.Popen(
+        [args.rest_server, "--listen", "unix:" + str(socket), "--path", str(repository), "--no-auth",
+         "--append-only", "--max-size", str(escrow.REPO_LIMIT)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (socket.exists() and stat.S_ISSOCK(socket.lstat().st_mode)):
+            install.require(listener.poll() is None and time.monotonic() < deadline, "repository listener did not start")
+            time.sleep(0.2)
+        relay = services.Host(directory, "relay", {"serverId": 0}, booted, install.checked_process, socket,
+                              time.time() + 900)
+        facts["relayBackupStep"] = "inputs"
+        services.inactive(relay, services.RELAY_WRITERS)
+        tls = directory / "tls"
+        inputs = {name: install.read_private(tls / name, 16384) for name in ("ca.pem", "relay-cert.pem", "relay-key.pem")}
+        inputs["repository-password"] = install.read_private(directory / "repository-password", 4096)
+        services.install_runtime(relay, inputs)
+        facts["relayBackupStep"] = "bootstrap"
+        signature = services.bootstrap_relay(relay)
+        install.require(services.bootstrap_relay(relay) == signature, "second relay bootstrap changed identity")
+        identity = relay.run("relay-identity", services.RELAY_SIGNATURE, capture=True).decode("ascii")
+        # sha256sum lines of the Noise and DERP private keys; the digests stay in memory only.
+        keys = {match[2]: match[1] for match in re.finditer(r"^([a-f0-9]{64})  (/var/lib/headscale/[a-z_]+[.]key)$",
+                                                             identity, re.M)}
+        install.require(len(keys) == 2, "relay identity keys were not listed")
+        facts["relayBackupStep"] = "quiesce"
+        services.quiesce_relay(relay)
+        facts["relayBackupStep"] = "backup"
+        relay.run("repository-init", "terrace-backup init primary", seconds=90, repository=True)
+        relay.run("native-backup", "systemctl start terrace-backup.service", seconds=300, repository=True)
+        services.inactive(relay, services.RELAY_WRITERS)
+    finally:
+        listener.terminate()
+        try:
+            listener.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            listener.kill()
+            listener.wait(timeout=5)
+        socket.unlink(missing_ok=True)
+    facts["relayBackupStep"] = "offhost"
+    stored = repository / "repository"
+    password = directory / "repository-password"
+    # As the service phase's off-host verifier: an encrypted config is not readable JSON.
+    install.require(not install.read_private(stored / "config", 65536).lstrip().startswith(b"{"),
+                    "off-host repository configuration is not encrypted")
+    restic(args, stored, password, "check", "--read-data")
+    snapshots = json.loads(restic(args, stored, password, "snapshots", "--json", capture=True))
+    install.require(len(snapshots) == 1 and snapshots[0]["hostname"] == "relay"
+                    and services.SNAPSHOT.fullmatch(snapshots[0]["id"]), "unexpected relay snapshot inventory")
+    restored = directory / "restored"
+    restic(args, stored, password, "restore", snapshots[0]["id"], "--target", str(restored))
+    for path, digest in keys.items():
+        copy = restored / path.lstrip("/")
+        install.require(copy.is_file() and install.sha(copy.read_bytes()) == digest,
+                        "restored relay identity key differs")
+    databases = list(restored.rglob("headscale.sqlite"))
+    install.require(len(databases) == 1, "restored relay database snapshot missing")
+    import sqlite3
+    with sqlite3.connect(f"file:{databases[0]}?mode=ro", uri=True) as connection:
+        install.require(connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+                        and [row[0] for row in connection.execute("select name from users")] == ["rehearsal-synthetic"],
+                        "restored relay database differs")
+    facts["relayBackup"] = {"idempotentBootstrap": True, "writersStopped": True, "snapshots": 1,
+                            "checkReadData": True, "restoredKeys": len(keys), "restoredDatabase": True}
 
 
 def exercise(args, directory, seed, overlay, facts):
@@ -880,8 +966,10 @@ def exercise(args, directory, seed, overlay, facts):
             installed, ram_boot = exercise_install(directory, ssh, public, options, args.plan,
                                                    args.installed_public, facts)
             facts["stage"] = "installed-boot"
-            exercise_installed_boot(args, directory, process, Path(monitor) / "qmp.sock", ssh, installed,
-                                    ram_boot, facts)
+            booted = exercise_installed_boot(args, directory, process, Path(monitor) / "qmp.sock", ssh, installed,
+                                             ram_boot, facts)
+            facts["stage"] = "relay-backup"
+            exercise_relay_backup(args, directory, Path(monitor), booted, facts)
     finally:
         if facts.get("packetCaptureStarted"):
             facts["packetFacts"] = packet_facts(packets, late_packets)
@@ -920,7 +1008,8 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--install-source", type=Path, required=True,
                         help="a checkout of this revision; the relay's install outputs are built from it")
-    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy", "ovmf-code", "ovmf-vars"):
+    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy", "ovmf-code", "ovmf-vars", "openssl", "rest-server",
+                 "restic"):
         parser.add_argument("--" + tool, required=True)
     args = parser.parse_args()
     facts = {"stage": "inputs"}

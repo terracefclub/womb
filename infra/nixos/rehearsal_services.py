@@ -500,10 +500,14 @@ def quiesce(app, relay):
     scale(app, replicas, stop=True)
     app.run("gateway-quiescence", STOP_APP, *(name + ".service" for name in APP_SETUP), seconds=210)
     inactive(app, tuple(name for name in APP_WRITERS if name != "postgresql"))
+    quiesce_relay(relay)
+    return replicas
+
+
+def quiesce_relay(relay):
     relay.run("relay-quiescence", "systemctl stop nginx.service headscale.service\nsystemctl stop \"$@\"",
               *(name + ".service" for name in RELAY_SETUP), seconds=90)
     inactive(relay, RELAY_WRITERS)
-    return replicas
 
 
 def stop_database(app):
