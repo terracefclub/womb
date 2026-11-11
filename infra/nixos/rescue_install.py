@@ -1,6 +1,7 @@
 """Install reviewed closures on one independently authenticated, leased Rescue host."""
 
 import argparse
+from contextlib import contextmanager
 import base64
 import hashlib
 import hmac
@@ -240,10 +241,12 @@ printf '#!/bin/sh\nexec timeout --kill-after=10 %s /run/current-system/sw/bin/ni
 chmod 0700 {NIX_SERVE}
 """
 
+# Every lsblk and findmnt text comparison uses raw output (-r): the default table
+# output pads columns, e.g. MAJ:MIN prints as "  8:0  " while lsblk JSON says "8:0".
 DISK_GUARD = """
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"
 test "$(readlink -e "$2")" = "$3"
-test "$(lsblk -dn -o MAJ:MIN -- "$3")" = "$4"
+test "$(lsblk -drn -o MAJ:MIN -- "$3")" = "$4"
 test "$(blockdev --getsize64 "$3")" = "$5"
 """
 
@@ -251,23 +254,37 @@ MOUNT_GUARD = """
 mounted="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint /mnt)"
 read -r source kind <<<"$mounted"
 test "$kind" = ext4
-test "$(lsblk -dn -o PKNAME -- "$source")" = "${3##*/}"
+test "$(lsblk -drn -o PKNAME --paths -- "$source")" = "$3"
 esp="$(findmnt -rn -o SOURCE,FSTYPE --mountpoint /mnt/boot)"
 read -r esp_source esp_kind <<<"$esp"
 test "$esp_kind" = vfat
-test "$(lsblk -dn -o PKNAME -- "$esp_source")" = "${3##*/}"
+test "$(lsblk -drn -o PKNAME --paths -- "$esp_source")" = "$3"
 udevadm settle --timeout=30
-esp_type="$(lsblk -dn -o PARTTYPE -- "$esp_source")"
+esp_type="$(lsblk -drn -o PARTTYPE -- "$esp_source")"
 test "${esp_type,,}" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b
 """
 
-FORMAT = "set -euo pipefail\n" + DISK_GUARD + """
-if findmnt -rn --mountpoint /mnt >/dev/null; then exit 1; else test "$?" = 1; fi
-"$6"
-""" + MOUNT_GUARD
 
-FINISH = "set -euo pipefail\n" + DISK_GUARD + MOUNT_GUARD + """
-"$6/bin/nixos-install" --root /mnt --system "$7" --no-root-passwd --no-channel-copy
+def step_script(name, body):
+    """A disk-writing step that reports only a fixed failure line, like PROBE.
+
+    All command output is discarded; fd 3 carries just "<name>-ok" or
+    "<name>-failed LINE STATUS", so a failure names the line that stopped it.
+    Long-running tools get fd 3 closed, so nothing they leave behind holds the verdict.
+    """
+    return ("set -euo pipefail\n"
+            "exec 3>&1 >/dev/null 2>&1\n"
+            f"trap 'printf \"{name}-failed %d %d\\n\" \"$LINENO\" \"$?\" >&3; exit 0' ERR\n"
+            + body + f"printf '{name}-ok\\n' >&3\n")
+
+
+FORMAT = step_script("format", DISK_GUARD + """
+if findmnt -rn --mountpoint /mnt >/dev/null; then false; else test "$?" = 1; fi
+"$6" 3>&-
+""" + MOUNT_GUARD)
+
+FINISH = step_script("finish", DISK_GUARD + MOUNT_GUARD + """
+"$6/bin/nixos-install" --root /mnt --system "$7" --no-root-passwd --no-channel-copy 3>&-
 # No firmware variables are written, so the disk must boot from the removable path.
 test -f /mnt/boot/EFI/BOOT/BOOTX64.EFI
 test ! -L /mnt/boot/EFI/BOOT/BOOTX64.EFI
@@ -282,7 +299,10 @@ set -o noclobber
 cat >"$key"
 test "$(ssh-keygen -y -f "$key" | cut -d ' ' -f 2)" = "$8"
 sync -f /mnt
-"""
+""")
+STEP_FAILURE = re.compile(rb"(format|finish)-failed ([1-9][0-9]{0,2}) ([1-9][0-9]{0,2})\n")
+INSTALL_LABELS = ("authority", "disk-receipt", "plan", "installed-key", "probe", "store-service",
+                  "store-copy", "recheck", "format", "target-copy", "finish", "installed-receipt")
 
 
 def unmounted(row):
@@ -297,6 +317,42 @@ class ProbeFailed(Rejected):
     def __init__(self, line, status):
         super().__init__("whole-disk probe check failed")
         self.line, self.status = line, status
+
+
+class InstallFailed(Rejected):
+    """An install stage failed; only its fixed label and, for a step script, its line are kept."""
+
+    def __init__(self, label, line=None, status=None):
+        super().__init__("install stage failed")
+        assert label in INSTALL_LABELS
+        self.label, self.line, self.status = label, line, status
+
+    def report(self):
+        where = f" line {self.line} status {self.status}" if self.line is not None else ""
+        return f"Install failed at {self.label}{where}. Private inputs suppressed."
+
+
+@contextmanager
+def install_stage(label):
+    try:
+        yield
+    except InstallFailed:
+        raise
+    except ProbeFailed as failure:
+        raise InstallFailed(label, failure.line, failure.status) from None
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        raise InstallFailed(label) from None
+
+
+def run_step(ssh, seconds, name, script, *args, stdin=None):
+    """Run FORMAT or FINISH; a failed check raises its label with the script line."""
+    output = remote(ssh, seconds, script, *args, stdin=stdin, capture=True)
+    if output == f"{name}-ok\n".encode():
+        return
+    failure = STEP_FAILURE.fullmatch(output)
+    if failure and failure[1].decode() == name:
+        raise InstallFailed(name, int(failure[2]), int(failure[3]))
+    raise InstallFailed(name)
 
 
 def parse_probe(data, device):
@@ -540,64 +596,75 @@ def remaining(directory, binding, limit):
 
 
 def install(directory, phase, role, approved, archive):
-    require(not reviewed_probe_mode(directory, phase), "console probe cannot write a disk")
-    ram = reviewed_bootstrap(directory, phase, role) is not None
-    prefix = f"{phase}-{role}"
-    target_seconds = TARGET_COPY_SECONDS[role]
-    require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")
-    binding, key, options, ssh = authority(directory, phase, role, ram=ram)
-    reviewed, disk_digest = read_json(directory / f"{prefix}-disk.json")
-    require(reviewed["binding"] == binding and reviewed["rescueKey"] == key,
-            "install target changed after review")
-    disk = reviewed["disk"]
-    plan = checked_plan(directory, prefix, approved, disk_digest)
-    staged_key = directory / f"{prefix}-installed-ed25519"
-    key_bytes = read_private(staged_key, 4096)
-    public = checked_process(["ssh-keygen", "-y", "-f", str(staged_key)], 5, capture=True)
-    public_kind, public_data, *_ = public.decode("ascii").split()
-    require(public_kind == "ssh-ed25519" and public_data != key, "installed host key is not distinct")
-    installed_hosts = directory / f"{prefix}-installed-known-hosts"
-    require(read_private(installed_hosts, 4096).split() ==
-            [binding["ipv4"].encode(), b"ssh-ed25519", public_data.encode()],
-            "installed host key does not match its independent pin")
+    with install_stage("authority"):
+        require(not reviewed_probe_mode(directory, phase), "console probe cannot write a disk")
+        ram = reviewed_bootstrap(directory, phase, role) is not None
+        prefix = f"{phase}-{role}"
+        target_seconds = TARGET_COPY_SECONDS[role]
+        require(re.fullmatch(r"/[A-Za-z0-9/_.-]+", str(directory)), "unsupported SSH state path")
+        binding, key, options, ssh = authority(directory, phase, role, ram=ram)
+    with install_stage("disk-receipt"):
+        reviewed, disk_digest = read_json(directory / f"{prefix}-disk.json")
+        require(reviewed["binding"] == binding and reviewed["rescueKey"] == key,
+                "install target changed after review")
+        disk = reviewed["disk"]
+    with install_stage("plan"):
+        plan = checked_plan(directory, prefix, approved, disk_digest)
+    with install_stage("installed-key"):
+        staged_key = directory / f"{prefix}-installed-ed25519"
+        key_bytes = read_private(staged_key, 4096)
+        public = checked_process(["ssh-keygen", "-y", "-f", str(staged_key)], 5, capture=True)
+        public_kind, public_data, *_ = public.decode("ascii").split()
+        require(public_kind == "ssh-ed25519" and public_data != key, "installed host key is not distinct")
+        installed_hosts = directory / f"{prefix}-installed-known-hosts"
+        require(read_private(installed_hosts, 4096).split() ==
+                [binding["ipv4"].encode(), b"ssh-ed25519", public_data.encode()],
+                "installed host key does not match its independent pin")
 
     device = disk["device"]
-    require(valid_disk(device) and parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
-            "Rescue disk identity changed")
-    if ram:
-        remote(ssh, remaining(directory, binding, 20), RAM_SERVE, str(target_seconds + 10))
-    else:
-        require(archive is not None, "Rescue Nix archive is required")
-        descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, "rb") as source:
-            info = os.fstat(source.fileno())
-            require(stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= 100_000_000
-                    and hashlib.file_digest(source, "sha256").hexdigest() == NIX_SHA,
-                    "Rescue Nix archive rejected")
-            source.seek(0)
-            remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, str(target_seconds + 10), stdin=source)
-    copy_store(binding, options, remaining(directory, binding, 240), [plan["disko"], plan["installer"]])
-    # Provider controller may refresh observedAt. The immutable binding and
-    # Rescue pin must still match, immediately before any disk write.
-    fresh, fresh_key, _, _ = authority(directory, phase, role, ram=ram)
-    require(fresh == binding and fresh_key == key, "install target changed before formatting")
-    require(parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
-            "Rescue disk identity changed before formatting")
-    write_private(directory / f"{prefix}-install-dispatched.json", {
-        "binding": binding, "diskSha256": disk_digest, "planSha256": approved,
-    })
+    with install_stage("probe"):
+        require(valid_disk(device) and parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
+                "Rescue disk identity changed")
+    with install_stage("store-service"):
+        if ram:
+            remote(ssh, remaining(directory, binding, 20), RAM_SERVE, str(target_seconds + 10))
+        else:
+            require(archive is not None, "Rescue Nix archive is required")
+            descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as source:
+                info = os.fstat(source.fileno())
+                require(stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= 100_000_000
+                        and hashlib.file_digest(source, "sha256").hexdigest() == NIX_SHA,
+                        "Rescue Nix archive rejected")
+                source.seek(0)
+                remote(ssh, remaining(directory, binding, 120), BOOTSTRAP, str(target_seconds + 10), stdin=source)
+    with install_stage("store-copy"):
+        copy_store(binding, options, remaining(directory, binding, 240), [plan["disko"], plan["installer"]])
+    with install_stage("recheck"):
+        # Provider controller may refresh observedAt. The immutable binding and
+        # Rescue pin must still match, immediately before any disk write.
+        fresh, fresh_key, _, _ = authority(directory, phase, role, ram=ram)
+        require(fresh == binding and fresh_key == key, "install target changed before formatting")
+        require(parse_probe(remote(ssh, 20, PROBE, device, capture=True), device) == disk,
+                "Rescue disk identity changed before formatting")
+        write_private(directory / f"{prefix}-install-dispatched.json", {
+            "binding": binding, "diskSha256": disk_digest, "planSha256": approved,
+        })
     disk_args = [disk["bootId"], device, disk["canonical"], disk["majorMinor"], str(disk["size"])]
-    remote(ssh, remaining(directory, binding, 90), FORMAT, *disk_args, plan["disko"])
-    copy_store(binding, options, remaining(directory, binding, target_seconds), [plan["system"]], target=True)
-    with tempfile.TemporaryFile() as key_stream:
+    with install_stage("format"):
+        run_step(ssh, remaining(directory, binding, 90), "format", FORMAT, *disk_args, plan["disko"])
+    with install_stage("target-copy"):
+        copy_store(binding, options, remaining(directory, binding, target_seconds), [plan["system"]], target=True)
+    with install_stage("finish"), tempfile.TemporaryFile() as key_stream:
         key_stream.write(key_bytes)
         key_stream.seek(0)
-        remote(ssh, remaining(directory, binding, 180), FINISH, *disk_args, plan["installer"],
-               plan["system"], public_data, stdin=key_stream)
-    write_private(directory / f"{prefix}-installed.json", {
-        "binding": binding, "system": plan["system"], "planSha256": approved,
-        "installedHostKey": public_data, "mountedExt4Verified": True,
-    })
+        run_step(ssh, remaining(directory, binding, 180), "finish", FINISH, *disk_args, plan["installer"],
+                 plan["system"], public_data, stdin=key_stream)
+    with install_stage("installed-receipt"):
+        write_private(directory / f"{prefix}-installed.json", {
+            "binding": binding, "system": plan["system"], "planSha256": approved,
+            "installedHostKey": public_data, "mountedExt4Verified": True,
+        })
 
 
 def main():
@@ -618,6 +685,9 @@ def main():
         else:
             install(directory, args.phase, args.role, args.install_approved_sha, args.bootstrap_archive)
             message = "Reviewed NixOS installed to the verified disk. Reboot is separate."
+    except InstallFailed as failure:
+        print(failure.report(), file=sys.stderr)
+        return 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         print("Rescue operation rejected. Private inputs suppressed.", file=sys.stderr)
         return 1

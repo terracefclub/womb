@@ -66,5 +66,8 @@ in
   assert relay.services.nginx.defaultListenAddresses == ["127.0.0.1"];
   assert relay.networking.firewall.interfaces == {};
   assert relay.services.nginx.virtualHosts."relay.terrace.invalid".onlySSL && !relay.services.nginx.virtualHosts."relay.terrace.invalid".enableACME;
+  # nginx runs as its own user, so the root-only relay leaf must arrive as a systemd credential.
+  assert relay.services.nginx.virtualHosts."relay.terrace.invalid".sslCertificateKey == "/run/credentials/nginx.service/terrace-relay-key";
+  assert relay.systemd.services.nginx.serviceConfig.LoadCredential == ["terrace-relay-cert:/var/lib/terrace-rehearsal-tls/cert.pem" "terrace-relay-key:/var/lib/terrace-rehearsal-tls/key.pem"];
   assert builtins.elem "The synthetic relay requires a private RFC1918 IPv4 address." (errors (relayFor "203.0.113.10"));
   assert lib.all (cfg: builtins.isString cfg.system.build.toplevel.drvPath && builtins.isString cfg.system.build.diskoScript.drvPath) [gateway relay]; "PASS: cloud synthetic roles keep startup, ingress, TLS inputs and backup off-host explicit"

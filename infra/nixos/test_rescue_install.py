@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import rehearsal_services as services
 import rescue_install as rescue
 import stock_kexec
 from test_stock_kexec_native import (
@@ -421,16 +422,18 @@ class RescueInstallTest(unittest.TestCase):
         fake = {
             "findmnt": 'case "$*" in\n*"--mountpoint /mnt/boot"*) test -n "$BOOT" || exit 1; echo "$BOOT";;\n'
                        '*"--mountpoint /mnt"*) echo "$ROOT";;\nesac\n',
-            "lsblk": 'case "$*" in\n*PKNAME*/dev/sda2*) echo "$ROOT_DISK";;\n*PKNAME*) echo "$ESP_DISK";;\n'
+            # Like util-linux: only raw output (-r) is unpadded.
+            "lsblk": 'case "$1" in -drn) ;; *) echo "  padded  "; exit 0;; esac\n'
+                     'case "$*" in\n*PKNAME*/dev/sda2*) echo "$ROOT_DISK";;\n*PKNAME*) echo "$ESP_DISK";;\n'
                      '*PARTTYPE*) echo "$ESP_TYPE";;\nesac\n',
             "udevadm": "exit 0\n",
         }
-        good = {"ROOT": "/dev/sda2 ext4", "BOOT": "/dev/sda1 vfat", "ROOT_DISK": "sda", "ESP_DISK": "sda",
-                "ESP_TYPE": esp_guid}
+        good = {"ROOT": "/dev/sda2 ext4", "BOOT": "/dev/sda1 vfat", "ROOT_DISK": "/dev/sda",
+                "ESP_DISK": "/dev/sda", "ESP_TYPE": esp_guid}
         cases = [({}, True), ({"ESP_TYPE": esp_guid.upper()}, True), ({"BOOT": ""}, False),
-                 ({"BOOT": "/dev/sda1 ext4"}, False), ({"ESP_DISK": "sdb"}, False),
+                 ({"BOOT": "/dev/sda1 ext4"}, False), ({"ESP_DISK": "/dev/sdb"}, False), ({"ESP_DISK": "sda"}, False),
                  ({"ESP_TYPE": "0fc63daf-8483-4772-8e79-3d69d8477de4"}, False), ({"ESP_TYPE": ""}, False),
-                 ({"ROOT": "/dev/sda2 vfat"}, False), ({"ROOT_DISK": "sdb"}, False)]
+                 ({"ROOT": "/dev/sda2 vfat"}, False), ({"ROOT_DISK": "/dev/sdb"}, False)]
         for change, expected in cases:
             with self.subTest(change=change):
                 with patch.dict("os.environ", {**good, **change}):
@@ -816,12 +819,15 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         cfg = {"run": RUN, "phase": "original", "probeOnly": True}
         path = write_reviewed_input(self.directory, cfg)
         with patch.object(rescue, "authority") as authority:
-            with self.assertRaisesRegex(rescue.Rejected, "cannot write a disk"):
+            # Each rejection keeps only the stage label, before any host is contacted.
+            with self.assertRaises(rescue.InstallFailed) as caught:
                 rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            self.assertEqual((caught.exception.label, caught.exception.line), ("authority", None))
             path.unlink()
             self.write("original-input.json", {"run": RUN, "phase": "original"})
-            with self.assertRaisesRegex(rescue.Rejected, "no longer matches"):
+            with self.assertRaises(rescue.InstallFailed) as caught:
                 rescue.install(self.directory, "original", "relay", "unused", self.directory / "archive")
+            self.assertEqual(caught.exception.label, "authority")
             authority.assert_not_called()
 
     def test_disk_probe_rejects_mount_holder_and_partition(self):
@@ -1069,6 +1075,90 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             self.assertEqual(stderr.getvalue(), line)
             self.assertRegex(line.strip(), r"Install target check failed: [a-z-]{1,24}"
                              r"( line [0-9]{1,3} status [0-9]{1,3})?\. Private inputs suppressed\.")
+
+    def disk_step(self, script, *args, **env):
+        """Run FORMAT or FINISH against stubs shaped like the RAM installer's tools."""
+        state = self.directory / "step-state"
+        state.mkdir(exist_ok=True)
+        fake = {
+            "cat": 'if [ "$1" = /proc/sys/kernel/random/boot_id ]; then echo "$BOOT"; else exec /bin/cat "$@"; fi\n',
+            "readlink": "echo /dev/sda\n",
+            "blockdev": "echo 343597383680\n",
+            # Like util-linux 2.42: the default table output pads MAJ:MIN; raw (-r) does not.
+            "lsblk": 'case "$*" in\n'
+                     '-drn\\ -o\\ MAJ:MIN*) echo "8:0";;\n*MAJ:MIN*) echo "  8:0  ";;\n'
+                     '-drn\\ -o\\ PKNAME\\ --paths*) echo /dev/sda;;\n*PKNAME*) echo "sda   ";;\n'
+                     '*PARTTYPE*) test -z "$PARTTYPE_FAIL" || exit 4; echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b;;\nesac\n',
+            "findmnt": f'test -e {state}/mounted || exit 1\n'
+                       'case "$*" in\n*"--mountpoint /mnt/boot"*) echo "/dev/sda1 vfat";;\n'
+                       '*"--mountpoint /mnt"*) echo "/dev/sda2 ext4";;\nesac\n',
+            "udevadm": "exit 0\n",
+        }
+        disko = self.directory / "disko"
+        disko.write_text(f"#!/bin/sh\n{env.pop('DISKO', '')}\ntouch {state}/mounted\n")
+        disko.chmod(0o700)
+        (state / "mounted").unlink(missing_ok=True)
+        result = subprocess.run(["bash", "-c", script, "terrace", *args, str(disko)], capture_output=True,
+                                timeout=10, env={**self.fake_bin(fake), "BOOT": "b0" * 4, **env})
+        self.assertEqual((result.returncode, result.stderr), (0, b""))
+        return result.stdout
+
+    def test_disk_steps_compare_raw_lsblk_and_report_only_a_fixed_line(self):
+        disk = ["b0" * 4, "/dev/sda", "/dev/sda", "8:0", "343597383680"]
+        lines = rescue.FORMAT.splitlines()
+        self.assertEqual(self.disk_step(rescue.FORMAT, *disk), b"format-ok\n")
+        with patch.object(rescue, "remote", return_value=b"format-ok\n"):
+            rescue.run_step(["ssh"], 5, "format", rescue.FORMAT)
+        cases = [
+            (dict(args=[*disk[:3], "8:16", disk[4]]), 'test "$(lsblk -drn -o MAJ:MIN -- "$3")" = "$4"'),
+            (dict(args=["c0" * 4, *disk[1:]]), 'test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"'),
+            (dict(args=[*disk[:4], "1"]), 'test "$(blockdev --getsize64 "$3")" = "$5"'),
+            (dict(args=disk, DISKO="exit 3"), '"$6" 3>&-'),
+            # A noisy failing formatter still yields exactly the marker (and no stderr).
+            (dict(args=disk, DISKO="echo SECRET; echo SECRET >&2; exit 3"), '"$6" 3>&-'),
+            (dict(args=disk, PARTTYPE_FAIL="1"), 'esp_type="$(lsblk -drn -o PARTTYPE -- "$esp_source")"'),
+        ]
+        for case, marker in cases:
+            with self.subTest(marker=marker):
+                env = {key: value for key, value in case.items() if key != "args"}
+                output = self.disk_step(rescue.FORMAT, *case["args"], **env)
+                line = lines.index(marker) + 1
+                # The whole output: disko and every check write nothing else.
+                self.assertRegex(output, rb"^format-failed " + str(line).encode() + rb" [1-9][0-9]*\n$")
+                with patch.object(rescue, "remote", return_value=output):
+                    with self.assertRaises(rescue.InstallFailed) as caught:
+                        rescue.run_step(["ssh"], 5, "format", rescue.FORMAT)
+                self.assertEqual((caught.exception.label, caught.exception.line), ("format", line))
+        # FINISH shares the guard; a wrong boot stops it before any write.
+        output = self.disk_step(rescue.FINISH, "c0" * 4, *disk[1:], "/nix/store/x", "/nix/store/y", "key")
+        line = rescue.FINISH.splitlines().index('test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"') + 1
+        self.assertEqual(output, f"finish-failed {line} 1\n".encode())
+        for output in (b"", b"format-ok\nextra\n", b"finish-failed 4 1\n", b"format-failed 0 1\n", b"noise"):
+            with self.subTest(output=output), patch.object(rescue, "remote", return_value=output):
+                with self.assertRaises(rescue.InstallFailed) as caught:
+                    rescue.run_step(["ssh"], 5, "format", rescue.FORMAT)
+                self.assertEqual((caught.exception.label, caught.exception.line), ("format", None))
+
+    def test_install_guards_compare_only_raw_or_json_listings(self):
+        # A padded table cell must never reach a text comparison.
+        for script in (rescue.DISK_GUARD, rescue.MOUNT_GUARD, rescue.RAM_PROBE, rescue.PROBE,
+                       stock_kexec.TARGET_FACTS, services.INSTALLED_IDENTITY):
+            for line in script.splitlines():
+                for tool in ("lsblk", "findmnt"):
+                    if re.search(rf"\b{tool}\b", line):
+                        self.assertRegex(line, rf"\b{tool} (-[a-z]*r[a-z]*n|--json|--tree --bytes --json|"
+                                               rf"--bytes --json)", line)
+
+    def test_install_failure_message_keeps_label_and_line(self):
+        argv = ["rescue_install.py", str(self.directory), "original", "app", "--install-approved-sha", "0" * 64]
+        for failure, text in ((rescue.InstallFailed("format", 7, 1), "format line 7 status 1"),
+                              (rescue.InstallFailed("target-copy"), "target-copy")):
+            with patch.object(sys, "argv", argv), patch.object(rescue, "install", side_effect=failure), \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(rescue.main(), 1)
+            self.assertEqual(stderr.getvalue(), f"Install failed at {text}. Private inputs suppressed.\n")
+        with self.assertRaises(AssertionError):
+            rescue.InstallFailed("not-a-stage")
 
     def test_all_fixed_remote_scripts_parse_without_execution(self):
         for script in [rescue.PROBE, rescue.BOOTSTRAP, rescue.FORMAT, rescue.FINISH,

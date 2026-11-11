@@ -1,6 +1,7 @@
 """Prove the strict stock-to-RAM SSH handoff with one isolated Debian guest."""
 
 import argparse
+import base64
 from contextlib import contextmanager
 import hashlib
 import json
@@ -21,6 +22,7 @@ import threading
 import time
 from unittest.mock import patch
 
+import rehearsal_services as services
 import rescue_install as install
 import stock_kexec
 from test_stock_kexec_packets import EXPECTED, SNAPLEN, packet_facts, packet_pipe
@@ -83,6 +85,23 @@ CLOUD_INIT_STATES = {
     "not started", "running", "done", "error", "disabled", "error - done",
     "error - running", "degraded done", "degraded running",
 }
+# The relay role is built exactly as the private planner prepares it: this module
+# shape, the relay's synthetic private address, and the planner's three outputs.
+RELAY_PRIVATE_IPV4 = "10.71.0.8"
+HARDWARE_MODULE = """{{ modulesPath, ... }}: {{
+  imports = [ (modulesPath + "/profiles/qemu-guest.nix") ];
+  networking.useDHCP = true;
+  terrace.cloudDisk.device = {device};
+  terrace.hetzner.authorizedKeys = [ {key} ];
+}}
+"""
+LOADER_IMAGE = "/sys/firmware/efi/efivars/LoaderImageIdentifier-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+# What the pre-fix text guards would have compared on this RAM installer, as booleans only.
+LEGACY_GUARD_FACTS = """
+set -euo pipefail
+printf '[%s]\n' "$(lsblk -dn -o MAJ:MIN -- "$1")"
+printf '[%s]\n' "$(lsblk -drn -o MAJ:MIN -- "$1")"
+"""
 CAPACITY_PROBE = """
 set -eu
 printf '%s\n' "$(findmnt -rn -o FSTYPE --mountpoint /run || true)"
@@ -623,6 +642,262 @@ def exercise_target(directory, ssh, public, options, qmp, facts):
     facts["wholeDiskProbe"] = {"partitions": len(kinds), "kinds": sorted(set(kinds)), "receipt": True}
 
 
+def build_install_plan(args, directory, operator_public):
+    """Build the relay's toplevel, Disko script and installer like the private planner."""
+    module = directory / f"{PREFIX}-hardware.nix"
+    private_text(module, HARDWARE_MODULE.format(device=json.dumps(FIXTURE_DISK), key=json.dumps(operator_public)))
+    argv = ["nix", "build", "--offline", "--impure", "--option", "substitute", "false", "--option", "builders", "",
+            "--option", "post-build-hook", "", "--max-jobs", "1", "--cores", "2",
+            "--file", "infra/nixos/rehearsal-config.nix", "--arg", "localModule", str(module),
+            "--argstr", "role", "relay", "--argstr", "privateIPv4", RELAY_PRIVATE_IPV4,
+            "--out-link", str(directory / "relay-closure"), "--print-out-paths",
+            "config.system.build.toplevel", "config.system.build.diskoScript", "config.system.build.nixos-install"]
+    result = subprocess.run(argv, cwd=args.install_source, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=900, check=False)
+    install.require(result.returncode == 0, "relay install outputs did not build")
+    paths = result.stdout.decode("ascii").split()
+    install.require(len(paths) == 3 and all(install.STORE.fullmatch(path) for path in paths),
+                    "unexpected relay install outputs")
+    plan = {"system": next(path for path in paths if "-nixos-system-relay-" in path),
+            "disko": next(path for path in paths if path.endswith("-disko")),
+            "installer": next(path for path in paths if path.endswith("-nixos-install"))}
+    install.require(len(set(plan.values())) == 3, "relay install outputs are not distinct")
+    return plan
+
+
+def legacy_guard_facts(ssh, target):
+    """Booleans only: whether the table and raw MAJ:MIN listings equal the probe's JSON value."""
+    table, raw = install.remote(ssh, 20, LEGACY_GUARD_FACTS, target["canonical"],
+                                capture=True).decode("ascii").splitlines()
+    expected = f"[{target['majorMinor']}]"
+    return {"tableMajMinMatches": table == expected, "tableMajMinPadded": table.replace(" ", "") == expected,
+            "rawMajMinMatches": raw == expected}
+
+
+def step_label(ssh, name, script, *args):
+    try:
+        install.run_step(ssh, 60, name, script, *args)
+    except install.InstallFailed as failure:
+        return failure.label, failure.line
+    return None
+
+
+def exercise_install(directory, ssh, public, options, plan, installed_public, facts):
+    """The provider install path on the RAM installer: store copy, FORMAT, target copy, FINISH."""
+    reviewed, disk_digest = install.read_json(directory / f"{PREFIX}-disk.json")
+    target = reviewed["disk"]
+    facts["legacyGuards"] = legacy_guard_facts(ssh, target)
+    # The original fault reproduces here, and the raw listing the guards now use matches.
+    install.require(facts["legacyGuards"] == {"tableMajMinMatches": False, "tableMajMinPadded": True,
+                                              "rawMajMinMatches": True}, "MAJ:MIN listings differ from expectation")
+    disk_args = [target["bootId"], target["device"], target["canonical"], target["majorMinor"], str(target["size"])]
+    # Both disk steps stop at their guards, before any write, and name the line.
+    lines = {name: script.splitlines() for name, script in (("format", install.FORMAT), ("finish", install.FINISH))}
+    rejects = {
+        "formatWrongMajorMinor": step_label(ssh, "format", install.FORMAT, *disk_args[:3], "0:0", disk_args[4],
+                                            plan["disko"]),
+        "finishWrongBoot": step_label(ssh, "finish", install.FINISH, "0" * 8 + target["bootId"][8:],
+                                      *disk_args[1:], plan["installer"], plan["system"], installed_public),
+    }
+    facts["installGuardRejects"] = rejects
+    install.require(rejects == {
+        "formatWrongMajorMinor": ("format", lines["format"].index(
+            'test "$(lsblk -drn -o MAJ:MIN -- "$3")" = "$4"') + 1),
+        "finishWrongBoot": ("finish", lines["finish"].index(
+            'test "$(cat /proc/sys/kernel/random/boot_id)" = "$1"') + 1),
+    }, "a disk step guard did not report its line")
+    private_text(directory / f"{PREFIX}-installed-known-hosts", f"{FIXTURE_IP} ssh-ed25519 {installed_public}\n")
+    install.write_private(directory / f"{PREFIX}-install.json", {"diskSha256": disk_digest, **plan})
+    _, approved = install.read_json(directory / f"{PREFIX}-install.json")
+    bound = ({"ipv4": FIXTURE_IP}, public, options, ssh)
+    copy = install.copy_store
+
+    def loopback_copy(binding, copy_options, seconds, paths, *, target=False):
+        # The guest is reached through its loopback forward; the pinned SSH options are unchanged.
+        return copy({**binding, "ipv4": "127.0.0.1"}, copy_options, seconds, paths, target=target)
+
+    start = time.monotonic()
+    with patch.object(install, "authority", return_value=bound), \
+            patch.object(install, "reviewed_probe_mode", return_value=False), \
+            patch.object(install, "reviewed_bootstrap", return_value=(FIXTURE_RUN, "0" * 64)), \
+            patch.object(install, "copy_store", side_effect=loopback_copy):
+        try:
+            install.install(directory, "original", "relay", approved, None)
+        except install.InstallFailed as failure:
+            facts["installFailure"] = {"label": failure.label, "line": failure.line, "status": failure.status}
+            raise
+    facts["installSeconds"] = round(time.monotonic() - start)
+    installed, _ = install.read_json(directory / f"{PREFIX}-installed.json")
+    install.require(installed["system"] == plan["system"] and installed["installedHostKey"] == installed_public
+                    and installed["mountedExt4Verified"] is True, "installed receipt differs from the plan")
+    facts["installed"] = {"receipt": True, "planSha256": approved == installed["planSha256"]}
+    return installed, target["bootId"]
+
+
+def exercise_installed_boot(args, directory, process, qmp, ssh, installed, ram_boot, facts):
+    """Reset the guest like the provider's reboot; the disk must boot the installed relay."""
+    private_text(directory / f"{PREFIX}-booted-known-hosts", f"{ALIAS} ssh-ed25519 {installed['installedHostKey']}\n")
+    booted = ["ssh", *install.ssh_options(directory, PREFIX, "booted"), "-o", "HostKeyAlias=" + ALIAS,
+              "-p", str(args.port), "operator@127.0.0.1"]
+    with qmp_commands(qmp) as ask:
+        install.require(ask("system_reset") == {}, "guest reset failed")
+    start = time.monotonic()
+    # The same first check the service phase runs on each installed host.
+    await_fact(process, 300, lambda: install.remote(booted, 20, services.INSTALLED_IDENTITY,
+                                                    installed["system"], "relay"))
+    facts["installedBootSeconds"] = round(time.monotonic() - start)
+    facts["installedIdentity"] = True
+    boot = install.remote(booted, 10, "cat /proc/sys/kernel/random/boot_id", capture=True).decode("ascii").strip()
+    install.require(install.BOOT_ID.fullmatch(boot) and boot != ram_boot, "installed system did not boot anew")
+    install.remote(booted, 10, "test -d /sys/firmware/efi")
+    raw = install.remote(booted, 10, 'if test -e "$1"; then base64 -w0 "$1"; fi', LOADER_IMAGE, capture=True)
+    loader = base64.b64decode(raw)[4:].decode("utf-16-le").rstrip("\0") if raw else None
+    # No firmware variable names this disk: the firmware must have used the removable path.
+    facts["installedLoaderImage"] = loader
+    install.require(loader is not None and loader.lower() == "\\efi\\boot\\bootx64.efi",
+                    "installed system did not boot from the fallback loader")
+    state = install.remote(booted, 15, "systemctl is-system-running || true", capture=True).decode("ascii").strip()
+    facts["installedSystemState"] = state if state in {"running", "degraded", "starting"} else "other"
+    wrong_host_rejected(ssh)
+    facts["installedRejectsRamPin"] = True
+    return booted
+
+
+NGINX_MARKERS = {
+    "certificate": b"cannot load certificate", "privateKey": b"cannot load certificate key",
+    "keyMismatch": b"key values mismatch", "permission": b"permission denied", "missingFile": b"no such file",
+    "bind": b"bind() to", "addressInUse": b"address already in use", "hostNotFound": b"host not found",
+    "unknownDirective": b"unknown directive", "emerg": b"[emerg]", "configTestFailed": b"test failed",
+    "startPreFailed": b"control process exited", "resolver": b"resolver", "user": b"getpwnam",
+}
+RELAY_UNITS = ("headscale", "nginx", "cloud-rehearsal-tls", "cloud-rehearsal-relay-address")
+RELAY_TOOLS = ("headscale", "jq", "curl", "sqlite3")
+
+
+def relay_diagnostics(booted):
+    """Diagnostic only: the failing bootstrap line, fixed unit states and tool presence."""
+    facts = {}
+    probe = "set -Eeuo pipefail\ntrap 'printf \"relay-line:%d:%d\\n\" \"$LINENO\" \"$?\"' ERR\n" + services.BOOTSTRAP_RELAY
+    command = shlex.join(["timeout", "120", "sudo", "-n", "bash", "-c", probe])
+    _, out, _ = diagnostic_command([*booted, command], 130, truncate=True)
+    match = re.search(rb"^relay-line:([1-9][0-9]{0,2}):([1-9][0-9]{0,2})$", out, re.M)
+    facts["line"] = list(map(int, match.groups())) if match else None
+    states = {"active", "inactive", "failed", "activating", "deactivating", "success", "exit-code", "timeout",
+              "signal", "core-dump", "start-limit-hit", "resources", "dependency"}
+    _, out, _ = diagnostic_command([*booted, shlex.join(["systemctl", "show", "-p", "ActiveState", "-p", "Result",
+                                                         *(name + ".service" for name in RELAY_UNITS)])], 15)
+    values = [line.split("=", 1)[1] for line in out.decode("ascii", "replace").splitlines() if "=" in line]
+    facts["units"] = [value if value in states else "other" for value in values]
+    _, out, _ = diagnostic_command([*booted, "for t in " + " ".join(RELAY_TOOLS) +
+                                    "; do command -v $t >/dev/null && echo y || echo n; done"], 15)
+    facts["tools"] = dict(zip(RELAY_TOOLS, out.decode("ascii", "replace").split()))
+    # Known nginx start failures, as booleans over its own bounded journal.
+    _, out, _ = diagnostic_command([*booted, "sudo -n journalctl -u nginx.service -b --no-pager -o cat | tail -n 200"],
+                                   20, truncate=True)
+    text = out.lower()
+    facts["nginxJournal"] = {name: marker in text for name, marker in NGINX_MARKERS.items()}
+    return facts
+
+
+def restic(args, repository, password, *command, capture=False):
+    return install.checked_process([args.restic, "--repo", str(repository), "--password-file", str(password),
+                                    "--no-cache", *command], 300, capture=capture)
+
+
+def exercise_relay_backup(args, directory, socket_dir, booted, facts):
+    """The relay half of the original service phase, against a local repository listener.
+
+    The production service code runs over the installed host's pinned SSH and its reverse
+    forward to a private Unix socket, as on a lease. The fixture then checks and restores
+    the encrypted snapshot off-host. Provider retirement and a fresh-disk replacement
+    restore are not part of this run.
+    """
+    import rehearsal_escrow as escrow
+
+    try:
+        run_relay_backup(args, directory, socket_dir, booted, facts, escrow)
+    except (install.Rejected, services.Rejected) as failure:
+        # Our own fixed labels only (for example "relay relay-bootstrap failed").
+        facts["relayBackupRejected"] = str(failure)
+        raise
+
+
+def run_relay_backup(args, directory, socket_dir, booted, facts, escrow):
+
+    escrow.generate_material(directory, Path(args.openssl))
+    repository = directory / "repository-data"
+    repository.mkdir(mode=0o700)
+    socket = socket_dir / "rest.sock"
+    listener = subprocess.Popen(
+        [args.rest_server, "--listen", "unix:" + str(socket), "--path", str(repository), "--no-auth",
+         "--append-only", "--max-size", str(escrow.REPO_LIMIT)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (socket.exists() and stat.S_ISSOCK(socket.lstat().st_mode)):
+            install.require(listener.poll() is None and time.monotonic() < deadline, "repository listener did not start")
+            time.sleep(0.2)
+        relay = services.Host(directory, "relay", {"serverId": 0}, booted, install.checked_process, socket,
+                              time.time() + 900)
+        facts["relayBackupStep"] = "inputs"
+        services.inactive(relay, services.RELAY_WRITERS)
+        tls = directory / "tls"
+        inputs = {name: install.read_private(tls / name, 16384) for name in ("ca.pem", "relay-cert.pem", "relay-key.pem")}
+        inputs["repository-password"] = install.read_private(directory / "repository-password", 4096)
+        services.install_runtime(relay, inputs)
+        facts["relayBackupStep"] = "bootstrap"
+        try:
+            signature = services.bootstrap_relay(relay)
+        except (install.Rejected, services.Rejected):
+            facts["relayBootstrapDiagnostics"] = relay_diagnostics(booted)
+            raise
+        install.require(services.bootstrap_relay(relay) == signature, "second relay bootstrap changed identity")
+        identity = relay.run("relay-identity", services.RELAY_SIGNATURE, capture=True).decode("ascii")
+        # sha256sum lines of the Noise and DERP private keys; the digests stay in memory only.
+        keys = {match[2]: match[1] for match in re.finditer(r"^([a-f0-9]{64})  (/var/lib/headscale/[a-z_]+[.]key)$",
+                                                             identity, re.M)}
+        install.require(len(keys) == 2, "relay identity keys were not listed")
+        facts["relayBackupStep"] = "quiesce"
+        services.quiesce_relay(relay)
+        facts["relayBackupStep"] = "backup"
+        relay.run("repository-init", "terrace-backup init primary", seconds=90, repository=True)
+        relay.run("native-backup", "systemctl start terrace-backup.service", seconds=300, repository=True)
+        services.inactive(relay, services.RELAY_WRITERS)
+    finally:
+        listener.terminate()
+        try:
+            listener.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            listener.kill()
+            listener.wait(timeout=5)
+        socket.unlink(missing_ok=True)
+    facts["relayBackupStep"] = "offhost"
+    stored = repository / "repository"
+    password = directory / "repository-password"
+    # As the service phase's off-host verifier: an encrypted config is not readable JSON.
+    install.require(not install.read_private(stored / "config", 65536).lstrip().startswith(b"{"),
+                    "off-host repository configuration is not encrypted")
+    restic(args, stored, password, "check", "--read-data")
+    snapshots = json.loads(restic(args, stored, password, "snapshots", "--json", capture=True))
+    install.require(len(snapshots) == 1 and snapshots[0]["hostname"] == "relay"
+                    and services.SNAPSHOT.fullmatch(snapshots[0]["id"]), "unexpected relay snapshot inventory")
+    restored = directory / "restored"
+    restic(args, stored, password, "restore", snapshots[0]["id"], "--target", str(restored))
+    for path, digest in keys.items():
+        copy = restored / path.lstrip("/")
+        install.require(copy.is_file() and install.sha(copy.read_bytes()) == digest,
+                        "restored relay identity key differs")
+    databases = list(restored.rglob("headscale.sqlite"))
+    install.require(len(databases) == 1, "restored relay database snapshot missing")
+    import sqlite3
+    with sqlite3.connect(f"file:{databases[0]}?mode=ro", uri=True) as connection:
+        install.require(connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+                        and [row[0] for row in connection.execute("select name from users")] == ["rehearsal-synthetic"],
+                        "restored relay database differs")
+    facts["relayBackup"] = {"idempotentBootstrap": True, "writersStopped": True, "snapshots": 1,
+                            "checkReadData": True, "restoredKeys": len(keys), "restoredDatabase": True}
+
+
 def exercise(args, directory, seed, overlay, facts):
     binding = {"ipv4": "127.0.0.1"}
     options = [*install.ssh_options(directory, PREFIX, "bootstrap"),
@@ -736,16 +1011,30 @@ def exercise(args, directory, seed, overlay, facts):
             install.remote(ssh, 5, 'set -eu; test -f "$1"; test "$(sha256sum "$1" | cut -d " " -f1)" = "$2"',
                            store, install.sha(Path(store).read_bytes()))
             facts["ramStoreCopy"] = True
+            # On a lease the install creates the store service first; leave the RAM host that way.
+            install.remote(ssh, 5, 'rm -- "$1"', install.NIX_SERVE)
             facts["stage"] = "ram-target"
             exercise_target(directory, ssh, public, options, Path(monitor) / "qmp.sock", facts)
+            facts["stage"] = "install"
+            installed, ram_boot = exercise_install(directory, ssh, public, options, args.plan,
+                                                   args.installed_public, facts)
+            facts["stage"] = "installed-boot"
+            booted = exercise_installed_boot(args, directory, process, Path(monitor) / "qmp.sock", ssh, installed,
+                                             ram_boot, facts)
+            facts["stage"] = "relay-backup"
+            exercise_relay_backup(args, directory, Path(monitor), booted, facts)
     finally:
         if facts.get("packetCaptureStarted"):
             facts["packetFacts"] = packet_facts(packets, late_packets)
         if monitor is not None:
             facts["qmpScratchGone"] = not Path(monitor).exists()
             install.require(facts["qmpScratchGone"], "private monitor scratch survived cleanup")
-        operator = (directory / "operator-ed25519").read_bytes()
-        forbidden = {b"PRIVATE KEY-----", *operator.splitlines()[1:-1]}
+        forbidden = {b"PRIVATE KEY-----"}
+        for name in ("operator-ed25519", f"{PREFIX}-installed-ed25519", "tls/relay-key.pem", "repository-password"):
+            if (directory / name).exists():
+                # PEM bodies line by line; a one-line secret such as the password whole.
+                lines = (directory / name).read_bytes().splitlines()
+                forbidden.update(lines[1:-1] if len(lines) > 2 else [line.strip() for line in lines])
         facts["serialPrivateKeyFound"] = any(marker in serial for marker in forbidden if marker)
         lower_serial = serial.lower()
         facts["serialBootMarkers"] = {
@@ -772,7 +1061,10 @@ def main():
     parser.add_argument("--archive-sha256", required=True)
     parser.add_argument("--store-probe", required=True)
     parser.add_argument("--port", type=int, required=True)
-    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy", "ovmf-code", "ovmf-vars"):
+    parser.add_argument("--install-source", type=Path, required=True,
+                        help="a checkout of this revision; the relay's install outputs are built from it")
+    for tool in ("qemu", "qemu-img", "mkfs-vfat", "mcopy", "ovmf-code", "ovmf-vars", "openssl", "rest-server",
+                 "restic"):
         parser.add_argument("--" + tool, required=True)
     args = parser.parse_args()
     facts = {"stage": "inputs"}
@@ -785,6 +1077,11 @@ def main():
             nonce = secrets.token_hex(32)
             private_text(directory / f"{PREFIX}-bootstrap-nonce", nonce + "\n")
             operator_public = key(directory / "operator-ed25519")
+            args.installed_public = key(directory / f"{PREFIX}-installed-ed25519").split()[1]
+            facts["stage"] = "install-build"
+            start = time.monotonic()
+            args.plan = build_install_plan(args, directory, operator_public)
+            facts["installBuildSeconds"] = round(time.monotonic() - start)
             wrong_public = key(directory / "wrong-ed25519")
             private_text(directory / f"{PREFIX}-wrong-known-hosts", f"{ALIAS} {wrong_public}\n")
             seed = directory / "seed.img"
@@ -804,7 +1101,7 @@ def main():
                 install.require(facts["baseUnchanged"], "Debian base changed")
             facts["stage"] = "complete"
         install.write_private(output / "stock-kexec-native.json", facts)
-        print("Strict SSH handoff and RAM store copy passed. The offline guest is off.")
+        print("Strict SSH handoff, RAM install and installed boot passed. The offline guest is off.")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError):
         if "output" in locals():
             install.write_private(output / "stock-kexec-native-failure.json", facts)
