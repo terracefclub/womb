@@ -872,6 +872,8 @@ def exercise(args, directory, seed, overlay, facts):
             install.remote(ssh, 5, 'set -eu; test -f "$1"; test "$(sha256sum "$1" | cut -d " " -f1)" = "$2"',
                            store, install.sha(Path(store).read_bytes()))
             facts["ramStoreCopy"] = True
+            # On a lease the install creates the store service first; leave the RAM host that way.
+            install.remote(ssh, 5, 'rm -- "$1"', install.NIX_SERVE)
             facts["stage"] = "ram-target"
             exercise_target(directory, ssh, public, options, Path(monitor) / "qmp.sock", facts)
             facts["stage"] = "install"
