@@ -134,10 +134,12 @@ class ServiceProofTests(unittest.TestCase):
             ({"app": 90, "relay": 40}, None),
             ({"app": 91, "relay": 0}, "app binding window too short"),
             ({"app": 0, "relay": 41}, "relay binding window too short"),
-            ({"app": 0, "relay": None}, "relay binding window too short"),
-            ({"app": -1, "relay": 0}, "app binding window too short"),
+            ({"app": 0, "relay": None}, "relay binding missing"),
+            ({"app": -1, "relay": 0}, "app binding observed in the future"),
+            ({"app": 121, "relay": 0}, "app binding rejected"),
             # Lease 3: install-time bindings, launched 577 s and 90 s after they were observed.
-            ({"app": 577, "relay": 90}, "app binding window too short"),
+            ({"app": 577, "relay": 90}, "app binding rejected"),
+            ({"app": 0, "relay": 90}, "relay binding window too short"),
         ]
         for ages, reason in cases:
             with self.subTest(ages=ages), tempfile.TemporaryDirectory() as root:

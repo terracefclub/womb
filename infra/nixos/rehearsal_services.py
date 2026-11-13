@@ -634,11 +634,15 @@ def require_launch_window(directory, phase, rescue, now, start=SERVICE_START_SEC
     for index, role in enumerate(ROLES):
         delay = start + index * APP_IDENTITY_SECONDS
         try:
-            for moment in (now, now + delay):
-                rescue.lease_binding(directory, phase, role, moment)
             observed = rescue.latest_binding(directory, f"{phase}-{role}")["observedAt"]
         except (OSError, ValueError, KeyError, TypeError):
-            raise Rejected(f"{role} binding window too short") from None
+            raise Rejected(f"{role} binding missing") from None
+        require(type(observed) is int and observed <= now, f"{role} binding observed in the future")
+        for moment, label in ((now, "rejected"), (now + delay, "window too short")):
+            try:
+                rescue.lease_binding(directory, phase, role, moment)
+            except (OSError, ValueError, KeyError, TypeError):
+                raise Rejected(f"{role} binding {label}") from None
         left[role] = int(observed + rescue.BINDING_MAX_AGE - now)
     return left
 

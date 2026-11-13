@@ -908,6 +908,7 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
         self.assertEqual(calls[-2:], ["original-relay-install-dispatched.json", "format"])
         calls, failure = self.run_install(step_failure="finish")
         self.assertEqual(failure, ("finish", 7))
+        self.assertEqual(calls[-1], "finish")
         self.assertNotIn("original-relay-installed.json", calls)
         # A changed binding at the recheck stops before the dispatch receipt and any disk write.
         calls, failure = self.run_install(recheck_binding={"changed": True})

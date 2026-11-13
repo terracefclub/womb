@@ -24,7 +24,9 @@ just before it starts the supervisor, then call
 `rehearsal_services.require_launch_window`. That call requires the app binding
 to stay accepted for `SERVICE_START_SECONDS` (30 s). The relay needs 50 s more
 (`APP_IDENTITY_SECONDS`), because the app's installed-identity check runs before
-the relay binding is checked. Known-full lease 3 stopped here: its newest
+the relay binding is checked. It names a failure as `<role> binding missing`,
+`observed in the future`, `rejected` (already outside the window) or `window too short`.
+Known-full lease 3 stopped here: its newest
 bindings came from the install steps, so the app's was about 9.5 minutes old
 when the services launched.
 
