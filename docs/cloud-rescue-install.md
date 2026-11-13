@@ -14,8 +14,21 @@ supplies `lease.json`, the phase's `*-created.json`, and a fresh per-role
 binding such as `original-app-binding-<time_ns>.json` with `run`, `phase`, `role`,
 `serverId`, `ipv4`, `expires` and `observedAt`. The install executor accepts
 only a server created in that phase and a provider observation at most
-120 seconds old. It selects the newest exact per-role receipt and preserves
+120 seconds old (`BINDING_MAX_AGE`). It selects the newest exact per-role receipt and preserves
 earlier observations. It takes no provider credential.
+
+The service phase uses the same window but cannot refresh a binding, because it
+also takes no provider credential. Its supervisor and `authenticate_host` each
+check both bindings once, at the start. A launcher must refresh both bindings
+just before it starts the supervisor, then call
+`rehearsal_services.require_launch_window`. That call requires the app binding
+to stay accepted for `SERVICE_START_SECONDS` (30 s). The relay needs 50 s more
+(`APP_IDENTITY_SECONDS`), because the app's installed-identity check runs before
+the relay binding is checked. It names a failure as `<role> binding missing`,
+`observed in the future`, `rejected` (already outside the window) or `window too short`.
+Known-full lease 3 stopped here: its newest
+bindings came from the install steps, so the app's was about 9.5 minutes old
+when the services launched.
 
 Place the run operator key in `operator-ed25519`, the single exact Rescue
 known_hosts entry in `original-app-rescue-known-hosts`, and the independently

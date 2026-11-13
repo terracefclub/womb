@@ -143,6 +143,8 @@ failed or interrupted write, records any unresolved provider outcome, and
 keeps disarm closed while uncertainty remains. Replacement requires the original
 cohort's verified absence. `binding` independently reads each created host
 and writes a short-lived private ID/address receipt for the installer.
+Consumers accept it for 120 s. A services launch must refresh it first; see
+`docs/cloud-rescue-install.md`.
 
 The operator helper uses the same lease and bounded systemd writer unit
 for Rescue boot, an authenticated provider console receipt, and the installed

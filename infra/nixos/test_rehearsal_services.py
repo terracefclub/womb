@@ -10,7 +10,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import inspect
+
 import rehearsal_services as services
+import rescue_install as rescue
 
 
 class ServiceProofTests(unittest.TestCase):
@@ -100,6 +103,63 @@ class ServiceProofTests(unittest.TestCase):
                 with self.assertRaises(services.Rejected):
                     host.run("test", "false", data=data)
             self.assertEqual(calls, [(70, True)])
+
+    def binding_directory(self, root, ages, now):
+        directory = Path(root)
+        run = "a" * 32
+        for name, value in (("lease.json", {"schema": 1, "run": run, "expires": now + 9000,
+                                            "baseline": {"servers": {"41": {}}}}),
+                            ("original-created.json", {"servers": [21, 22]})):
+            (directory / name).write_text(json.dumps(value))
+            (directory / name).chmod(0o600)
+        for server, (role, age) in zip((21, 22), ages.items()):
+            if age is None:
+                continue
+            path = directory / f"original-{role}-binding-{1000 + server}.json"
+            path.write_text(json.dumps({"run": run, "phase": "original", "role": role, "serverId": server,
+                                        "ipv4": f"1.1.1.{server}", "expires": now + 9000,
+                                        "observedAt": now - age}))
+            path.chmod(0o600)
+        return directory
+
+    def test_launch_window_covers_both_binding_checks_in_role_order(self):
+        # The services unit checks the app binding first, then runs the app's identity check
+        # before the relay binding is checked; each must still be inside the 120 s window.
+        self.assertEqual(services.ROLES, ("app", "relay"))
+        self.assertEqual(rescue.BINDING_MAX_AGE, 120)
+        identity_budget = inspect.signature(services.Host.run).parameters["seconds"].default
+        self.assertGreaterEqual(services.APP_IDENTITY_SECONDS, identity_budget + 20)
+        now = 1_800_000_000
+        cases = [
+            ({"app": 90, "relay": 40}, None),
+            ({"app": 91, "relay": 0}, "app binding window too short"),
+            ({"app": 0, "relay": 41}, "relay binding window too short"),
+            ({"app": 0, "relay": None}, "relay binding missing"),
+            ({"app": -1, "relay": 0}, "app binding observed in the future"),
+            ({"app": 121, "relay": 0}, "app binding rejected"),
+            # Lease 3: install-time bindings, launched 577 s and 90 s after they were observed.
+            ({"app": 577, "relay": 90}, "app binding rejected"),
+            ({"app": 0, "relay": 90}, "relay binding window too short"),
+        ]
+        for ages, reason in cases:
+            with self.subTest(ages=ages), tempfile.TemporaryDirectory() as root:
+                directory = self.binding_directory(root, ages, now)
+                if reason is None:
+                    self.assertEqual(services.require_launch_window(directory, "original", rescue, now),
+                                     {"app": 30, "relay": 80})
+                else:
+                    with self.assertRaises(services.Rejected) as caught:
+                        services.require_launch_window(directory, "original", rescue, now)
+                    self.assertEqual(str(caught.exception), reason)
+
+    def test_service_phase_rejects_a_stale_binding_before_any_ssh(self):
+        now = 1_800_000_000
+        with tempfile.TemporaryDirectory() as root:
+            directory = self.binding_directory(root, {"app": 121, "relay": 0}, now)
+            with patch.object(services.time, "time", return_value=now), \
+                 patch.object(rescue, "checked_process", side_effect=AssertionError("no SSH")):
+                with self.assertRaises(rescue.Rejected):
+                    services.authenticate_host(directory, "original", "app", rescue, directory / "rest.sock", now + 9000)
 
     def test_offhost_check_uses_independent_backend_before_listing(self):
         with tempfile.TemporaryDirectory() as root:
