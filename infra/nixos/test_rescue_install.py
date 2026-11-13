@@ -830,6 +830,90 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             self.assertEqual(caught.exception.label, "authority")
             authority.assert_not_called()
 
+    def run_install(self, *, step_failure=None, recheck_binding=None):
+        binding = {"run": RUN, "phase": "original", "role": "relay", "serverId": 22, "ipv4": "1.1.1.22",
+                   "expires": 9000}
+        disk = {"device": "/dev/sda", "bootId": "b", "canonical": "/dev/sda", "majorMinor": "8:0", "size": 1}
+        plan = {"disko": "/nix/store/disko", "installer": "/nix/store/installer", "system": "/nix/store/system"}
+        calls = []
+        authorities = iter([binding, recheck_binding or binding])
+
+        def authority(directory, phase, role, *, ram=False):
+            calls.append("authority")
+            return next(authorities), "rescue-key", ["-o", "x"], ["ssh", "root@1.1.1.22"]
+
+        def remote(ssh, seconds, script, *args, stdin=None, capture=False):
+            calls.append({rescue.PROBE: "probe", rescue.RAM_SERVE: "store-service"}[script])
+            return b"probe"
+
+        def checked_process(argv, seconds, capture=False, **kwargs):
+            calls.append(argv[0])
+            return b"ssh-ed25519 PUBLIC installed\n"
+
+        def read_private(path, limit):
+            return b"1.1.1.22 ssh-ed25519 PUBLIC\n" if path.name.endswith("known-hosts") else b"key"
+
+        def run_step(ssh, seconds, name, script, *args, stdin=None):
+            calls.append(name)
+            self.assertIs(script, {"format": rescue.FORMAT, "finish": rescue.FINISH}[name])
+            if name == step_failure:
+                raise rescue.InstallFailed(name, 7, 1)
+
+        def copy_store(binding, options, seconds, paths, *, target=False):
+            calls.append(("target-copy" if target else "store-copy", tuple(paths)))
+
+        def write_private(path, value):
+            calls.append(path.name)
+
+        patches = [
+            patch.object(rescue, "reviewed_probe_mode", return_value=False),
+            patch.object(rescue, "reviewed_bootstrap", return_value={}),
+            patch.object(rescue, "authority", authority),
+            patch.object(rescue, "read_json", return_value=({"binding": binding, "rescueKey": "rescue-key",
+                                                              "disk": disk}, "d" * 64)),
+            patch.object(rescue, "checked_plan", return_value=plan),
+            patch.object(rescue, "read_private", read_private),
+            patch.object(rescue, "checked_process", checked_process),
+            patch.object(rescue, "remote", remote),
+            patch.object(rescue, "parse_probe", return_value=disk),
+            patch.object(rescue, "remaining", lambda directory, binding, limit: limit),
+            patch.object(rescue, "copy_store", copy_store),
+            patch.object(rescue, "run_step", run_step),
+            patch.object(rescue, "write_private", write_private),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        failure = None
+        try:
+            rescue.install(self.directory, "original", "relay", "a" * 64, None)
+        except rescue.InstallFailed as error:
+            failure = (error.label, error.line)
+        for item in patches:
+            item.stop()
+        return calls, failure
+
+    def test_install_runs_its_stages_in_order_and_writes_only_after_each_gate(self):
+        calls, failure = self.run_install()
+        self.assertIsNone(failure)
+        self.assertEqual(calls, [
+            "authority", "ssh-keygen", "probe", "store-service",
+            ("store-copy", ("/nix/store/disko", "/nix/store/installer")),
+            "authority", "probe", "original-relay-install-dispatched.json",
+            "format", ("target-copy", ("/nix/store/system",)), "finish", "original-relay-installed.json",
+        ])
+        # A failed FORMAT keeps its line and stops before any later stage or receipt.
+        calls, failure = self.run_install(step_failure="format")
+        self.assertEqual(failure, ("format", 7))
+        self.assertEqual(calls[-2:], ["original-relay-install-dispatched.json", "format"])
+        calls, failure = self.run_install(step_failure="finish")
+        self.assertEqual(failure, ("finish", 7))
+        self.assertNotIn("original-relay-installed.json", calls)
+        # A changed binding at the recheck stops before the dispatch receipt and any disk write.
+        calls, failure = self.run_install(recheck_binding={"changed": True})
+        self.assertEqual(failure, ("recheck", None))
+        self.assertEqual(calls[-1], "authority")
+
     def test_disk_probe_rejects_mount_holder_and_partition(self):
         row = {"path": "/dev/vda", "type": "disk", "size": 123456, "ro": False,
                "rm": False, "maj:min": "252:0", "mountpoints": [None]}

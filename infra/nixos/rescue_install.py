@@ -37,6 +37,11 @@ BY_ID = re.compile(r"/dev/disk/by-id/[A-Za-z0-9][A-Za-z0-9_.:+-]{0,220}")
 STORE = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+_.-]+")
 KEY_PREFIX = b"\0\0\0\x0bssh-ed25519\0\0\0\x20"
 BINDING_FIELDS = {"run", "phase", "role", "serverId", "ipv4", "expires", "observedAt"}
+# A provider binding is accepted only this long after the controller observed it.
+# Steps that run while the operator refreshes it every 40 s (pin through install)
+# stay inside this window; a later consumer must refresh it first (see
+# rehearsal_services.require_launch_window).
+BINDING_MAX_AGE = 120
 BOOT_ID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 PROOF_LINE = re.compile(rb"terrace-hostkey-proof v1 ([0-9a-f]{64})")
 PROOF_OUTPUT_LIMIT = 65536
@@ -114,7 +119,7 @@ def lease_binding(directory, phase, role, now):
     require(server_id in created["servers"] and str(server_id) not in manifest["baseline"]["servers"],
             "server is not an owned created identity")
     require(type(binding["observedAt"]) is int and type(binding["expires"]) is int
-            and 0 <= now - binding["observedAt"] <= 120
+            and 0 <= now - binding["observedAt"] <= BINDING_MAX_AGE
             and now < binding["expires"] <= manifest["expires"],
             "provider binding expired or stale")
     address = ipaddress.IPv4Address(binding["ipv4"])

@@ -615,6 +615,34 @@ test "$(findmnt -rn -o FSTYPE --mountpoint /)" = ext4
 """
 
 
+# Binding-freshness contract. This phase holds no provider credential, so it cannot
+# refresh a provider binding. The supervisor and authenticate_host each accept a
+# binding only while rescue_install.lease_binding does: at most BINDING_MAX_AGE
+# (120 s) after the controller observed it. Both check it once, at the start; from
+# then on only the lease expiry bounds the phase. A launcher must therefore refresh
+# both bindings immediately before it starts the supervisor and call
+# require_launch_window first. authenticate_host takes the roles in ROLES order and
+# the app's installed-identity run precedes the relay check, so the relay needs
+# APP_IDENTITY_SECONDS more of its window than the app.
+SERVICE_START_SECONDS = 30
+APP_IDENTITY_SECONDS = 50  # Host.run's default 30 s budget plus its 20 s SSH slack
+
+
+def require_launch_window(directory, phase, rescue, now, start=SERVICE_START_SECONDS):
+    """Require both bindings to stay accepted until this phase checks them; return seconds left."""
+    left = {}
+    for index, role in enumerate(ROLES):
+        delay = start + index * APP_IDENTITY_SECONDS
+        try:
+            for moment in (now, now + delay):
+                rescue.lease_binding(directory, phase, role, moment)
+            observed = rescue.latest_binding(directory, f"{phase}-{role}")["observedAt"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise Rejected(f"{role} binding window too short") from None
+        left[role] = int(observed + rescue.BINDING_MAX_AGE - now)
+    return left
+
+
 def authenticate_host(directory, phase, role, rescue, socket, expires):
     binding = rescue.lease_binding(directory, phase, role, time.time())
     prefix = phase + "-" + role
