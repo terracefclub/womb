@@ -645,7 +645,7 @@ in {
           ok("delivered as a replacement" in app.fail("terrace-production adopt --new 2>&1"), "adopt --new refused: replacement marker")
           # A1(b), independently: without the marker the repository still says this host has backups.
           app.succeed("mv /var/lib/terrace-secrets/replacement /run/replacement-held")
-          ok("already holds snapshots of this host" in app.fail("terrace-production adopt --new 2>&1"), "adopt --new refused: snapshots exist")
+          ok("already holds snapshots; this is a replacement" in app.fail("terrace-production adopt --new 2>&1"), "adopt --new refused: snapshots exist")
           app.succeed("mv /run/replacement-held /var/lib/terrace-secrets/replacement")
           app.fail("test -e /var/lib/postgresql/18/PG_VERSION")
           ok(True, "the refused adoptions initialised nothing")

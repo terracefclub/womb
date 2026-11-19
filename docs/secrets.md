@@ -254,7 +254,11 @@ changed values) and `verify`, and restores the previous file if either fails.
   (`log_min_error_statement = panic`, `log_statement = none`, no duration
   logging), and restarts Keycloak. The upstream Keycloak database init would
   log its `CREATE ROLE ... PASSWORD '<cleartext>'` if that statement ever failed;
-  the profile runs it with the same no-statement-logging session options.
+  the profile runs it with the same no-statement-logging session options. Upstream
+  also runs that `psql --file` without `ON_ERROR_STOP`, so a failed role creation
+  used to exit 0 and the unit reported success; the profile sets `PSQLRC` with
+  `ON_ERROR_STOP` so it fails visibly. The VM forces that failure and finds the
+  error logged without the statement or the password.
 - **Backup repository password**: `rotate --manual`; `apply` (before `push`:
   sends the NEW value over the pinned channel on stdin; the host adds it as a
   restic key while the old one still opens the repository); `push`; `apply
