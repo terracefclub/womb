@@ -114,7 +114,8 @@ in {
 
       STORE = "/root/store"
       ESCROW = "/root/escrow/escrow.age"
-      ENV = f"TERRACE_SECRETS_STORE={STORE} SOPS_AGE_KEY_FILE={ESCROW} TERRACE_SECRETS_SCRATCH=/dev/shm "
+      # Exported, so every command of a pipeline sees the operator environment.
+      ENV = f"export TERRACE_SECRETS_STORE={STORE} SOPS_AGE_KEY_FILE={ESCROW} TERRACE_SECRETS_SCRATCH=/dev/shm; "
       CA = "/etc/terrace-rehearsal-ca.pem"
       MEDIA = "/var/lib/terrace-cms-media"
       OUTBOX = "/var/lib/terrace-cms-outbox"
