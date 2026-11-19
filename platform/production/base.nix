@@ -99,7 +99,7 @@
             --new)
               # A new deployment starts from nothing: refuse a host that already holds state or a restore.
               if [[ -e $populated || -e $restored ]]; then
-                echo 'terrace-production: this host holds data or a restore; use `adopt --restored` after a reconciled restore' >&2
+                echo 'terrace-production: this host holds data or a restore; use adopt --restored after a reconciled restore' >&2
                 exit 1
               fi ;;
             --restored)
