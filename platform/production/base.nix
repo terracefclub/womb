@@ -42,8 +42,10 @@
     options.security.polkit.extraConfig
   ];
   credentialSetters = lib.concatLists (lib.mapAttrsToList (unit: service:
-    map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key}) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
+    map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key} && !(key == "ImportCredential" && builtins.elem unit importingUnits)) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
   config.systemd.services);
+  # NixOS's own tmpfiles re-setup imports `tmpfiles.*` credentials; nothing of ours imports any.
+  importingUnits = ["systemd-tmpfiles-resetup"];
   # Units that hold secrets in memory besides the writers.
   secretHolders = ["sops-install-secrets" "terrace-production-boot" "terrace-backup" "terrace-backup-check"] ++ cfg.writerHelpers;
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;

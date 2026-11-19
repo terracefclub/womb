@@ -145,7 +145,7 @@ let
   };
   # Services that may be enabled at all (each listens only where the checks above say), and socket units.
   allowedEnabled = role:
-    ["openssh" "nginx" "nscd" "timesyncd" "logrotate" "dhcpcd" "resolved" "userborn" "lvm" "udisks2" "fstrim"]
+    ["openssh" "nginx" "nscd" "timesyncd" "logrotate" "dhcpcd" "resolved" "userborn" "lvm" "udisks2" "fstrim" "dbus" "getty" "logind" "udev"]
     ++ (
       if role == "app"
       then ["postgresql" "keycloak"]
