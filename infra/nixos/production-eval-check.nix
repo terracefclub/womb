@@ -179,7 +179,7 @@ let
     ++ check "boot timers: ${toString (bootUnits cfg "timers")}" (sorted (bootUnits cfg "timers") == sorted allowedBoot.timers)
     ++ check "boot sockets: ${toString (bootUnits cfg "sockets")}" (sorted (bootUnits cfg "sockets") == sorted allowedBoot.sockets)
     ++ check "boot paths: ${toString (bootUnits cfg "paths")}" (bootUnits cfg "paths" == allowedBoot.paths)
-    ++ check "boot targets: ${toString (bootUnits cfg "targets")}" (lib.subtractLists (map (t: t) bootTargets) (bootUnits cfg "targets") == allowedBoot.targets)
+    ++ check "boot targets: ${toString (lib.subtractLists bootTargets (bootUnits cfg "targets"))}" (lib.subtractLists bootTargets (bootUnits cfg "targets") == allowedBoot.targets)
     ++ check "boot target wants: ${toString (lib.subtractLists allowedBoot.targetPulls (targetPulls cfg))}" (subset (targetPulls cfg) allowedBoot.targetPulls)
     ++ check "gated services: ${toString (gatedUnits cfg "services")}" (gatedUnits cfg "services" == sorted p.writers)
     ++ check "gated timers: ${toString (gatedUnits cfg "timers")}" (gatedUnits cfg "timers" == sorted p.writerTimers)
