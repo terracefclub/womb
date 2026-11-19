@@ -29,7 +29,8 @@
   # anywhere else is refused here, not silently overridden.
   portSources = kind: allowed: lib.filter (entry: !(builtins.elem entry.port allowed)) (portDefinitions options.networking.firewall.${kind});
   # Free-form firewall, SSH and sudo configuration may come only from NixOS's own modules.
-  foreignDefinitions = option: lib.filter (definition: !(lib.hasInfix "/nixos/modules/" (toString definition.file))) option.definitionsWithLocations;
+  # Identified by the pinned nixpkgs store path, not by a path substring a private module could imitate.
+  foreignDefinitions = option: lib.filter (definition: !(lib.hasPrefix "${toString pkgs.path}/nixos/modules/" (toString definition.file))) option.definitionsWithLocations;
   foreignConfig = lib.concatMap foreignDefinitions [
     options.networking.firewall.extraCommands
     options.networking.firewall.extraStopCommands
@@ -38,7 +39,13 @@
     options.networking.nftables.ruleset
     options.services.openssh.extraConfig
     options.security.sudo.extraConfig
+    options.security.polkit.extraConfig
   ];
+  credentialSetters = lib.concatLists (lib.mapAttrsToList (unit: service:
+    map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key}) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
+  config.systemd.services);
+  # Units that hold secrets in memory besides the writers.
+  secretHolders = ["sops-install-secrets" "terrace-production-boot" "terrace-backup" "terrace-backup-check"] ++ cfg.writerHelpers;
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
   strayUDP = portSources "allowedUDPPorts" cfg.publicUDPPorts;
   production = cfg.instance == "production";
@@ -86,53 +93,99 @@
   sopsItems = lib.attrValues config.sops.secrets ++ lib.attrValues config.sops.templates;
   rootOnly = item: item.mode == "0400" && item.owner == null && (item.uid == 0 || item.uid == null) && item.group == null && (item.gid == 0 || item.gid == null);
   optionalModuleOn = path: lib.attrByPath (path ++ ["enable"]) false config;
+  backupTargets = lib.attrNames (lib.filterAttrs (_: target: target.enable) config.terrace.backup.targets);
   adopt = pkgs.writeShellApplication {
     name = "terrace-production";
-    runtimeInputs = [pkgs.coreutils pkgs.systemd tool];
+    runtimeInputs = [pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.systemd tool];
     text = ''
       [[ $(id -u) == 0 ]] || { echo 'terrace-production: run as root' >&2; exit 1; }
       restored=${restoreMarker}
       populated=${lib.escapeShellArg cfg.stateWitness}
+      adopting=/var/lib/terrace-production/adopting
+      replacement=/var/lib/terrace-secrets/replacement
+      refuse() { echo "terrace-production: not adopted: $*" >&2; exit 1; }
+      # A host whose backup repository already holds snapshots of it is a replacement, whatever its disk says.
+      repository_check() {
+        local target out rc
+        for target in ${lib.escapeShellArgs backupTargets}; do
+          rc=0
+          out=$(terrace-backup restic "$target" snapshots --json --host ${lib.escapeShellArg config.networking.hostName} 2>/dev/null) || rc=$?
+          if [[ $rc == 0 ]]; then
+            if [[ $(jq length <<<"$out") != 0 ]]; then
+              refuse "backup repository $target already holds snapshots of this host; restore, then adopt --restored"
+            fi
+          elif [[ $rc == 10 ]]; then
+            : # not initialised yet: a genuinely new deployment
+          elif [[ ''${1:-} == --without-repository-check ]]; then
+            echo "terrace-production: backup repository $target unreachable (restic exit $rc); continuing as explicitly requested" >&2
+          else
+            refuse "backup repository $target unreachable (restic exit $rc); fix access, or for a first deployment with no repository pass --without-repository-check"
+          fi
+        done
+      }
+      # Success means every writer is active (or skipped by its documented condition) and every helper succeeded.
+      settled() {
+        local unit state condition problems=()
+        for unit in ${lib.escapeShellArgs cfg.writers}; do
+          state=$(systemctl show "$unit.service" -p ActiveState --value)
+          condition=$(systemctl show "$unit.service" -p ConditionResult --value)
+          if [[ $state != active ]] && ! { [[ " ${toString cfg.conditionalWriters} " == *" $unit "* ]] && [[ $state == inactive && $condition == no ]]; }; then
+            problems+=("$unit.service:$state")
+          fi
+        done
+        for unit in ${lib.escapeShellArgs cfg.writerHelpers}; do
+          if systemctl is-failed --quiet "$unit.service" || [[ $(systemctl show "$unit.service" -p Result --value) != success ]]; then
+            problems+=("$unit.service:$(systemctl show "$unit.service" -p Result --value)")
+          fi
+        done
+        for unit in ${lib.escapeShellArgs cfg.writerTimers}; do
+          [[ $(systemctl show "$unit.timer" -p ActiveState --value) == active ]] || problems+=("$unit.timer")
+        done
+        if (( ''${#problems[@]} )); then
+          echo "terrace-production: not adopted yet; not running: ''${problems[*]}. Fix them and run the same adopt command again (it resumes)." >&2
+          return 1
+        fi
+      }
       case "''${1:-}" in
         adopt)
-          case "''${2:-}" in
+          mode=''${2:-}
+          case "$mode" in
             --new)
-              # A new deployment starts from nothing: refuse a host that already holds state or a restore.
-              if [[ -e $populated || -e $restored ]]; then
-                echo 'terrace-production: this host holds data or a restore; use adopt --restored after a reconciled restore' >&2
-                exit 1
-              fi ;;
+              [[ -e $replacement ]] && refuse "this host was delivered as a replacement; restore, then adopt --restored"
+              if [[ $(cat "$adopting" 2>/dev/null) != new ]]; then
+                # A new deployment starts from nothing: refuse a host that already holds state or a restore.
+                if [[ -e $populated || -e $restored ]]; then
+                  refuse "this host holds data or a restore; use adopt --restored after a reconciled restore"
+                fi
+              fi
+              repository_check "''${3:-}" ;;
             --restored)
               if ! grep -qx 'RECONCILIATION OK' "$restored" 2>/dev/null || [[ ! -e $populated ]]; then
-                echo 'terrace-production: no reconciled restore promoted into place; restore first (docs/production-profile.md)' >&2
-                exit 1
+                refuse "no reconciled restore promoted into place; restore first (docs/production-profile.md)"
               fi ;;
-            *) echo 'usage: terrace-production adopt --new|--restored' >&2; exit 2 ;;
+            *) echo 'usage: terrace-production adopt --new [--without-repository-check] | adopt --restored' >&2; exit 2 ;;
           esac
+          [[ -e ${marker} ]] && { echo 'Already adopted.'; exit 0; }
+          [[ -e $adopting && $(cat "$adopting") != "''${mode#--}" ]] && refuse "an adoption as $(cat "$adopting") is in progress; repeat that one"
           # Fail closed: the writers start only on a host whose secrets verify.
           terrace-secrets verify
-          systemctl start terrace-production.target
-          # A writer whose dependency failed stays inactive, so check this profile's own units.
-          failed=()
-          for unit in ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))}; do
-            if systemctl is-failed --quiet "$unit"; then failed+=("$unit"); fi
-          done
-          if (( ''${#failed[@]} )); then
-            echo "terrace-production: not adopted; failed: ''${failed[*]}" >&2
-            exit 1
-          fi
           install -d -m 0700 /var/lib/terrace-production
-          if [[ ! -e ${marker} ]]; then
-            install -m 0600 /dev/null ${marker}
-            date -u +%FT%TZ >${marker}
-          fi
+          echo "''${mode#--}" >"$adopting"
+          chmod 0600 "$adopting"
+          systemctl reset-failed ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))} 2>/dev/null || true
+          systemctl start terrace-production.target || true
+          settled || exit 1
+          install -m 0600 /dev/null ${marker}
+          date -u +%FT%TZ >${marker}
+          rm -f "$adopting"
+          [[ $mode == --restored ]] && rm -f "$replacement"
           echo 'Adopted: the writers start now and at every boot.'
           ;;
         status)
-          if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; else echo 'not adopted: no writer starts at boot'; fi
+          if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; elif [[ -e $adopting ]]; then echo "adoption as $(cat "$adopting") not finished"; else echo 'not adopted: no writer starts at boot'; fi
           systemctl is-active terrace-production.target || true
           ;;
-        *) echo 'usage: terrace-production adopt --new|--restored | status' >&2; exit 2 ;;
+        *) echo 'usage: terrace-production adopt --new [--without-repository-check] | adopt --restored | status' >&2; exit 2 ;;
       esac
     '';
   };
@@ -187,6 +240,12 @@ in {
       type = lib.types.str;
       internal = true;
       description = "A path that exists once the host holds application state (adopt --new refuses it).";
+    };
+    conditionalWriters = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [];
+      description = "Writers that may stay inactive because their documented condition is unmet (the CMS and website before the first migration).";
     };
     writerHelpers = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -271,7 +330,7 @@ in {
           message = "Terrace production secrets come only from the host ciphertext; no per-secret sopsFile.";
         }
         {
-          assertion = !config.systemd.coredump.enable && config.boot.kernel.sysctl."kernel.core_pattern" == noCore && config.boot.kernel.sysctl."fs.suid_dumpable" == 0 && lib.all (unit: (config.systemd.services.${unit}.serviceConfig.LimitCORE or null) == 0) cfg.writers;
+          assertion = !config.systemd.coredump.enable && config.boot.kernel.sysctl."kernel.core_pattern" == noCore && config.boot.kernel.sysctl."fs.suid_dumpable" == 0 && lib.all (unit: (config.systemd.services.${unit}.serviceConfig.LimitCORE or null) == 0) (cfg.writers ++ secretHolders);
           message = "Terrace production writes no core dumps: process memory holds secrets.";
         }
         {
@@ -279,8 +338,12 @@ in {
           message = "Terrace production refuses firewall ports or rules outside the role's public ports, and free-form firewall, sshd or sudo configuration: ${toString (map (entry: "${toString entry.port} from ${toString entry.file}") (strayTCP ++ strayUDP) ++ map (definition: toString definition.file) foreignConfig)}.";
         }
         {
-          assertion = !config.users.mutableUsers && !config.systemd.enableEmergencyMode && config.services.openssh.settings.AllowUsers == ["operator"];
-          message = "Terrace production needs immutable users, no emergency shell and SSH for the operator account only.";
+          assertion = !config.users.mutableUsers && !config.systemd.enableEmergencyMode && config.services.openssh.settings.AllowUsers == ["operator"] && !config.security.sudo-rs.enable && !config.security.doas.enable;
+          message = "Terrace production needs immutable users, no emergency shell, SSH for the operator account only and sudo as the only privilege tool.";
+        }
+        {
+          assertion = credentialSetters == [];
+          message = "Terrace production units take credentials from files, never inline or imported: ${toString credentialSetters}.";
         }
         {
           assertion = serviceEnvironmentLeaks == [];
@@ -332,12 +395,13 @@ in {
         requires = ["sops-install-secrets.service"];
         after = ["sops-install-secrets.service"];
       };
-      systemd.services =
-        lib.genAttrs cfg.writers (_: {
+      systemd.services = lib.mkMerge [
+        (lib.genAttrs cfg.writers (_: {
           wantedBy = lib.mkForce ["terrace-production.target"];
           serviceConfig.LimitCORE = 0;
-        })
-        // {
+        }))
+        (lib.genAttrs secretHolders (_: {serviceConfig.LimitCORE = 0;}))
+        {
           terrace-production-boot = {
             description = "Start the Terrace writers on an adopted host whose secrets verify";
             wantedBy = ["multi-user.target"];
@@ -349,7 +413,8 @@ in {
               ExecStartPost = "${pkgs.systemd}/bin/systemctl start --no-block terrace-production.target";
             };
           };
-        };
+        }
+      ];
       systemd.timers = lib.genAttrs cfg.writerTimers (_: {wantedBy = lib.mkForce ["terrace-production.target"];});
     }
   ]);

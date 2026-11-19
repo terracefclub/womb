@@ -30,8 +30,20 @@ CHARSET = "023456789acdefghjklmnpqrstuvwxyz"
 # Split so that no complete key armour appears in the repository.
 BEGIN, END = "-----BEGIN ", "-----END "
 PRIVATE = "PRIVATE KEY-----"
-TLS_KEY = f"{BEGIN}{PRIVATE}\n{base64.b64encode(b'x' * 48).decode()}\n{END}{PRIVATE}\n"
-TLS_CERT = f"{BEGIN}CERTIFICATE-----\n{base64.b64encode(b'c' * 48).decode()}\n{END}CERTIFICATE-----\n"
+
+
+def der(payload):
+    """A synthetic DER SEQUENCE (structure only, not a usable key or certificate)."""
+    return b"\x30" + (bytes([len(payload)]) if len(payload) < 128 else b"\x81" + bytes([len(payload)])) + payload
+
+
+def armour(label, raw):
+    body = base64.b64encode(raw).decode()
+    return f"{BEGIN}{label}-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + f"\n{END}{label}-----\n"
+
+
+TLS_KEY = armour(PRIVATE[:-5], der(b"\x02\x01\x00" + b"k" * 40))
+TLS_CERT = armour("CERTIFICATE", der(b"c" * 60))
 def s3(key, secret, extra=""):
     """A synthetic S3 environment value (built at run time; no literal credential shape)."""
     return "AWS_ACCESS_KEY_ID=" + key + "\nAWS_" + "SECRET_ACCESS_KEY=" + secret + "\n" + extra
@@ -51,7 +63,7 @@ FAKES = {
         path = sys.argv[sys.argv.index("-f") + 1]
         comment = sys.argv[sys.argv.index("-C") + 1]
         with open(path, "w") as handle:
-            handle.write("-----BEGIN OPENSSH " + "PRIVATE KEY-----\n" + base64.b64encode(os.urandom(48)).decode() + "\n-----END OPENSSH " + "PRIVATE KEY-----\n")
+            handle.write("-----BEGIN OPENSSH " + "PRIVATE KEY-----\n" + base64.b64encode(b"openssh-key-v1\0" + os.urandom(33)).decode() + "\n-----END OPENSSH " + "PRIVATE KEY-----\n")
         public = base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00 " + os.urandom(32)).decode()
         with open(path + ".pub", "w") as handle:
             handle.write(f"ssh-ed25519 {public} {comment}\n")
@@ -64,7 +76,11 @@ FAKES = {
             print(recipient(sys.stdin.read().split()[1]))
     ''',
     "ssh": r'''
-        sys.stdout.write("remote ok\n")
+        here = os.path.dirname(os.path.abspath(__file__))
+        if "reencrypt" in sys.argv:
+            sys.stdout.write(open(os.path.join(here, "reencrypt-output")).read())
+        else:
+            sys.stdout.write("remote ok\n")
     ''',
     "systemctl": r'''
         sys.exit(1 if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fail-systemctl")) else 0)
@@ -218,6 +234,7 @@ class StoreTest(Fixture):
     def test_formats(self):
         entries = tool.inventory()
         good = {"website/lifecycle-intake": "0" * 64, "tls/key": TLS_KEY, "tls/certificate": TLS_CERT + TLS_CERT,
+                "backup/primary/sftp-key": armour("OPENSSH " + PRIVATE[:-5], b"openssh-key-v1\0" + b"x" * 40),
                 "backup/secondary/environment": s3("K0012345678", "abc/def+ghi=jkl_mno-pq"),
                 "rehearsal/users-json": USERS}
         for name, value in good.items():
@@ -225,12 +242,16 @@ class StoreTest(Fixture):
         bad = [("website/lifecycle-intake", "0" * 63), ("website/lifecycle-intake", "0" * 64 + "\nINJECTED=1"),
                ("website/lifecycle-intake", "'" + "0" * 63), ("website/payload-secret", "0" * 62 + "\\0"),
                ("identity/database-password", "$" + "0" * 63), ("identity/database-password", "0" * 32 + " " + "0" * 31),
-               ("identity/client/terrace-web", "A" * 64), ("tls/key", TLS_KEY.replace("\n" + base64.b64encode(b'x' * 48).decode(), "\nnot base64!")),
+               ("identity/client/terrace-web", "A" * 64), ("tls/key", TLS_KEY.replace(TLS_KEY.splitlines()[1], "not base64!")),
                ("tls/key", TLS_CERT), ("tls/certificate", TLS_KEY), ("backup/primary/sftp-key", TLS_KEY),
                ("backup/secondary/environment", s3("K0012345678", "abc\"def0123456789")),
                ("backup/secondary/environment", s3("K0012345678", "abcdef0123456789", "EXTRA=1\n")),
                ("rehearsal/users-json", json.dumps([{"username": "x", "roles": [], "email": "x@y", "password": "short"}])),
-               ("rehearsal/other", "0" * 64), ("unknown/name", "0" * 64)]
+               ("rehearsal/other", "0" * 64), ("unknown/name", "0" * 64),
+               ("website/lifecycle-intake", "0" * 64 + "\n"), ("tls/key", TLS_KEY + TLS_KEY),
+               ("tls/key", TLS_KEY.replace(PRIVATE[:-5], "CERTIFICATE")), ("tls/key", TLS_KEY + "\n"),
+               ("tls/key", armour(PRIVATE[:-5], b"not der")), ("tls/certificate", TLS_CERT.replace("\n" + END, "%\n" + END)),
+               ("backup/primary/sftp-key", armour("OPENSSH " + PRIVATE[:-5], b"x" * 40))]
         for name, value in bad:
             with self.assertRaises(tool.Refused, msg=name):
                 tool.validate(entries, name, value)
@@ -306,6 +327,32 @@ class StoreTest(Fixture):
         os.environ["SOPS_AGE_KEY_FILE"] = str(self.escrow)
         self.refused("set", "app", "tls/key", stdin=TLS_KEY.encode())
 
+    def test_escrow_replace_is_resumable_and_switches_last(self):
+        self.bootstrap()
+        self.ok("host", "create", "relay", "--role", "relay", "--stage", str(self.root / "stage-relay"))
+        self.ok("generate", "relay")
+        before = {host: self.plaintext(host) for host in ["app", "relay"]}
+        old = (self.store / "escrow.recipient").read_text()
+        real_run, calls = tool.run, []
+
+        def failing(argv, **kwargs):
+            if argv[:2] == ["sops", "encrypt"]:
+                calls.append(1)
+                if len(calls) == 2:
+                    raise tool.Refused("simulated crash")
+            return real_run(argv, **kwargs)
+        new_escrow = self.root / "escrow-2.age"
+        with mock.patch.object(tool, "run", failing):
+            self.refused("escrow", "replace", str(new_escrow))
+        self.assertEqual((self.store / "escrow.recipient").read_text(), old)
+        self.assertEqual({host: self.plaintext(host) for host in ["app", "relay"]}, before)
+        self.refused("escrow", "replace", str(self.root / "escrow-other.age"))
+        self.ok("escrow", "replace", str(new_escrow))
+        self.assertNotEqual((self.store / "escrow.recipient").read_text(), old)
+        self.assertFalse((self.store / "escrow-replace.pending").exists())
+        os.environ["SOPS_AGE_KEY_FILE"] = str(new_escrow)
+        self.assertEqual({host: self.plaintext(host) for host in ["app", "relay"]}, before)
+
     def test_staging_defaults_to_memory_and_unstage(self):
         self.ok("escrow", "create", str(self.escrow))
         existing = self.root / "exists"
@@ -361,6 +408,16 @@ class StoreTest(Fixture):
         self.assertEqual(ssh[-2:], ["/run/current-system/sw/bin/terrace-secrets", "install"])
         self.refused("apply", "app", "website/payload-secret", "--address", "app")
         self.ok("apply", "app", "backup/primary/repository-password", "--address", "app")
+        self.ok("apply", "app", "backup/primary/repository-password", "--finish", "--keep", "abcd1234", "--address", "app")
+        ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
+        self.assertEqual(ssh[-4:], ["--finish", "--keep", "abcd1234"][-3:] and ssh[-4:], ssh[-4:])
+        self.assertIn("--keep", ssh)
+        # A replacement carries its marker with every push.
+        self.ok("host", "create", "app", "--role", "app", "--stage", str(self.root / "stage-r"), "--replace")
+        self.ok("rekey", "app")
+        self.ok("push", "app", "--address", "app")
+        ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
+        self.assertEqual(ssh[-3:], ["/run/current-system/sw/bin/terrace-secrets", "install", "--replacement"])
         value = self.plaintext()["backup/primary/repository-password"]
         self.assertNotIn(value, self.argv_log())
 
@@ -433,16 +490,61 @@ class HostTest(Fixture):
         self.assertIn("sops-install-secrets failed", self.refused("install", stdin=newer))
         self.assertEqual(self.host_file.read_bytes(), good)
 
-    def test_lost_escrow_reencrypt_and_adopt(self):
+    def test_install_restores_on_any_exception_and_records_a_replacement(self):
+        good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.ok("install", stdin=good)
+        self.ok("rotate", "app", "website/lifecycle-intake")
+        newer = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        with mock.patch.object(tool, "cmd_verify", side_effect=RuntimeError("unexpected")):
+            with self.assertRaises(RuntimeError):
+                self.call("install", stdin=newer)
+        self.assertEqual(self.host_file.read_bytes(), good)
+        marker = self.root / "var" / "replacement"
+        with mock.patch.object(tool, "REPLACEMENT_MARKER", marker):
+            self.ok("install", stdin=newer)
+            self.assertFalse(marker.exists())
+            self.ok("install", "--replacement", stdin=newer)
+            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+
+    def test_lost_escrow_reencrypt_and_pinned_adopt(self):
         self.ok("install", stdin=(self.store / "hosts/app/secrets.sops.json").read_bytes())
         before = self.plaintext()
         new_recipient = tool.new_age_identity(self.root / "escrow-new.age")
         out = self.ok("reencrypt", new_recipient)
         self.assertNotIn(before["website/payload-secret"], out)
+        (self.bin / "reencrypt-output").write_text(out)
         (self.store / "escrow.recipient").write_text(new_recipient + "\n")
-        self.ok("escrow", "adopt", "app", stdin=out.encode())
+        self.refused("escrow", "adopt", "app", "--address", "app")  # still the old identity: cannot check the values
         os.environ["SOPS_AGE_KEY_FILE"] = str(self.root / "escrow-new.age")
+        self.ok("escrow", "adopt", "app", "--address", "app")
         self.assertEqual(self.plaintext(), before)
+        bad = json.loads(out)
+        bad["website"]["payload-secret"] = bad["website"]["lifecycle-intake"].replace("data:", "data:AA")
+        (self.bin / "reencrypt-output").write_text(json.dumps(bad))
+        self.refused("escrow", "adopt", "app", "--address", "app")
+
+    def test_host_apply_database_password_uses_a_verifier_and_quiet_logging(self):
+        secrets = self.root / "run-secrets"
+        (secrets / "identity").mkdir(parents=True)
+        (secrets / "identity" / "database-password").write_text("ab" * 32)
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append((argv, kwargs.get("input", b""), kwargs.get("env", {})))
+            return mock.Mock(returncode=0, stdout=b"[]")
+        with mock.patch.object(tool, "SECRETS_ROOT", secrets), mock.patch.object(tool.subprocess, "run", fake):
+            self.assertIn("SCRAM verifier", self.ok("host-apply", "identity/database-password"))
+            self.refused("host-apply", "identity/database-password", "--role", "keycloak; DROP")
+            self.refused("host-apply", "backup/primary/repository-password", "--finish")
+        argv, sql, env = calls[0]
+        self.assertEqual(argv[:4], ["runuser", "-u", "postgres", "--"])
+        self.assertNotIn(b"ab" * 32, sql)
+        self.assertRegex(sql.decode(), r"(?s)SET log_min_error_statement = panic; .*ALTER ROLE keycloak WITH PASSWORD 'SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}';")
+        self.assertIn("log_min_error_statement=panic", env["PGOPTIONS"])
+        self.assertEqual(calls[1][0], ["systemctl", "restart", "keycloak.service"])
+        verifier = tool.scram_verifier("pencil", salt=b"\x00" * 16)
+        self.assertEqual(verifier, tool.scram_verifier("pencil", salt=b"\x00" * 16))
+        self.assertNotEqual(verifier, tool.scram_verifier("pencil"))
 
 
 class VerifyTest(unittest.TestCase):
@@ -469,6 +571,7 @@ class VerifyTest(unittest.TestCase):
         }))
         self.patches = [mock.patch.object(tool, "SECRETS_ROOT", self.link), mock.patch.object(tool, "MOUNT_ROOT", self.mount),
                         mock.patch.object(tool, "HOST_CONFIG", root / "no-etc"),
+                        mock.patch.object(tool, "ciphertext_problems", lambda: []),
                         mock.patch.dict(os.environ, {"TERRACE_SECRETS_INVENTORY": str(HERE / "inventory.json")}),
                         mock.patch.object(tool, "require_root", lambda: None), mock.patch.object(tool, "mount_type", lambda path: "ramfs")]
         for patch in self.patches:
@@ -492,6 +595,15 @@ class VerifyTest(unittest.TestCase):
         passed, out = self.verify()
         self.assertTrue(passed, out)
         self.assertIn("PASS 1 secrets, 1 templates", out)
+
+    def test_missing_pin_fails_closed(self):
+        self.patches[3].stop()  # the real ciphertext_problems: no pin file in this fixture
+        try:
+            passed, out = self.verify()
+        finally:
+            self.patches[3].start()
+        self.assertFalse(passed)
+        self.assertIn("pinned escrow recipient is missing", out)
 
     def test_mode_format_placeholder_and_mount_failures(self):
         os.chmod(self.secret, 0o444)

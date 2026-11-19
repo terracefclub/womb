@@ -40,12 +40,15 @@
     cp ${./rehearsal-users.ts} $out/rehearsal-users.ts
   '';
   patterns = pkgs.writers.writePython3Bin "rehearsal-patterns" {flakeIgnore = ["E501"];} (builtins.readFile ./rehearsal-patterns.py);
-  extension = pkgs.writeText "terrace-rehearsal-leaf.ext" ''
-    basicConstraints=critical,CA:FALSE
-    keyUsage=critical,digitalSignature,keyEncipherment
-    extendedKeyUsage=serverAuth
-    subjectAltName=${lib.concatMapStringsSep "," (name: "DNS:${name}") names}
-  '';
+  leafExtension = hostnames:
+    pkgs.writeText "terrace-rehearsal-leaf.ext" ''
+      basicConstraints=critical,CA:FALSE
+      keyUsage=critical,digitalSignature,keyEncipherment
+      extendedKeyUsage=serverAuth
+      subjectAltName=${lib.concatMapStringsSep "," (name: "DNS:${name}") hostnames}
+    '';
+  extension = leafExtension names;
+  relayExtension = leafExtension ["relay.terrace.invalid"];
 in {
   name = "terrace-production-profile";
   nodes = {
@@ -109,6 +112,29 @@ in {
         inherit (release) revision;
       };
     };
+    # The production relay role, booted once: secrets delivered, adopted, its own service checked.
+    relay = {...}: {
+      imports = [sopsModule ./relay.nix ./rehearsal-relay.nix];
+      virtualisation = {
+        memorySize = 2048;
+        cores = 1;
+      };
+      terrace.production = {
+        instance = "rehearsal";
+        memoryMiB = 2048;
+        inherit escrowRecipient;
+        operatorKeys = [(publicKey "operator")];
+        relay = {
+          hostname = "relay.terrace.invalid";
+          # A documentation address: accepted by the rehearsal instance only.
+          publicIPv4 = "192.0.2.10";
+          backup.primary = {
+            repository = "sftp:restic@operator:relay-repository";
+            knownHosts = "operator ${publicKey "repository-host"}";
+          };
+        };
+      };
+    };
   };
   testScript = {nodes, ...}: let
     closure = pkgs.closureInfo {rootPaths = [nodes.app.system.build.toplevel];};
@@ -166,9 +192,9 @@ in {
           for port in [443, 5432, 8088, 13048, 14294]:
               machine.fail(f"nc -z -w 1 127.0.0.1 {port}")
 
-      def verify(machine):
+      def verify(machine, counts="13 secrets, 5 templates"):
           output = machine.succeed("terrace-secrets verify").strip()
-          ok(re.fullmatch(r"terrace-secrets verify: PASS 13 secrets, 5 templates, root-only modes, valid formats, ramfs\.", output) is not None, "secrets verify " + output)
+          ok(output == f"terrace-secrets verify: PASS {counts}, root-only modes, valid formats, ramfs.", machine.name + " secrets verify " + output)
 
       def modes(machine):
           generation = machine.succeed("readlink /run/secrets").strip()
@@ -242,16 +268,17 @@ in {
               "media": app.succeed("cd " + MEDIA + " && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum").strip(),
           }
 
-      def stage():
+      def stage(host="app"):
           # What the installer stages: the operator-generated host key, nothing else.
-          operator.succeed("rm -rf /tmp/shared/stage/app && install -d -m 0700 /tmp/shared/stage/app")
-          operator.succeed(f"cp {STAGE}/ssh_host_ed25519_key {STAGE}/ssh_host_ed25519_key.pub /tmp/shared/stage/app/")
+          source = "/dev/shm/terrace-stage-" + host
+          operator.succeed(f"rm -rf /tmp/shared/stage/{host} && install -d -m 0700 /tmp/shared/stage/{host}")
+          operator.succeed(f"cp {source}/ssh_host_ed25519_key {source}/ssh_host_ed25519_key.pub /tmp/shared/stage/{host}/")
 
-      def unstage():
+      def unstage(host="app"):
           # The installer's and the operator's copies of the host key go once the host runs it.
-          operator.succeed("rm -rf /tmp/shared/stage/app")
-          op("terrace-secrets host unstage app")
-          operator.fail("test -e " + STAGE)
+          operator.succeed(f"rm -rf /tmp/shared/stage/{host}")
+          op("terrace-secrets host unstage " + host)
+          operator.fail("test -e /dev/shm/terrace-stage-" + host)
 
       def pids(units):
           return {unit: app.succeed(f"systemctl show {unit}.service -p MainPID --value").strip() for unit in units}
@@ -270,9 +297,12 @@ in {
           writers_inactive(app)
           ok(unit_state("terrace-production-boot.service", "ConditionResult") == "no", label + ": boot gate closed")
 
-      def push(label):
-          out = op("terrace-secrets push app" + PUSH)
-          ok("PASS 13 secrets" in out and "Installed 13 encrypted secrets." in out, label + ": push over SSH pinned to the operator-generated host key")
+      def push(label, host="app", count=13):
+          out = op(f"terrace-secrets push {host} --address {host} --identity /root/.ssh/operator --rehearsal")
+          ok(f"PASS {count} secrets" in out and f"Installed {count} encrypted secrets." in out, label + ": push over SSH pinned to the operator-generated host key")
+
+      def journal_hits(machine, needle_file):
+          return machine.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f " + needle_file + " || true").strip()
 
       def intake_header(source, out):
           # printf is a shell builtin: the value never becomes a process argument.
@@ -352,8 +382,19 @@ in {
       with subtest("adopt --new, enrol, migrate and pass the shared protocol through the gateway"):
           # The temporary administrator exists only for the first Keycloak start.
           app.succeed("install -d -m 0700 /run/terrace-rehearsal && install -m 0400 /run/secrets/rendered/rehearsal/keycloak-bootstrap.env /run/terrace-rehearsal/keycloak-bootstrap.env")
+          # A2: the first adoption fails after PostgreSQL is initialised (nginx cannot bind 443) ...
+          app.succeed("systemd-run --unit=rehearsal-block-443 ${pkgs.python3}/bin/python3 -m http.server 443 --bind 0.0.0.0")
+          app.wait_until_succeeds("ss -ltn | grep -q ':443 '")
+          refused = app.fail("terrace-production adopt --new 2>&1")
+          ok("not adopted yet" in refused and "nginx.service" in refused, "a failed first adoption names the unit")
+          app.succeed("test -e /var/lib/postgresql/18/PG_VERSION && test -e /var/lib/terrace-production/adopting && test ! -e /var/lib/terrace-production/adopted")
+          ok("adoption as new not finished" in app.succeed("terrace-production status"), "status reports the unfinished adoption")
+          ok("no reconciled restore" in app.fail("terrace-production adopt --restored 2>&1"), "adopt --restored still refused")
+          # ... and the same command resumes once the cause is gone.
+          app.succeed("systemctl stop rehearsal-block-443.service")
           app.succeed("terrace-production adopt --new")
-          app.succeed("test -e /var/lib/terrace-production/adopted")
+          app.succeed("test -e /var/lib/terrace-production/adopted && test ! -e /var/lib/terrace-production/adopting")
+          ok(True, "adopt --new resumed after the failure")
           app.wait_for_unit("keycloak.service", timeout=360)
           app.wait_for_unit("nginx.service")
           for unit in ["terrace-cms", "terrace-web"]:
@@ -443,9 +484,20 @@ in {
           out = op("terrace-secrets apply app backup/primary/repository-password" + PUSH)
           ok("Added the new repository key" in out, "new repository key added over the pinned channel")
           push("repository password")
-          out = op("terrace-secrets apply app backup/primary/repository-password --finish" + PUSH)
+          out = op("terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH)
           ok("Removed 1 old repository key(s)" in out, "old repository key removed")
           ok(len(json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))) == 1, "one repository key left")
+
+      with subtest("a failing database-password apply logs neither the cleartext nor the verifier"):
+          app.succeed("rm -rf /run/terrace-db && install -d -m 0700 /run/terrace-db && install -m 0400 /run/secrets/identity/database-password /run/terrace-db/patterns && echo 'SCRAM-SHA-256$' >>/run/terrace-db/patterns && echo 'role \"terrace_missing_role\" does not exist' >/run/terrace-db/control")
+          ok(journal_hits(app, "/run/terrace-db/control") == "0", "control text absent before the failure")
+          refused = app.fail("terrace-secrets host-apply identity/database-password --role terrace_missing_role 2>&1")
+          ok("ALTER ROLE failed (statement text is not logged)" in refused, "apply against a missing role fails")
+          app.wait_until_succeeds("test $(journalctl --namespace='*' -o export --no-pager | grep -acF -f /run/terrace-db/control) -gt 0", timeout=30)
+          ok(True, "PostgreSQL logged the error itself (control)")
+          ok(journal_hits(app, "/run/terrace-db/patterns") == "0", "no cleartext and no SCRAM verifier in any journal")
+          ok(app.succeed("find /var/lib/postgresql -name '*.log' -type f | wc -l").strip() == "0", "PostgreSQL keeps no log file of its own")
+          app.succeed("rm -rf /run/terrace-db")
 
       with subtest("reboot: ramfs vanishes, secrets return from ciphertext, adopted writers start alone"):
           app.succeed("touch /run/secrets.d/terrace-vanish-marker")
@@ -473,11 +525,53 @@ in {
           ok(app.succeed("find /var/lib/systemd/coredump -type f 2>/dev/null | wc -l").strip() == "0", "no systemd-coredump file")
           ok(app.succeed("find / -xdev -newer /run/terrace-core-marker -type f \\( -name core -o -name 'core.*' \\) 2>/dev/null | wc -l").strip() == "0", "no core file on the root disk")
           ok(app.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -ac '^SYSLOG_IDENTIFIER=systemd-coredump$' || true").strip() == "0", "no coredump journal entry")
+          # The kernel backstop alone: a unit that does NOT limit core size.
+          app.succeed("systemd-run --unit=rehearsal-core-probe -p LimitCORE=infinity -p WorkingDirectory=/var/tmp ${pkgs.coreutils}/bin/sleep 600")
+          probe = pids(["rehearsal-core-probe"])["rehearsal-core-probe"]
+          ok(app.succeed(f"grep '^Max core file size' /proc/{probe}/limits | tr -s ' ' | cut -d' ' -f5").strip() == "unlimited", "probe allows core dumps")
+          app.succeed(f"kill -ABRT {probe}")
+          app.wait_until_succeeds("systemctl show rehearsal-core-probe.service -p ActiveState --value | grep -qvx active", timeout=30)
+          ok(app.succeed("find / -xdev -newer /run/terrace-core-marker -type f \\( -name core -o -name 'core.*' \\) 2>/dev/null | wc -l").strip() == "0", "kernel core pattern: still no core file")
+          ok(app.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -ac '^SYSLOG_IDENTIFIER=systemd-coredump$' || true").strip() == "0", "kernel core pattern: still no coredump entry")
+          app.succeed("systemctl reset-failed rehearsal-core-probe.service || true")
 
       with subtest("owners, modes and ramfs; values absent from store, units, journals, arguments and disk"):
           verify(app)
           modes(app)
           timed("scanOriginal", lambda: scan(app, "original"))
+
+      with subtest("production relay role: key staged, secrets pushed, adopted, Headscale and HTTPS up, backup"):
+          op("terrace-secrets host create relay --role relay && terrace-secrets generate relay")
+          op("sh -ec 'umask 077; d=$(mktemp -d /dev/shm/tls.XXXXXX); "
+             "openssl req -new -nodes -newkey rsa:2048 -sha256 -keyout $d/key.pem -out $d/req.pem -subj /CN=relay.terrace.invalid 2>/dev/null; "
+             "openssl x509 -req -in $d/req.pem -CA ${ca}/ca.pem -CAkey ${ca}/ca-key.pem -set_serial 0x$(openssl rand -hex 8) -days 30 -sha256 -extfile ${relayExtension} -out $d/cert.pem 2>/dev/null; "
+             "terrace-secrets set relay tls/key <$d/key.pem; terrace-secrets set relay tls/certificate <$d/cert.pem; rm -rf $d'")
+          ok("relay: 4 secrets encrypted to exactly" in op("terrace-secrets check relay"), "relay store complete")
+          relay_public = op("terrace-secrets public relay backup/primary/sftp-key").strip()
+          operator.succeed("install -d -o restic -g users -m 0700 /home/restic/relay-repository && echo " + shlex.quote(relay_public) + " >>/home/restic/.ssh/authorized_keys")
+          stage("relay")
+          relay.start()
+          relay.wait_for_unit("multi-user.target")
+          unstage("relay")
+          relay.fail("terrace-secrets verify")
+          push("relay", host="relay", count=4)
+          verify(relay, "4 secrets, 0 templates")
+          for unit in ["headscale", "nginx"]:
+              ok(relay.succeed(f"systemctl show {unit}.service -p ActiveState --value").strip() == "inactive", f"relay {unit} off before adoption")
+          relay.succeed("terrace-production adopt --new")
+          relay.wait_for_unit("headscale.service")
+          relay.wait_for_unit("nginx.service")
+          relay.succeed("headscale users create rehearsal-operator >/dev/null && headscale users list -o json | ${pkgs.jq}/bin/jq -e 'length == 1' >/dev/null")
+          address = operator.succeed("getent hosts relay | cut -d' ' -f1").strip()
+          ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --resolve relay.terrace.invalid:443:{address} https://relay.terrace.invalid/health").strip() == "200", "relay HTTPS with the delivered certificate")
+          ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --resolve relay.terrace.invalid:80:{address} http://relay.terrace.invalid/").strip() == "301", "relay port 80 only redirects")
+          relay_listeners = sorted({line for line in relay.succeed("ss -H -ltnu | awk '{print $1\" \"$5}'").split("\n") if line and not re.search(r" (127\.0\.0\.1|\[::1\])(%[a-z0-9]+)?:[0-9]+$", line)})
+          relay_tcp = sorted(line for line in relay_listeners if line.startswith("tcp "))
+          ok(relay_tcp == sorted(["tcp 0.0.0.0:22", "tcp 0.0.0.0:443", "tcp 0.0.0.0:80", "tcp [::]:22", "tcp [::]:443", "tcp [::]:80"]), f"relay public TCP listeners {relay_tcp}")
+          ok(any(line.endswith(":3478") for line in relay_listeners if line.startswith("udp ")), "relay STUN listener")
+          relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
+          ok(relay.succeed("systemctl show terrace-backup.service -p Result --value").strip() == "success", "relay backup")
+          relay.shutdown()
 
       with subtest("back up, destroy the host, re-key from escrow for a new host key"):
           app.succeed("systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service terrace-web.service terrace-cms.service keycloak.service nginx.service", timeout=120)
@@ -517,11 +611,20 @@ in {
           operator.succeed("rm -f /dev/shm/retired-app-key /dev/shm/retired-app-key.pub")
           stage()
 
-      with subtest("replacement: new key, push, restore, adopt --restored, same data, lifecycle continues"):
+      with subtest("replacement: new key, push, guards, restore, adopt --restored, same data, lifecycle continues"):
           first_boot_without_secrets("replacement")
           push("replacement")
           verify(app)
           writers_inactive(app)
+          # A1(a): the push said this host is a replacement, so it cannot be adopted as new.
+          app.succeed("test -e /var/lib/terrace-secrets/replacement")
+          ok("delivered as a replacement" in app.fail("terrace-production adopt --new 2>&1"), "adopt --new refused: replacement marker")
+          # A1(b), independently: without the marker the repository still says this host has backups.
+          app.succeed("mv /var/lib/terrace-secrets/replacement /run/replacement-held")
+          ok("already holds snapshots of this host" in app.fail("terrace-production adopt --new 2>&1"), "adopt --new refused: snapshots exist")
+          app.succeed("mv /run/replacement-held /var/lib/terrace-secrets/replacement")
+          app.fail("test -e /var/lib/postgresql/18/PG_VERSION")
+          ok(True, "the refused adoptions initialised nothing")
           app.succeed("umask 077; terrace-backup-restore --target primary --snapshot " + snapshot + " --dest " + RESTORE + " >/var/tmp/restore.log 2>&1", timeout=600)
           app.succeed("grep -qx 'RECONCILIATION OK' " + RESTORE + "/reconciliation.txt")
           ok(True, "restore reconciliation")
@@ -533,8 +636,9 @@ in {
           app.succeed("test ! -L " + pg_dir + " && { test ! -e " + pg_dir + " || test -z \"$(ls -A " + pg_dir + ")\"; }")
           app.succeed("install -d -m 0700 -o postgres -g postgres " + pg_dir + " && cp -a " + RESTORE + "/pgdata/. " + pg_dir + "/ && chown -R postgres:postgres " + pg_dir)
           refused = app.fail("terrace-production adopt --new 2>&1")
-          ok("holds data or a restore" in refused, "adopt --new refused on a restored host")
+          ok("delivered as a replacement" in refused, "adopt --new refused on a restored host (replacement marker)")
           app.succeed("terrace-production adopt --restored")
+          app.fail("test -e /var/lib/terrace-secrets/replacement")
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", "keycloak") == "0", "no bootstrap administrator on the replacement")
           app.succeed("systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service", timeout=300)

@@ -132,6 +132,7 @@ in {
       publicUDPPorts = [];
       writers = ["postgresql" "keycloak" "nginx" "terrace-cms" "terrace-web"];
       writerHelpers = ["keycloakPostgreSQLInit" "terrace-website-inputs"];
+      conditionalWriters = ["terrace-cms" "terrace-web"];
       stateWitness = "${config.services.postgresql.dataDir}/PG_VERSION";
       writerTimers = ["terrace-cms-sweep" "terrace-backup" "terrace-backup-check" "terrace-backup-freshness" "terrace-identity-health"];
     };
@@ -208,7 +209,14 @@ in {
     # Upstream keycloakPostgreSQLInit writes the role password through mktemp;
     # give it a private tmpfs so the value never reaches the root disk. The unit
     # runs as postgres, so the mount must be world-writable and sticky like /tmp.
-    systemd.services.keycloakPostgreSQLInit.serviceConfig.TemporaryFileSystem = "/tmp:mode=1777";
+    systemd.services.keycloakPostgreSQLInit = {
+      serviceConfig.TemporaryFileSystem = "/tmp:mode=1777";
+      # Its CREATE ROLE carries the cleartext password: if it ever failed, PostgreSQL would
+      # log the statement text. This session never logs statements.
+      environment.PGOPTIONS = "-c log_min_error_statement=panic -c log_statement=none -c log_min_duration_statement=-1";
+    };
+    systemd.services.terrace-cms-migrate.serviceConfig.LimitCORE = 0;
+    systemd.services.terrace-cms-sweep.serviceConfig.LimitCORE = 0;
     # Before the first explicit migration the CMS and website are skipped, not
     # failed; a revision mismatch still fails through the module's own gate.
     systemd.services.terrace-cms.unitConfig.ConditionPathExists = migrated;
