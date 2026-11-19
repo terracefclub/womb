@@ -291,7 +291,7 @@ let
     (rejects "must not contain CMS bootstrap settings" (app {sops.templates."terrace-website/cms.env".content = lib.mkAfter "CMS_BOOTSTRAP_ADMIN=1\n";}))
     # Listening sockets and the firewall.
     (rejects "keeps PostgreSQL and Keycloak (HTTP and management) on loopback" (app {services.postgresql.settings.listen_addresses = lib.mkForce "*";}))
-    (rejects "refuses firewall ports or rules outside the role's public ports: 5432" (app {networking.firewall.allowedTCPPorts = [5432];}))
+    (rejects ": 5432 from" (app {networking.firewall.allowedTCPPorts = [5432];}))
     (rejects "refuses firewall ports or rules" (app {networking.firewall.extraCommands = "iptables -A INPUT -j ACCEPT";}))
     (rejects "refuses firewall ports or rules" (app {
       networking.nftables.tables.open = {
@@ -299,7 +299,7 @@ let
         content = "";
       };
     }))
-    (rejectsRelay "refuses firewall ports or rules outside the role's public ports: 51820" (relayAs "production" {networking.firewall.allowedUDPPorts = [51820];}))
+    (rejectsRelay ": 51820 from" (relayAs "production" {networking.firewall.allowedUDPPorts = [51820];}))
     (rejectsRelay "keeps Headscale's API, metrics and gRPC on loopback" (relayAs "production" {services.headscale.settings.metrics_listen_addr = lib.mkForce "0.0.0.0:9090";}))
     (rejects "nginx vhosts" (app {services.nginx.virtualHosts."admin.terracefclub.org".locations."/".return = "404";}))
     # Accounts, SSH, sudo, kernel and emergency access.
