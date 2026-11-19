@@ -30,7 +30,7 @@ Work top to bottom. Tick the box when the "Worked if" line is true. Do not skip 
 | Environment | What it is | Data | Who touches it |
 | --- | --- | --- | --- |
 | Local preview on your Mac | Loopback-only Keycloak, CMS and website started by `./tools/local-stack start` (website repo `docs/local-preview.md`). Website `http://127.0.0.1:4194/`, CMS `http://127.0.0.1:3040/admin/login`, Keycloak `http://127.0.0.1:8186/admin/`. | Synthetic only | You |
-| Disposable Hetzner rehearsal | Two leased servers (app and relay) created, installed, tested and deleted in one run. Driven by private tooling on Falcon (`.devenv/github-migration/`) and `docs/cloud-rehearsal.md`. Names are synthetic `.invalid`. Each run needs your fresh explicit yes. Its planner waits on Falcon's shared build lock, which other jobs also use (G-42). | Synthetic only | Claude, with your yes |
+| Disposable Hetzner rehearsal | Two leased servers (app and relay) created, installed, tested and deleted in one run. Driven by private tooling on the builder and `docs/cloud-rehearsal.md`. Names are synthetic `.invalid`. Each run needs your fresh explicit yes. Its planner waits on Falcon's shared build lock, which other jobs also use (G-42). | Synthetic only | Claude, with your yes |
 | Production | Does not exist yet. No production host profile, no real DNS, no real data on any server. | Real, later | Claude and you |
 | On-prem (later) | One x86_64 server at the club. Hardware unknown. | Real, later | You (hardware), Claude (software) |
 
