@@ -180,7 +180,18 @@
           chmod 0600 "$adopting"
           systemctl reset-failed ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))} 2>/dev/null || true
           systemctl start terrace-production.target || true
-          settled || exit 1
+          # A writer can report "started" before it fails: nginx, for one, is active for a few
+          # seconds while it retries a port it cannot bind. Require the same processes to be
+          # running after a stability window, not just a passing snapshot.
+          before=$(systemctl show "''${writers[@]/%/.service}" -p MainPID -p NRestarts --value | tr '\n' ' ')
+          sleep ${toString cfg.adoptStabilitySeconds}
+          after=$(systemctl show "''${writers[@]/%/.service}" -p MainPID -p NRestarts --value | tr '\n' ' ')
+          stable=yes
+          if [[ $before != "$after" ]]; then
+            echo "terrace-production: a writer restarted during the stability window" >&2
+            stable=no
+          fi
+          if ! settled || [[ $stable == no ]]; then exit 1; fi
           install -m 0600 /dev/null ${marker}
           date -u +%FT%TZ >${marker}
           rm -f "$adopting"
@@ -246,6 +257,12 @@ in {
       type = lib.types.str;
       internal = true;
       description = "A path that exists once the host holds application state (adopt --new refuses it).";
+    };
+    adoptStabilitySeconds = lib.mkOption {
+      type = lib.types.ints.between 5 120;
+      default = 15;
+      internal = true;
+      description = "How long every writer must keep the same process after `adopt` starts it.";
     };
     conditionalWriters = lib.mkOption {
       type = lib.types.listOf lib.types.str;
