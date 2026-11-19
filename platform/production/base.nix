@@ -183,12 +183,18 @@
           # A writer can report "started" before it fails: nginx, for one, is active for a few
           # seconds while it retries a port it cannot bind. Require the same processes to be
           # running after a stability window, not just a passing snapshot.
-          before=$(systemctl show "''${writers[@]/%/.service}" -p MainPID -p NRestarts --value | tr '\n' ' ')
+          declare -A seen=()
+          for unit in "''${writers[@]}"; do
+            seen[$unit]=$(systemctl show "$unit.service" -p MainPID -p NRestarts --value | tr '\n' ' ')
+          done
           sleep ${toString cfg.adoptStabilitySeconds}
-          after=$(systemctl show "''${writers[@]/%/.service}" -p MainPID -p NRestarts --value | tr '\n' ' ')
+          unstable=()
+          for unit in "''${writers[@]}"; do
+            [[ $(systemctl show "$unit.service" -p MainPID -p NRestarts --value | tr '\n' ' ') == "''${seen[$unit]}" ]] || unstable+=("$unit.service")
+          done
           stable=yes
-          if [[ $before != "$after" ]]; then
-            echo "terrace-production: a writer restarted during the stability window" >&2
+          if (( ''${#unstable[@]} )); then
+            echo "terrace-production: not adopted yet; restarted during the stability window: ''${unstable[*]}. Fix them and run the same adopt command again (it resumes)." >&2
             stable=no
           fi
           if ! settled || [[ $stable == no ]]; then exit 1; fi
