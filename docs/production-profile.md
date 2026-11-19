@@ -1,0 +1,353 @@
+# Production host profiles
+
+Design and operating notes for the first production-shaped host profiles. They
+enable the modules the rehearsals prove, require every deployment-specific value
+as a parameter, and take all secrets from [sops-nix](secrets.md). Written
+2026-11-19. A profile that evaluates and passes its VM proof is not a
+deployment: no provider resource, DNS record, certificate or real secret exists
+because of this document.
+
+## Topology
+
+Two roles, the same split the cloud rehearsal and the all-services VM rehearsal
+already prove ([access relay](access-relay.md), [cloud rehearsal](cloud-rehearsal.md)):
+
+| Role | Module | Runs | Public ports |
+| --- | --- | --- | --- |
+| `app` | `platform/production/app.nix` | PostgreSQL 18, Keycloak (identity), CMS and website, the HTTPS gateway (nginx), backup | TCP 22, 443 |
+| `relay` | `platform/production/relay.nix` | Headscale with embedded DERP behind nginx, backup | TCP 22, 80 (the relay module's HTTPS redirect; ACME later), 443; UDP 3478 |
+
+Alternatives considered:
+
+- **One host for everything.** Cheaper, but relay access would die with the
+  application host, which defeats the reason for an independent recovery path
+  (owner decision 2026-10-28). Rejected.
+- **App host split further** (identity on its own host). More cost and more
+  secrets to deliver, and no rehearsal proves it. Rejected.
+- **Same profile, different hardware.** Accepted: the role modules carry no
+  disk, boot loader or network layout; a hardware module supplies them (below).
+
+## Decisions waiting on the owner
+
+These are stated, not decided, by this profile.
+
+1. **Documenso, Windmill and Vaultwarden: deferred pending owner sign-off.**
+   They are accepted scope (kept services). The production profile refuses them
+   today because the runbook requires measuring the combined stack before adding
+   each one (6.22) and because their inputs are not yet rendered from secrets.
+   Prerequisites per service: render its input file (`secrets.json`,
+   `bootstrap.json`, `input.json`) as a sops template from the inventoried
+   secrets ([secrets](secrets.md#inventory)); add its OIDC client to the realm
+   template; add its database to the backup; a VM proof. Memory ceilings each
+   adds, from the existing modules' `MemoryMax`: Documenso 2304 MiB, Windmill
+   4096 MiB (server and worker, 2048 MiB each), Vaultwarden 512 MiB; under the
+   25 percent rule each MiB of ceiling needs 1.33 MiB of host memory (all three
+   together: 6912 MiB more ceiling, 9216 MiB more host memory).
+2. **K3s.** Production does **not import** the single-node K3s module at all
+   (`single-node.nix`/`hetzner.nix` are bypassed, not disabled with an option),
+   and the profile asserts `services.k3s.enable` is false. Reasons: no workload
+   uses it, its datastore and PV data are not in the backup (G-21), and an idle
+   control plane costs memory. It comes back when a workload needs it, together
+   with backup coverage of `/var/lib/rancher/k3s/server` and the PVs, its memory
+   ceiling in the budget and a VM proof.
+3. **Operator accounts.** The profile creates one shared `operator` account in
+   `wheel` with passwordless sudo, reachable only by the listed SSH keys;
+   actions are attributable only by key fingerprint in the SSH log. The
+   alternative is one named account per person (each with its own key and
+   sudo), which gives per-person attribution at the cost of more accounts to
+   manage. The choice is open.
+4. **Instance size.** The app writers' memory ceilings are PostgreSQL 1024 MiB,
+   Keycloak 2048 MiB, CMS 2048 MiB, website 768 MiB, nginx 256 MiB and the
+   backup job 768 MiB: 6912 MiB. With at least 25 percent free (runbook 6.22),
+   the host needs 6912 / 0.75 = 9216 MiB (9 GiB). The relay's ceilings are
+   Headscale 512 MiB, nginx 256 MiB and backup 768 MiB: 1536 MiB, so 2048 MiB.
+   No size is recommended here (G-9).
+
+## What the profile requires
+
+Every value that differs between deployments is a required option with no
+default. Evaluation stops with a clear message when one is missing or unsafe.
+
+| Option (`terrace.production.*`) | Role | Meaning |
+| --- | --- | --- |
+| `instance` | both | `"production"` or `"rehearsal"`; no default |
+| `operatorKeys` | both | individual operator SSH public keys (ed25519) |
+| `memoryMiB` | both | host memory; the writers' `MemoryMax` ceilings must fit in 75 percent of it |
+| `escrowRecipient` | both | the offline escrow key's public age recipient; the host accepts only ciphertext for exactly itself and this recipient |
+| `app.webHostname`, `app.cmsHostname`, `app.identityHostname` | app | public DNS names; HTTPS origins derive from them |
+| `app.identityContract` | app | hash-pinned TFC realm producer (`platform/identity-contract.nix`) |
+| `app.backup.primary.repository`, `.knownHosts` (`.port`) | app | Storage Box SFTP repository and its pinned host key |
+| `terrace.website.webPackage`, `cmsPackage`, `revision` | app | the reviewed release pair (`platform/website-release.nix`) |
+| `relay.hostname`, `relay.publicIPv4`, `relay.backup.primary.*` | relay | as above for the relay |
+
+Origins, the realm's callbacks, `LIFECYCLE_PUBLIC_ORIGIN`, `CMS_PUBLIC_ORIGIN`
+and the client-address header all derive from the hostnames.
+
+### Hardware module interface
+
+`infra/nixos/production-config.nix` takes `role`, `localModule` (the private
+parameters above) and `hardwareModule`. The hardware module must provide, and
+nothing else:
+
+- `fileSystems."/"` (and any other mounts), the disk layout;
+- an installable boot loader (`boot.loader.systemd-boot.enable`, or GRUB with a
+  real `boot.loader.grub.device`);
+- the network: DHCP (default) or static addressing
+  (`networking.useDHCP = false; networking.interfaces.<if>.ipv4.addresses`,
+  `networking.defaultGateway`, nameservers); the evaluation check proves a
+  static-network host passes;
+- kernel modules or firmware the machine needs; no services and no ports.
+
+Hetzner Cloud uses the existing `infra/nixos` cloud disk module (GPT, ESP, ext4,
+systemd-boot fallback path), which leases 3 and 4 installed and booted. The
+on-prem server's hardware is unknown, so no layout is written for it; the
+profile refuses to evaluate as production without a root filesystem and a boot
+loader.
+
+## Invariants enforced at evaluation
+
+The role modules assert, and `infra/nixos/production-eval-check.nix` re-checks
+on evaluated configurations, with a negative variant for each that must fail
+for the stated reason:
+
+- **Production mode only**: no hostname under a reserved name (`.invalid`,
+  `.test`, `.example`, `.localhost`, `.local`, `.internal`, `.lan`,
+  `home.arpa`, `example.com/net/org`); no relay address in a private, shared,
+  loopback, link-local, benchmarking or documentation range; no rehearsal
+  harness or known fixture unit; no extra trust anchors; no Keycloak
+  `EnvironmentFile`; a root filesystem and an installable boot loader.
+- **Secrets**: every consumer reads a sops-nix path; every secret and template is
+  `root:root 0400` from the one host ciphertext (no per-secret `sopsFile`); no
+  unit `environment` or `serviceConfig.Environment` carries a secret-named
+  variable or a placeholder; no `EnvironmentFile` or `LoadCredential` points
+  into the Nix store on any unit; no core dumps (systemd-coredump off,
+  `kernel.core_pattern` piped to a no-op, `fs.suid_dumpable = 0`,
+  `LimitCORE=0` on the writers and every other unit that holds secrets); no
+  unencrypted swap; no `SetCredential` or `ImportCredential` (except NixOS's
+  own tmpfiles re-setup); the escrow recipient is pinned.
+- **Network**: the firewall opens exactly the role's ports and every port
+  definition must come from an allowed module (an extra port is refused, not
+  overridden); free-form firewall rules, nftables tables, sshd, sudo or polkit
+  configuration only from the pinned nixpkgs' own modules (identified by its
+  store path, not a path substring); only listed services may be enabled at
+  all and only listed socket units may listen;
+  PostgreSQL, Keycloak (HTTP and management), Headscale (API, metrics, gRPC),
+  the CMS and the website listen on loopback; nginx has exactly the role's
+  virtual hosts, TLS only on the app and HTTPS with the module's redirect on the
+  relay, no extra listeners.
+- **Accounts and access**: immutable users; no password on any account (only
+  locked markers); `wheel` (users and group members) is exactly `operator`;
+  sudo rules only for root and `wheel`, and no `sudo-rs` or `doas`;
+  SSH key-only, `AllowUsers operator`, no `extraConfig`, one ed25519 host key;
+  no emergency shell and no debug or rescue kernel parameters.
+- **Units**: services, timers, sockets, paths and targets wanted at boot are a
+  subset of an explicit allowlist (operating-system plumbing plus
+  `sops-install-secrets` and `terrace-production-boot`); no boot target pulls a
+  unit through `wants`/`requires`; the units wanted by
+  `terrace-production.target` are exactly the writers and their timers.
+- **Scope and capacity**: K3s, Documenso, Windmill, Vaultwarden and the demos
+  off; static CMS and website ids (44121, 44122); the writers' ceilings within
+  75 percent of `memoryMiB`.
+
+## Boot gate: adopt before writers start
+
+A brand-new host and a blank replacement boot the same closure. If the writers
+started at boot, a replacement would initialise an empty PostgreSQL cluster and
+import a fresh realm before the backup is restored. So every writer and its
+timers are wanted only by `terrace-production.target`, and
+`terrace-production-boot.service` starts it at boot only when
+`/var/lib/terrace-production/adopted` exists (after `terrace-secrets verify`
+passes). An unadopted host stays gated across reboots. The operator adopts a
+host once, explicitly:
+
+- `terrace-production adopt --new` refuses a host that already holds state (a
+  PostgreSQL data directory on the app, a Headscale database on the relay) or a
+  restore under `/var/lib/terrace-restore`. It also refuses a **replacement**,
+  two independent ways: `terrace-secrets push` delivers a replacement marker to
+  any host made with `host create --replace` (it arrives over the channel
+  pinned to that host's key), and before adopting, the host lists the snapshots
+  in each of its backup repositories with its own delivered credentials (within
+  120 seconds) and refuses if the repository holds **any** snapshot: the
+  repository is per role, so this also catches a replacement given a different
+  host name. A repository that is not initialised yet (restic exit 10) is what
+  a genuinely new deployment has. An unreachable or silent repository refuses,
+  naming the restic exit code, because that is exactly when a replacement could
+  be mistaken for a new host. The last resort, `adopt --new
+  --first-deployment-without-repository HOSTNAME` (the host's own name, typed
+  out), is only for a first deployment whose repository does not exist yet,
+  after confirming that no earlier host of this role ever existed; it is
+  refused while the replacement marker is present and prints a fixed warning.
+  `adopt --new` on an adopted host just answers `Already adopted.`
+- The operator's store keeps a host's replacement marker until the first `push`
+  after the host was adopted (the host reports `Host state: adopted`), then
+  clears it. To redeploy a wiped host as a genuinely new deployment under the
+  same name, clear it explicitly: `terrace-secrets host reset-replacement HOST
+  --confirm HOST`.
+- `terrace-production adopt --restored` refuses unless
+  `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
+  restored state is in place; it then clears the replacement marker.
+
+Each host is adopted once. Both commands verify the secrets, record
+`/var/lib/terrace-production/adopting`, start the target and write the adopted
+marker only when every writer is active (the CMS and website may instead be
+skipped by their migration condition) and still runs the same process after a
+15-second stability window (a writer can report started and fail seconds later,
+as nginx does while it retries a port it cannot bind), every helper (Keycloak's
+database init, the website input check) succeeded and every timer runs. If anything is not
+running, the command names it and stops; fix the cause and **run the same adopt
+command again**: while `adopting` says `new`, `adopt --new` resumes instead of
+refusing the database its first attempt created. `terrace-production status`
+shows an unfinished adoption.
+
+## Cold start of a new deployment
+
+1. Operator: `terrace-secrets host create`, `generate`, `set` each external
+   value, `check` ([secrets](secrets.md#bootstrap-of-a-brand-new-host)).
+2. Install the host with the operator-generated host key staged
+   ([Rescue installer](cloud-rescue-install.md)). The installer does **not**
+   stage the encrypted secrets file (see the gap below), so the first boot has
+   no secrets and nothing writes.
+3. `terrace-secrets push` over SSH pinned to that host key; it installs and
+   verifies the secrets. `terrace-secrets host unstage`.
+4. `terrace-production adopt --new`.
+5. Explicit release steps (runbook 6.15): `systemctl start
+   terrace-cms-migrate.service`, then `systemctl start terrace-cms.service
+   terrace-web.service`. Until the first migration the CMS and website are
+   skipped, not failed (`ConditionPathExists` on the migration marker; a
+   revision mismatch still fails through the existing gate).
+6. `terrace-backup init primary`. The first scheduled backup before this step
+   fails visibly (`systemctl --failed`); after it, backups succeed.
+
+**Gap, not implemented here:** the Rescue installer (`infra/nixos/rescue_install.py`,
+lease tooling in use) copies only the host key. Staging the ciphertext at
+install time would remove step 3's first-boot window without secrets; it needs
+an installer change to copy `secrets.sops.json` to
+`/mnt/var/lib/terrace-secrets/` (`0600`) and a lease rehearsal. The VM proof
+follows the steps above (its installer stand-in stages the host key only).
+
+## Host replacement (rehearsed)
+
+1. On the old host: stop the sweep timer, website, CMS, Keycloak and nginx;
+   `systemctl start terrace-backup.service`; note the snapshot id; stop
+   PostgreSQL. Then the host is destroyed.
+2. Operator: `terrace-secrets host create app --replace`, `terrace-secrets
+   rekey app` with the escrow key; install the replacement with the new host
+   key; `push` (which marks the host as a replacement).
+3. On the replacement (not adopted, so nothing writes):
+   `terrace-backup-restore --target primary --snapshot <id> --dest /var/lib/terrace-restore`
+   must print `RECONCILIATION OK`. Copy the restored media and outbox
+   directories and the stopped PostgreSQL data directory into place exactly as
+   the all-services rehearsal does (`platform/full/scenario.py`,
+   `fresh_restore`), then `terrace-production adopt --restored`, the migration
+   action (the ledger must stay unchanged) and the two services.
+
+Promoting a restore into service on real data still needs the owner-approved
+procedure (G-22); this rehearsal is its technical basis.
+
+## What the evaluation check does not catch
+
+- A host module that deliberately spoofs its `_file`, or a hostile private module
+  inside the trust base (the pinned nixpkgs and this repository), can define
+  free-form configuration that looks like NixOS's own.
+- Secret values written into a unit's `script` text, a file in the Nix store or
+  an innocuously named variable: the checks look at names, placeholders and the
+  secrets module's paths, not at every string (the VM scans catch values that
+  actually appear, for the rehearsal's values).
+- Units a package brings in that are not wanted at boot or by the production
+  target, and anything started by hand.
+- Runtime behaviour after adoption: the 15-second stability window runs at
+  adopt time only. A writer that fails after a later reboot shows in
+  `systemctl --failed` and nowhere else until alerting exists (G-23).
+- The relay role's replacement and its reboot are not exercised in the VM (only
+  its first boot, delivery, adoption, listeners and a backup); the app role's
+  are.
+
+## Building a host
+
+The private deployment directory holds the host module and the encrypted
+secrets store; neither belongs in this public repository.
+
+```nix
+# host-app.nix (private)
+{
+  networking.hostName = "app";
+  terrace.production = {
+    instance = "production";
+    memoryMiB = 15360;
+    operatorKeys = ["ssh-ed25519 AAAA... operator"];
+    escrowRecipient = "age1...";
+    app = {
+      webHostname = "www.terracefclub.org";
+      cmsHostname = "cms.terracefclub.org";
+      identityHostname = "id.terracefclub.org";
+      backup.primary = {
+        repository = "sftp:uNNNNNN@uNNNNNN.your-storagebox.de:terrace-app";
+        port = 23;
+        knownHosts = "[uNNNNNN.your-storagebox.de]:23 ssh-ed25519 AAAA...";
+      };
+    };
+  };
+}
+```
+
+```sh
+nix build --no-link --print-out-paths --impure --expr '
+  let infra = builtins.getFlake "path:/checkout/infra/nixos"; in
+  (import /checkout/infra/nixos/production-config.nix {
+     role = "app"; localModule = /private/deployment/host-app.nix;
+     hardwareModule = { imports = [infra.nixosModules.cloud-disk];
+                        terrace.cloudDisk.device = "/dev/disk/by-id/REPLACE_WITH_VERIFIED_DISK"; };
+     webArchive = /protected/terrace-web-<rev>-linux-x64-gnu.tar.gz;
+     cmsArchive = /protected/terrace-cms-<rev>-linux-x64-gnu.tar.gz;
+     tfcSource = /source/tfc-at-<rev>; }).config.system.build.toplevel'
+```
+
+Build on the Linux builder under the shared lock, never on a Mac.
+
+## Verification
+
+- Evaluation check (no builds; builder, shared lock):
+  `nix eval --raw --impure --option builders "" --file infra/nixos/production-eval-check.nix`
+- VM proof (builder; the wrapper takes the shared lock itself):
+  `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
+- Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`
+
+The VM proof boots the **same** app role and, briefly, the **same** relay role
+(secrets pushed, adopted, Headscale and HTTPS answering, redirect on port 80,
+a backup) with `instance = "rehearsal"`,
+synthetic `.invalid` hostnames, a throwaway escrow key made at build time (so
+its public recipient can be pinned like the owner's), a host key generated at
+test time and secrets generated by `terrace-secrets` inside the operator guest.
+A rehearsal-only harness (`platform/production/rehearsal.nix`) adds only what
+the shared protocol needs: trust in a synthetic CA, the protocol scripts, a
+temporary Keycloak bootstrap administrator supplied through sops and removed by
+the protocol, a closure-scan control string, and the stand-in for the installer
+that copies the staged host key. The production check rejects that harness.
+
+What the secret scans cover and exclude is in [secrets](secrets.md#verification).
+Verified 2026-11-19 on the Linux builder at commit `cbf129f` with the pinned
+`680ad56` bundles: evaluation check PASS (production app, static-network app,
+relay and rehearsal instance; 71 rejected variants); VM proof PASS in 637 s
+with 199 assertions, including the 198 shared protocol assertions, the
+unchanged original and replacement lifecycle steps and one boot of the
+production relay role; the cloud rehearsal check still passes. The
+all-services rehearsal passed at `2ce39bb`, after which no shared module
+changed. The relay role has been booted only in that VM proof (secrets, an
+unreachable-repository refusal and the named override, adoption, Headscale,
+HTTPS, redirect, backup), never on a provider. Not proven: a real provider
+host, real DNS and certificates, real secret values or an escrow retrieval with
+the owner.
+
+## Out of scope, with what each needs
+
+| Follow-up | Gap | What it needs |
+| --- | --- | --- |
+| TLS issuance and renewal (ACME) | G-12 | Certificates are a static secret pair here. ACME needs port 80 (HTTP-01) or DNS-01 credentials, a renewal path that bypasses sops, expiry alerting, and a test against a local ACME server (pebble) |
+| Mail transport | G-20 | Owner's provider choice; SMTP credentials become sops secrets; outbox delivery job; a test against a local sink |
+| Alerting and log retention | G-23 | Delivery channel, external probe, certificate and backup-age alerts that reach a person, a tested failing check |
+| Keycloak production administration | G-15, G-39 | First administrator via `kc.sh bootstrap-admin` with the escrowed `identity/bootstrap-admin-password`, its removal, role grants, OIDC client-secret rotation through the admin API, realm reconciliation |
+| Production sizing | G-9 | Owner decision (above) |
+| Installer stages the ciphertext | G-11 | `rescue_install.py` change and a lease rehearsal (above) |
+| Documenso, Windmill, Vaultwarden in production | 6.18-6.20, 6.22 | Owner sign-off, then the prerequisites above, one at a time |
+| Restore promotion on real data | G-22 | Owner-approved procedure based on the rehearsed sequence |
+| K3s datastore backup | G-21 | Only if a workload is added |

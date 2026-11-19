@@ -64,7 +64,7 @@ found in the audited app paths; live inventory was not queried.
 | Acceptance dimension | Terrace evidence / explicit gap |
 | --- | --- |
 | Idempotent bootstrap and individual SSO | Realm startup is create-only, not reconciliation; CMS migrations repeat. Complete per-app per-person bootstrap remains absent for legacy services. No shared operator/admin session is acceptable. |
-| Secret creation, delivery and escrow | Native modules consume private runtime files; VM synthetic inputs prove permissions/restoration. No production generator/delivery/independent escrow retrieval is established. Never evaluate secret contents into Nix/store. |
+| Secret creation, delivery and escrow | Native modules consume private runtime files. The production profiles take them from sops-nix (host key plus offline escrow recipient, ramfs, ciphertext outside the store) with a generator, rotation and re-keying tool, proven in the production VM check ([secrets](secrets.md)). No real secret exists and no escrow retrieval drill with the owner has run. Never evaluate secret contents into Nix/store. |
 | Retention and restore | Scoped synthetic backup/recovery above; app removal retains state by default. Each dataset needs an owner, retention and tested offsite path or explicit exclusion. Cache may rebuild; signing keys, uploads and DB may not. |
 | Ingress and egress | Private K3s API and limited native proxies tested; public gateway is separate work. No complete namespace egress/default-deny policy or production firewall validation. |
 | Pins and updates | Pinned Nix inputs and hash-checked TFC archives; no complete automatic promotion/rollback pipeline across services. |

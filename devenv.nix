@@ -4,7 +4,7 @@
   ...
 }: {
   name = "terrace-womb";
-  packages = with pkgs; [git gh glab jq curl openssh kubectl hcloud restic gitleaks pulumi pulumi.pkgs.pulumi-nodejs];
+  packages = with pkgs; [git gh glab jq curl openssh kubectl hcloud restic gitleaks pulumi pulumi.pkgs.pulumi-nodejs sops age ssh-to-age];
   languages.javascript = {
     enable = true;
     bun.enable = true;

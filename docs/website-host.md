@@ -49,7 +49,10 @@ It can coexist with the native identity module's separate database/role.
 
 Deliver root-owned mode0400 `cms.env` and `web.env` into the root-owned0700
 `inputsDirectory` (default `/var/lib/terrace-website-inputs`) through the external
-secret manager. Files must be regular files, not symlinks. Nix only carries
+secret manager, or set `inputFiles.cms` and `inputFiles.web` to files the secret
+manager renders elsewhere (the production profile uses sops-nix templates on
+ramfs; then the input directory is neither used nor backed up). Files must be
+regular files, not symlinks. Nix only carries
 their paths: it never reads their contents during evaluation or a build. The
 input unit checks permissions and that both component manifests match the
 reviewed revision. Do not grant the application users access to these files;
