@@ -265,12 +265,18 @@ in {
         source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx activating", timeout=30)
         running = source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID --value").strip()
         assert running != migration
+        swept = source.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
         source.succeed("systemctl start --no-block terrace-cms-sweep.service && sleep 3")
+        # The sweep's start job waits behind the running migration instead of stopping it.
         assert source.succeed("systemctl show terrace-cms-migrate.service -p ActiveState --value").strip() == "activating"
-        source.wait_until_succeeds("systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive && test \"$(systemctl show terrace-cms-sweep.service -p ExecMainStartTimestampMonotonic --value)\" -gt \"$(systemctl show terrace-cms-migrate.service -p ExecMainExitTimestampMonotonic --value)\"", timeout=180)
-        migrated = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID,Result,ActiveState").splitlines())
-        assert migrated == {"InvocationID": running, "Result": "success", "ActiveState": "inactive"}, migrated
-        assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
+        assert source.succeed("systemctl show terrace-cms-sweep.service -p ActiveState --value").strip() == "inactive"
+        source.succeed("systemctl list-jobs --no-legend | grep -E 'terrace-cms-sweep.service +start +waiting' >/dev/null")
+        source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx inactive", timeout=120)
+        migrated = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID,Result,ExecMainExitTimestampMonotonic").splitlines())
+        assert migrated["InvocationID"] == running and migrated["Result"] == "success", migrated
+        source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {swept} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=180)
+        sweep = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,ExecMainStartTimestampMonotonic").splitlines())
+        assert sweep["Result"] == "success" and sweep["ExecMainStatus"] == "0" and int(sweep["ExecMainStartTimestampMonotonic"]) > int(migrated["ExecMainExitTimestampMonotonic"]), sweep
         source.succeed("rm /run/website-test-slow-migration && systemctl start terrace-cms.service terrace-web.service")
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
