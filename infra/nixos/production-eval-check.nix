@@ -175,14 +175,20 @@ let
   allowedSockets = ["nix-daemon" "systemd-journald-audit"];
   # Units the profile's own and NixOS's allowed units may pull in through wants/requires/bindsTo/upholds.
   allowedPulls = role:
-    ["network-online.target" "network.target" "sysinit.target" "multi-user.target" "local-fs.target" "remote-fs.target" "nss-lookup.target" "nss-user-lookup.target" "time-sync.target" "systemd-journald.socket" "sops-install-secrets.service" "terrace-production.target" "systemd-journald-sync@terrace-apps.service" "systemd-journald@terrace-apps.service"]
+    ["network-online.target" "network.target" "network-pre.target" "systemd-logind.service" "sysinit.target" "multi-user.target" "local-fs.target" "remote-fs.target" "nss-lookup.target" "nss-user-lookup.target" "time-sync.target" "systemd-journald.socket" "sops-install-secrets.service" "terrace-production.target" "systemd-journald-sync@terrace-apps.service" "systemd-journald@terrace-apps.service"]
     ++ (
       if role == "app"
       then ["postgresql.service" "postgresql.target" "postgresql-setup.service" "keycloakPostgreSQLInit.service" "terrace-website-inputs.service" "terrace-cms.service" "terrace-cms-migrate.service" "keycloak.service"]
       else ["headscale.service"]
     );
   # Packages that bring their own unit files, accepted for the stated reason.
-  allowedSystemdPackages = [];
+  allowedSystemdPackages = [
+    "lvm2" # NixOS default: device-mapper units
+    "nix" # the Nix daemon's units
+    "dbus" # system bus units
+    "dbus-broker" # the system bus implementation
+    "util-linux" # fstrim and uuidd units (listed twice by NixOS)
+  ];
   bootTargets = ["multi-user" "default" "sysinit" "basic" "timers" "sockets" "paths" "network" "network-online" "local-fs" "graphical"];
   wanted = cfg: kind: name: cfg.systemd.${kind}.${name}.wantedBy ++ (cfg.systemd.${kind}.${name}.requiredBy or []) ++ (cfg.systemd.${kind}.${name}.upheldBy or []);
   bootUnits = cfg: kind: lib.filter (name: let w = wanted cfg kind name; in w != [] && w != ["terrace-production.target"]) (lib.attrNames cfg.systemd.${kind});

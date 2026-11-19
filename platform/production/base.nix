@@ -50,8 +50,8 @@
   credentialSetters = lib.concatLists (lib.mapAttrsToList (unit: service:
     map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key} && !(key == "ImportCredential" && importingUnits.${unit} or null == service.serviceConfig.ImportCredential)) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
   config.systemd.services);
-  # NixOS's own tmpfiles re-setup imports `tmpfiles.*` credentials; nothing of ours imports any.
-  importingUnits = {systemd-tmpfiles-resetup = ["tmpfiles.*"];};
+  # NixOS's own tmpfiles re-setup, with exactly its upstream credential list; nothing of ours imports any.
+  importingUnits = {systemd-tmpfiles-resetup = ["tmpfiles.*" "loging.motd" "login.issue" "network.hosts" "ssh.authorized_keys.root"];};
   # Units that hold secrets in memory besides the writers.
   secretHolders = ["sops-install-secrets" "terrace-production-boot" "terrace-backup" "terrace-backup-check"] ++ cfg.writerHelpers;
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
