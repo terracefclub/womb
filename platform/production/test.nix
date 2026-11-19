@@ -173,6 +173,14 @@ in {
           machine.fail("test -e /var/lib/terrace-website-inputs")
           ok(machine.succeed("find /var/lib/terrace-gateway-test -mindepth 1 -printf '%y %P\\n'").strip() == "l credentials.json", "only the harness credentials link outside ramfs")
 
+      # grep exits 1 when nothing matches; only a real error (2) may fail a scan.
+      GREP = "sh -c 'grep -lF -D skip -f \"$0\" -- \"$@\"; test $? -le 1 || exit 255'"
+
+      def files_with_values(machine, producer, patterns, timeout=600):
+          # producer prints NUL-separated paths; the hit list stays inside the guest.
+          machine.succeed(producer + " | xargs -0r " + GREP + " " + patterns + " >/run/terrace-scan-hits", timeout=timeout)
+          return machine.succeed("wc -l </run/terrace-scan-hits && rm /run/terrace-scan-hits").strip()
+
       def scan(machine, label, closure_scan=True):
           # Patterns come from this host's own ramfs generation, into private tmpfs.
           machine.succeed("rm -rf /run/terrace-scan && install -d -m 0700 /run/terrace-scan")
@@ -181,14 +189,14 @@ in {
           count = int(machine.succeed("wc -l </run/terrace-scan/all").strip())
           ok(count >= 20, f"{label}: {count} value patterns")
           if closure_scan:
-              hits = machine.succeed("xargs -r grep -rlF -f /run/terrace-scan/all <${closure}/store-paths | wc -l", timeout=1800).strip()
+              hits = files_with_values(machine, "xargs -r -a ${closure}/store-paths -I{} find {} -type f -print0", "/run/terrace-scan/all", timeout=1800)
               ok(hits == "0", f"{label}: no value in the system closure")
-          ok(machine.succeed("grep -rlF -f /run/terrace-scan/all /etc/systemd /run/systemd 2>/dev/null | wc -l").strip() == "0", f"{label}: no value in unit files")
+          ok(files_with_values(machine, "{ find -L /etc/systemd /run/systemd -type f -print0 2>/dev/null; true; }", "/run/terrace-scan/all") == "0", f"{label}: no value in unit files")
           ok(machine.succeed("systemctl show '*' --all --no-pager 2>/dev/null | grep -cF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in unit properties")
           ok(machine.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in any journal")
           ok(machine.succeed("cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -cF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in process arguments")
           machine.succeed("sync")
-          files = machine.succeed("find / -xdev \\( -path /nix -o -path /var/lib/postgresql -o -path /var/lib/terrace-backup -o -path " + RESTORE + " \\) -prune -o -type f -print0 | xargs -0r grep -lF -f /run/terrace-scan/all 2>/dev/null | wc -l", timeout=600).strip()
+          files = files_with_values(machine, "find / -xdev \\( -path /nix -o -path /var/lib/postgresql -o -path /var/lib/terrace-backup -o -path " + RESTORE + " \\) -prune -o -type f -print0", "/run/terrace-scan/all")
           ok(files == "0", f"{label}: no value in a file on the root disk outside the databases")
           raw = machine.succeed("grep -acF -f /run/terrace-scan/disk /dev/vda || true", timeout=600).strip()
           ok(raw == "0", f"{label}: no non-database value anywhere on the raw disk")
@@ -437,7 +445,7 @@ in {
           operator.succeed("rm -rf /dev/shm/scan && install -d -m 0700 /dev/shm/scan")
           op("sops decrypt --output-type json " + STORE + "/hosts/app/secrets.sops.json | rehearsal-patterns /dev/shm/scan/all >/dev/null")
           operator.succeed("sync")
-          ok(operator.succeed("find / -xdev -path /nix -prune -o -type f -print0 | xargs -0r grep -lF -f /dev/shm/scan/all 2>/dev/null | wc -l", timeout=600).strip() == "0", "operator: no value in a file")
+          ok(files_with_values(operator, "find / -xdev -path /nix -prune -o -type f -print0", "/dev/shm/scan/all") == "0", "operator: no value in a file")
           ok(operator.succeed("grep -acF -f /dev/shm/scan/all /dev/vda || true", timeout=600).strip() == "0", "operator: no value on the raw disk")
           ok(operator.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f /dev/shm/scan/all || true").strip() == "0", "operator: no value in the journal")
           operator.succeed("rm -rf /dev/shm/scan")
