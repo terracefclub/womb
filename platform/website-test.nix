@@ -5,6 +5,7 @@
 }: let
   inputs = "/var/lib/terrace-website-inputs";
   media = "/var/lib/terrace-cms-media";
+  outbox = "/var/lib/terrace-cms-outbox";
   secrets = "/var/lib/website-backup-secrets";
   restored = "/var/lib/terrace-website-recovery";
   repository = "/home/restic/website-repository";
@@ -80,6 +81,7 @@ in {
           resource=$(${pkgs.openssl}/bin/openssl rand -hex 32)
           member=$(${pkgs.openssl}/bin/openssl rand -hex 32)
           browser=$(${pkgs.openssl}/bin/openssl rand -hex 32)
+          intake=$(${pkgs.openssl}/bin/openssl rand -hex 32)
           cat >${inputs}/cms.env <<EOF
           PAYLOAD_SECRET=$payload
           CMS_ORIGIN=http://127.0.0.1:13048
@@ -94,6 +96,7 @@ in {
           MEMBER_AUTH_AUDIENCE=terrace-community
           MEMBER_AUTH_INTROSPECTION_CLIENT_ID=terrace-community
           MEMBER_AUTH_INTROSPECTION_SECRET=$member
+          LIFECYCLE_INTAKE_SECRET=$intake
           EOF
           cat >${inputs}/web.env <<EOF
           CMS_ORIGIN=http://127.0.0.1:13048
@@ -103,6 +106,7 @@ in {
           MEMBER_AUTH_ISSUER=http://127.0.0.1:8088/realms/terrace
           MEMBER_AUTH_CLIENT_ID=terrace-web
           MEMBER_AUTH_CLIENT_SECRET=$browser
+          LIFECYCLE_INTAKE_SECRET=$intake
           EOF
           chmod 0400 ${inputs}/*.env
         '';
@@ -159,7 +163,7 @@ in {
 
     def data_signature(machine, isolated=False):
         return {table: sql(machine, f"select md5(string_agg(to_jsonb(t)::text, chr(10) order by to_jsonb(t)::text)) from {table} t", isolated)
-                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations"]}
+                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox"]}
 
     def assert_content(machine):
         docs = api(machine, "/api/events?limit=10&draft=true")["docs"]
@@ -176,13 +180,15 @@ in {
         assert sql(source, "select count(*) from pg_tables where schemaname='public'") == "0"
         migration_seconds = timed(source, "systemctl start terrace-cms-migrate.service")
         before_ledger = sql(source, "select name || ':' || batch from payload_migrations order by id")
-        assert len(before_ledger.splitlines()) == 6
+        # The pinned release records its registry; the ledger must hold exactly those names in order.
+        assert [row.rsplit(":", 1)[0] for row in before_ledger.splitlines()] == ${builtins.toJSON release.migrations}
         source.succeed("systemctl start terrace-cms-migrate.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
         for change, undo in [
             ("chmod 0640 ${inputs}/cms.env", "chmod 0400 ${inputs}/cms.env"),
             ("echo CMS_BOOTSTRAP_TEST=0 >>${inputs}/cms.env", "sed -i '/^CMS_BOOTSTRAP_TEST=/d' ${inputs}/cms.env"),
             ("sed -i '/^CMS_AUTH_ISSUER=/d' ${inputs}/cms.env", "echo CMS_AUTH_ISSUER=http://127.0.0.1:8088/realms/terrace >>${inputs}/cms.env"),
+            ("cp -a ${inputs}/cms.env /root/cms.env.keep && sed -i 's/^LIFECYCLE_INTAKE_SECRET=.*/LIFECYCLE_INTAKE_SECRET=too-short/' ${inputs}/cms.env", "cp -a /root/cms.env.keep ${inputs}/cms.env && rm /root/cms.env.keep"),
         ]:
             source.succeed(change)
             source.fail("systemctl start terrace-cms-migrate.service")
@@ -218,6 +224,31 @@ in {
         source.fail("runuser -u nobody -- journalctl --namespace=terrace-apps --no-pager -o cat 2>/dev/null | grep -F SYNTHETIC_PRIVATE_LOG_MARKER >/dev/null")
         source.fail("journalctl --no-pager -o cat | grep -Fx SYNTHETIC_PRIVATE_LOG_MARKER >/dev/null")
         source.fail("runuser -u terrace_web -- psql -h /run/postgresql -U terrace_cms -d terrace_cms -c 'select 1' >/dev/null 2>&1")
+
+    with subtest("private lifecycle outbox and packaged daily sweep as the CMS account"):
+        assert source.succeed("stat -c %U:%G:%a ${outbox}").strip() == "terrace_cms:terrace_cms:700"
+        source.fail("runuser -u terrace_web -- ls ${outbox}")
+        # Module-owned paths override the protected environment file.
+        cms_pid = source.succeed("systemctl show terrace-cms.service -p MainPID --value").strip()
+        source.succeed(f"tr '\\0' '\\n' </proc/{cms_pid}/environ | grep -qx 'LIFECYCLE_OUTBOX_DIR=${outbox}'")
+        source.succeed("systemctl is-enabled terrace-cms-sweep.timer && systemctl is-active terrace-cms-sweep.timer")
+        assert source.succeed("systemctl show terrace-cms-sweep.service -p User,Type --value").split() == ["terrace_cms", "oneshot"]
+        # A pending synthetic outbox row (no file copy yet): the sweep writes its private mirror.
+        pending = sql(source, "insert into message_outbox(kind,recipient_label,recipient_email,subject,body) values ('denial','Synthetic Applicant','host-applicant@terrace.invalid','Synthetic subject','Synthetic body') returning id").splitlines()[0]
+        source.succeed("systemctl start terrace-cms-sweep.service")
+        assert source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus --value").split() == ["success", "0"]
+        mirror = "${outbox}/" + pending.zfill(6) + "-denial.json"
+        assert source.succeed(f"stat -c %U:%a {mirror}").strip() == "terrace_cms:600"
+        source.succeed(f"jq -e '.to == \"host-applicant@terrace.invalid\"' {mirror} >/dev/null")
+        assert sql(source, "select count(*) from message_outbox where mirrored_at is null") == "0"
+        # The real timer unit fires its service: a persistent timer whose last run
+        # predates a scheduled elapse catches up immediately when (re)started.
+        before = source.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
+        source.succeed("systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d '3 days ago' /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer")
+        source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {before} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=120)
+        assert source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus --value").split() == ["success", "0"]
+        before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
+
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
         before_rows = data_signature(source)
         before_inputs = source.succeed("cd ${inputs} && sha256sum *.env 2>/dev/null").strip()
@@ -245,6 +276,10 @@ in {
         assert data_signature(recovery, True) == before_rows
         assert int(sql(recovery, "select count(*) from pg_tables where schemaname !~ '^pg_' and schemaname != 'information_schema'", True)) == table_count
         recovery.succeed("test ! -e ${inputs} && cp -a ${restored}/files${inputs} ${inputs} && test -z \"$(ls -A ${media})\" && cp -a ${restored}/files${media}/. ${media}/ && chown -R terrace-restore:terrace-restore ${media}")
+        # The outbox (live invitation links) comes back with its private owner and modes.
+        recovery.succeed("test -z \"$(ls -A ${outbox})\" && cp -a ${restored}/files${outbox}/. ${outbox}/")
+        assert recovery.succeed("cd ${outbox} && sha256sum *.json").strip() == before_outbox
+        assert recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split() == ["terrace_cms:700", "terrace_cms:600"]
         assert recovery.succeed("cd ${inputs} && sha256sum *.env 2>/dev/null").strip() == before_inputs
         recovery.fail("runuser -u nobody -- test -r ${inputs}/cms.env")
         recovery.fail("nc -z -w 2 127.0.0.1 5432")

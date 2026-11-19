@@ -22,6 +22,9 @@
       proxy_set_header X-Forwarded-Host ${host};
       proxy_set_header X-Forwarded-Proto https;
       proxy_set_header X-Forwarded-Port 443;
+      # Overwritten, never appended: the website reads exactly this one value
+      # (ADDRESS_HEADER=X-Forwarded-For, XFF_DEPTH=1), so a client-supplied
+      # header cannot choose its own rate-limit bucket.
       proxy_set_header X-Forwarded-For $remote_addr;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header Forwarded "";
@@ -60,10 +63,10 @@
           ${
         if component == "cms"
         then ''e.CMS_PUBLIC_DEPLOYMENT !== "1"''
-        else ''e.ORIGIN !== "https://${cfg.webHostname}" || e.MEMBER_AUTH_ORIGIN !== e.ORIGIN''
+        else ''e.ORIGIN !== "https://${cfg.webHostname}" || e.MEMBER_AUTH_ORIGIN !== e.ORIGIN || e.LIFECYCLE_DIRECT_CLIENTS === "1"''
       }
           ${lib.optionalString (config.terrace.identity.enable or false) ''|| e.MEMBER_AUTH_ISSUER !== "https://${config.terrace.identity.hostname}/realms/terrace"''}) {
-          console.error("HTTPS gateway runtime origins or public activation policy rejected.");
+          console.error("HTTPS gateway runtime origins, client-address or public activation policy rejected.");
           process.exit(1);
         }
       '
@@ -104,10 +107,21 @@ in {
         message = "Application and identity hostnames must be distinct.";
       }
       {
+        # The gateway writes exactly one address into both headers (see proxy).
+        assertion = (website.addressHeader == "X-Forwarded-For" && website.xffDepth == 1) || website.addressHeader == "X-Real-IP";
+        message = "Behind the website gateway the website must read the gateway-overwritten client address (X-Forwarded-For with depth 1, or X-Real-IP).";
+      }
+      {
         assertion = lib.all runtimeFile [cfg.certificateFile cfg.certificateKeyFile];
         message = "Website TLS inputs must be external absolute runtime file paths.";
       }
     ];
+    terrace.website = {
+      lifecyclePublicOrigin = lib.mkDefault "https://${cfg.webHostname}";
+      cmsPublicOrigin = lib.mkDefault "https://${cfg.cmsHostname}";
+      addressHeader = lib.mkDefault "X-Forwarded-For";
+      xffDepth = lib.mkDefault 1;
+    };
     services.nginx = {
       enable = true;
       recommendedTlsSettings = true;
@@ -136,6 +150,7 @@ in {
     };
     systemd.services.terrace-cms.serviceConfig.ExecStartPre = lib.mkAfter [(runtimeGuard "cms")];
     systemd.services.terrace-cms-migrate.serviceConfig.ExecStartPre = lib.mkAfter [(runtimeGuard "cms")];
+    systemd.services.terrace-cms-sweep.serviceConfig.ExecStartPre = lib.mkAfter [(runtimeGuard "cms")];
     systemd.services.terrace-web.serviceConfig.ExecStartPre = lib.mkAfter [(runtimeGuard "web")];
     networking.firewall.allowedTCPPorts = [443];
   };

@@ -53,10 +53,12 @@
         then ["PAYLOAD_SECRET" "CMS_ORIGIN" "CMS_AUTH_ISSUER" "CMS_AUTH_CLIENT_ID" "CMS_AUTH_CLIENT_SECRET" "CMS_AUTH_AUDIENCE" "CMS_AUTH_INTROSPECTION_CLIENT_ID" "CMS_AUTH_INTROSPECTION_SECRET" "MEMBER_AUTH_ISSUER" "MEMBER_AUTH_CLIENT_ID" "MEMBER_AUTH_AUDIENCE" "MEMBER_AUTH_INTROSPECTION_CLIENT_ID" "MEMBER_AUTH_INTROSPECTION_SECRET"]
         else ["CMS_ORIGIN" "ORIGIN" "MEMBER_AUTH_ISSUER" "MEMBER_AUTH_CLIENT_ID" "MEMBER_AUTH_CLIENT_SECRET" "MEMBER_AUTH_ORIGIN"]
       )};
-        if (required.some(key => !env[key]) || Object.keys(env).some(key => key === "CMS_LOCAL_BOOTSTRAP" || key.startsWith("CMS_BOOTSTRAP_"))
+        // The intake secret is shared by design: the website signs apply/redeem calls the CMS verifies.
+        if (required.some(key => !env[key]) || Buffer.byteLength(env.LIFECYCLE_INTAKE_SECRET || "") < 32 ||
+          Object.keys(env).some(key => key === "CMS_LOCAL_BOOTSTRAP" || key.startsWith("CMS_BOOTSTRAP_"))
         ${lib.optionalString (component == "web") ''|| env.CONTENT_SOURCE !== "cms" || Object.hasOwn(env,"DATABASE_URI") || Object.hasOwn(env,"PAYLOAD_SECRET") || Object.hasOwn(env,"MEMBER_AUTH_INTROSPECTION_SECRET") || Object.keys(env).some(key => key.startsWith("CMS_AUTH_"))''}
         ${lib.optionalString (component == "cms") ''|| Object.hasOwn(env,"MEMBER_AUTH_CLIENT_SECRET")''}) {
-          console.error("Native Terrace runtime requires complete per-user identity configuration without bootstrap settings or cross-service secrets.");
+          console.error("Native Terrace runtime requires complete per-user identity and lifecycle intake configuration without bootstrap settings or cross-service secrets.");
           process.exit(1);
         }
       '
@@ -99,15 +101,31 @@
         CacheDirectory = "terrace-cms";
         CacheDirectoryMode = "0700";
         BindPaths = ["/var/cache/terrace-cms:${cfg.cmsPackage}/.next/cache"];
-        ReadWritePaths = [cfg.mediaDirectory];
+        ReadWritePaths = [cfg.mediaDirectory cfg.outboxDirectory];
         MemoryHigh = "1536M";
         MemoryMax = "2G";
         CPUQuota = "200%";
       };
   };
-  cmsExec = entry: ''
+  # Module-owned locations and origins override anything in the protected
+  # environment file, so a runtime input cannot redirect the database, uploads
+  # or the outbox that holds live invitation links.
+  cmsEnvironment = ''
     export DATABASE_URI=${lib.escapeShellArg databaseURI}
     export CMS_MEDIA_DIR=${lib.escapeShellArg cfg.mediaDirectory}
+    export LIFECYCLE_OUTBOX_DIR=${lib.escapeShellArg cfg.outboxDirectory}
+    ${lib.optionalString (cfg.lifecyclePublicOrigin != null) "export LIFECYCLE_PUBLIC_ORIGIN=${lib.escapeShellArg cfg.lifecyclePublicOrigin}"}
+  '';
+  webEnvironment = ''
+    ${lib.optionalString (cfg.cmsPublicOrigin != null) "export CMS_PUBLIC_ORIGIN=${lib.escapeShellArg cfg.cmsPublicOrigin}"}
+    ${lib.optionalString (cfg.addressHeader != null) ''
+      export ADDRESS_HEADER=${lib.escapeShellArg cfg.addressHeader}
+      export XFF_DEPTH=${toString cfg.xffDepth}
+      unset LIFECYCLE_DIRECT_CLIENTS
+    ''}
+  '';
+  cmsExec = entry: ''
+    ${cmsEnvironment}
     exec ${cfg.cmsPackage}/bin/${entry}
   '';
   requireMigration = pkgs.writeShellScript "terrace-require-cms-migration" ''
@@ -150,6 +168,36 @@ in {
       default = "/var/lib/terrace-cms-media";
       description = "Retained CMS upload directory, included with the database in backups.";
     };
+    outboxDirectory = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/terrace-cms-outbox";
+      description = "Private (0700, CMS account) LIFECYCLE_OUTBOX_DIR holding the member-lifecycle message mirror, including live invitation links. Backed up with the database.";
+    };
+    lifecyclePublicOrigin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Bare public https website origin used in invitation links (LIFECYCLE_PUBLIC_ORIGIN). Required by a public CMS; the HTTPS gateway sets it from its website hostname.";
+    };
+    cmsPublicOrigin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Public https CMS origin the website may embed media from (CMS_PUBLIC_ORIGIN). The HTTPS gateway sets it from its CMS hostname.";
+    };
+    addressHeader = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum ["X-Forwarded-For" "X-Real-IP"]);
+      default = null;
+      description = "Header a trusted proxy overwrites with the client address (website ADDRESS_HEADER). The HTTPS gateway sets X-Forwarded-For to exactly the connecting address.";
+    };
+    xffDepth = lib.mkOption {
+      type = lib.types.ints.between 1 4;
+      default = 1;
+      description = "Number of trusted proxies writing X-Forwarded-For (website XFF_DEPTH).";
+    };
+    sweepSchedule = lib.mkOption {
+      type = lib.types.str;
+      default = "*-*-* 03:30:00";
+      description = "systemd OnCalendar for the daily member-lifecycle sweep (CMS bin/sweep, without --purge-moderated).";
+    };
     webPort = lib.mkOption {
       type = lib.types.port;
       default = 14294;
@@ -180,12 +228,19 @@ in {
         message = "Terrace website requires one reviewed revision and distinct unprivileged loopback ports.";
       }
       {
-        assertion = lib.all validDirectory [cfg.inputsDirectory cfg.mediaDirectory cfg.databaseSocketDirectory];
+        assertion = lib.all validDirectory [cfg.inputsDirectory cfg.mediaDirectory cfg.outboxDirectory cfg.databaseSocketDirectory];
         message = "Terrace website directories must be normalized absolute runtime paths outside the Nix store.";
       }
       {
-        assertion = cfg.inputsDirectory != cfg.mediaDirectory && !(lib.hasPrefix (cfg.inputsDirectory + "/") cfg.mediaDirectory) && !(lib.hasPrefix (cfg.mediaDirectory + "/") cfg.inputsDirectory);
-        message = "Terrace runtime inputs and uploads must not overlap.";
+        assertion = let
+          disjoint = a: b: a != b && !(lib.hasPrefix (a + "/") b) && !(lib.hasPrefix (b + "/") a);
+        in
+          disjoint cfg.inputsDirectory cfg.mediaDirectory && disjoint cfg.inputsDirectory cfg.outboxDirectory && disjoint cfg.mediaDirectory cfg.outboxDirectory;
+        message = "Terrace runtime inputs, uploads and the lifecycle outbox must not overlap.";
+      }
+      {
+        assertion = lib.all (value: value == null || builtins.match "https://[a-z0-9.-]+" value != null) [cfg.lifecyclePublicOrigin cfg.cmsPublicOrigin];
+        message = "Terrace public lifecycle and CMS media origins must be bare https origins.";
       }
     ];
     users.groups.${cmsUser} = {};
@@ -198,7 +253,11 @@ in {
       isSystemUser = true;
       group = webUser;
     };
-    systemd.tmpfiles.rules = ["d ${cfg.mediaDirectory} 0700 ${cmsUser} ${cmsUser} - -"];
+    systemd.tmpfiles.rules = [
+      "d ${cfg.mediaDirectory} 0700 ${cmsUser} ${cmsUser} - -"
+      # The CMS forces this mode too; its mirror files are 0600 and the sweep runs as the same account.
+      "d ${cfg.outboxDirectory} 0700 ${cmsUser} ${cmsUser} - -"
+    ];
     services.postgresql = lib.mkIf cfg.manageDatabase {
       enable = true;
       ensureDatabases = ["terrace_cms"];
@@ -235,7 +294,7 @@ in {
     systemd.services.terrace-website-inputs = {
       description = "Validate external Terrace website input permissions";
       path = [pkgs.coreutils];
-      before = ["terrace-cms.service" "terrace-web.service" "terrace-cms-migrate.service"];
+      before = ["terrace-cms.service" "terrace-web.service" "terrace-cms-migrate.service" "terrace-cms-sweep.service"];
       serviceConfig = {
         Type = "oneshot";
         ExecStart = inputCheck;
@@ -244,17 +303,16 @@ in {
     };
     systemd.services.terrace-cms-migrate = lib.recursiveUpdate cmsRuntime {
       description = "Explicit CMS migration; never part of automatic startup";
-      conflicts = ["terrace-cms.service" "terrace-web.service"];
+      conflicts = ["terrace-cms.service" "terrace-web.service" "terrace-cms-sweep.service"];
       requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
-      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-web.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-web.service" "terrace-cms-sweep.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
       serviceConfig = {
         Type = "oneshot";
         TimeoutStartSec = 180;
       };
       script = ''
         set -euo pipefail
-        export DATABASE_URI=${lib.escapeShellArg databaseURI}
-        export CMS_MEDIA_DIR=${lib.escapeShellArg cfg.mediaDirectory}
+        ${cmsEnvironment}
         ${cfg.cmsPackage}/bin/migrate
         printf '%s\n' '${cfg.revision}' >/var/lib/terrace-cms/migrated-revision
       '';
@@ -307,13 +365,42 @@ in {
           Restart = "on-failure";
           RestartSec = 10;
         };
-      script = "exec ${cfg.webPackage}/bin/start";
+      script = ''
+        ${webEnvironment}
+        exec ${cfg.webPackage}/bin/start
+      '';
       postStart = health cfg.webPort "/events/";
+    };
+    # Daily member-lifecycle housekeeping: expire invitations, withdraw stale
+    # applications, finish outbox mirror writes and redactions after erasure.
+    # Same account, environment file, guards and migration gate as the CMS.
+    systemd.services.terrace-cms-sweep = lib.recursiveUpdate cmsRuntime {
+      description = "Terrace CMS member-lifecycle sweep (bin/sweep)";
+      requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      after = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStartPre = [(identityGuard "cms") requireMigration];
+        # bin/sweep bounds itself at 120 s (exit 2 when it times out).
+        TimeoutStartSec = 150;
+      };
+      script = cmsExec "sweep";
+    };
+    systemd.timers.terrace-cms-sweep = {
+      description = "Daily Terrace CMS member-lifecycle sweep";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = cfg.sweepSchedule;
+        Persistent = true;
+        Unit = "terrace-cms-sweep.service";
+      };
     };
     terrace.backup = lib.mkIf config.terrace.backup.enable {
       postgresql.databases = lib.mkIf cfg.manageDatabase ["terrace_cms"];
       media.website = cfg.mediaDirectory;
       extraPaths.website-inputs = cfg.inputsDirectory;
+      # Live invitation links exist only here; restore them with the database.
+      extraPaths.website-outbox = cfg.outboxDirectory;
     };
   };
 }

@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -327,17 +327,17 @@ before backup; absence is checked again on the replacement. Production
 Vaultwarden inputs do not escrow each person's master password. This test's
 private administrator readback does not prove it can decrypt real users' vaults.
 
-With the accepted archives already present on Falcon, the complete invocation
-from a clean repository checkout is:
+With the pinned archives and the matching website checkout already present on the
+builder, the complete invocation from a clean repository checkout is:
 
 ```sh
-install -d -m 0700 /home/tristan/terrace-work/full-rehearsal-output
-direnv exec . env BUILD_LOCK=/home/tristan/.falcon-heavy.lock \
+install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
+direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
-  --output /home/tristan/terrace-work/full-rehearsal-output \
-  --webArchive /home/tristan/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --cmsArchive /home/tristan/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --tfcSource /home/tristan/terrace-work/release-a2
+  --output $HOME/terrace-work/full-rehearsal-output \
+  --webArchive $HOME/terrace-work/website-bundle-1733308-output/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-1733308-output/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-1733308
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted
@@ -346,7 +346,7 @@ completed synthetic purge removes that run's retained payloads:
 
 ```sh
 direnv exec . ./platform/full-rehearsal purge \
-  /home/tristan/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID \
+  $HOME/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID \
   --synthetic-only --yes
 ```
 
@@ -364,6 +364,25 @@ before teardown. Export failures preserve the original restore failure; failed
 disks and the early encrypted repository/escrow remain retained. No diagnostic
 contents are printed by this export.
 
+
+### Website member lifecycle in the rehearsal
+
+Since the re-pin to website `1733308`, every variant also runs the website
+lifecycle through the real gateway. After the original simultaneous checks it
+renders `/news/` and a synthetic imported-style post (public-origin body image
+kept, foreign image dropped), follows the old WordPress URL's 301, submits six
+applications from the gateway guest with forged client headers (five accepted,
+the sixth limited) and one from the browser guest (accepted), approves one as an
+editor (the invitation mirror appears `0600` in the CMS outbox), redeems it once
+and signs the applicant in, which links the application. The outbox bytes,
+owner and modes and the application rows join the app signature, so they must be
+identical after the quiescent backup and after the originals-off restore. The
+sweep timer is armed only by the explicit bootstrap and stopped before capture.
+After the replacement's restored checks the post still renders, an administrator
+offboards and erases the member (application withdrawn and scrubbed), the mirror
+still names the applicant, and the real sweep timer (backdated persistent stamp)
+then redacts it. The receipt records `websiteLifecycleOriginal` and
+`websiteLifecycleRestored` assertion counts and timings.
 
 ### Observed all-services acceptance — November 5, 2026 (Pacific)
 

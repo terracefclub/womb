@@ -14,9 +14,9 @@
         inherit path;
         name = builtins.baseNameOf relative;
       };
-  realm = checked "identity/tools/production-realm.ts" "c8cc120bdcfa56774aa5efc876864c2e7903d09b9fe81791f8287992bf2e0ee1";
-  clients = checked "identity/tools/realm-config.ts" "68cd6d4b6286afc554a5c92dda5e3334a14b294d04fc19b6991383418724c839";
-  input = checked "cms/src/auth/production-input.ts" "9600bd0aa47e28c2568afcc02cea47c9de13377301d64d6079f9af5c771c6ed9";
+  realm = checked "identity/tools/production-realm.ts" "91ff97ec6d0902e085a29cf3e96349ee7ef99c21eabffedc033543b67931603e";
+  clients = checked "identity/tools/realm-config.ts" "0df304749356778154387550267dfea1dcd232be0682eeb4e07a5b52016810d3";
+  input = checked "cms/src/auth/production-input.ts" "59f359df123bda17222684d45cdd0b9ca2c65423e4274ad32dc67856a4870f9d";
 in
   pkgs.runCommand "terrace-gateway-test-contract" {} ''
     mkdir -p $out/identity/tools $out/cms/src/auth

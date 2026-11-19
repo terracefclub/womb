@@ -28,6 +28,7 @@ RESTORE = '/var/lib/rehearsal-recovery'
 GATEWAY_INPUTS = '/var/lib/terrace-gateway-test'
 WEB_INPUTS = '/var/lib/terrace-website-inputs'
 MEDIA = '/var/lib/terrace-cms-media'
+OUTBOX = '/var/lib/terrace-cms-outbox'
 DOCUMENSO_INPUTS = '/var/lib/terrace-documenso-inputs'
 DOCUMENSO_STATE = '/var/lib/terrace-documenso'
 DOCUMENSO_BROWSER = '/root/documenso-functional'
@@ -42,7 +43,7 @@ TAILNET_INPUTS = '/var/lib/rehearsal-tailnet'
 TAILNET_STATE = '/var/lib/tailscale'
 TAILNET_PEERS = [(gateway, 'application'), (automation, 'private'), (client, 'denied')]
 BLANK_WRITERS = {
-    'gateway': ['postgresql.service', 'keycloak.service', 'nginx.service', 'terrace-cms.service', 'terrace-web.service', 'k3s.service'],
+    'gateway': ['postgresql.service', 'keycloak.service', 'nginx.service', 'terrace-cms.service', 'terrace-web.service', 'terrace-cms-sweep.service', 'terrace-cms-sweep.timer', 'k3s.service'],
     'automation': ['home-assistant.target', 'home-assistant.service', 'terrace-demo-ha.socket', 'terrace-demo-ha.service', 'terrace-demo-ha-network.service', 'frigate.service', 'go2rtc.service', 'nginx.service'],
     'relay': ['headscale.service', 'nginx.service'],
 }
@@ -105,6 +106,8 @@ def bootstrap_app():
     # The test-only master bootstrap is no longer needed after enrollment.
     gateway.succeed('chmod 0600 ' + GATEWAY_INPUTS + '/keycloak.env && truncate -s 0 ' + GATEWAY_INPUTS + '/keycloak.env && chmod 0400 ' + GATEWAY_INPUTS + '/keycloak.env')
     gateway.succeed('systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service', timeout=300)
+    # The daily lifecycle sweep is a writer too: armed only by explicit bootstrap.
+    gateway.succeed('systemctl start terrace-cms-sweep.timer')
     gateway.succeed('systemctl start k3s.service')
     gateway.wait_until_succeeds("k3s kubectl get nodes --no-headers | grep ' Ready '", timeout=360)
     gateway.wait_until_succeeds("k3s kubectl get storageclass local-retain -o jsonpath='{.reclaimPolicy}' | grep -qx Retain", timeout=180)
@@ -130,7 +133,10 @@ def app_signature():
     signature = {'realm': sql("select id from realm where name='terrace'", 'keycloak'),
             'users': sql('select md5(string_agg(id||username,chr(10) order by id)) from user_entity', 'keycloak'),
             'migrations': sql('select name||batch from payload_migrations order by id'),
-            'inputs': gateway.succeed('cd ' + WEB_INPUTS + ' && sha256sum *.env').strip()}
+            'inputs': gateway.succeed('cd ' + WEB_INPUTS + ' && sha256sum *.env').strip(),
+            # Live invitation links exist only in this private mirror: bytes, owner and modes.
+            'outbox': gateway.succeed('cd ' + OUTBOX + " && stat -c '%U %a' . && find . -type f -printf '%P %U %m\\n' | LC_ALL=C sort && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum").strip(),
+            'applications': sql("select md5(coalesce(string_agg(row_to_json(a)::text,chr(10) order by a.id),'')) from member_applications a")}
     # Passwords and role settings stay inside these private one-way witnesses.
     # Compare semantic names, not newly assigned ordinary-role/database OIDs.
     signature['postgresGlobalRoles'] = sql("SELECT md5(coalesce(string_agg(row_to_json(r)::text,chr(10) ORDER BY r.rolname),'')) FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,rolpassword,rolvaliduntil,rolbypassrls FROM pg_authid) r", 'postgres')
@@ -639,7 +645,61 @@ def simultaneous_functional_checks(phase):
     return value
 
 
+def lifecycle(machine, action, label):
+    output = machine.succeed('python3 /etc/gateway-protocol.py ' + action, timeout=180).strip()
+    assert re.fullmatch(label + r'[^:]*: [0-9]+ bounded assertions(;.*)?\.', output)
+    print(output)
+    return int(re.search(r': ([0-9]+) ', output)[1])
+
+
+def applications():
+    return int(sql('select count(*) from member_applications'))
+
+
+def lifecycle_original():
+    # Imported-style content, the public application form behind the real
+    # gateway (per-address limit despite forged headers), editor approval into
+    # the private outbox, single-use redemption and automatic member linking.
+    counts = {'content': lifecycle(gateway, 'content', 'Imported-content checks passed')}
+    assert applications() == 0
+    counts['applyBurst'] = lifecycle(gateway, 'apply-burst', 'Application rate-limit checks passed')
+    assert applications() == 5
+    counts['applyOtherAddress'] = lifecycle(client, 'apply-other', 'Separate-address application check passed')
+    assert applications() == 6
+    counts['approve'] = lifecycle(gateway, 'approve', 'Approval checks passed')
+    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-invitation.json').strip() == 'terrace_cms:600'
+    counts['redeem'] = lifecycle(gateway, 'redeem', 'Redemption checks passed')
+    return counts
+
+
+def sweep_by_timer():
+    # Exercise the real timer unit: a persistent timer whose last trigger
+    # predates a scheduled elapse catches up as soon as it is started.
+    before = gateway.succeed('systemctl show terrace-cms-sweep.service -p InvocationID --value').strip()
+    gateway.succeed('systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d \x273 days ago\x27 /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer')
+    gateway.wait_until_succeeds('test "$(systemctl show terrace-cms-sweep.service -p InvocationID --value)" != ' + shlex.quote(before) + ' && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive', timeout=180)
+    assert gateway.succeed('systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User --value').split() == ['success', '0', 'terrace_cms']
+    return True
+
+
+def lifecycle_restored():
+    # On the replacement: restored content still renders, then an administrator
+    # erasure is completed in the restored mirror only by the sweep timer.
+    counts = {'content': lifecycle(gateway, 'content', 'Imported-content checks passed')}
+    mirror = OUTBOX + '/*-invitation.json'
+    gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
+    counts['erase'] = lifecycle(gateway, 'erase', 'Erasure checks passed')
+    gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
+    assert sweep_by_timer()
+    gateway.succeed('jq -e \x27.to == "Former member" and .body == "Redacted after erasure."\x27 ' + mirror + ' >/dev/null')
+    gateway.fail('grep -rl local-alumni@terrace.invalid ' + OUTBOX)
+    return counts
+
+
 def quiesce_writers():
+    gateway.succeed('systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service', timeout=330)
+    for unit in ['terrace-cms-sweep.timer', 'terrace-cms-sweep.service']:
+        assert gateway.succeed('systemctl show ' + unit + ' -p ActiveState --value', timeout=10).strip() == 'inactive'
     if APPLICATIONS_ENABLED:
         stop_units(gateway, ['rehearsal-pg-sample'])
         stop_units(gateway, ['vaultwarden'])
@@ -772,6 +832,7 @@ with subtest('empty state and two explicit bootstrap passes'):
     assert app_signature() == signature
     gateway.succeed('install -m 0600 /dev/null ' + MEDIA + "/private.png && echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgUbL4DwACCgFmeGgpMwAAAABJRU5ErkJggg==' | base64 -d >" + MEDIA + '/private.png && cp ' + MEDIA + '/private.png ' + MEDIA + '/public.png && chown terrace_cms:terrace_cms ' + MEDIA + '/*.png')
     sql("insert into media(alt,public,filename,mime_type,filesize,width,height) values ('Synthetic private',false,'private.png','image/png',70,1,1),('Synthetic public',true,'public.png','image/png',70,1,1)")
+    gateway.succeed('runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -f /etc/gateway-content.sql >/dev/null 2>&1')
     timed('bootstrapAutomation', bootstrap_automation)
     automation.wait_until_succeeds("demos-ha-test states | jq -e '[.[] | select(.entity_id | startswith(\"sensor.synthetic_\")) | select(.state != \"unknown\" and .state != \"unavailable\")] | length == 3' >/dev/null", timeout=180)
     automation_identity = json.loads(automation.succeed('demos-ha-test identity'))
@@ -884,6 +945,9 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
     results['relayPeakBytes'] = {unit: int(relay.succeed('systemctl show ' + unit + '.service -p MemoryPeak --value').strip()) for unit in ['headscale', 'nginx']}
     results['postgresConnectionsAfterConcurrentChecks'] = int(sql('select count(*) from pg_stat_activity', 'postgres'))
 
+with subtest('imported content, application intake, approval outbox and redemption through the gateway'):
+    results['checks']['websiteLifecycleOriginal'] = timed('websiteLifecycleOriginal', lifecycle_original)
+
 with subtest('quiesce every writer before all encrypted snapshots'):
     deployment_replicas = quiesce_writers()
     signature = app_signature()
@@ -929,7 +993,7 @@ with subtest('quiesce every writer before all encrypted snapshots'):
     assert all(not Path('/proc/' + str(item['pid'])).exists() for item in results['originalGuests'])
 
 with subtest('fresh empty disks restore the exact node identity and functional services'):
-    application_paths = [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']
+    application_paths = [GATEWAY_INPUTS, WEB_INPUTS, MEDIA, OUTBOX, '/var/lib/rancher/k3s/server', '/var/lib/rancher/k3s/storage', '/etc/rancher/node']
     if APPLICATIONS_ENABLED:
         application_paths += [VAULT_INPUTS, VAULT_STATE, VAULT_RELEASE, WIND_INPUTS, WIND_STATE]
     if DOCUMENSO_ENABLED:
@@ -1060,6 +1124,7 @@ with subtest('fresh empty disks restore the exact node identity and functional s
         results['restoredContainerMemory'] = {name: container_memory(name, limit) for name, limit in [
             ('terrace-documenso', 2147483648), ('terrace-windmill-server', 1610612736), ('terrace-windmill-worker', 1610612736)]}
         results['restoredPostgresConnectionsAfterConcurrentChecks'] = int(sql('select count(*) from pg_stat_activity', 'postgres'))
+    results['checks']['websiteLifecycleRestored'] = timed('websiteLifecycleRestored', lifecycle_restored)
     for machine in nodes:
         assert machine.succeed('cat /var/lib/unrelated-synthetic-sentinel').strip() == 'retained'
 

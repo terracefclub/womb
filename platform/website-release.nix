@@ -27,12 +27,14 @@
       test -x "$out/bin/start"
       ${pkgs.lib.optionalString (component == "cms") ''
         test -x "$out/bin/migrate"
+        test -x "$out/bin/sweep"
+        jq -e '.entrypoints.migrate == "bin/migrate" and .entrypoints.sweep == "bin/sweep"' "$out/release.json" >/dev/null
         test -d "$out/.next/cache"
         test -z "$(ls -A "$out/.next/cache")"
       ''}
     '';
 in {
-  inherit (pin) revision;
+  inherit (pin) revision migrations;
   web = bundle "web" webArchive;
   cms = bundle "cms" cmsArchive;
 }
