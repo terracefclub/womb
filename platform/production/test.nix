@@ -206,7 +206,8 @@ in {
           # same scans, so a zero below means absence, not a blind scan.
           canary = "terrace-scan-canary-" + os.urandom(24).hex()
           machine.succeed(f"echo {canary} >/run/terrace-scan/canary && echo {canary} >/var/tmp/terrace-scan-canary && sync")
-          machine.succeed(f"systemd-run --unit=terrace-scan-canary -p Description={canary} sh -c 'sleep 900' {canary}")
+          # The trailing `true` stops the shell from exec-ing sleep, which would drop the canary argument.
+          machine.succeed(f"systemd-run --unit=terrace-scan-canary -p Description={canary} sh -c 'sleep 900; true' {canary}")
           control = counts(machine, "/run/terrace-scan/canary", "/run/terrace-scan/canary", closure_scan=False)
           ok(all(int(value) > 0 for value in control.values()), f"{label}: canary found by every scan {control}")
           found = counts(machine, "/run/terrace-scan/all", "/run/terrace-scan/disk", closure_scan)
