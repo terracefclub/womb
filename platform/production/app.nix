@@ -202,8 +202,9 @@ in {
     networking.hosts."127.0.0.1" = cfg.publicHostnames;
 
     # Upstream keycloakPostgreSQLInit writes the role password through mktemp;
-    # give it a private tmpfs so the value never reaches the root disk.
-    systemd.services.keycloakPostgreSQLInit.serviceConfig.TemporaryFileSystem = "/tmp";
+    # give it a private tmpfs so the value never reaches the root disk. The unit
+    # runs as postgres, so the mount must be world-writable and sticky like /tmp.
+    systemd.services.keycloakPostgreSQLInit.serviceConfig.TemporaryFileSystem = "/tmp:mode=1777";
     # Before the first explicit migration the CMS and website are skipped, not
     # failed; a revision mismatch still fails through the module's own gate.
     systemd.services.terrace-cms.unitConfig.ConditionPathExists = migrated;

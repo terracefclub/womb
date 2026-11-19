@@ -66,6 +66,12 @@
             date -u +%FT%TZ >${marker}
           fi
           systemctl start terrace-production.target
+          # A writer whose dependency failed stays inactive, so report every failed unit.
+          failed=$(systemctl list-units --state=failed --plain --no-legend | cut -d' ' -f1 | tr '\n' ' ')
+          if [[ -n $failed ]]; then
+            echo "Adopted, but units failed: $failed" >&2
+            exit 1
+          fi
           echo 'Adopted: the writers start now and at every boot.'
           ;;
         status)
