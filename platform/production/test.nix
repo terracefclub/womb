@@ -106,7 +106,6 @@ in {
     builtins.readFile ../website-gateway/lifecycle_steps.py
     + ''
       import json, re, shlex, time
-      from pathlib import Path
 
       checks = []
       def ok(condition, label):
