@@ -263,7 +263,7 @@ let
     ++ check "unit dependencies: ${toString strayPulls}" (strayPulls == [])
     ++ check "systemd packages: ${toString (map lib.getName cfg.systemd.packages)}" (subset (map lib.getName cfg.systemd.packages) allowedSystemdPackages)
     ++ check "unit files through environment.etc: ${toString etcUnits}" (etcUnits == [])
-    ++ check "container or VM daemons" (!(lib.any (name: lib.attrByPath [name "enable"] false cfg.virtualisation) ["docker" "podman" "libvirtd" "containers" "incus" "cri-o"]))
+    ++ check "container or VM daemons" (lib.all (name: lib.isOption (system.options.virtualisation.${name}.enable or null) && !cfg.virtualisation.${name}.enable) p.forbiddenDaemons)
     ++ check "sudo rules" (lib.all (rule: subset (rule.users or []) ["root"] && subset (rule.groups or []) ["wheel"]) cfg.security.sudo.extraRules)
     ++ check "store paths in EnvironmentFile or LoadCredential: ${toString unitFiles}" (unitFiles == [])
     ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))

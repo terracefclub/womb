@@ -52,6 +52,8 @@
   config.systemd.services);
   # NixOS's own tmpfiles re-setup, with exactly its upstream credential list; nothing of ours imports any.
   importingUnits = {systemd-tmpfiles-resetup = ["tmpfiles.*" "loging.motd" "login.issue" "network.hosts" "ssh.authorized_keys.root"];};
+  # Fail closed when nixpkgs renames or removes one of the checked daemon options.
+  missingDaemonOptions = lib.filter (name: !(options.virtualisation ? ${name} && options.virtualisation.${name} ? enable && lib.isOption options.virtualisation.${name}.enable)) cfg.forbiddenDaemons;
   # Units that hold secrets in memory besides the writers.
   secretHolders = ["sops-install-secrets" "terrace-production-boot" "terrace-backup" "terrace-backup-check"] ++ cfg.writerHelpers;
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
@@ -165,6 +167,10 @@
       case "''${1:-}" in
         adopt)
           mode=''${2:-}
+          case "$mode" in
+            --new | --restored) ;;
+            *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored' >&2; exit 2 ;;
+          esac
           [[ -e ${marker} ]] && { echo 'Already adopted.'; exit 0; }
           case "$mode" in
             --new)
@@ -274,6 +280,13 @@ in {
       internal = true;
       description = "A path that exists once the host holds application state (adopt --new refuses it).";
     };
+    forbiddenDaemons = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = ["docker" "podman" "libvirtd" "containers" "incus" "cri-o" "waydroid"];
+      description = "virtualisation.<name> daemons a production host never runs; shared with the evaluation check.";
+    };
     adoptStabilitySeconds = lib.mkOption {
       type = lib.types.ints.between 5 120;
       default = 15;
@@ -381,8 +394,8 @@ in {
           message = "Terrace production needs immutable users, no emergency shell, SSH for the operator account only and sudo as the only privilege tool.";
         }
         {
-          assertion = (config.terrace.backup.targets.primary.enable or false) && !(lib.any (name: lib.attrByPath ["virtualisation" name "enable"] false config) ["docker" "podman" "libvirtd" "containers" "incus" "cri-o" "waydroid"]);
-          message = "Terrace production needs the primary backup target and runs no container or VM daemon.";
+          assertion = (config.terrace.backup.targets.primary.enable or false) && missingDaemonOptions == [] && !(lib.any (name: config.virtualisation.${name}.enable) cfg.forbiddenDaemons);
+          message = "Terrace production needs the primary backup target and runs no container or VM daemon (${toString cfg.forbiddenDaemons}); a daemon option that no longer exists fails closed: ${toString missingDaemonOptions}.";
         }
         {
           assertion = credentialSetters == [];

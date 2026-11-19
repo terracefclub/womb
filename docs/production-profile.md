@@ -255,6 +255,14 @@ procedure (G-22); this rehearsal is its technical basis.
   actually appear, for the rehearsal's values).
 - Units a package brings in that are not wanted at boot or by the production
   target, and anything started by hand.
+- Services enabled outside `services.<name>.enable`: daemons switched on through
+  `programs.*`, `networking.*` or `security.*` options are not enumerated
+  (only the unit, socket, listener and firewall checks would notice them).
+- A replacement adopted as new in two corner cases: when its backup repository
+  is unreachable and the operator uses `--first-deployment-without-repository`,
+  or when `adopt --new` runs on a replacement that never went through `rekey`
+  (so carries no replacement marker) and whose repository shows no snapshot
+  (for example one that was never initialised).
 - Runtime behaviour after adoption: the 15-second stability window runs at
   adopt time only. A writer that fails after a later reboot shows in
   `systemctl --failed` and nowhere else until alerting exists (G-23).
