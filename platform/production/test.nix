@@ -212,7 +212,7 @@ in {
           machine.succeed("rehearsal-patterns /run/terrace-scan/all --directory \"$(readlink /run/secrets)\" >/dev/null")
           machine.succeed("rehearsal-patterns /run/terrace-scan/disk --exclude-database --directory \"$(readlink /run/secrets)\" >/dev/null")
           # The host's age identity, derived from its SSH key, must appear nowhere either.
-          machine.succeed("ssh-to-age -private-key -i /etc/ssh/ssh_host_ed25519_key | tee -a /run/terrace-scan/all >>/run/terrace-scan/disk")
+          machine.succeed("${pkgs.ssh-to-age}/bin/ssh-to-age -private-key -i /etc/ssh/ssh_host_ed25519_key | tee -a /run/terrace-scan/all >>/run/terrace-scan/disk")
           count = int(machine.succeed("wc -l </run/terrace-scan/all").strip())
           ok(count >= 20, f"{label}: {count} value patterns")
           # Positive control: a non-secret canary planted in a unit description,
