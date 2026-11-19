@@ -295,14 +295,17 @@ the protocol, a closure-scan control string, and the stand-in for the installer
 that copies the staged host key. The production check rejects that harness.
 
 What the secret scans cover and exclude is in [secrets](secrets.md#verification).
-Verified 2026-11-19 on the Linux builder at commit `74fe3a4` with the pinned
+Verified 2026-11-19 on the Linux builder at commit `9189312` with the pinned
 `680ad56` bundles: evaluation check PASS (production app, static-network app,
-relay and rehearsal instance; 49 rejected variants); VM proof PASS in 502 s
-with 167 assertions, including the 198 shared protocol assertions and the
-unchanged original and replacement lifecycle steps; the cloud rehearsal check
-still passes. The all-services rehearsal passed at `2ce39bb`, after which no
-shared module changed. Not proven: a real provider host, real DNS and
-certificates, real secret values or an escrow retrieval with the owner.
+relay and rehearsal instance; 59 rejected variants); VM proof PASS in 605 s
+with 192 assertions, including the 198 shared protocol assertions, the
+unchanged original and replacement lifecycle steps and one boot of the
+production relay role; the cloud rehearsal check still passes. The
+all-services rehearsal passed at `2ce39bb`, after which no shared module
+changed. The relay role has been booted only in that VM proof (secrets, adoption,
+Headscale, HTTPS, redirect, backup), never on a provider. Not proven: a real
+provider host, real DNS and certificates, real secret values or an escrow
+retrieval with the owner.
 
 ## Out of scope, with what each needs
 
