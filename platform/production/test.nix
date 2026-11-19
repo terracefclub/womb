@@ -345,7 +345,7 @@ in {
           new_pids = app.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").split()
           ok(all(a != b for a, b in zip(pids, new_pids)), "CMS and website restarted by sops-install-secrets")
           app.fail("cmp -s /run/terrace-rotation/old /run/secrets/website/lifecycle-intake")
-          ok(app.succeed("grep -rlF -f /run/terrace-rotation/old /run/secrets.d/ | wc -l").strip() == "0", "old value gone from every secrets generation")
+          ok(files_with_values(app, "find /run/secrets.d -type f -print0", "/run/terrace-rotation/old") == "0", "old value gone from every secrets generation")
           intake_header("/run/secrets/website/lifecycle-intake", "/run/terrace-rotation/new-header")
           ok(intake_status("/run/terrace-rotation/old-header") == "403", "old value refused after rotation")
           ok(intake_status("/run/terrace-rotation/new-header") == "404", "new value accepted after rotation")
