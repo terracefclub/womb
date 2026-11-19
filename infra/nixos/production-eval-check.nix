@@ -315,5 +315,5 @@ in
   assert lib.assertMsg (positive.static == []) "Static-network app violations: ${toString positive.static}";
   assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";
   assert lib.assertMsg (positive.rehearsal == []) "Rehearsal instance violations: ${toString positive.rehearsal}";
-  assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)."]) "Production relay with a documentation address: ${toString relayDocumentation}";
+  assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)." "toplevel does not evaluate"]) "Production relay with a documentation address: ${toString relayDocumentation}";
   assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance hold every invariant; ${toString (builtins.length negatives)} rejected variants"
