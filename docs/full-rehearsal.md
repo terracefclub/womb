@@ -386,17 +386,18 @@ then redacts it. The receipt records `websiteLifecycleOriginal` and
 
 ### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
 
-Womb `dd29887` with the website `680ad56` bundles completed the `--all-services`
-rehearsal from 03:24 to 04:02 (scenario 1783.33 seconds), first attempt at that
-source. Both phases passed 198 HTTPS protocol assertions and the four concurrent
-native browser helpers. The website lifecycle passed 18, 83, 49, 39 and 64 bounded
-assertions before backup (23.33 s) and 18 and 61 after the originals-off restore
-(8.48 s), including the replacement CMS writing a new notice into the restored
-outbox and the sweep timer redacting the restored invitation file as the
-static-ID CMS account. PostgreSQL sampled peaks were 27 clients in both phases.
-Signed Documenso, Windmill (roster), Vaultwarden, K3s PVC, automation and tailnet
-recovery checks all passed; all seven guest lifetimes were absent at the end and
-the guard unit inactive. The run preserved its disks, repository and escrow.
+Womb `2ec399c` with the website `680ad56` bundles completed the `--all-services`
+rehearsal from 04:28 to 05:05 (scenario 1770.15 seconds). Both phases passed 198
+HTTPS protocol assertions and the four concurrent native browser helpers. The
+website lifecycle passed 18, 83, 49, 39 and 64 bounded assertions before backup
+(23.79 s) and 18 and 62 after the originals-off restore (8.12 s), including the
+replacement CMS writing a new notice into the restored outbox and the sweep timer
+redacting the restored invitation file as the static-ID CMS account. PostgreSQL
+sampled peaks were 25 and 27 clients. Signed Documenso, Windmill (roster),
+Vaultwarden, K3s PVC, automation and tailnet recovery checks all passed; all seven
+guest lifetimes were absent at the end and the guard unit inactive. The run
+preserved its disks, repository and escrow. At the same commit the cloud
+rehearsal configuration check passed, including its boot-timer rule.
 
 ### Observed all-services acceptance — November 5, 2026 (Pacific)
 
