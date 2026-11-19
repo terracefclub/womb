@@ -83,7 +83,8 @@ in {
       enable = true;
       role = "relay";
       publicHostnames = [relay.hostname];
-      publicTCPPorts = [22 443];
+      # Port 80 is the relay module's own HTTPS redirect (and ACME HTTP-01 later).
+      publicTCPPorts = [22 80 443];
       publicUDPPorts = [3478];
       writers = ["headscale" "nginx"];
       stateWitness = "/var/lib/headscale/db.sqlite";
@@ -93,11 +94,9 @@ in {
       enable = true;
       inherit (relay) hostname publicIPv4;
     };
-    # Static certificate from sops until ACME (G-12): onlySSL, so the relay module opens no port 80.
+    # Static certificate from sops until ACME (G-12); the relay module's redirect on port 80 stays.
     services.nginx.virtualHosts.${relay.hostname} = {
       enableACME = lib.mkForce false;
-      forceSSL = lib.mkForce false;
-      onlySSL = true;
       sslCertificate = "/run/credentials/nginx.service/terrace-relay-cert";
       sslCertificateKey = "/run/credentials/nginx.service/terrace-relay-key";
     };

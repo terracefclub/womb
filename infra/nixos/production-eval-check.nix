@@ -180,16 +180,34 @@ let
     ++ check "boot sockets: ${toString (bootUnits cfg "sockets")}" (sorted (bootUnits cfg "sockets") == sorted allowedBoot.sockets)
     ++ check "boot paths: ${toString (bootUnits cfg "paths")}" (bootUnits cfg "paths" == allowedBoot.paths)
     ++ check "boot targets: ${toString (bootUnits cfg "targets")}" (lib.subtractLists (map (t: t) bootTargets) (bootUnits cfg "targets") == allowedBoot.targets)
-    ++ check "boot target wants: ${toString (targetPulls cfg)}" (subset (targetPulls cfg) allowedBoot.targetPulls)
+    ++ check "boot target wants: ${toString (lib.subtractLists allowedBoot.targetPulls (targetPulls cfg))}" (subset (targetPulls cfg) allowedBoot.targetPulls)
     ++ check "gated services: ${toString (gatedUnits cfg "services")}" (gatedUnits cfg "services" == sorted p.writers)
     ++ check "gated timers: ${toString (gatedUnits cfg "timers")}" (gatedUnits cfg "timers" == sorted p.writerTimers)
-    ++ check "firewall" (cfg.networking.firewall.enable && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts) == [22 443] && lib.unique cfg.networking.firewall.allowedUDPPorts == (lib.optional (role == "relay") 3478))
+    ++ check "firewall" (cfg.networking.firewall.enable
+      && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts)
+      == (
+        if role == "relay"
+        then [22 80 443]
+        else [22 443]
+      )
+      && lib.unique cfg.networking.firewall.allowedUDPPorts == (lib.optional (role == "relay") 3478))
     ++ check "ssh policy" (cfg.services.openssh.enable && cfg.services.openssh.ports == [22] && cfg.services.openssh.settings.PermitRootLogin == "no" && !cfg.services.openssh.settings.PasswordAuthentication && !cfg.services.openssh.settings.KbdInteractiveAuthentication && cfg.services.openssh.settings.PermitEmptyPasswords == false && cfg.services.openssh.settings.AllowUsers == ["operator"] && map (k: k.type) cfg.services.openssh.hostKeys == ["ed25519"])
     ++ check "accounts: wheel ${toString wheel}" (!cfg.users.mutableUsers && wheel == ["operator"] && lib.all (user: lockedPassword user.hashedPassword && user.password == null && lockedPassword user.initialHashedPassword && user.initialPassword == null && user.hashedPasswordFile == null) users)
     ++ check "sudo rules" (lib.all (rule: subset (rule.users or []) ["root"] && subset (rule.groups or []) ["wheel"]) cfg.security.sudo.extraRules)
     ++ check "store paths in EnvironmentFile or LoadCredential: ${toString unitFiles}" (unitFiles == [])
     ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))
-    ++ check "nginx vhosts: ${toString (lib.attrNames vhosts)}" (sorted (lib.attrNames vhosts) == sorted expectedVhosts && lib.all (vhost: vhost.onlySSL && !vhost.forceSSL && !vhost.addSSL && vhost.listen == [] && vhost.listenAddresses == []) (lib.attrValues vhosts))
+    ++ check "nginx vhosts: ${toString (lib.attrNames vhosts)}" (sorted (lib.attrNames vhosts)
+      == sorted expectedVhosts
+      && lib.all (vhost:
+        (
+          if role == "relay"
+          then vhost.forceSSL && !vhost.onlySSL
+          else vhost.onlySSL && !vhost.forceSSL
+        )
+        && !vhost.addSSL
+        && !vhost.enableACME
+        && vhost.listen == []
+        && vhost.listenAddresses == []) (lib.attrValues vhosts))
     ++ check "core dumps" (!cfg.systemd.coredump.enable && lib.hasSuffix "/bin/false" cfg.boot.kernel.sysctl."kernel.core_pattern")
     ++ check "secret inventory: ${toString (lib.attrNames cfg.sops.secrets)}" (p.instance != "production" || sorted (lib.attrNames cfg.sops.secrets) == delivered role)
     ++ check "world-readable or non-root secret" (lib.all (item: item.mode == "0400" && item.owner == null && item.group == null) sops)

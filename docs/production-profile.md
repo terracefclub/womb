@@ -15,7 +15,7 @@ already prove ([access relay](access-relay.md), [cloud rehearsal](cloud-rehearsa
 | Role | Module | Runs | Public ports |
 | --- | --- | --- | --- |
 | `app` | `platform/production/app.nix` | PostgreSQL 18, Keycloak (identity), CMS and website, the HTTPS gateway (nginx), backup | TCP 22, 443 |
-| `relay` | `platform/production/relay.nix` | Headscale with embedded DERP behind nginx, backup | TCP 22, 443; UDP 3478 |
+| `relay` | `platform/production/relay.nix` | Headscale with embedded DERP behind nginx, backup | TCP 22, 80 (the relay module's HTTPS redirect; ACME later), 443; UDP 3478 |
 
 Alternatives considered:
 
@@ -129,7 +129,8 @@ for the stated reason:
   overridden); no `extraCommands`, `extraInputRules` or nftables tables;
   PostgreSQL, Keycloak (HTTP and management), Headscale (API, metrics, gRPC),
   the CMS and the website listen on loopback; nginx has exactly the role's
-  virtual hosts, TLS only, no extra listeners.
+  virtual hosts, TLS only on the app and HTTPS with the module's redirect on the
+  relay, no extra listeners.
 - **Accounts and access**: immutable users; no password on any account (only
   locked markers); `wheel` is exactly `operator`; sudo rules only for `wheel`;
   SSH key-only, `AllowUsers operator`, no `extraConfig`, one ed25519 host key;
