@@ -474,6 +474,8 @@ in {
       with subtest("stop owned guests"):
           app.shutdown()
           operator.shutdown()
+      # Labels carry counts and names only, never values.
+      print("PRODUCTION-CHECKS " + json.dumps(checks))
       print("PRODUCTION-PROOF " + json.dumps({"assertions": len(checks), "protocolAssertions": assertions, "seconds": round(time.time() - started_at, 2), "timings": timings}))
     '';
 }
