@@ -193,7 +193,9 @@ in {
             source.succeed(change)
             source.fail("systemctl start terrace-cms-migrate.service")
             assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
-            source.succeed(undo + "; systemctl reset-failed terrace-cms-migrate.service terrace-website-inputs.service")
+            # Each refused start also starts the namespace journal sync unit; four refusals within
+            # ten seconds would otherwise trip that unit's default start limit, not the gate under test.
+            source.succeed(undo + "; systemctl reset-failed terrace-cms-migrate.service terrace-website-inputs.service systemd-journald-sync@terrace-apps.service")
         source.succeed("systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
         source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value | grep -v '^$' >/var/lib/terrace-cms/old-pids && systemctl start terrace-cms-migrate.service && test -f /var/lib/terrace-cms/stop-verified")
         source.fail("systemctl is-active --quiet terrace-cms.service")
