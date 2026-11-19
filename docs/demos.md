@@ -3,8 +3,9 @@
 On November 2, 2026, the Linux check passed all nine scenarios with the measured
 limits in 317.38 seconds. The resulting VM test artifact on the builder is
 `/nix/store/hlf1l4q4d902yfycj9fgkbyxs74m34x0-vm-test-run-terrace-synthetic-demos`.
-Deployment and individual access are tracked in [issue #10](https://gitlab.com/terrace/tech/womb/-/issues/10).
-Real hardware and device integration are tracked in [issue #9](https://gitlab.com/terrace/tech/womb/-/issues/9).
+Deployment and individual access (historical [GitLab #10](https://gitlab.com/terrace/tech/womb/-/issues/10))
+and real hardware and device integration (historical [GitLab #9](https://gitlab.com/terrace/tech/womb/-/issues/9))
+are tracked in GitHub [Womb #13](https://github.com/terracefclub/womb/issues/13).
 
 `platform/demos.nix` is an optional NixOS module (`terrace.demos.enable`, default
 off) that runs the kept home services against made-up data so people can see them

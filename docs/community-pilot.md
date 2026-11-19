@@ -1,5 +1,7 @@
 # Terrace private community pilot
 
+> **Superseded (2026-11-18).** This HumHub proposal (2026-10-28) was not adopted. The accepted decision is the Payload and SvelteKit pilot: approved Keycloak members, collections stored in the CMS PostgreSQL database, no separate community application or database. See the website repository documents [`web/docs/community.md`](https://github.com/terracefclub/tfc-website/blob/dev/web/docs/community.md), [`cms/COMMUNITY.md`](https://github.com/terracefclub/tfc-website/blob/dev/cms/COMMUNITY.md) and [`docs/member-lifecycle.md`](https://github.com/terracefclub/tfc-website/blob/dev/docs/member-lifecycle.md), and [backlog item 15](backlog.md). Everything below is kept as the historical option analysis; its HumHub, MariaDB and module recommendations are not the plan.
+
 Checked: 2026-10-28. Status: proposed technical decision, based on current primary sources; no deployment or runtime testing performed.
 
 **Pilot HumHub Community Edition alongside the public Payload/SvelteKit website.** It matches the selected audience—current members and alumni—and the selected features: member profiles, stories, groups and opt-in mentorship. Keep community data and administration separate from the public CMS. Use existing software and configuration before developing social features in Payload.

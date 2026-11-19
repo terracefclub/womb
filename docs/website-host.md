@@ -1,5 +1,7 @@
 # Optional native website host
 
+> **Note, 2026-11-18.** The pinned bundles and the six-migration ledger described here are website `3902e16`. Website `dev` is now `8883875`: it has eight migrations (adding the WordPress import and member-lifecycle migrations) and new required variables (`LIFECYCLE_*`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER` with `XFF_DEPTH`; see the website `docs/member-lifecycle.md`). Womb's pins and hashes are deliberately unchanged here; building new bundles and re-pinning is tracked work and has not been done.
+
 This disabled-by-default module runs the accepted TFC website and CMS bundles
 as separate native NixOS services. It adds no gateway, public listener, DNS,
 account, cloud resource or deployment profile. The existing single-node K3s
@@ -54,8 +56,8 @@ reviewed revision. Do not grant the application users access to these files;
 systemd reads them before dropping privileges. Never print their contents or
 credential-bearing process environments during diagnosis.
 
-Follow the [TFC runtime contract](https://gitlab.com/terrace/tech/tfc-website/-/blob/dev/tools/release/README.md)
-and [public policy](https://gitlab.com/terrace/tech/tfc-website/-/blob/dev/cms/README.md).
+Follow the [TFC runtime contract](https://github.com/terracefclub/tfc-website/blob/dev/tools/release/README.md)
+and [public policy](https://github.com/terracefclub/tfc-website/blob/dev/cms/README.md).
 Both complete CMS editorial/member OIDC configurations are required for the
 intended host; use per-user SSO and omit all bootstrap variables. Website
 `ORIGIN` must equal `MEMBER_AUTH_ORIGIN`; select explicit CMS/content origins.

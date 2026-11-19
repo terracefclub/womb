@@ -163,6 +163,8 @@ once backups are added.
 
 ### Recommendation: option A
 
+> **Sizing discrepancy, 2026-11-18.** The defaults below (CX23 and CX43) are unchanged in `infra/cloud`, but the Hetzner rehearsals ran a CPX22 relay and a CPX42 application host in `nbg1`, because the CX line showed unavailable (2026-10-31) and the Rescue install path was proven on CPX types. A CPX42 alone is $81.99 per month at the list price above, over the ceiling. Production sizing, region and creation path are an owner decision that is still open; nothing here or in the code defaults has been changed to reflect the rehearsals.
+
 Defaults in `infra/cloud`: relay `cx23` in `hel1`, application `cx43` in
 `nbg1`, provider backups on both. Steady state **$37.18/month**, worst overlap
 month **$44.77**, which is $35.23 under the ceiling, and $53.28 even with 19% VAT.
