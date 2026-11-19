@@ -396,18 +396,23 @@ receipt records each step's seconds.
 
 ### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
 
-Womb `2ec399c` with the website `680ad56` bundles completed the `--all-services`
-rehearsal from 04:28 to 05:05 (scenario 1770.15 seconds). Both phases passed 198
+Womb `48ab695` with the website `680ad56` bundles completed the `--all-services`
+rehearsal from 06:13 to 06:58 (scenario 1840.51 seconds). Both phases passed 198
 HTTPS protocol assertions and the four concurrent native browser helpers. The
-website lifecycle passed 18, 83, 49, 39 and 64 bounded assertions before backup
-(23.79 s) and 18 and 62 after the originals-off restore (8.12 s), including the
-replacement CMS writing a new notice into the restored outbox and the sweep timer
-redacting the restored invitation file as the static-ID CMS account. PostgreSQL
-sampled peaks were 25 and 27 clients. Signed Documenso, Windmill (roster),
-Vaultwarden, K3s PVC, automation and tailnet recovery checks all passed; all seven
-guest lifetimes were absent at the end and the guard unit inactive. The run
-preserved its disks, repository and escrow. At the same commit the cloud
-rehearsal configuration check passed, including its boot-timer rule.
+shared lifecycle steps took, before backup: apply 15.48 s, approve 1.80 s, redeem
+0.66 s, sign-in 0.82 s, link 0.91 s (25.69 s with content and the second address);
+on the replacement: ownership 0.11 s, redeem of the restored pending token 0.63 s,
+sign-in 0.88 s, link 0.81 s, erase of both members 3.23 s, sweep by the timer
+6.39 s and redaction 0.10 s (13.10 s with content). PostgreSQL sampled peaks were
+25 and 29 clients. Signed Documenso, Windmill (roster), Vaultwarden, K3s PVC,
+automation and tailnet recovery checks all passed; all seven guest lifetimes were
+absent at the end, the guard unit inactive and the driver's GC root released. The
+run preserved its disks, repository and escrow. At the same commit the cloud
+rehearsal configuration check and the infrastructure unit tests passed.
+
+An earlier attempt at `ed08c4c` failed when the replacement automation guest
+could not start: the builder's scheduled garbage collection (05:59 to 06:01)
+deleted its unrooted closure mid-run. `48ab695` roots the driver for the run.
 
 ### Observed all-services acceptance — November 5, 2026 (Pacific)
 

@@ -128,12 +128,12 @@ before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
 
-Verified 2026-11-19 on the shared Linux builder at Womb `2ec399c` with the
-`680ad56` bundles (04:25 to 04:28 Pacific, prebuilt closure): 198 HTTPS protocol
+Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
+`680ad56` bundles (06:10 to 06:13 Pacific, prebuilt closure): 198 HTTPS protocol
 assertions, the Chromium account switch, and lifecycle stages of 18 (content),
-83 (application limit), 49 (second address), 39 (approval), 64 (redemption and
-linking) and 62 (erasure) bounded assertions, the sweep-timer redaction and the
-packaged-sweep negative case all passed.
+83 (application limit), 49 (second address), 40 (approval), 15 (redemption),
+24 (sign-in), 28 (link) and 63 (erasure) bounded assertions, the sweep-timer
+redaction and the packaged-sweep negative case all passed.
 
 ## Remaining activation and cost gates
 

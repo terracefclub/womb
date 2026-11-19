@@ -244,15 +244,15 @@ restores the outbox with identical bytes, owner and modes. It measures migration
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
 
-Verified 2026-11-19 on the shared Linux builder at Womb `2ec399c` with the
-`680ad56` bundles (04:21 to 04:25 Pacific, prebuilt closure): the two-guest test
+Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
+`680ad56` bundles (06:06 to 06:10 Pacific, prebuilt closure): the two-guest test
 passed with 37 actual non-system CMS tables and the eleven-migration ledger in
-pinned order. Explicit migration took 5.18 s, encrypted backup 8.72 s, complete
-repository check 5.22 s, isolated restore 4.31 s and recovered HTTP verification
-9.96 s. The sweep service, its schedule and timer catch-up, its wait behind a slow
+pinned order. Explicit migration took 6.02 s, encrypted backup 8.34 s, complete
+repository check 4.95 s, isolated restore 5.43 s and recovered HTTP verification
+11.77 s. The sweep service, its schedule and timer catch-up, its wait behind a slow
 migration, and the outbox restore (bytes, static owner, modes, and a read and
-write by the CMS account) passed. Source cgroup peaks were 82.1 MiB CMS, 47.0 MiB
-website and 125.3 MiB PostgreSQL.
+write by the CMS account) passed. Source cgroup peaks were 81.9 MiB CMS, 47.5 MiB
+website and 125.4 MiB PostgreSQL.
 
 Verified2026-11-03 on the shared Linux builder (historical, website `3902e16`): the final two-guest test passed
 in83.34seconds with25actual non-system CMS tables and an unchanged six-migration
