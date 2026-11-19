@@ -214,6 +214,9 @@ in {
       # Its CREATE ROLE carries the cleartext password: if it ever failed, PostgreSQL would
       # log the statement text. This session never logs statements.
       environment.PGOPTIONS = "-c log_min_error_statement=panic -c log_statement=none -c log_min_duration_statement=-1";
+      # Upstream runs `psql --file` without ON_ERROR_STOP, so a failed CREATE ROLE still
+      # exits 0 and the unit reports success with no role. Make psql fail loudly.
+      environment.PSQLRC = "${pkgs.writeText "terrace-keycloak-init-psqlrc" "\\set ON_ERROR_STOP on\n"}";
     };
     systemd.services.terrace-cms-migrate.serviceConfig.LimitCORE = 0;
     systemd.services.terrace-cms-sweep.serviceConfig.LimitCORE = 0;
