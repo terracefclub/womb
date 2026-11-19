@@ -191,7 +191,7 @@ operator-generated host key (see [secrets](secrets.md#bootstrap-of-a-brand-new-h
 - Evaluation check (no builds; builder, shared lock):
   `nix eval --raw --impure --option builders "" --file infra/nixos/production-eval-check.nix`
 - VM proof (builder; the wrapper takes the shared lock itself):
-  `BUILD_LOCK=$HOME/.falcon-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
+  `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`
 
 Verified 2026-11-19 on the Linux builder at commit `2ce39bb` with the pinned
