@@ -100,6 +100,25 @@ class RunnerTests(unittest.TestCase):
         args = json.loads(self.record.read_text())
         self.assertEqual(args[0:2], ["build", "synthetic-check"])
         self.assertEqual(args[args.index("--timeout") + 1], "2")
+        self.assertIn("--no-link", args)
+        self.unlocked()
+
+    def test_optional_out_link_roots_the_result_in_a_private_directory(self):
+        self.fake("open(os.environ['RECORD'],'w').write(json.dumps(sys.argv[1:]))\n")
+        private = self.root / "run"
+        private.mkdir(mode=0o700)
+        code, _, _ = self.result(self.start(CHECK_OUT_LINK=str(private / "driver")))
+        self.assertEqual(code, 0)
+        args = json.loads(self.record.read_text())
+        self.assertEqual(args[args.index("--out-link") + 1], str(private / "driver"))
+        self.assertNotIn("--no-link", args)
+        self.record.unlink()
+        private.chmod(0o755)
+        for link in [str(private / "driver"), "relative/driver", str(private) + "/../run/driver"]:
+            with self.subTest(link=link):
+                code, out, _ = self.result(self.start(CHECK_OUT_LINK=link))
+                self.assertEqual(code, 2)
+                self.assertFalse(self.record.exists())
         self.unlocked()
 
     def test_invalid_limits_do_not_start_a_child_or_echo_input(self):

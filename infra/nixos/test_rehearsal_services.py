@@ -210,9 +210,49 @@ class ServiceProofTests(unittest.TestCase):
                 self.assertIn(name + ".timer", units)
             for unit in ("documenso-test-mailpit.service", "terrace-vaultwarden-migration-server.service",
                          "terrace-identity-health.timer", "cloud-rehearsal-inputs.service",
+                         "terrace-cms-sweep.timer", "terrace-cms-sweep.service",
                          "postgresql-setup.service", *(name + ".service" for name in services.APP_SETUP)):
                 self.assertEqual(unit in units, role == "app")
             self.assertEqual("cloud-rehearsal-relay-address.service" in units, role == "relay")
+
+
+    def test_lifecycle_steps_parse_and_fail_with_one_fixed_label_each(self):
+        for steps in (services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS, services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS):
+            labels = [label for label, _, _ in steps]
+            self.assertEqual(len(labels), len(set(labels)))
+            for label, seconds, script in steps:
+                self.assertTrue(label.isascii() and 0 < seconds <= 300)
+                result = subprocess.run(["bash", "-n"], input=(services.lifecycle_steps.LIFECYCLE_PROLOGUE + script).encode(),
+                                        capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual([label for label, _, _ in services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS],
+                         ["apply", "approve", "redeem", "sign-in", "link"])
+        self.assertEqual([label for label, _, _ in services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS],
+                         ["ownership", "redeem", "sign-in", "link", "erase", "sweep", "redaction"])
+        for phase, steps in (("original", services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS),
+                             ("replacement", services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS)):
+            for failing, _, _ in steps:
+                calls = []
+
+                def run(stage, script, *args, seconds=30, failing=failing, calls=calls):
+                    calls.append((stage, args, seconds))
+                    if stage.endswith("-" + failing):
+                        raise services.Rejected(f"app {stage} failed")
+
+                with self.subTest(phase=phase, step=failing), self.assertRaises(services.Rejected) as raised:
+                    services.lifecycle(SimpleNamespace(role="app", run=run), phase)
+                self.assertEqual(str(raised.exception), f"app website-lifecycle-{phase}-{failing} failed")
+                self.assertTrue(all(args == (services.CA,) for _, args, _ in calls))
+                self.assertEqual(calls[-1][0], f"website-lifecycle-{phase}-{failing}")
+        with self.assertRaises(services.Rejected):
+            services.lifecycle(SimpleNamespace(role="app", run=lambda *args, **kwargs: None), "unknown")
+
+    def test_restore_covers_the_outbox_and_sweep_stays_off_until_bootstrap(self):
+        self.assertIn(services.OUTBOX, services.APP_PATHS)
+        self.assertIn(services.OUTBOX, services.APP_SIGNATURE)
+        self.assertLess(services.BOOTSTRAP_APP.index("systemctl start terrace-cms.service"),
+                        services.BOOTSTRAP_APP.index("systemctl start terrace-cms-sweep.timer"))
+        self.assertTrue(services.STOP_APP.lstrip().startswith("systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service"))
 
 
 if __name__ == "__main__":

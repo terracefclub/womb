@@ -37,6 +37,22 @@ For the gateway, use `--argstr role gateway` and supply
 `--arg webArchive /absolute/reviewed/web.tar.gz`,
 `--arg cmsArchive /absolute/reviewed/cms.tar.gz` and
 `--argstr tfcSource /absolute/reviewed/tfc-source` in place of `privateIPv4`.
+The source must be a checkout of the website at the pinned revision in
+`platform/website-release.json`: its identity contract files are hash-checked
+against `platform/test-identity-contract.nix`. The gateway profile keeps the
+daily CMS sweep timer off at boot like every other writer, and the service
+proof arms it after adoption.
+
+The service proof also runs the website lifecycle steps in
+`platform/website-gateway/lifecycle_steps.py`: before backup, two applications
+(from the host's own address through the gateway, five accepted and a sixth
+rate-limited), two approvals into the outbox, and one redemption, sign-in and
+automatic link; after the restore, the other (restored, still pending) invitation
+is redeemed once, signed in and linked, both members are erased, the sweep timer
+runs, and the restored outbox must be owned, written and redacted by the CMS
+account. Each step fails with one fixed label (`website-lifecycle-<phase>-<step>`).
+These exact scripts are proven in the VM all-services rehearsal
+([full-rehearsal.md](full-rehearsal.md)); **they have not yet run on a provider**.
 The three matching outputs are `config.system.build.diskoScript`,
 `config.system.build.toplevel` and `config.system.build.nixos-install`.
 Build each under the shared Linux builder lock with

@@ -15,9 +15,14 @@ import sys
 import tempfile
 import time
 
+# The website lifecycle steps are shared verbatim with the VM all-services rehearsal.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "platform" / "website-gateway"))
+import lifecycle_steps  # noqa: E402
+
 
 CA = "/var/lib/terrace-rehearsal-trust/ca.pem"
 GATEWAY_INPUTS = "/var/lib/terrace-gateway-test"
+OUTBOX = "/var/lib/terrace-cms-outbox"
 ROLES = ("app", "relay")
 APP_WRITERS = (
     "postgresql", "keycloak", "nginx", "k3s", "terrace-web", "terrace-cms",
@@ -30,7 +35,7 @@ APP_ONESHOTS = (
     "terrace-documenso-bootstrap", "terrace-windmill-migrate", "terrace-windmill-bootstrap",
     "terrace-vaultwarden-migrate", "terrace-vaultwarden-migration-server",
     "terrace-vaultwarden-bootstrap", "terrace-vaultwarden-guard", "terrace-identity-health",
-    "documenso-test-mailpit",
+    "documenso-test-mailpit", "terrace-cms-sweep",
 )
 APP_SETUP = (
     "terrace-documenso-inputs", "terrace-documenso-database", "terrace-documenso-image",
@@ -40,7 +45,7 @@ APP_SETUP = (
 RELAY_SETUP = ("cloud-rehearsal-relay-address",)
 BACKUP_UNITS = ("terrace-backup", "terrace-backup-check", "terrace-backup-freshness")
 APP_PATHS = (
-    GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media",
+    GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media", OUTBOX,
     "/var/lib/rancher/k3s/server", "/var/lib/rancher/k3s/storage", "/etc/rancher/node",
     "/var/lib/terrace-documenso-inputs", "/var/lib/terrace-documenso",
     "/var/lib/terrace-windmill-inputs", "/var/lib/terrace-windmill",
@@ -110,6 +115,8 @@ truncate -s 0 "$envfile"
 chmod 0400 "$envfile"
 systemctl start terrace-cms-migrate.service
 systemctl start terrace-cms.service terrace-web.service
+# The daily lifecycle sweep is a writer too: armed only after explicit bootstrap.
+systemctl start terrace-cms-sweep.timer
 systemctl start k3s.service
 wait_for k3s kubectl wait --for=condition=Ready node/gateway --timeout=5s
 local_retain() {
@@ -156,6 +163,13 @@ done
 for table in users ciphers attachments; do
   sql terrace_vaultwarden "select md5(coalesce(string_agg(row_to_json(r)::text,chr(10) order by row_to_json(r)::text),'')) from $table r"
 done
+sql terrace_cms "select md5(coalesce(string_agg(row_to_json(a)::text,chr(10) order by a.id),'')) from member_applications a"
+# Live invitation links exist only in this private mirror: owner, modes and bytes.
+cd /var/lib/terrace-cms-outbox
+stat -c '%U %a' .
+find . -type f -printf '%P %U %m\n' | LC_ALL=C sort
+find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum
+cd /
 sha256sum /var/lib/terrace-website-inputs/*.env \
   /var/lib/terrace-documenso-inputs/secrets.json \
   /var/lib/terrace-windmill-inputs/bootstrap.json /var/lib/terrace-windmill/migrated-image \
@@ -196,6 +210,7 @@ k3s kubectl get node gateway -o jsonpath='{.metadata.uid}{"\n"}'
 k3s kubectl get pvc rehearsal -o jsonpath='{.spec.volumeName}{"\n"}'
 """
 STOP_APP = r"""
+systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service
 systemctl stop vaultwarden.service
 systemctl stop podman-terrace-windmill-worker.service
 systemctl stop podman-terrace-windmill-server.service
@@ -441,13 +456,25 @@ def inactive(host, names):
     timers = BACKUP_UNITS
     if host.role == "app":
         services += (*APP_ONESHOTS, *APP_SETUP)
-        timers += ("terrace-identity-health",)
+        timers += ("terrace-identity-health", "terrace-cms-sweep")
         if "postgresql" in names:
             services += ("postgresql-setup",)
     else:
         services += RELAY_SETUP
     host.run("writer-absence", INACTIVE, *(name + ".service" for name in services),
              *(name + ".timer" for name in timers))
+
+
+def lifecycle(host, phase):
+    """Run the shared website lifecycle steps; a failure names only its phase and step."""
+    require(phase in ("original", "replacement"), "lifecycle phase rejected")
+    steps = lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS if phase == "original" else lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS
+    timings = {}
+    for label, seconds, script in steps:
+        before = time.monotonic()
+        host.run(f"website-lifecycle-{phase}-{label}", lifecycle_steps.LIFECYCLE_PROLOGUE + script, CA, seconds=seconds)
+        timings[label] = round(time.monotonic() - before, 2)
+    return timings
 
 
 def bootstrap_app(host):
@@ -532,6 +559,7 @@ def original(app, relay, inputs, verify_repository):
     app.run("synthetic-media", MEDIA_FIXTURE)
     node = pvc(app, "original")
     assertions = protocol(app, "")
+    lifecycle_timings = lifecycle(app, "original")
     replicas = quiesce(app, relay)
     signature = app_signature(app)
     app.run("repository-init", "terrace-backup init primary", seconds=90, repository=True)
@@ -545,7 +573,7 @@ def original(app, relay, inputs, verify_repository):
         "verified": True, "servers": sorted([app.id, relay.id]), "snapshots": snapshots,
         "repositoryConfigSha256": repo_hash, "inputSha256": {name: digest(value) for name, value in inputs.items()},
         "gatewaySignature": signature, "relaySignature": relay_signature, "pvc": node,
-        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True,
+        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True, "websiteLifecycleSeconds": lifecycle_timings,
         "writersStopped": True,
     }
 
@@ -580,11 +608,12 @@ install -m 0600 -o headscale -g headscale \
     require(bootstrap_relay(relay) == backup["relaySignature"], "restored relay identity changed")
     assertions = protocol(app, "-restored")
     require(assertions == backup["protocolAssertions"], "restored protocol assertion count changed")
+    lifecycle_timings = lifecycle(app, "replacement")
     quiesce(app, relay)
     stop_database(app)
     return {
         "servers": sorted([app.id, relay.id]), "protocolAssertions": assertions,
-        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True,
+        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True, "websiteLifecycleSeconds": lifecycle_timings,
         "relayIdentityAndPrivateHTTPS": True, "writersStopped": True,
     }
 

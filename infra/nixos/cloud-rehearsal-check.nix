@@ -10,7 +10,7 @@ let
     terrace.hetzner.authorizedKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEoUtCnNlZBsJyHCk+HjpH1L4sIv9N4G3mFVL/+UuUYQ test-only"];
   };
   stub = pkgs.writeText "rehearsal-eval-only" "";
-  gateway =
+  gatewayWith = extra:
     (lib.nixosSystem {
       inherit system;
       modules = [
@@ -24,8 +24,12 @@ let
           };
           contract = stub;
         })
+        extra
       ];
     }).config;
+  gateway = gatewayWith {};
+  # Every timer the gateway modules define must stay off at boot; the bootstrap arms them.
+  bootTimers = cfg: lib.filter (name: cfg.systemd.timers.${name}.wantedBy != []) (lib.attrNames cfg.systemd.timers);
   relayFor = privateIPv4:
     (import ./rehearsal-config.nix {
       inherit localModule privateIPv4;
@@ -51,7 +55,12 @@ in
   assert check gateway && check relay;
   assert gateway.services.k3s.enable && lib.versions.major (lib.getVersion gateway.services.postgresql.package) == "18";
   assert gateway.terrace.windmill.membershipRuntime && gateway.terrace.documenso.enableSigning;
-  assert noBoot gateway ["postgresql" "nginx" "keycloak" "k3s" "terrace-web" "terrace-cms" "terrace-documenso" "vaultwarden" "podman-terrace-windmill-server" "podman-terrace-windmill-worker" "cloud-rehearsal-inputs"];
+  assert noBoot gateway ["postgresql" "nginx" "keycloak" "k3s" "terrace-web" "terrace-cms" "terrace-cms-migrate" "terrace-cms-sweep" "terrace-documenso" "vaultwarden" "podman-terrace-windmill-server" "podman-terrace-windmill-worker" "cloud-rehearsal-inputs"];
+  # Only operating-system maintenance that touches no application state may run at boot;
+  # any new timer fails closed until it is listed here or forced off in the profile.
+  assert lib.assertMsg (bootTimers gateway == ["fstrim" "logrotate"]) "Boot-enabled gateway timers: ${toString (bootTimers gateway)}";
+  # The check itself must reject a profile that boots the sweep timer.
+  assert builtins.elem "terrace-cms-sweep" (bootTimers (gatewayWith {systemd.timers.terrace-cms-sweep.wantedBy = lib.mkOverride 10 ["timers.target"];}));
   assert gateway.systemd.targets.postgresql.wantedBy == [];
   assert builtins.elem (import ../../platform/full/probe-image.nix {inherit pkgs;}) gateway.services.k3s.images;
   assert gateway.environment.etc."rehearsal-probe.yaml".source == ../../platform/full/probe.yaml;

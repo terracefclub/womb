@@ -25,6 +25,8 @@ export function createIdentityFixture(options: FixtureOptions = {}) {
   write(`${directory}/keycloak.env`, `KC_BOOTSTRAP_ADMIN_USERNAME=gateway-fixture-bootstrap\nKC_BOOTSTRAP_ADMIN_PASSWORD=${adminPassword}\n`)
   write(`${directory}/db-password`, secret())
   const issuer = 'https://identity.terrace.invalid/realms/terrace'
+  // One shared apply/redeem intake secret, identical on both components by design.
+  const intake = secret()
   write(`${inputs}/cms.env`, `PAYLOAD_SECRET=${secret()}
 CMS_PUBLIC_DEPLOYMENT=1
 CMS_ORIGIN=https://cms.terrace.invalid
@@ -40,6 +42,7 @@ MEMBER_AUTH_CLIENT_ID=terrace-web
 MEMBER_AUTH_AUDIENCE=terrace-community
 MEMBER_AUTH_INTROSPECTION_CLIENT_ID=terrace-community
 MEMBER_AUTH_INTROSPECTION_SECRET=${credentials.introspectionSecret}
+LIFECYCLE_INTAKE_SECRET=${intake}
 `)
   write(`${inputs}/web.env`, `CMS_ORIGIN=https://cms.terrace.invalid
 CONTENT_SOURCE=cms
@@ -48,6 +51,7 @@ MEMBER_AUTH_ORIGIN=https://web.terrace.invalid
 MEMBER_AUTH_ISSUER=${issuer}
 MEMBER_AUTH_CLIENT_ID=terrace-web
 MEMBER_AUTH_CLIENT_SECRET=${credentials.webSecret}
+LIFECYCLE_INTAKE_SECRET=${intake}
 `)
   return { extraSecrets, users, issuer, directory, inputs }
 }

@@ -215,6 +215,8 @@ in {
       ];
       systemd.targets.postgresql.wantedBy = lib.mkForce [];
       systemd.timers.terrace-identity-health.wantedBy = lib.mkForce [];
+      # Armed only by the explicit bootstrap; a blank or replacement boot starts no writer.
+      systemd.timers.terrace-cms-sweep.wantedBy = lib.mkForce [];
       environment.etc =
         {
           "rehearsal-pg-directory".text = config.services.postgresql.dataDir;
@@ -362,5 +364,6 @@ in {
       then "True"
       else "False"
     }\n"
+    + builtins.readFile ../website-gateway/lifecycle_steps.py
     + builtins.readFile ./scenario.py;
 }

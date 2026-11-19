@@ -35,6 +35,7 @@ before real data is loaded.** Until then "TBD" means nobody is responsible.
 
 Note (2026-11-18): the accepted community pilot is Payload and SvelteKit, whose community collections live in the CMS database (`cms`), so the CMS row covers them. `community` was the database name in the superseded HumHub plan ([community pilot](community-pilot.md)); it remains only as an example and as a synthetic test database in `platform/backup-test.nix`. Choose the real database list when the production host profile is written.
 
+| CMS lifecycle outbox | `/var/lib/terrace-cms-outbox` (`terrace.website.outboxDirectory`, `0700` CMS account; holds live invitation links) | restic file backup via `extraPaths.website-outbox`, added automatically by the website module; sha256 manifest | TBD | same | sha256; the website VM test and the full rehearsal also compare bytes, owner and modes after restore |
 | Keycloak database (`keycloak`) | same cluster | same | TBD | same | Table counts plus a separate [actual schema/issuer/signing-key recovery check](identity-recovery.md), with no real accounts |
 | PostgreSQL roles | same cluster | `pg_dumpall --globals-only` (contains password hashes; protected by repository encryption) | TBD | same | Roles restored first; database owners checked in the VM test |
 | CMS and community media | `terrace.backup.media` paths (default budget: 5 GB, a planning figure from the superseded community pilot) | restic file backup, taken after the database dump; sha256 manifest | TBD | same | sha256 and file count per directory |

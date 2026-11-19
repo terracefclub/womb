@@ -85,6 +85,7 @@ in {
       networking.firewall.allowedTCPPorts = [5432 8088 9000 13048 14294];
       environment.systemPackages = [pkgs.curl pkgs.jq pkgs.netcat-openbsd pkgs.python3 pkgs.postgresql_18];
       environment.etc."gateway-protocol.py".source = ./website-gateway/protocol.py;
+      environment.etc."gateway-content.sql".source = ./website-gateway/content.sql;
     };
     client = {nodes, ...}: {
       imports = [./website-gateway.nix ./identity.nix];
@@ -97,6 +98,8 @@ in {
       environment.systemPackages = [pkgs.curl pkgs.jq pkgs.netcat-openbsd pkgs.nssTools (pkgs.python3.withPackages (ps: [ps.playwright]))];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
       environment.etc."gateway-browser.py".source = ./website-gateway/browser.py;
+      # A second real client address for the per-address application limit.
+      environment.etc."gateway-protocol.py".source = ./website-gateway/protocol.py;
     };
   };
   testScript = ''
@@ -126,6 +129,12 @@ in {
         gateway.succeed("systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service")
         gateway.succeed("install -m 0600 /dev/null ${media}/private.png && echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgUbL4DwACCgFmeGgpMwAAAABJRU5ErkJggg==' | base64 -d >${media}/private.png && cp ${media}/private.png ${media}/public.png && chown terrace_cms:terrace_cms ${media}/*.png")
         gateway.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"insert into media(alt,public,filename,mime_type,filesize,width,height) values ('Synthetic private',false,'private.png','image/png',70,1,1),('Synthetic public',true,'public.png','image/png',70,1,1)\" >/dev/null 2>&1")
+        gateway.succeed("runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d terrace_cms -f /etc/gateway-content.sql >/dev/null 2>&1")
+        # The gateway supplies every lifecycle setting the public bundles require.
+        for unit, name, value in [("terrace-cms", "LIFECYCLE_OUTBOX_DIR", "/var/lib/terrace-cms-outbox"), ("terrace-cms", "LIFECYCLE_PUBLIC_ORIGIN", "https://web.terrace.invalid"),
+                                  ("terrace-web", "CMS_PUBLIC_ORIGIN", "https://cms.terrace.invalid"), ("terrace-web", "ADDRESS_HEADER", "X-Forwarded-For"), ("terrace-web", "XFF_DEPTH", "1")]:
+            gateway.succeed(f"pid=$(systemctl show {unit}.service -p MainPID --value) && tr '\\0' '\\n' </proc/$pid/environ | grep -qx {name}={value}")
+        assert gateway.succeed("stat -c %U:%G:%a /var/lib/terrace-cms-outbox").strip() == "terrace_cms:terrace_cms:700"
         headers = client.succeed("curl --fail --silent --max-time 10 -D - -o /dev/null https://web.terrace.invalid/events/").lower()
         assert "cache-control: private, no-store" in headers and "x-content-type-options: nosniff" in headers
         for route in ["/api/media/file/private.png", "/_next/image?url=%2Fapi%2Fmedia%2Ffile%2Fprivate.png&w=64&q=75", "/api/users/me"]:
@@ -155,12 +164,55 @@ in {
             assert "cache-control: private, no-store" in headers
         peaks = {unit: gateway.succeed(f"systemctl show {unit}.service -p MemoryPeak --value").strip() for unit in ["keycloak", "terrace-cms", "terrace-web", "postgresql", "nginx"]}
 
+    with subtest("imported content, application limit, invitation outbox, sweep timer and erasure through the gateway"):
+        def lifecycle(machine, action, label):
+            output = machine.succeed("python3 /etc/gateway-protocol.py " + action, timeout=180).strip()
+            assert re.fullmatch(label + r"[^:]*: [0-9]+ bounded assertions(;.*)?\.", output), output
+            print(output)
+
+        def applications():
+            return int(gateway.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c 'select count(*) from member_applications' 2>/dev/null").strip())
+
+        mirror = "/var/lib/terrace-cms-outbox/*-invitation.json"
+        lifecycle(gateway, "content", "Imported-content checks passed")
+        assert applications() == 0
+        lifecycle(gateway, "apply-burst", "Application rate-limit checks passed")
+        assert applications() == 5
+        lifecycle(client, "apply-other", "Separate-address application checks passed")
+        assert applications() == 10
+        lifecycle(gateway, "approve local-alumni", "Approval checks passed")
+        assert gateway.succeed("stat -c %U:%a " + mirror).strip() == "terrace_cms:600"
+        lifecycle(gateway, "redeem local-alumni", "Redemption checks passed")
+        lifecycle(gateway, "sign-in local-alumni", "Member sign-in checks passed")
+        lifecycle(gateway, "link local-alumni", "Application link checks passed")
+        lifecycle(gateway, "erase local-alumni", "Erasure checks passed")
+        # An administrator erasure cannot rewrite files; the mirror still names the applicant until the sweep runs.
+        gateway.succeed("jq -e '.to == \"local-alumni@terrace.invalid\"' " + mirror + " >/dev/null")
+        gateway.succeed("systemctl is-enabled terrace-cms-sweep.timer && systemctl is-active terrace-cms-sweep.timer")
+        before = gateway.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
+        gateway.succeed("systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d '3 days ago' /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer")
+        gateway.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != '{before}' && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=180)
+        assert dict(line.split("=", 1) for line in gateway.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User").splitlines()) == {"Result": "success", "ExecMainStatus": "0", "User": "terrace_cms"}
+        gateway.succeed("jq -e '.to == \"Former member\" and .body == \"Redacted after erasure.\"' " + mirror + " >/dev/null")
+        gateway.fail("grep -rl local-alumni@terrace.invalid /var/lib/terrace-cms-outbox")
+        # Platform-level negative case: the packaged sweep refuses a public deployment without its outbox,
+        # while the identical invocation with the module's outbox succeeds (the harness itself is sound).
+        manual = ("systemd-run --quiet --wait --pipe --collect -p User=terrace_cms -p Group=terrace_cms -p EnvironmentFile=/var/lib/terrace-website-inputs/cms.env "
+                  "-p WorkingDirectory=/ -p Environment=PATH=${pkgs.nodejs_24}/bin:${pkgs.bash}/bin:${pkgs.coreutils}/bin "
+                  "-p Environment=CMS_MEDIA_DIR=/var/lib/terrace-cms-media -p 'Environment=DATABASE_URI=postgresql://terrace_cms@/terrace_cms?host=/run/postgresql&port=5432' "
+                  "-p Environment=NODE_EXTRA_CA_CERTS=${trustedCertificate} -p Environment=LIFECYCLE_PUBLIC_ORIGIN=https://web.terrace.invalid ")
+        sweep = "$(systemctl show terrace-cms.service -p WorkingDirectory --value)/bin/sweep"
+        refused = gateway.fail(manual + sweep + " 2>&1 >/dev/null")
+        assert "CMS lifecycle sweep failed" in refused, refused
+        gateway.succeed(manual + "-p Environment=LIFECYCLE_OUTBOX_DIR=/var/lib/terrace-cms-outbox " + sweep + " >/dev/null 2>&1")
+
     with subtest("explicit task service stop and disabled optional import"):
-        gateway.succeed("systemctl stop terrace-identity-health.timer terrace-identity-health.service terrace-web.service terrace-cms.service keycloak.service nginx.service postgresql.target postgresql.service")
+        gateway.succeed("systemctl stop terrace-identity-health.timer terrace-identity-health.service terrace-cms-sweep.timer terrace-cms-sweep.service terrace-web.service terrace-cms.service keycloak.service nginx.service postgresql.target postgresql.service")
         for unit in ["terrace-web", "terrace-cms", "keycloak", "nginx", "postgresql"]:
             gateway.fail(f"systemctl is-active --quiet {unit}.service")
         for port in [443, 5432, 8088, 9000, 13048, 14294]:
             gateway.fail(f"nc -z -w 1 127.0.0.1 {port}")
+        gateway.fail("systemctl is-active --quiet terrace-cms-sweep.timer")
         for unit in ["terrace-web.service", "terrace-cms.service", "keycloak.service", "nginx.service"]:
             client.fail(f"systemctl is-enabled {unit}")
         print(f"HTTPS native gateway/SSO/cookie/cache boundary and owned-service stop checks passed; synthetic component peak bytes {peaks}")

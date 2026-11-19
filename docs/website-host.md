@@ -1,6 +1,6 @@
 # Optional native website host
 
-> **Note, 2026-11-18.** The pinned bundles and the six-migration ledger described here are website `3902e16`. Website `dev` is now `dad0a20` (first noted at `8883875`): it has nine migrations (adding the WordPress import, member-lifecycle and mirror-marker migrations) and Next.js 16.4.5 and new required variables (`LIFECYCLE_*`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER` with `XFF_DEPTH`; see the website `docs/member-lifecycle.md`). Womb's pins and hashes are deliberately unchanged here; building new bundles and re-pinning is tracked work and has not been done.
+> **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18, including the packaged CMS `bin/sweep`). The ledger now has eleven migrations, recorded in `platform/website-release.json` and checked in order by the VM test. The module now supplies the member-lifecycle settings listed under [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep).
 
 This disabled-by-default module runs the accepted TFC website and CMS bundles
 as separate native NixOS services. It adds no gateway, public listener, DNS,
@@ -16,7 +16,7 @@ remain disabled in actual host profiles; CDN activation remains separate.
 ## Accepted inputs
 
 `platform/website-release.json` pins the exact secret-free Linux x86-64 glibc
-archives from TFC source `3902e16c8c681638282e5983869d53efa8bb424c` (TFC !42).
+archives from TFC source `680ad567f553449280664cafad2d200011b6abac` (website `dev`, PR #15).
 `website-release.nix` checks the raw archive SHA256, source/runtime manifest and
 every packaged file hash before producing immutable Nix packages. The archive hash
 must match before that archive is copied into the Nix store. It uses local retained
@@ -31,8 +31,8 @@ Never put environment files, credentials, uploads or a database into a bundle.
 
 Import `platform/website.nix` or `nixosModules.website`. A reviewed host can
 construct `release = import ./platform/website-release.nix { inherit pkgs;
-webArchive = "/protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz";
-cmsArchive = "/protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz"; };`
+webArchive = "/protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz";
+cmsArchive = "/protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz"; };`
 and set `terrace.website.webPackage = release.web`, `cmsPackage = release.cms`,
 `revision = release.revision` and `enable = true`. This is an integration
 example, not an enabled host configuration.
@@ -89,6 +89,59 @@ Uploads are retained at `mediaDirectory` (default
 read-only. Only private `/var/cache/terrace-cms` is bound writable over the
 bundle's empty `.next/cache`. Cache is derived and excluded from backups.
 Service/module removal never deletes the upload or database directories.
+
+## Member lifecycle settings, outbox and sweep
+
+The module owns the lifecycle settings that are paths or public origins, and
+exports them in each launcher after loading the protected environment file, so a
+runtime input cannot redirect them (as with `DATABASE_URI` and `CMS_MEDIA_DIR`):
+
+| Variable | Component | Source |
+| --- | --- | --- |
+| `LIFECYCLE_OUTBOX_DIR` | CMS start, migrate, sweep | `outboxDirectory` (default `/var/lib/terrace-cms-outbox`) |
+| `LIFECYCLE_PUBLIC_ORIGIN` | CMS start, migrate, sweep | `lifecyclePublicOrigin`; the HTTPS gateway sets `https://<webHostname>` |
+| `CMS_PUBLIC_ORIGIN` | website | `cmsPublicOrigin`; the HTTPS gateway sets `https://<cmsHostname>` |
+| `ADDRESS_HEADER`, `XFF_DEPTH` | website | `addressHeader`, `xffDepth`; the HTTPS gateway sets `X-Forwarded-For` and `1` and unsets `LIFECYCLE_DIRECT_CLIENTS` |
+| `LIFECYCLE_INTAKE_SECRET` | CMS and website | the protected `cms.env` and `web.env` (the same value in both, 32 or more bytes); the start guards refuse a missing or short value |
+
+Optional retention placeholders (`LIFECYCLE_APPLICATION_DAYS`,
+`LIFECYCLE_INVITATION_DAYS`, `LIFECYCLE_GRACE_DAYS`) may be added to `cms.env`;
+their defaults apply otherwise. Everything else in the website's production
+configuration table (`docs/member-lifecycle.md` in the website repository)
+is unchanged and delivered through the same protected files.
+
+The outbox directory is created `0700` and owned by the CMS account; the CMS
+writes its mirror files `0600`. It holds live one-time invitation links, so it is
+included in backups with the database (`extraPaths.website-outbox`) and is not
+readable by the website account. Read it as root on the host; there is no mail
+transport yet.
+
+`terrace-cms-sweep.service` runs the bundle's `bin/sweep` (without
+`--purge-moderated`) as the CMS account with the same environment file, guards
+and migration gate as the CMS, and is `Type=oneshot` with a 150 second start
+limit (`bin/sweep` bounds itself at 120 seconds and exits 2 when it times out). `terrace-cms-sweep.timer` runs it daily at `sweepSchedule` (default
+`03:30`, persistent, so a missed run catches up at boot). Run it by hand after
+every administrator-initiated erasure:
+
+```sh
+systemctl start terrace-cms-sweep.service
+```
+
+A sweep requested while an explicit migration runs waits for it (and is skipped
+if one is still active when it starts); starting a migration stops a running sweep,
+which is idempotent and retried (website `680ad56`:
+`cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
+writes every mirror file to a private temporary file and renames it into place,
+`reconcileMirror` marks a row only once its file is confirmed and retries unmarked
+rows, and stale temporary files from an interrupted write are removed). A failed sweep leaves the unit failed with a
+labelled line in the private journal; the next run retries.
+
+The CMS and website accounts have static IDs (`cmsUid` 44121, `webUid` 44122)
+because uploads and the outbox are restored with their numeric owners. These apply
+to new hosts. NixOS does not renumber existing users: a host that already has these
+accounts with allocated numbers needs a planned renumbering (stop the services,
+change the IDs, `chown` their state) before adopting the static values, and backups
+taken before the change still carry the old numbers. No such host exists yet.
 
 ## Health, private logs and capacity
 
@@ -169,8 +222,8 @@ On the x86-64 Linux builder, under the shared queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-check \
-  /protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz
+  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz
 ```
 
 This separate check accepts local hash-pinned artifacts so ordinary flake
@@ -183,11 +236,25 @@ repeat ledger, public content/private draft and media denial, native image cache
 service/code/input isolation and resource caps. It backs up database/uploads and
 protected settings over test SFTP with restic, performs a complete repository
 check, restores into a fresh guest, reconciles table/file hashes and serves the
-same content with private routes still denied. It measures migration, backup,
+same content with private routes still denied. It also checks the ledger against
+the pinned migration list, refuses a short intake secret, runs the sweep service
+as the CMS account (writing a synthetic pending outbox copy `0600`), proves the
+real timer unit fires it (a backdated persistent stamp makes it catch up), and
+restores the outbox with identical bytes, owner and modes. It measures migration, backup,
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
 
-Verified2026-11-03 on the shared Linux builder: the final two-guest test passed
+Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
+`680ad56` bundles (06:06 to 06:10 Pacific, prebuilt closure): the two-guest test
+passed with 37 actual non-system CMS tables and the eleven-migration ledger in
+pinned order. Explicit migration took 6.02 s, encrypted backup 8.34 s, complete
+repository check 4.95 s, isolated restore 5.43 s and recovered HTTP verification
+11.77 s. The sweep service, its schedule and timer catch-up, its wait behind a slow
+migration, and the outbox restore (bytes, static owner, modes, and a read and
+write by the CMS account) passed. Source cgroup peaks were 81.9 MiB CMS, 47.5 MiB
+website and 125.4 MiB PostgreSQL.
+
+Verified2026-11-03 on the shared Linux builder (historical, website `3902e16`): the final two-guest test passed
 in83.34seconds with25actual non-system CMS tables and an unchanged six-migration
 ledger. Explicit migration took4.48s, encrypted backup7.05s, complete repository
 check5.45s, isolated restore3.96s and recovered HTTP verification11.29s. Source

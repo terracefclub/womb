@@ -2,7 +2,9 @@
 import http.cookiejar
 import json
 import os
+import re
 import ssl
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -42,7 +44,7 @@ class Client:
     def request(self, url, method="GET", data=None, headers=None):
         # All redirects/actions are checked before use; no arbitrary URL fetch.
         check(urllib.parse.urlsplit(url).netloc in [
-            "web.terrace.invalid", "cms.terrace.invalid", "identity.terrace.invalid", "127.0.0.1:8088"
+            "web.terrace.invalid", "cms.terrace.invalid", "identity.terrace.invalid", "127.0.0.1:8088", "127.0.0.1:14294"
         ])
         request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
         try:
@@ -118,6 +120,20 @@ def seed():
             check(status == 200)
             status, _, _ = client.api(base + "users/" + users[0]["id"] + "/role-mappings/realm", "POST", [definition], admin_headers)
             check(status == 204)
+    # The imported member-linking contract: verified, unique, administrator-only email,
+    # and the email claim on the member client only.
+    status, _, realm = client.api(base[:-1], headers=admin_headers)
+    check(status == 200 and realm["verifyEmail"] is True and realm["duplicateEmailsAllowed"] is False and realm["editUsernameAllowed"] is False)
+    status, _, profile = client.api(base + "users/profile", headers=admin_headers)
+    check(status == 200 and [attribute["permissions"]["edit"] for attribute in profile["attributes"] if attribute["name"] == "email"] == [["admin"]])
+    for client_id, expected in [("terrace-web", True), ("terrace-cms", False)]:
+        status, _, found = client.api(base + "clients?" + urllib.parse.urlencode({"clientId": client_id}), headers=admin_headers)
+        check(status == 200 and len(found) == 1)
+        status, _, scopes = client.api(base + "clients/" + found[0]["id"] + "/default-client-scopes", headers=admin_headers)
+        check(status == 200 and ("email" in [scope["name"] for scope in scopes]) == expected)
+    for user in credentials["users"]:
+        status, _, found = client.api(base + "users?" + urllib.parse.urlencode({"username": user["username"], "exact": "true"}), headers=admin_headers)
+        check(status == 200 and found[0]["emailVerified"] is True and found[0]["email"] == user["username"] + "@terrace.invalid")
     master = "http://127.0.0.1:8088/admin/realms/master/users"
     status, _, users = client.api(master + "?username=gateway-fixture-bootstrap&exact=true", headers=admin_headers)
     check(status == 200 and len(users) == 1)
@@ -241,13 +257,246 @@ def test():
     print(f"Native HTTPS protocol checks passed: {count} bounded assertions; SSO, roles, state, CSRF, cookies, publication, private cache and logout.")
 
 
+OUTBOX = Path("/var/lib/terrace-cms-outbox")
+POST_SLUG = "synthetic-imported-post"
+APPLICANT = "local-alumni"
+
+
+class ApplyForm(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.token = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "input" and attrs.get("name") == "t" and attrs.get("value"):
+            self.token = attrs["value"]
+
+
+def content():
+    global stage
+    stage = "imported-style news through the gateway"
+    anonymous = Client()
+    status, headers, body = anonymous.request(WEB + "/news/")
+    check(status == 200 and b"Synthetic imported post" in body)
+    private(headers)
+    status, headers, body = anonymous.request(WEB + "/news/" + POST_SLUG + "/")
+    check(status == 200 and b"Synthetic imported post" in body and b"Synthetic imported body." in body)
+    # CMS_PUBLIC_ORIGIN keeps only body images served by the public CMS origin.
+    check(b'src="https://cms.terrace.invalid/api/media/file/public.png"' in body and b"elsewhere.invalid" not in body)
+    private(headers)
+    status, _, image = anonymous.request(CMS + "/api/media/file/public.png")
+    check(status == 200 and len(image) > 0)
+    stage = "old WordPress URL redirect"
+    status, headers, _ = anonymous.request(WEB + "/2019/05/" + POST_SLUG + "/")
+    check(status == 301 and urllib.parse.urlsplit(headers["Location"]).path == "/news/" + POST_SLUG + "/")
+    check(anonymous.request(WEB + "/2019/05/synthetic-unknown-post/")[0] == 404)
+    print(f"Imported-content checks passed: {count} bounded assertions; news list, imported post, public body image and old-URL redirect.")
+
+
+def action_result(body):
+    # SvelteKit's enhanced form protocol: {"type": ..., "status": ..., "data": <serialized>}.
+    result = json.loads(body)
+    return result.get("type"), result.get("status"), str(result.get("data", ""))
+
+
+ENHANCED = {"Accept": "application/json", "x-sveltekit-action": "true"}
+
+
+HTML_OUTCOMES = [("limited", b"Too many applications from here"), ("received", b"Your request was received.")]
+
+
+def apply(attempts, base=WEB, html=False):
+    """Open the form for every attempt, wait out the minimum fill time, then submit each in order.
+
+    By default each post is what a browser with script sends (use:enhance): HTTP 200 carrying the action
+    result. With html=True it is a plain no-script form post: the action's own HTTP status and page.
+    """
+    global stage
+    stage = ("application form through the gateway" if base == WEB else "application form on the private loopback port") + (" (no script)" if html else "")
+    tokens = []
+    for email, forged in attempts:
+        client = Client()
+        status, headers, body = client.request(base + "/apply/", headers={"X-Forwarded-For": forged, "X-Real-IP": forged})
+        check(status == 200)
+        private(headers)
+        form = ApplyForm()
+        form.feed(body.decode())
+        check(form.token is not None)
+        tokens.append((client, form.token, email, forged))
+    # The website refuses a submission sooner than three seconds after its form token was issued.
+    time.sleep(3.5)
+    results = []
+    for client, token, email, forged in tokens:
+        fields = {"t": token, "website": "", "name": "Synthetic Applicant", "affiliation": "alumni", "classYear": "",
+                  "contactEmail": email, "note": "Synthetic rehearsal application."}
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "X-Forwarded-For": forged, "X-Real-IP": forged}
+        headers.update({"Accept": "text/html"} if html else ENHANCED)
+        status, response_headers, body = client.request(base + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), headers)
+        private(response_headers)
+        if html:
+            # Fixed application wording only (never submitted values).
+            results.append((status, next((label for label, text in HTML_OUTCOMES if text in body), "other")))
+        else:
+            check(status == 200)
+            kind, code, _ = action_result(body)
+            results.append((kind, code))
+    stage += f": results {results}"
+    return results
+
+
+def apply_burst():
+    # Six submissions from one real address (the gateway guest), each forging a different client address.
+    # The first two are the synthetic applicants later approved (local-alumni, local-member).
+    attempts = [(name + "@terrace.invalid", f"203.0.113.{10 + index}") for index, name in enumerate(APPLICANTS)]
+    attempts += [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 5)]
+    check(apply(attempts) == [("success", 200)] * 5 + [("failure", 429)])
+    # The same exhausted bucket on the private loopback port (with the header the gateway writes) and as a
+    # no-script post at both layers: the application's 429 passes through the gateway unchanged.
+    check(apply([("burst-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294") == [("failure", 429)])
+    check(apply([("burst-html@terrace.invalid", "192.0.2.1")], html=True) == [(429, "limited")])
+    check(apply([("burst-html-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294", html=True) == [(429, "limited")])
+    print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited (429 with script and without, through the gateway and on the loopback port) despite forged client headers.")
+
+
+def apply_other():
+    # A second real client address, no-script posts, first forging the exhausted gateway address: its own bucket.
+    attempts = [("other-network@terrace.invalid", "127.0.0.1")] + [(f"other-{index}@terrace.invalid", f"203.0.113.{index}") for index in range(1, 6)]
+    check(apply(attempts, html=True) == [(200, "received")] * 5 + [(429, "limited")])
+    print(f"Separate-address application checks passed: {count} bounded assertions; no-script 200 five times then 429 in its own bucket.")
+
+
+def staff(username, role):
+    client, status = sign_in(username)
+    check(status == 303)
+    status, _, me = client.api(CMS + "/api/users/me")
+    check(status == 200 and me["user"]["role"] == role)
+    return client
+
+
+def application(client, email):
+    query = urllib.parse.urlencode({"where[contactEmail][equals]": email, "depth": "0", "limit": "2"})
+    status, headers, found = client.api(CMS + "/api/member-applications?" + query)
+    check(status == 200 and len(found["docs"]) == 1)
+    private(headers)
+    return found["docs"][0]
+
+
+def invitation_file(email):
+    matches = []
+    for path in sorted(OUTBOX.glob("*-invitation.json")):
+        message = json.loads(path.read_text())
+        if message.get("to") == email:
+            matches.append(message)
+    check(len(matches) == 1)
+    return matches[0]
+
+
+APPLICANTS = {"local-alumni": "alumni", "local-member": "current-member"}
+
+
+def applicant(username):
+    # Synthetic realm users whose verified email is their application's contact address.
+    check(username in APPLICANTS)
+    return username + "@terrace.invalid"
+
+
+def approve(*usernames):
+    global stage
+    for username in usernames or (APPLICANT,):
+        stage = f"editor approval issues an invitation ({username})"
+        email = applicant(username)
+        editor = staff("local-editorial-editor", "editor")
+        pending = application(editor, email)
+        check(pending["status"] == "pending")
+        decision = {"status": "approved", "grantRole": APPLICANTS[username]}
+        status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH", decision, {"Origin": "https://attacker.invalid"})
+        check(status == 403)
+        status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH", decision, {"Origin": CMS})
+        check(status == 200 and application(editor, email)["status"] == "approved")
+        message = invitation_file(email)
+        check(re.fullmatch(r"https://web\.terrace\.invalid/join/#[A-Za-z0-9_-]{20,}", re.search(r"https://\S+", message["body"])[0]) is not None)
+    print(f"Approval checks passed: {count} bounded assertions; invitation mirror written to the private outbox.")
+
+
+def redeem(username=APPLICANT):
+    global stage
+    stage = f"invitation redemption ({username})"
+    link = re.search(r"https://web\.terrace\.invalid/join/#([A-Za-z0-9_-]+)", invitation_file(applicant(username))["body"])
+    check(link is not None)
+    anonymous = Client()
+    # Single use: the first post accepts it, the repeat is refused.
+    for expected in [("success", 200, "accepted"), ("failure", 404, "invalid")]:
+        status, headers, body = anonymous.request(WEB + "/join/", "POST", urllib.parse.urlencode({"token": link[1]}).encode(),
+                                                  {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, **ENHANCED})
+        kind, code, data = action_result(body)
+        check(status == 200 and (kind, code) == expected[:2] and expected[2] in data)
+        private(headers)
+    # The repeat as a no-script post: HTTP 404 and the refusal page.
+    status, headers, body = anonymous.request(WEB + "/join/", "POST", urllib.parse.urlencode({"token": link[1]}).encode(),
+                                              {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "Accept": "text/html"})
+    check(status == 404 and b"That code was not accepted." in body and b"Invitation accepted." not in body)
+    private(headers)
+    print(f"Redemption checks passed: {count} bounded assertions; single-use invitation.")
+
+
+def member_sign_in(username=APPLICANT):
+    global stage
+    stage = f"member sign-in ({username})"
+    applicant(username)
+    member, status = sign_in(username, "web")
+    check(status == 303)
+    status, headers, _ = member.request(WEB + "/members/")
+    check(status == 200)
+    private(headers)
+    print(f"Member sign-in checks passed: {count} bounded assertions.")
+
+
+def link(username=APPLICANT):
+    global stage
+    stage = f"automatic application link ({username})"
+    # The CMS links a sign-in to its redeemed application by the token's verified email.
+    admin = staff("local-editorial-admin", "admin")
+    linked = application(admin, applicant(username))
+    check(linked["status"] == "approved" and isinstance(linked.get("member"), int))
+    print(f"Application link checks passed: {count} bounded assertions.")
+
+
+def erase(username=APPLICANT):
+    global stage
+    stage = f"administrator offboarding and erasure ({username})"
+    email = applicant(username)
+    admin = staff("local-editorial-admin", "admin")
+    linked = application(admin, email)
+    member_id = linked["member"]
+    check(isinstance(member_id, int))
+    status, _, _ = admin.api(CMS + "/api/member-offboardings", "POST", {"member": member_id, "reason": "Synthetic rehearsal"}, {"Origin": CMS})
+    check(status == 201)
+    status, _, _ = admin.api(CMS + "/api/data-requests", "POST", {"member": member_id, "kind": "erasure"}, {"Origin": CMS})
+    check(status == 201)
+    query = urllib.parse.urlencode({"where[contactEmail][equals]": email, "limit": "1"})
+    check(admin.api(CMS + "/api/member-applications?" + query)[2]["totalDocs"] == 0)
+    # Erasure scrubs the linked application and withdraws it.
+    status, _, scrubbed = admin.api(CMS + "/api/member-applications/" + str(linked["id"]) + "?depth=0")
+    check(status == 200 and scrubbed["status"] == "withdrawn" and scrubbed["name"] == "Erased applicant")
+    check(scrubbed["contactEmail"] != email and not scrubbed.get("note"))
+    # The tombstone is refused at sign-in (the website's denied page) and no member session exists.
+    erased, status = sign_in(username, "web")
+    check(status == 403)
+    status, headers, _ = erased.request(WEB + "/members/")
+    check(status == 303 and headers["Location"].startswith("/auth/login"))
+    print(f"Erasure checks passed: {count} bounded assertions; offboarded, erased, application scrubbed and member access closed.")
+
+
+ACTIONS = {"seed": seed, "test": test, "content": content, "apply-burst": apply_burst, "apply-other": apply_other,
+           "approve": approve, "redeem": redeem, "sign-in": member_sign_in, "link": link, "erase": erase}
+# Only these take synthetic applicant usernames (checked against APPLICANTS).
+WITH_APPLICANTS = {"approve": 2, "redeem": 1, "sign-in": 1, "link": 1, "erase": 1}
+
 try:
-    if sys.argv[1:] == ["seed"]:
-        seed()
-    elif sys.argv[1:] == ["test"]:
-        test()
-    else:
+    if len(sys.argv) < 2 or sys.argv[1] not in ACTIONS or len(sys.argv) - 2 > WITH_APPLICANTS.get(sys.argv[1], 0):
         raise RuntimeError("Invalid action")
+    ACTIONS[sys.argv[1]](*sys.argv[2:])
 except BaseException:
     # HTTP/form/parser errors can carry tokens, passwords or callback URLs.
     print(f"Native HTTPS protocol check failed at {stage}; {count} bounded checks completed.", file=sys.stderr)

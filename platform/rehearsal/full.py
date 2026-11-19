@@ -94,8 +94,10 @@ def warm(run, run_id, args, lock):
     child = None
     with (run / 'build.log').open('xb') as log, (run / 'build-output.txt').open('xb') as output:
         try:
+            # The driver and guest closures run after the build, outside its temporary roots:
+            # root them in the private run directory so a host GC cannot delete them mid-run.
             env = {**os.environ, 'BUILD_LOCK': lock, 'BUILD_LOCK_TIMEOUT': '1200', 'CHECK_TIMEOUT': '1800',
-                   'CHECK_BUILD_TIMEOUT': '1200', 'CHECK_STOP_GRACE': '30'}
+                   'CHECK_BUILD_TIMEOUT': '1200', 'CHECK_STOP_GRACE': '30', 'CHECK_OUT_LINK': str(run / 'driver-root')}
             child = subprocess.Popen(command, cwd=HERE.parent, env=env, stdin=subprocess.DEVNULL,
                                      stdout=output, stderr=log, start_new_session=True)
             child.wait(timeout=3070)
@@ -110,7 +112,7 @@ def warm(run, run_id, args, lock):
                     child.kill()
                     child.wait(timeout=5)
     driver = Path((run / 'build-output.txt').read_text().strip()) / 'bin/nixos-test-driver'
-    if not str(driver).startswith('/nix/store/') or not driver.is_file():
+    if not str(driver).startswith('/nix/store/') or not driver.is_file() or (run / 'driver-root').resolve() != driver.parent.parent:
         raise RuntimeError()
     return str(driver)
 
@@ -123,8 +125,14 @@ def execute(args):
     if not re.fullmatch(r'/[A-Za-z0-9/_.-]+', str(parent)):
         raise ValueError()
     run, run_id = create_run(parent)
-    driver = warm(run, run_id, args, lock)
-    containment = contained_driver(run, run_id, [driver, '--no-interactive', '--keep-machine-state', '--output_directory', str(run / 'evidence')], lock, runtime=2700 if args.all_services else 1800, queue=1200)
+    try:
+        driver = warm(run, run_id, args, lock)
+        containment = contained_driver(run, run_id, [driver, '--no-interactive', '--keep-machine-state', '--output_directory', str(run / 'evidence')], lock, runtime=2700 if args.all_services else 1800, queue=1200)
+    finally:
+        # Release the run's GC root once its guests are off; the store may then collect it.
+        root = run / 'driver-root'
+        if root.is_symlink():
+            root.unlink()
     scenario = private_json(run / 'evidence' / 'scenario-result.json')
     if scenario.get('scope') != 'terrace-disposable-synthetic' or scenario.get('checks', {}).get('allGuestsStopped') is not True:
         raise RuntimeError()

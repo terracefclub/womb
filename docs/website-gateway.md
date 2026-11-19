@@ -1,6 +1,6 @@
 # Optional HTTPS origin gateway
 
-> **Note, 2026-11-18.** The pinned bundles and the six-migration ledger described here are website `3902e16`. Website `dev` is now `dad0a20` (first noted at `8883875`): it has nine migrations (adding the WordPress import, member-lifecycle and mirror-marker migrations) and Next.js 16.4.5 and new required variables (`LIFECYCLE_*`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER` with `XFF_DEPTH`; see the website `docs/member-lifecycle.md`). Womb's pins and hashes are deliberately unchanged here; building new bundles and re-pinning is tracked work and has not been done.
+> **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18: lifecycle linking, packaged `bin/sweep`, release-proof fixes and no-script form status). The gateway now supplies the lifecycle origins and the client-address pairing below, and the check exercises the member lifecycle end to end.
 
 `platform/website-gateway.nix` adds an opt-in nginx gateway to the accepted native
 website/CMS bundles. Actual host profiles remain disabled. Importing the module
@@ -29,6 +29,13 @@ bootstrap keys and external media storage. Follow the [native runtime contract](
 and deliver protected environment files externally; never use local bootstrap
 credentials or put input contents in a Nix expression.
 
+The gateway overwrites `X-Forwarded-For` (and `X-Real-IP`) with the connecting
+address; it never appends. It therefore sets the website's `ADDRESS_HEADER=X-Forwarded-For`
+and `XFF_DEPTH=1` (an evaluation assertion rejects any other pairing, and the web
+guard rejects `LIFECYCLE_DIRECT_CLIENTS=1`), plus `LIFECYCLE_PUBLIC_ORIGIN=https://<webHostname>`
+for invitation links and `CMS_PUBLIC_ORIGIN=https://<cmsHostname>` for imported body
+images. See [native hosting](website-host.md#member-lifecycle-settings-outbox-and-sweep).
+
 This first origin gateway uses `proxy_cache off` and sends `private, no-store`
 for **every** web/CMS response, including public pages/assets, error responses,
 authentication and image optimization. It does not cache a published response
@@ -40,7 +47,7 @@ of their native modules.
 
 ## Disposable actual-bundle proof
 
-The check consumes the already accepted3902e16 web/CMS archives and **only three
+The check consumes the pinned `680ad56` web/CMS archives and **only three
 hash-pinned, secret-free source files** from that TFC revision: the realm
 generator, shared client/role contract and pure production-input validator.
 Their hashes are checked before Nix-store copying; the source checkout and its
@@ -51,9 +58,9 @@ On the x86-64 Linux builder, under the shared heavy-job queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-gateway-check \
-  /protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  /source/tfc-at-3902e16c8c681638282e5983869d53efa8bb424c
+  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /source/tfc-at-680ad567f553449280664cafad2d200011b6abac
 ```
 
 Two guests contain the actual immutable app pair and native PostgreSQL/Keycloak.
@@ -84,6 +91,34 @@ credentials cross only a mode0700 host temporary directory outside test output
 and a root-only guest file, then are removed. JavaScript is disabled for this
 native-form regression; it is not a dashboard hydration test.
 
+A lifecycle stage then runs through the real gateway with synthetic data only:
+`/news/` and an imported-style post (published, with WordPress provenance) render,
+a body image on the public CMS origin is kept and a foreign one dropped, and the
+old URL answers 301 to the new path. Six `/apply/` submissions from the gateway
+guest, posted as a browser with script does (SvelteKit's enhanced form protocol),
+each forging a different `X-Forwarded-For` and `X-Real-IP`, give five accepts and
+a 429 action result (five applications stored). The same exhausted bucket gives the
+same 429 on the private loopback port, and a no-script post into it gets HTTP 429
+and the limit page both through the gateway and on the loopback port, so the
+gateway passes the application's status through. From the second guest, six
+no-script posts (the first forging the gateway guest's exhausted address) give
+HTTP 200 and the received page five times, then 429: a separate address has its
+own bucket and a forged header cannot move a client into another one. An editor approval writes the
+invitation mirror (`0600`, CMS account) with a `https://web.terrace.invalid/join/#…`
+link; redemption works once (a repeat is refused, as a no-script post with HTTP 404); the applicant's first sign-in links the application
+by verified email; an administrator offboards and erases the member, which
+withdraws and scrubs the application and closes member access. The mirror still
+names the applicant until the real sweep timer fires (a backdated persistent
+stamp makes it catch up), after which it is redacted. The packaged `bin/sweep`, run as the CMS
+account with the public `cms.env` but no `LIFECYCLE_OUTBOX_DIR`, must exit non-zero
+with its fixed failure line, while the same invocation with the outbox succeeds. The fixture enrollment also
+checks the imported realm: `verifyEmail`, no duplicate emails or username edits,
+email editable by administrators only, and the `email` default scope on
+`terrace-web` but not `terrace-cms`. Synthetic users are created through the
+private loopback admin API with `<username>@terrace.invalid` verified addresses;
+the website's `provision-member.ts` (loopback realm tool reading the application
+through `PG*`) is not used by Womb.
+
 The remote guest separately checks certificate/hostname trust, spoofed forwarding,
 SNI/Host confusion, blocked identity administration, direct backend denial even
 with the VM firewall pierced, and cache headers on private/error routes. The
@@ -92,6 +127,13 @@ guest teardown. Every test-owned job/guest/process must be verified stopped
 before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
+
+Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
+`680ad56` bundles (06:10 to 06:13 Pacific, prebuilt closure): 198 HTTPS protocol
+assertions, the Chromium account switch, and lifecycle stages of 18 (content),
+83 (application limit), 49 (second address), 40 (approval), 15 (redemption),
+24 (sign-in), 28 (link) and 63 (erasure) bounded assertions, the sweep-timer
+redaction and the packaged-sweep negative case all passed.
 
 ## Remaining activation and cost gates
 

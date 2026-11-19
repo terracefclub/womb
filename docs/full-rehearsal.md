@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -93,7 +93,11 @@ follows the [Tailscale CLI contract](https://tailscale.com/docs/reference/tailsc
 and [Headscale fixture enrollment](https://headscale.net/stable/ref/registration/).
 This extension remains unaccepted until its source-matched native run passes.
 
-The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
+The driver runs after its build, outside the build's temporary store roots, so
+the runner roots its output in the private run directory (`driver-root`, through
+`run-check`'s `CHECK_OUT_LINK`) until the guests are off: a host garbage collection
+during a run (as on 2026-11-19, which deleted a guest closure mid-run) can no longer
+remove the guests' closures. The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
 build at 1200 seconds), and controller cleanup at 70 seconds. VM execution uses
 the independently validated transient system service/cgroup: queue 1200 seconds,
 active 1800 seconds, then 15 seconds of host stop grace. The build phase retains run-check's documented
@@ -327,17 +331,17 @@ before backup; absence is checked again on the replacement. Production
 Vaultwarden inputs do not escrow each person's master password. This test's
 private administrator readback does not prove it can decrypt real users' vaults.
 
-With the accepted archives already present on Falcon, the complete invocation
-from a clean repository checkout is:
+With the pinned archives and the matching website checkout already present on the
+builder, the complete invocation from a clean repository checkout is:
 
 ```sh
-install -d -m 0700 /home/tristan/terrace-work/full-rehearsal-output
-direnv exec . env BUILD_LOCK=/home/tristan/.falcon-heavy.lock \
+install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
+direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
-  --output /home/tristan/terrace-work/full-rehearsal-output \
-  --webArchive /home/tristan/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --cmsArchive /home/tristan/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-  --tfcSource /home/tristan/terrace-work/release-a2
+  --output $HOME/terrace-work/full-rehearsal-output \
+  --webArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-680ad56
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted
@@ -346,7 +350,7 @@ completed synthetic purge removes that run's retained payloads:
 
 ```sh
 direnv exec . ./platform/full-rehearsal purge \
-  /home/tristan/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID \
+  $HOME/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID \
   --synthetic-only --yes
 ```
 
@@ -364,6 +368,51 @@ before teardown. Export failures preserve the original restore failure; failed
 disks and the early encrypted repository/escrow remain retained. No diagnostic
 contents are printed by this export.
 
+
+### Website member lifecycle in the rehearsal
+
+Since the re-pin to website `680ad56`, every variant also runs the website
+lifecycle through the real gateway, using the same step scripts the cloud
+service proof runs (`platform/website-gateway/lifecycle_steps.py`, prepended to
+the scenario). Before backup it renders `/news/` and a synthetic imported-style
+post and follows an old URL's 301 (VM only), then: `apply` (six posts from the
+gateway guest with forged client headers: five accepted, the sixth limited, at
+the gateway and on the loopback port, with and without script), `approve` (two
+applicants, two invitation files `0600` in the CMS outbox), and `redeem`,
+`sign-in` and `link` for the first applicant only; the second invitation stays
+pending. A second client address then gets its own bucket (VM only). The outbox
+and application rows join the app signature, so they must be identical after the
+quiescent backup and after the originals-off restore. The sweep timer is armed
+only by the explicit bootstrap and stopped before capture.
+
+On the replacement: `ownership` (static CMS ID, restored outbox and invitations
+owned by the CMS account and readable by it), `redeem` of the restored pending
+token (accepted once, refused again), `sign-in` and automatic `link` by verified
+email, `erase` of both members (the running CMS writes two offboarding notices
+into the restored outbox; the invitation files still name the applicants),
+`sweep` by the real timer, and `redaction` (both invitations redacted, two
+erasure confirmations, every file `0600` and owned by the CMS account). The
+receipt records each step's seconds.
+
+### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
+
+Womb `48ab695` with the website `680ad56` bundles completed the `--all-services`
+rehearsal from 06:13 to 06:58 (scenario 1840.51 seconds). Both phases passed 198
+HTTPS protocol assertions and the four concurrent native browser helpers. The
+shared lifecycle steps took, before backup: apply 15.48 s, approve 1.80 s, redeem
+0.66 s, sign-in 0.82 s, link 0.91 s (25.69 s with content and the second address);
+on the replacement: ownership 0.11 s, redeem of the restored pending token 0.63 s,
+sign-in 0.88 s, link 0.81 s, erase of both members 3.23 s, sweep by the timer
+6.39 s and redaction 0.10 s (13.10 s with content). PostgreSQL sampled peaks were
+25 and 29 clients. Signed Documenso, Windmill (roster), Vaultwarden, K3s PVC,
+automation and tailnet recovery checks all passed; all seven guest lifetimes were
+absent at the end, the guard unit inactive and the driver's GC root released. The
+run preserved its disks, repository and escrow. At the same commit the cloud
+rehearsal configuration check and the infrastructure unit tests passed.
+
+An earlier attempt at `ed08c4c` failed when the replacement automation guest
+could not start: the builder's scheduled garbage collection (05:59 to 06:01)
+deleted its unrooted closure mid-run. `48ab695` roots the driver for the run.
 
 ### Observed all-services acceptance — November 5, 2026 (Pacific)
 
