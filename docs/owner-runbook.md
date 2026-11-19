@@ -1,8 +1,8 @@
-> This is a sanitised snapshot of the owner's private working copy of this runbook (2026-11-18, Womb `01464be`, website `dev` `dad0a20`). Machine-specific paths and private file names are replaced by placeholders, and it may lag the working copy. `$TERRACE_ROOT` stands for the root of the owner's workspace.
+> This is a sanitised snapshot of the owner's private working copy of this runbook (2026-11-19, Womb `f8fa07b`, website `dev` `b582459`). Machine-specific paths and private file names are replaced by placeholders, and it may lag the working copy. `$TERRACE_ROOT` stands for the root of the owner's workspace.
 
 # Terrace revival: owner runbook
 
-Prepared 2026-11-18, independently verified the same day (see the Verification log at the end), from `CLAUDE_HANDOFF.md` (website checkpoint 2026-11-18, Womb checkpoint 2026-11-13), Womb `origin/trunk` `01464be` and tfc-website `origin/dev` `8883875`, then re-checked against `dad0a20` and lease 4's result (second pass). Nothing in this file is new procedure. Every command is copied from a repository document, and the source is given in parentheses; where a command was adapted (a placeholder, a port or a directory chosen for you) the step says so. Where no procedure is written down, the step says **GAP: no documented procedure** and says what is missing.
+Prepared 2026-11-18, independently verified the same day (see the Verification log at the end), from `CLAUDE_HANDOFF.md` (website checkpoint 2026-11-18, Womb checkpoint 2026-11-13), Womb `origin/trunk` `01464be` and tfc-website `origin/dev` `8883875`, then re-checked against `dad0a20` and lease 4's result (second pass) and again on 2026-11-19 against Womb `origin/trunk` `f8fa07b` and website `origin/dev` `b582459` (fourth pass). Nothing in this file is new procedure. Every command is copied from a repository document, and the source is given in parentheses; where a command was adapted (a placeholder, a port or a directory chosen for you) the step says so. Where no procedure is written down, the step says **GAP: no documented procedure** and says what is missing.
 
 ---
 
@@ -18,7 +18,7 @@ Work top to bottom. Tick the box when the "Worked if" line is true. Do not skip 
   - **Needs your decision**: Claude can prepare options, but the choice is yours.
 - **Status** (what exists today, with evidence)
   - **PROVEN ON HETZNER**: ran on real Hetzner servers (probes 1 to 4, probe 2 run twice, and known-full leases 1 to 4; every one tore down cleanly with the baseline preserved; handoff Womb checkpoints). Lease 1 stopped at the app plan, lease 2 at FORMAT, lease 3 at the services launch after install, reboot and networking, and lease 4 at the first plan step on builder-lock contention. Only what lease 3 (run `90e965da`) reached counts for install, boot and networking.
-  - **NOT YET PROVEN ON HETZNER**: attempted in leases 3 and 4, not reached. Lease 3 stopped at the services launch (stale provider binding, fixed offline). Lease 4 (run `7d217921`, 2026-11-18) stopped at the first plan step because a non-Terrace job took Falcon's shared build lock; it proved nothing new beyond lease 3. Do not treat as proven; it is also not known to be broken.
+  - **NOT YET PROVEN ON HETZNER**: attempted in leases 3 and 4, not reached. Lease 3 stopped at the services launch (stale provider binding, fixed offline). Lease 4 (run `7d217921`, 2026-11-18) stopped at the first plan step because a non-Terrace job took Falcon's shared build lock; it proved nothing new beyond lease 3. Do not treat as proven; it is also not known to be broken. Things proven in the VM rehearsal since then (the website lifecycle, the sweep timer, the outbox) are PROVEN IN VM REHEARSAL, not proven on a provider and not deployed.
   - **PROVEN IN VM REHEARSAL**: passed on the Falcon builder in disposable QEMU guests with synthetic data (`docs/full-rehearsal.md` and the per-service docs).
   - **PROVEN LOCALLY**: ran on a Mac or loopback stack with synthetic data (handoff website section, website repo `docs/local-preview.md`), or, for release packaging, on the Linux builder with loopback only. A recorded real-browser or live-stack run is required; tests alone are not enough.
   - **TESTED IN CODE ONLY**: unit or integration tests exist (including tests against a real local PostgreSQL or a fake Keycloak API); no recorded run of the real flow end to end.
@@ -101,13 +101,21 @@ Tick each when done. "Unblocks" says what waits on it. "Default now" is what the
     - Why: the membership workflow must be preserved, and legacy source exposed credential material that must not be rotated until every consumer is mapped and a recoverable backup exists. (`docs/migration.md`, handoff "Other missing inputs")
 - [ ] **1.18 Hardware inventory for the on-prem server** (list in Part 10).
 - [ ] **1.19 Public hostnames and certificate approach** for: public website, CMS editor, identity, Headscale, Vaultwarden, Documenso, Windmill. Default: only `headscale.terracefclub.org` (relay default) and `vaultwarden.terracefclub.org` (legacy declaration) are named.
-- [ ] **1.20 Fresh yes for each Hetzner lease.** Lease 4 has ended without reaching the services (see 6.6). A fifth lease needs a new, explicit yes and the lock fix first (the open question about letting follow-on leases run without asking each time is still unanswered in the handoff).
+- [ ] **1.20 Fresh yes for each Hetzner lease.** Lease 4 has ended without reaching the services (see 6.6). A fifth lease needs a new, explicit yes (asked, unanswered); the lock fix is proven offline and reviewed, and the lease must be re-staged against the current trunk first (the open question about letting follow-on leases run without asking each time is still unanswered in the handoff).
+- [ ] **1.21 How editors preview drafts on the site.** The website has no draft preview for any collection: an editor sees an imported draft only as fields in the Payload admin, and sees how it looks on the site only after publishing. With the real export 36 documents are eligible for bulk publish, and documents carrying `divi-layout-review` (24), `empty-body` (11) or `leftover-shortcode` (5; the groups overlap) are held back for editor review.
+    - Why: reviewing the held-back documents on the real layout needs either a draft preview route (and a decision how editors authenticate to the website) or a staging copy of the site.
+    - Unblocks: step 4.8, publishing the held-back documents, G-8.
+    - Default now: none; the admin fields only. (website repo `docs/wordpress-import.md`, "Known gap: no draft preview")
+- [ ] **1.22 The builder's disk space and snapshot retention.** Rehearsal runs on the Linux builder retain tens of GB each until purged, and freed space comes back only when the host's ZFS snapshots rotate. The handoff records the builder's `/home` at about 79 percent used on 2026-11-19.
+    - Why: a full builder stops every rehearsal and lease preparation.
+    - Unblocks: more rehearsal runs and lease 5 staging.
+    - Default now: superseded runs are purged by hand; snapshot pruning is your call. (handoff, 2026-11-19)
 
 ---
 
 ## Part 2. See it working on your Mac
 
-All synthetic. Run it only while you are watching, then stop it. Do not leave it running. Written from website repo `docs/local-preview.md`, `identity/README.md`, `cms/README.md`, `web/README.md` and website repo `docs/member-lifecycle.md` at website `dev` `dad0a20` (first checked at `8883875`).
+All synthetic. Run it only while you are watching, then stop it. Do not leave it running. Written from website repo `docs/local-preview.md`, `identity/README.md`, `cms/README.md`, `web/README.md` and website repo `docs/member-lifecycle.md` at website `dev` `b582459` (first checked at `8883875`, re-verified at `b582459`).
 
 Where you type: every command below goes into Terminal on your Mac, **from the top folder of the website checkout** (the folder that contains `tools/`, `web/`, `cms/` and `identity/`), unless a step says otherwise. Step 2.2 creates that checkout and 2.3 onwards assume you are inside it. Do not type anything that prints a password, and never paste one anywhere.
 
@@ -126,7 +134,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     cd $TERRACE_ROOT/worktrees/tfc-preview
     ```
     Keep the checkout path short. `tools/local-stack` cannot create its PostgreSQL socket if the path is too long (handoff, PR9 notes: over 103 bytes). Computed from `cms/tools/with-local`, the socket file is the checkout path plus 42 bytes, so the checkout path itself must be at most 61 bytes; the path above is 53.
-    - Worked if: `git log -1 --oneline` in the checkout shows `dad0a20` or a later `dev` commit.
+    - Worked if: `git log -1 --oneline` in the checkout shows `b582459` or a later `dev` commit.
 - [ ] **2.3 Approve the three shells once.** Inside the checkout:
     - Who: You
     - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
@@ -188,40 +196,41 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
 - [ ] **2.10 Put synthetic news and pages on the site.** A fresh CMS has no published content. Apply the invented fixture plan with publishing on, to the local preview database only. The stack from 2.4 must still be running.
     - Who: Claude can do this for you (or You)
     - Status: PROVEN LOCALLY (handoff PR10 note: the worker applied the fixture with `--publish` in a local stack and saw 200 and 301 responses). The exact command below is assembled from the documented flags in website repo `docs/wordpress-import.md` and `cms/tools/wp-import.ts`; no source gives a local-stack walkthrough.
-    - Do: make an owner-only folder outside every Git checkout (the tool refuses a folder inside one; the `install -d -m 0700` form is borrowed from `docs/full-rehearsal.md`, the website docs only say to use an owner-only directory), then run the apply from the checkout's `cms/` folder. Replace `/absolute/private/dir` with the real path, for example a new folder in your home directory:
+    - Do: make an owner-only folder outside every Git checkout (website repo `docs/wordpress-import.md` suggests `~/owner-only-dir`; the tools refuse a folder that has a `.git` anywhere above it, even when Git ignores it, so never `.state/`), then run the apply from the checkout's `cms/` folder. Skip the `mkdir` if the folder already exists:
     ```bash
-    install -d -m 0700 /absolute/private/dir
+    mkdir -m 700 ~/owner-only-dir
     cd cms
-    direnv exec . tools/with-local bun tools/wp-import.ts apply --plan test/fixtures/wp-import-plan.synthetic.json --report /absolute/private/dir/fixture-apply.json --publish
+    direnv exec . tools/with-local bun tools/wp-import.ts apply --plan test/fixtures/wp-import-plan.synthetic.json --report ~/owner-only-dir/fixture-apply.json --publish
     cd ..
     ```
-    (The report file must not already exist; it is created exclusively with mode 0600.)
-    - Worked if: the terminal prints aggregate counts only. In the website at `http://127.0.0.1:4194/`, switch the masthead to **View published site** (the button then reads **View sample site**), then open `/news/`. Drafts and unknown paths return the same 404. Old WordPress paths in the fixture redirect with a 301.
+    (Assembled from the documented flags; the committed fixture plan is schema version 2 and has 10 eligible documents. The report file must not already exist; it is created exclusively with mode 0600.)
+    - Worked if: the terminal prints aggregate counts only. In the website at `http://127.0.0.1:4194/`, switch the masthead to **View published site** (the button then reads **View sample site**; a fresh local preview shows sample content until you do, and the choice is a cookie in that browser), then open `/news/`. Drafts and unknown paths return the same 404. Old WordPress paths in the fixture redirect with a 301.
 - [ ] **2.11 Look at the member area.** Use a private browsing window, or sign out of Terrace first: the editor session from 2.9 lives in the same Keycloak, and an account without a member role sees the denial screen (it has a switch-account button, handoff note on TFC !21). At `http://127.0.0.1:4194/`, choose **Members** and sign in as `local-member`, then as `local-alumni`, then try `local-unapproved`.
     - Who: You
     - Status: PROVEN LOCALLY (handoff 2026-11-04 captures and real-browser sign-in; `identity/README.md`)
     - Worked if: member and alumni reach "The living room", stories, people, mentorship and profile pages. The unapproved account sees the approval screen. Profile directory and mentorship are off by default.
 - [ ] **2.12 Try the account page.** As a member, open `/members/account/`.
     - Who: You
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: real-browser member profile, story, report, export and erasure against a local stack). It is unverified on any deployed host. Expect rough edges and report them.
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: real-browser member profile, story, report, export and erasure against a local stack; re-verified on website PR 14 with a clean erasure scan). It is unverified on any deployed host. Expect rough edges and report them.
     - Worked if: you can download your own data as JSON. Do not press the final "erase my data" confirmation unless you want that synthetic member erased.
 - [ ] **2.13 Walk the application lifecycle once, locally.**
     - Who: You (Claude can drive it)
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: real-browser apply, approve, invite, redeem, provision and first sign-in with real Keycloak SSO). Not a production procedure. The 2026-11-18 defects in this path (class-year field, unstyled pages) are fixed on `dev` `dad0a20` by website PR 13.
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18, re-verified on website PR 14 on 2026-11-19: real-browser apply, approve, invite, redeem, provision and first sign-in with real Keycloak SSO; first sign-in fires only "Update password", the email is not user-editable and the application is linked automatically). Not a production procedure.
     - Do:
         1. Open `http://127.0.0.1:4194/apply/`, submit a made-up name and an `.invalid`-style address. (Submissions faster than 3 seconds after the page loaded are rejected as spam: wait a few seconds.)
-        2. In the CMS admin (signed in as in 2.9) open **Member applications**, pick the role, set status `approved`.
+        2. In the CMS admin (signed in as in 2.9) open **Member applications**, pick the role, set status `approved`. Note the application's number from the address of its admin page (`.../admin/collections/member-applications/<number>`).
         3. Read the one-time link from the outbox mirror file in `cms/.state/outbox/` (named `<id>-<kind>.json`). Do not paste it anywhere. (The outbox rows visible in the admin never contain the link.)
         4. Open the link (`/join/#<token>`) and press **Accept invitation**.
-        5. Create the sign-in account, from the checkout's top folder. `KEYCLOAK_HTTP_PORT` must be your identity port: 8186 if you used the default ports in 2.4 (the source document now uses 8186 too; 8190 is the alternative port from 2.4):
+        5. Create the sign-in account, from the checkout's top folder. The email is read from the approved application in the local database, never typed, so the command runs through `cms/tools/with-local`. Replace `123` with the application number from step 2; `KEYCLOAK_HTTP_PORT` must be your identity port, 8186 if you used the default ports in 2.4 (8190 is the alternative from 2.4). The `cd ..` is added here:
         ```bash
-        KEYCLOAK_HTTP_PORT=8186 direnv exec identity bun identity/tools/provision-member.ts provision --username verify.alumna --email person@example.org --name "Verify Alumna" --role alumni
+        cd cms && direnv exec . tools/with-local env KEYCLOAK_HTTP_PORT=8186 bun ../identity/tools/provision-member.ts provision --username verify.alumna --application 123 --name "Verify Alumna" --role alumni
+        cd ..
         ```
         6. The temporary password is in `identity/.state/provisioned/<username>.txt` (mode 0600), never printed. Sign in with it at the website's **Members** link; Keycloak forces a change.
-    - Worked if: the account reaches the member area. (website repo `docs/member-lifecycle.md`, "Verify")
-- [ ] **2.14 Offboard it.** Create a **Member offboardings** record for that member, then close the realm side from the checkout's top folder. GAP: the admin screens cannot create this record yet (the rehearsal had to use the CMS REST API; fix in progress, G-41), so ask Claude to create it as the administrator `local-editorial-admin` (editors cannot offboard):
+    - Worked if: the account reaches the member area, and in the admin the application and its invitation now show that member (the link is made automatically at first sign-in by the token's verified email, matched to the approved application's contact address; nothing is linked by name). (website repo `docs/member-lifecycle.md`, "Linking the person to their application and invitation")
+- [ ] **2.14 Offboard it.** As the administrator `local-editorial-admin` (editors cannot offboard), open **Member offboardings**, press **Create new**, choose the member by name in the **Member** picker, add a reason and save. Then close the realm side from the checkout's top folder:
     - Who: You
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: offboard and restore, through the REST API for the CMS side; not a production procedure)
+    - Status: PROVEN LOCALLY (handoff, real-stack re-verification on website PR 14, 2026-11-19: offboard and restore in the admin UI; the picker is new in website PR 14). Not a production procedure.
     - Do (same port rule as 2.13):
     ```bash
     KEYCLOAK_HTTP_PORT=8186 direnv exec identity bun identity/tools/provision-member.ts offboard --username verify.alumna
@@ -309,11 +318,11 @@ Rule: keep WordPress intact until an isolated restore, import reconciliation, UR
 
 ## Part 4. Migrate content
 
-What the tooling does today (dev `dad0a20`): turn the WXR into a private plan, report on it, and write Payload documents as drafts into a local database. It has never been applied to a production database. A local rehearsal (handoff, real-export local rehearsal 2026-11-18, worktree at `8883875`, local database only) imported the owner's real export: 215 documents created with 0 failures, a re-apply that wrote nothing, a rollback to zero, then `apply --publish` published 56 documents and activated 51 redirects. A crawl found all 38 posts and 16 pages returning 200 and 50 of 51 redirect sources answering 301 to a 200, with no 5xx. Everything for production remains undone from step 4.6.
+What the tooling does today (dev `b582459`): turn the WXR into a private plan (schema version 2: a version 1 plan is refused, so plan again), report on it, and write Payload documents as drafts into a local database; a `publish` command then publishes eligible imported drafts, and publication keeps the redirect rows in step. It has never been applied to a production database. A local rehearsal on the owner's real export (handoff, real-export local rehearsal 2026-11-18, then a second one after the content gates, website repo `docs/wordpress-import.md`, local database only) created 215 documents with 0 failures, re-applied as a no-op, and rolled back to zero. After the quality gates `publish` published the 36 eligible drafts and activated their 36 redirects; a second `publish` published nothing; unpublishing and publishing one post in the admin flipped its redirect at once; rollback of the publish run and then the apply run left no imported rows. Everything for production remains undone from step 4.6.
 
-Real-export dry-run results to compare against (2026-11-18; handoff and website repo `docs/wordpress-import.md`): 245 items, 87 publish candidates, 215 mapped (122 media references, 41 posts, 25 pages, 14 events, 12 newsletters, 1 initiative), 30 unmapped (11 venues and organizers embedded in events, 11 menu items, 4 Divi layouts, 3 style records, 1 event with no start date), 86 redirects (80 redirect, 6 served in place) with 2 gaps (site root and one reserved-route collision), 56 publish-eligible. Website repo `docs/wordpress-import.md` now states the same 86 and 2.
+Real-export dry-run results to compare against (2026-11-18; handoff and website repo `docs/wordpress-import.md`): 245 items, 87 publish candidates, 215 mapped (122 media references, 41 posts, 25 pages, 14 events, 12 newsletters, 1 initiative), 30 unmapped (11 venues and organizers embedded in events, 11 menu items, 4 Divi layouts, 3 style records, 1 event with no start date), 85 redirects (79 redirect, 6 served in place) with 3 explicit gaps (the site root and two reserved routes), and **36 publish-eligible documents (it was 56 before the content gates)**. Documents carrying `divi-layout-review` (24), `empty-body` (11) or `leftover-shortcode` (5) are blocked from bulk publish until an editor reviews them (the groups overlap; 20 of the 56 became blocked). Link findings (non-blocking `unresolved-links`): 15 documents, 5 distinct unresolved internal targets and 39 distinct old-site upload paths that break at cutover until the Kinsta media is imported.
 
-Use `PRIV` for an existing owner-only (0700) directory outside every Git checkout and `EXPORT` for the protected WXR. Every `--report` and `--out` path must be a new file: the tools create reports exclusively at mode 0600 and refuse to overwrite, so give every run its own file name. Plan and report commands that use `cms/tools/wp-import.ts` run from the `cms/` folder of a source checkout, because the release bundle does not contain them (G-5).
+Use `PRIV` for an existing owner-only (0700) directory outside every Git checkout (the website docs suggest `~/owner-only-dir`, made with `mkdir -m 700 ~/owner-only-dir`; the tools refuse any directory with a `.git` anywhere above it, ignored or not) and `EXPORT` for the protected WXR. Every `--report` and `--out` path must be a new file: the tools create reports exclusively at mode 0600 and refuse to overwrite, so give every run its own file name. Commands that use `cms/tools/wp-import.ts` run from the `cms/` folder of a source checkout. The importer is deliberately not in the release bundle (G-5).
 
 - [ ] **4.1 Dry run on the real export.** Writes only a safe report.
     - Who: Claude can do this for you
@@ -325,12 +334,12 @@ Use `PRIV` for an existing owner-only (0700) directory outside every Git checkou
     - Worked if: the counts above reproduce and the report contains no titles, bodies, names or emails.
 - [ ] **4.2 Create the plan** (private file with titles and bodies; treat it like the export itself).
     - Who: Claude can do this for you
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: planner on the real export gave 245 items, 215 mapped, 86 redirects, 56 publish-eligible). The tool refuses `--out` inside a Git checkout, `.state/` included; use the private directory.
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: planner on the real export gave 245 items, 215 mapped, 86 redirects, 56 publish-eligible before the content gates; 85 redirects and 36 eligible after them). The tool refuses `--out` inside a Git checkout, `.state/` included; use the private directory.
     - Do:
     ```bash
     direnv exec web bun web/tools/wp-import/import.ts plan --out $PRIV/wp-import-plan.json --report $PRIV/plan-report.json < $EXPORT
     ```
-    - Worked if: both files exist at mode 0600. Never edit a plan; re-run the planner instead (the plan hash is an integrity check, not authenticity).
+    - Worked if: both files exist at mode 0600. Never edit a plan; re-run the planner instead (the plan hash is an integrity check, not authenticity). After an editor has reviewed documents, add `--reviewed $PRIV/review.json` to this command (see 4.8); the planner refuses to run against a stale route manifest.
 - [ ] **4.3 Dry run against a local CMS** (the stack from Part 2 running, migrations applied).
     - Who: Claude can do this for you
     - Status: PROVEN LOCALLY (synthetic fixture; and the real plan against a local database in the real-export rehearsal, handoff, real-export local rehearsal 2026-11-18)
@@ -346,7 +355,7 @@ Use `PRIV` for an existing owner-only (0700) directory outside every Git checkou
     - Look for:
         - source counts equal the preflight (245 and 87)
         - every unmapped item has a reason you accept: `embedded-in-events-not-standalone`, `menus-need-database-backup-or-review`, `divi-layout-library-not-imported`, `theme-styles-not-imported`
-        - review flags: `unsafe-html-stripped`, `builder-code-dropped`, `form-shortcode-dropped`, `plugin-shortcode-dropped`, `event-date-review`, `event-timezone-review`, `event-venue-missing`, `event-end-invalid`, `media-bytes-pending`, `divi-layout-review`, `alt-missing`, `slug-deduplicated`
+        - review flags: `unsafe-html-stripped`, `builder-code-dropped`, `form-shortcode-dropped`, `plugin-shortcode-dropped`, `event-date-review`, `event-timezone-review`, `event-venue-missing`, `event-end-invalid`, `media-bytes-pending`, `divi-layout-review`, `empty-body`, `leftover-shortcode`, `unresolved-links` (non-blocking), `alt-missing`, `slug-deduplicated`; the report also lists the distinct leftover shortcode names with counts and the link findings, never attributes or text
         - redirect gaps: `redirect-site-root`, `redirect-reserved-route`, `redirect-query-or-fragment-route`, `redirect-foreign-origin`, `redirect-unrepresentable-path`, `redirect-duplicate-source-path`
     - Worked if: you can say, for every non-zero line, "accepted", "fix in the editor" or "wait for the ZIP".
 - [ ] **4.5 Rehearse apply as drafts on the local preview.** Everything is created as a draft unless `--publish` is given.
@@ -361,40 +370,41 @@ Use `PRIV` for an existing owner-only (0700) directory outside every Git checkou
 - [ ] **4.6 Apply the real plan to the production CMS as drafts.**
     - Who: Needs your decision, then Claude
     - Status: NOT YET BUILT
-    - GAP: no documented procedure. The release bundle contains only the migrator (`bin/migrate`), not the importer. The importer runs from a source checkout through `tools/with-local` and refuses non-local databases (loopback allowed, so an SSH tunnel counts as local; the flag "guards intent, not topology"). There is no production host yet and no written way to run it against one. See G-5.
+    - GAP: no documented production procedure, by decision. The release bundle contains `bin/start`, `bin/migrate` and, since website PR 15, `bin/sweep`, but deliberately not the importer: on a production host the PostgreSQL is itself local, so a packaged importer would pass its local-database guard against the live database. Website repo `tools/release/README.md` says to keep running it from a reviewed source checkout of the deployed revision, against a local rehearsal database first, and to treat a production apply as a separate, explicit, backed-up operator decision. The guard allows loopback, so an SSH tunnel counts as local; the flag guards intent, not topology. There is no production host yet. See G-5.
     - Worked if: the production report matches the rehearsal counts.
 - [ ] **4.7 Import media bytes, newsletter PDFs and menus from the Kinsta ZIP.**
     - Who: Claude can do this for you, after 1.1
     - Status: NOT YET BUILT
     - GAP: only typed stubs exist (`MediaBytesProvider.find()`, `DatabaseTableProvider.menus()`, `pluginOption()`; they report `todo-kinsta-zip`). Needed: the ZIP, a reader for uploads and the SQL dump, a navigation collection for the 11 menu items, and SHA-256 reconciliation of originals and derivatives. Until then no Media can be public and no newsletter, event poster or initiative image can publish. 18 referenced media IDs and 28 body URLs are missing from the export. See G-6 and G-7.
     - Worked if: every Media reference has verified bytes and the `media-bytes-pending` flag clears.
-- [ ] **4.8 Review flagged items visually.** 24 items are flagged `divi-layout-review` (Divi layouts were flattened to text and basic HTML). Compare each with the live WordPress page.
+- [ ] **4.8 Review the held-back items.** Documents carrying `divi-layout-review` (24: Divi layouts flattened to text and basic HTML), `empty-body` (11: under 200 characters of text, mostly pages that are only a heading) or `leftover-shortcode` (5: raw `[tt-event]`, Google Drive and payment-receipt shortcodes) are blocked from bulk publish. Compare each with the live WordPress page, then record each decision in a private review file (`{"kind":"wp-import-review","schemaVersion":1,"reviewed":[{"ordinal":N,"sourceHash":"<64 hex from the safe report>","flags":["divi-layout-review"]}]}`) and plan again with `--reviewed`; the flag becomes `<flag>-reviewed` and stops blocking, only for that unchanged source record.
     - Who: You (editors)
     - Status: NOT YET BUILT
-    - GAP: there is no draft preview for any collection (stated in website repo `docs/wordpress-import.md` at `dad0a20`). The existing preview toggle only switches sample versus published content, and drafts return 404 on the public site. Editors can only read the fields in the Payload admin. Needed: a draft preview route and an owner decision on how editors authenticate to the website, or a staging copy of the site. Known defect from the rehearsal: nine near-empty pages and one raw `[tt-event]` shortcode were publish-eligible, so review those before publishing (G-41). See G-8.
+    - GAP: there is still no draft preview for any collection (website repo `docs/wordpress-import.md`, "Known gap"). The existing preview toggle only switches sample versus published content, and drafts return 404 on the public site. Editors can only read the fields in the Payload admin and see the site only after publishing. Needed: a signed draft preview route and your decision on how editors authenticate to the website (1.21), or a staging copy of the site. See G-8.
     - Worked if: each reviewed item is marked fixed or accepted. Also fix `alt-missing` media alt text in the admin.
-- [ ] **4.9 Publish.** Two ways: add `--publish` to the apply run (only documents that run creates, only those marked eligible, and never anything with a blocking flag), or have an editor publish in the admin. Updates to an already-published document are written as a draft version, so the public page never changes by itself.
-    - Who: You (editors), Claude can run the apply
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: `apply --publish` published 56 documents; a real browser passed editor publish and unpublish; 38 of 38 posts and 16 of 16 pages returned 200). Known defect: `apply --publish` publishes nothing on an already-imported set (G-41).
-    - Worked if: the page opens at `/news/<slug>/` or `/pages/<slug>/` and the same slug while still a draft returns 404.
-- [ ] **4.10 Activate redirects.** The importer stores 301 rows with `active: false` until their target is published. Re-run apply with the same plan after publishing; a later apply run activates the redirect once the document is published.
-    - Who: Claude can do this for you
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: 51 redirects active, 50 of 51 sources answered 301 to a 200). Known defect: publishing in the admin does not activate a redirect until `apply` is re-run, as this step says (G-41).
-    - Do:
+- [ ] **4.9 Publish.** Three ways: add `--publish` to the apply run (only documents that run creates, only those marked eligible, never anything with a blocking flag), run the `publish` command for drafts that are already imported (journaled; it never touches a document an editor changed, one already published or one that differs from the plan), or have an editor publish in the admin. Updates to an already-published document are written as a draft version, so the public page never changes by itself.
+    - Who: You (editors), Claude can run the commands
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: `apply --publish` published 56 documents before the gates; after them `publish` published the 36 eligible drafts, a second `publish` published nothing, a real browser passed editor publish and unpublish, and all 38 posts and 16 pages returned 200)
+    - Do (the dry run first; each run needs its own report name):
     ```bash
     cd cms
-    direnv exec . tools/with-local bun tools/wp-import.ts apply --plan $PRIV/wp-import-plan.json --report $PRIV/cms-apply-2.json
+    direnv exec . tools/with-local bun tools/wp-import.ts publish --plan $PRIV/wp-import-plan.json --report $PRIV/cms-publish-dry.json --dry-run
+    direnv exec . tools/with-local bun tools/wp-import.ts publish --plan $PRIV/wp-import-plan.json --report $PRIV/cms-publish.json
     ```
+    - Worked if: the page opens at `/news/<slug>/` or `/pages/<slug>/` and the same slug while still a draft returns 404; the dry run's counts match what is then published.
+- [ ] **4.10 Check redirects.** The importer stores 301 rows with `active: false` until their target is published. Publication now keeps them in step inside the CMS: publishing a document (in the admin or with `publish`) activates its importer-owned redirect rows, and unpublishing or deleting it deactivates them, with no re-run of `apply`. An editor-changed row is left alone.
+    - Who: Claude can do this for you
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18, then handoff, real-stack re-verification on website PR 14, 2026-11-19: `publish` activated 36 redirects, an admin unpublish and publish flipped one at once; earlier 50 of 51 sources answered 301 to a 200)
     - Worked if: opening an old WordPress URL in a browser lands on the new path with a 301, and an old URL whose target is still a draft does not redirect. Changes can take up to five minutes to appear (in-process cache). Rules held only by Kinsta or Nginx are not part of this (G-1).
 - [ ] **4.11 Roll back an import run** if something is wrong.
     - Who: Claude can do this for you
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: rollback to zero verified; tests also cover the refusal paths)
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18 and the second rehearsal: rollback of the publish run and then the apply run left no imported rows; tests also cover the refusal paths)
     - Do:
     ```bash
     cd cms
     direnv exec . tools/with-local bun tools/wp-import.ts rollback --run wpimport-YYYYMMDDHHMMSS-abcdef
     ```
-    - Worked if: the run is marked `rolled-back` and created documents are gone. Rollback refuses (changing nothing) when: a later run depends on the document (roll back newest first), an editor edited or published it (`--discard-edits` overrides), media is referenced elsewhere, or the run is still `running`. A crashed apply is marked `failed` and can be rolled back. A run stuck `running` needs `--take-over-stale` after one hour idle.
+    - Worked if: the run is marked `rolled-back` and created documents are gone. Rollback refuses (changing nothing) when: a later run depends on the document (roll back newest first), an editor edited or published it (`--discard-edits` overrides), media is referenced elsewhere, or the run is still `running`. A crashed apply is marked `failed` and can be rolled back. A run stuck `running` needs `--take-over-stale` after one hour idle. Rolling back a `publish` run sets exactly those documents back to draft and deactivates their redirects.
 - [ ] **4.12 Rebuild approved forms** (contact, newsletter contribution, donation, merchandise, as you decided in 1.13).
     - Who: Claude can do this for you, after 1.13
     - Status: NOT YET BUILT
@@ -423,7 +433,7 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: two named administrators (primary and backup) and the editor list exist in a private record.
 - [ ] **5.2 Generate the production realm file** (user-free: four application clients, no users, no admin client, no mail settings). Use real HTTPS origins, and independently generated client secrets delivered from a secret manager. Never reuse the local `credentials.json`.
     - Who: Claude can do this for you
-    - Status: TESTED IN CODE ONLY (contract tests; the opt-in native import test needs the pinned archive). Womb's gateway check uses the same contract files hash-pinned at TFC `3902e16`; see G-13.
+    - Status: TESTED IN CODE ONLY (contract tests, and a CI check that the production realm carries what member linking needs; the opt-in native import test needs the pinned archive). Womb's checks import the realm through the same contract files, now hash-pinned at website `680ad56` and proven in the VM rehearsal. Since website PR 14 the production realm makes the `email` attribute administrator-edit-only, forbids duplicate emails and username edits, requires verified email, and gives the member client (`terrace-web`) the `email` scope; the editorial client does not release it. A realm import is create-only, so an older realm needs the operator checklist in website repo `docs/member-lifecycle.md` ("Existing realm").
     - Do: (`identity/README.md`)
     ```bash
     umask 077
@@ -462,13 +472,13 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: each editor signs in at the CMS admin with **Sign in with Terrace** and sees only what their role allows.
 - [ ] **5.7 Set the production environment so applications can open.** For the website and CMS (delivered as protected env files):
     - Who: Claude can do this for you
-    - Status: TESTED IN CODE ONLY (website repo `docs/member-lifecycle.md`, `cms/README.md`, `web/README.md`). Not run on any deployed host.
+    - Status: PROVEN IN VM REHEARSAL for the Womb wiring (Womb `f8fa07b`, VM rehearsal 2026-11-19: the website and gateway modules set `LIFECYCLE_OUTBOX_DIR`, `LIFECYCLE_PUBLIC_ORIGIN`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER=X-Forwarded-For` with `XFF_DEPTH=1`, and the check rejects any other pairing); the secret values and a real host are not proven. Not deployed.
     - Required values (names only; never print values):
         - CMS: `LIFECYCLE_INTAKE_SECRET` (32+ chars; unset means `/apply/` and `/join/` show "not open" and the endpoints answer 503), `LIFECYCLE_OUTBOX_DIR` (absolute, outside the code and media directories; a public CMS refuses to start without it), `LIFECYCLE_PUBLIC_ORIGIN` (a bare public https origin; a public CMS refuses to start without it), `CMS_ORIGIN`, `CMS_PUBLIC_DEPLOYMENT=1`, the CMS and member auth settings, `CMS_MEDIA_DIR`, `DATABASE_URI`.
         - Website: `ADDRESS_HEADER` (a header the proxy overwrites with the real client address) together with `XFF_DEPTH`, or `LIFECYCLE_DIRECT_CLIENTS=1` if there is no proxy; `/apply/` stays closed otherwise. Also `ORIGIN` equal to `MEMBER_AUTH_ORIGIN`, `CMS_ORIGIN`, and `CMS_PUBLIC_ORIGIN` (without it every inline body image is dropped and the CSP names no media origin).
         - Omit every `CMS_LOCAL_BOOTSTRAP` and `CMS_BOOTSTRAP_*` key.
-    - GAP (reduced): website PR 11 added one "Production configuration" table to website repo `docs/member-lifecycle.md` listing every CMS and website variable, what happens when it is unset, and that the website logs a `[config]` line (names only) per missing setting. The Womb side is still open. That table names `ADDRESS_HEADER` with `XFF_DEPTH` set to the number of trusted proxies for `X-Forwarded-For`. Womb's gateway code (`platform/website-gateway.nix`) sets `X-Forwarded-For` to `$remote_addr`, one hop, so `X-Forwarded-For` with depth `1` matches by reading the code, but no Womb document says so, no test checks the pairing, and no Womb module sets `ADDRESS_HEADER`, `XFF_DEPTH`, `LIFECYCLE_*` or `CMS_PUBLIC_ORIGIN` at all. See G-14.
-    - Worked if: `/apply/` opens, approval succeeds, and a spoofed `X-Forwarded-For` from a client does not choose its own rate-limit bucket.
+    - Closed in the VM rehearsal (G-14): website repo `docs/member-lifecycle.md` has one "Production configuration" table, and Womb's `docs/website-host.md` ("Member lifecycle settings, outbox and sweep") now supplies the path and origin variables from its modules, with the gateway setting the header pairing (it overwrites `X-Forwarded-For` with the connecting address) and a gateway check forging headers to prove each client address gets its own rate-limit bucket. Still yours: `LIFECYCLE_INTAKE_SECRET` (the same 32-byte-or-longer value in `cms.env` and `web.env`; the start guards refuse a missing or short one), the real hostnames (1.19) and the optional retention values.
+    - Worked if: `/apply/` opens, approval succeeds, and a spoofed `X-Forwarded-For` from a client does not choose its own rate-limit bucket (the gateway check proves this in the VM; the real host is still to do).
 - [ ] **5.8 Open applications.** Share the `/apply/` address with people on the approved roster. Applications stay pending until reviewed; at most 500 pending are held, pending applications are withdrawn after `LIFECYCLE_APPLICATION_DAYS` (60 by default), and a staff notice is added when the queue passes 400.
     - Who: You
     - Status: TESTED IN CODE ONLY for production; PROVEN LOCALLY for the form (handoff, real-export local rehearsal 2026-11-18)
@@ -479,21 +489,21 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: an approval creates an invitation record and an outbox row; a denial adds a denial notice.
 - [ ] **5.10 Deliver the invitation.** The one-time link exists only in the outbox mirror file `LIFECYCLE_OUTBOX_DIR/<id>-<kind>.json` (folder mode 0700, files 0600). Pass it to the applicant privately. The link is `/join/#<token>`, valid `LIFECYCLE_INVITATION_DAYS` (7 by default).
     - Who: You
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: invite and redeem in a real browser)
-    - GAP for production: there is no mail transport and no documented way to read the file on a server. Website PR 11 documents the directory (absolute, outside the code and media directories; the CMS and the sweep must run as the same account, because the folder is mode 0700) and makes a public CMS refuse to start without it. Still open: the production location, a check that the service can write it, and backup inclusion (it holds live invitation links). The sweep now retries missing mirror files and lists an invitation whose file is missing as `mirror.undeliverable`: reissue it. See G-19, G-20.
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: invite and redeem in a real browser); the Womb outbox is PROVEN IN VM REHEARSAL (Womb `f8fa07b`, VM rehearsal 2026-11-19)
+    - GAP for production: there is no mail transport (invitation delivery is manual, D-8) and no safe operator read procedure. Womb now defines the folder (`/var/lib/terrace-cms-outbox`, mode 0700, owned by the CMS account, not readable by the website account), includes it in backups (`extraPaths.website-outbox`) and restore, and the rehearsal proves restored invitations are owned by, readable by and redeemable from the CMS account; but `docs/website-host.md` says only "read it as root on the host", and the file holds live one-time links. The sweep retries missing mirror files and lists an invitation whose file is missing as `mirror.undeliverable`: reissue it. See G-19, G-20.
     - Worked if: the applicant opens the link and presses **Accept invitation**, and the token cannot be used a second time.
 - [ ] **5.11 Create the person's Keycloak account** and grant exactly one member role.
     - Who: You, in the Keycloak admin console
     - Status: NOT YET BUILT (production)
-    - GAP: `identity/tools/provision-member.ts` refuses anything but the loopback local realm. For production the doc says to follow "the same steps" in the admin console and lists production enrollment, verified contact ownership and password delivery as open. The realm requires verified email, and no SMTP exists. Needed: a written console procedure (user, verified-email flag, member role, temporary password and forced change) and a private way to deliver the temporary password. See G-16.
-    - Worked if: the person signs in once at the website and reaches the member area. First sign-in of a freshly provisioned user has not been verified in a browser.
-- [ ] **5.12 Link the member** to their application and invitation (administrator only, after first sign-in; today through the CMS REST API, G-41). This lets that member read those two records.
+    - GAP: `identity/tools/provision-member.ts` (now `--application ID`, reading the approved application's email) refuses anything but the loopback local realm. For production the doc says to follow "the same steps" in the admin console and lists production enrollment, verified contact ownership and password delivery as open. What the console account must carry is now written down: the email equal to the approved application's contact address, marked verified, with exactly one member role; a mistyped address would bind the user to whoever applied with it. The realm requires verified email, and no SMTP exists. Needed: a written console procedure (user, verified-email flag, member role, temporary password and forced change) and a private way to deliver the temporary password. See G-16.
+    - Worked if: the person signs in once at the website and reaches the member area. The first sign-in of a locally provisioned user is proven (2.13); on a production realm it is not.
+- [ ] **5.12 Member linking.** The link between a member and their application and invitation is made automatically at first sign-in, from the token's verified email, for an approved application whose invitation was redeemed and is not yet linked. An administrator can set the **member** link by hand in the admin picker (the picker lists members by display name and status only) for the one case the system leaves open: a person who never signed in or whose token carried no matching verified email.
+    - Who: You (administrator, only when the automatic link did not happen)
+    - Status: PROVEN LOCALLY (handoff, real-stack re-verification on website PR 14, 2026-11-19: auto-link at first sign-in, picker in the admin); the sign-in and link steps are also PROVEN IN VM REHEARSAL (Womb `f8fa07b`, VM rehearsal 2026-11-19)
+    - Worked if: the member shows on the application and the invitation. The sweep's `unlinkedRedeemedApplications` count reports the ones left over. Link before any erasure, so the erasure can find the application.
+- [ ] **5.13 Offboard a member.** (a) An administrator opens **Member offboardings** in the admin and creates a record, choosing the member by name. The member is refused (401 and 403) even if Keycloak still lets them sign in, their content is hidden but kept, and a notice is queued. (b) Close the realm side.
     - Who: You
-    - Status: PROVEN LOCALLY through the REST API only (handoff, real-export local rehearsal 2026-11-18). GAP: the admin screens cannot link a member yet (fix in progress, G-41).
-    - Worked if: the member row shows on the application. Link before any erasure, so the erasure can find the application.
-- [ ] **5.13 Offboard a member.** (a) An administrator creates a **Member offboardings** record (GAP: the admin screens cannot do this yet, so it goes through the CMS REST API, G-41). The member is refused (401 and 403) even if Keycloak still lets them sign in, their content is hidden but kept, and a notice is queued. (b) Close the realm side.
-    - Who: You
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: offboard and restore, CMS side through the REST API, because the admin screens cannot create an offboarding yet, G-41). Production realm step is a GAP (G-16).
+    - Status: PROVEN LOCALLY (handoff, real-stack re-verification on website PR 14, 2026-11-19: offboard and restore in the admin UI). Production realm step is a GAP (G-16).
     - Do (local realm only; use your own identity port, 8186 by default):
     ```bash
     KEYCLOAK_HTTP_PORT=8186 direnv exec identity bun identity/tools/provision-member.ts offboard --username verify.alumna
@@ -509,18 +519,22 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: the file contains only that member's records and a hidden-by-moderation flag, no other people's writing.
 - [ ] **5.16 Erase a member.** Member-initiated: **Start erasure** gives a single-use 15-minute code, then they type "erase my data". Administrator-initiated: only for an already offboarded member, by creating a **Data requests** record of kind `erasure`. Run the realm offboard step afterwards.
     - Who: You
-    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: erasure in a real browser). Known defect: erasure leaves personal data when the application was never linked to the member, so link first as the next paragraph says (G-41).
-    - Before you start: link the application to the member, and check no other applicant shares the contact address (erasing one person also anonymises other unlinked applications and outbox rows that use the same address).
+    - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: erasure in a real browser; website PR 14 fixed the unlinked-application defect for the normal case and re-verified with a clean erasure scan); erasure and sweep are also PROVEN IN VM REHEARSAL (Womb `f8fa07b`, VM rehearsal 2026-11-19: both members erased, redaction by the real sweep timer). An erased application becomes `withdrawn`.
+    - Before you start: check the member is linked to their application (5.12; an application nobody ever linked is the one case left to an administrator), and check no other applicant shares the contact address (erasing one person also anonymises other unlinked applications and outbox rows that use the same address).
     - Worked if: the member row is a tombstone (status `erased`, no roles, name and subject wiped) and a confirmation is queued.
-- [ ] **5.17 Run the cleanup sweep after every administrator-initiated erasure.** It also expires stale invitations, withdraws unreviewed applications, completes pending mirror redaction, and reports content past its grace period. With `--purge-moderated` it deletes moderation-hidden content in one transaction. Offboarded members are never erased automatically.
+- [ ] **5.17 Run the cleanup sweep after every administrator-initiated erasure.** It also expires stale invitations, withdraws unreviewed applications, reports `unlinkedRedeemedApplications`, completes pending mirror redaction and reports content past its grace period. With `--purge-moderated` it deletes moderation-hidden content in one transaction. Offboarded members are never erased automatically.
     - Who: Claude can do this for you
-    - Status: TESTED IN CODE ONLY (tests; no recorded run against a live local stack)
-    - Do:
+    - Status: PROVEN LOCALLY (handoff, real-stack re-verification on website PR 14, 2026-11-19: the sweep ends on its own with exit 0); the packaged `bin/sweep` and the daily timer are PROVEN IN VM REHEARSAL (Womb `f8fa07b`, VM rehearsal 2026-11-19: the release smoke runs the extracted `bin/sweep`, and the VM checks fire the real timer). Not deployed.
+    - Do (local; source checkout):
     ```bash
     cd cms && direnv exec . tools/with-local bun run lifecycle:sweep
     cd cms && direnv exec . tools/with-local bun run lifecycle:sweep -- --purge-moderated
     ```
-    - GAP for production (reduced): the sweep is still not in the release bundle and nobody has scheduled it. Website PR 11 documents a production invocation from a source checkout of the deployed revision with the CMS runtime environment, `cd /path/to/checkout/cms && bun run lifecycle:sweep`, recommends once a day at a quiet hour (for example 03:30) without `--purge-moderated` until you set retention (1.10), and says Womb must own the timer and its service account. Needed: a packaged `bin/sweep` and the Womb timer. See G-18.
+    On a Womb host the platform runs the packaged sweep for you daily at 03:30 (`terrace-cms-sweep.timer`, `Type=oneshot`, as the CMS account, without `--purge-moderated`); run it by hand after an administrator-initiated erasure (`docs/website-host.md`):
+    ```bash
+    systemctl start terrace-cms-sweep.service
+    ```
+    - GAP for production: no production host runs it yet, and purging moderated content stays off until you set retention periods (1.10, D-6). `bin/sweep` prints one JSON line of counts and ids and ends on its own: exit 0 is success, 1 a labelled failure (mirror work failed, or in a public deployment the outbox directory is unset), 2 a timeout after 120 seconds, 64 an unknown argument.
     - Worked if: the JSON report lists nothing pending, `mirror.failed` is 0 and `mirror.undeliverable` is empty (reissue any listed invitation), and the confirmation file is written once and not recreated if you delete it.
 - [ ] **5.18 Bring in the real roster.**
     - Who: Needs your decision
@@ -556,7 +570,7 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
         7. Start the repository listener (lease 3 `repository-start`; in lease 4 the listener never started).
         8. Tear down: delete the servers, IPs, key and firewall, prove absence in three reads, preserve the baseline, remove the credentials copy.
     - Worked if: you accept it. Receipts are in the lease 3 run directory `cloud-90e965daf611c47b5a52fd666a996611` under the builder's work folder (reference only). Lease 4 repeated steps 1 to 3 (create, key pin, RAM installer, install-target check) and step 8 (teardown) on 2026-11-18 and stopped at step 4 for the lock reason in 6.6; the repository listener never started, and it adds no new proven step.
-- [ ] **6.2 Next lease: services launch on both installed hosts.** Gateway bootstrap, 198 protocol assertions, relay nginx started with `LoadCredential`.
+- [ ] **6.2 Next lease: services launch on both installed hosts.** Gateway bootstrap, 198 protocol assertions, relay nginx started with `LoadCredential`, and now also the website lifecycle steps (two applications, approvals into the outbox, redeem, sign-in, automatic link, erasure and the sweep timer; `docs/cloud-rehearsal.md` says they have not yet run on a provider).
     - Who: Claude can do this for you (needs your yes for the lease)
     - Status: NOT YET PROVEN ON HETZNER: attempted in leases 3 and 4, not reached. Lease 3 stopped here because the provider binding was older than 120 seconds. Lease 4 stopped earlier, at the app plan step (6.6). PR45 added `require_launch_window` and the launcher refreshes both bindings (`cloud-controller.py binding --phase <phase> --role <role>`) right before launch. Proven offline only.
     - Worked if: Claude reports the supervisor passed `installed-boot-binding` and both roles' services came up. Do not call it proven until it reports so. The command text `cloud-controller.py binding --phase <phase> --role <role>` appears in the handoff only (a private operator script in the lease's proof directory); the repository tool behind it is `infra/cloud/rehearsal_apply.py binding <phase> --directory <run-dir> --credential-file <file> --role <role>`, and no step here asks you to run either.
@@ -574,28 +588,28 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: zero servers, IPs, SSH keys or firewalls remain from the run; the baseline (one CPX11, two primary IPs, one SSH key) is unchanged; no token copy remains; the timer is inactive.
 - [ ] **6.6 Lease 4 result, and the decision on a fifth lease.** Lease 4 (run `7d217921`, 2026-11-18 21:30 to 21:59 PST, CPX42 app and CPX22 relay in nbg1, at `01464be`) created both hosts, pinned the host keys without trusting first use, dispatched and verified the RAM installer on both and passed the app's install-target check again. It then stopped at the first plan step: a non-Terrace job took Falcon's shared build lock 5 seconds before the planner started and the planner's 100 second lock wait expired. No platform code was at fault. Everything was torn down and audited (absence in three reads, baseline preserved). It proved nothing new beyond lease 3.
     - Who: Needs your decision
-    - Status: NOT YET PROVEN ON HETZNER (services launch, off-host backup, retire and replacement restore). A fix to the lease tooling (prebuild before arming, fair-queue lock waits, a time ledger) is in progress offline; see G-42.
+    - Status: NOT YET PROVEN ON HETZNER (services launch, off-host backup, retire and replacement restore). Nothing has run on a provider since lease 4. The lease tooling fix (prebuild before arming, fair-queue lock waits sized in tens of minutes, a time ledger, an always-teardown runner) passed a three-pass independent review and offline replays, including one with a simulated foreign lock holder; see G-42. A fifth lease needs your yes (asked, unanswered), a quiet builder queue (expect up to about 75 minutes of prestaging plus about 4 hours), and must be re-staged against the current trunk and the pinned website bundle first, with the cloud rehearsal profile re-checked.
     - Worked if: you have decided whether to approve lease 5 once the tooling fix is merged. Each lease needs a fresh "Yes, run lease N". The handoff's older 2026-11-18 resume checkpoint still says "Lease 4 (not started)"; the newer lease 4 checkpoint supersedes it (G-36).
 
 ### 6B. What the VM rehearsal proves (synthetic, on Falcon)
 
-- [ ] **6.7 Know the all-services VM rehearsal result.** It composes K3s with PVC, website and CMS, Keycloak and PostgreSQL, Home Assistant and Frigate demos, Headscale with real Tailscale clients, signed Documenso, Windmill with the roster worker and Vaultwarden. It backs up quiescent state, retires every original guest, restores onto blank replacements, and re-runs two 198-assertion HTTPS and browser phases. Result: PASS in 1733.06 s at source `71b45be` (2026-11-05), 38 recorded process identities absent, synthetic state purged.
+- [ ] **6.7 Know the all-services VM rehearsal result.** It composes K3s with PVC, website and CMS with the member lifecycle, Keycloak and PostgreSQL, Home Assistant and Frigate demos, Headscale with real Tailscale clients, signed Documenso, Windmill with the roster worker and Vaultwarden. It backs up quiescent state, retires every original guest, restores onto blank replacements, and re-runs two 198-assertion HTTPS and browser phases. Latest result (Womb `f8fa07b`, VM rehearsal 2026-11-19): PASS in 1840 s at Womb `48ab695` (the code merged as `f8fa07b`) with website `680ad56` bundles, receipt `3c8066f5…6a3b`; all seven guest lifetimes absent. The website, gateway (198 protocol assertions) and cloud rehearsal-profile checks and the infrastructure unit tests passed at the same commit. The earlier result was 1733.06 s at `71b45be` (2026-11-05), 38 process identities absent, synthetic state purged. Defects the integrated run found and fixed: the release smoke had been stale since the lifecycle merge; no-script form posts returned an error after the action ran; service accounts had dynamic ids, so a restore onto a differently configured host would have mis-owned media and the outbox (now static ids 44121 and 44122); the sweep timer would have been boot-enabled in the cloud profile (now off, and the check rejects unexpected boot timers); and the builder's store garbage collection deleted a rehearsal guest mid-run (the driver is now rooted).
     - Who: You (read)
     - Status: PROVEN IN VM REHEARSAL (`docs/full-rehearsal.md`)
-    - Does not prove: a blank provider install, real DNS and certificates, CDN, off-site recovery, real invitations, human relay enrollment, forced DERP, production sizing.
+    - Does not prove: a blank provider install, real DNS and certificates, CDN, off-site recovery, real invitations or mail, human relay enrollment, forced DERP, production sizing, real secrets delivery, production host profiles.
     - Worked if: you accept the limits.
-- [ ] **6.8 Re-run the rehearsal** (for example after the website bundle changes). On Falcon, from a clean checkout:
+- [ ] **6.8 Re-run the rehearsal** (for example after the website bundle changes). On the builder, from a clean checkout, with the pinned archives and the matching website checkout already present (`docs/full-rehearsal.md`):
     - Who: Claude can do this for you
-    - Status: PROVEN IN VM REHEARSAL (`docs/full-rehearsal.md`, "All-services composition"). Archive names there are the 3902e16 bundles (G-13).
+    - Status: PROVEN IN VM REHEARSAL (`docs/full-rehearsal.md`, "All-services composition"). The archive names are the pinned `680ad56` bundles; the run retains tens of GB until purged (1.22).
     - Do:
     ```bash
     install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
     direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
       ./platform/full-rehearsal run --all-services \
       --output $HOME/terrace-work/full-rehearsal-output \
-      --webArchive $HOME/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-      --cmsArchive $HOME/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-      --tfcSource $HOME/terrace-work/release-a2
+      --webArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+      --cmsArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+      --tfcSource $HOME/terrace-work/website-bundle-680ad56
     ```
     Purge only a completed, verified, synthetic run:
     ```bash
@@ -620,19 +634,19 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Status: NOT YET BUILT
     - GAP: no production secret manager or generator or escrow retrieval exists ("Production secret delivery is still a release gate"; sops-nix not adopted). The files to deliver, from the docs: website `cms.env` and `web.env` (`/var/lib/terrace-website-inputs`, mode 0700 folder); realm JSON, database password and TLS for identity; backup repository passwords, SFTP key, known hosts and optional B2 environment file; TLS certificate and key for the gateway; Windmill `bootstrap.json`; Documenso `secrets.json`; Vaultwarden `input.json`. See G-11.
     - Worked if: each file exists at mode 0400, owned by root, regular (not a symlink), and a recovery copy is escrowed outside the servers.
-- [ ] **6.12 Build release bundles for the website at the revision you will deploy** (dev `dad0a20` or newer). On Falcon, from a clean Linux checkout, with no application dotenv files, through the heavy-build queue:
+- [ ] **6.12 Build release bundles for the website at the revision you will deploy.** The platform currently pins website `680ad56`, built on the builder (web `5aa81995…1bc1`, cms `1ed1ecc7…9895`); `dev` is now `b582459` (website PRs 18 and 19 add a route-header guard and a join-page hint). On the builder, from a clean Linux checkout, with no application dotenv files, through the heavy-build queue:
     - Who: Claude can do this for you
-    - Status: NOT YET BUILT for `dad0a20` (the procedure was run for `3902e16`, whose archives are on Falcon; `dev` has nine migrations and Next.js 16.4.5)
+    - Status: PROVEN IN VM REHEARSAL for `680ad56` (built on the builder; release smoke proof recorded; Womb `f8fa07b`, VM rehearsal 2026-11-19); NOT YET BUILT for `b582459`. Use a short checkout directory name: a 40-character SHA in the path pushes the PostgreSQL socket over its length limit (handoff).
     - Do (`tools/release/README.md`):
     ```bash
     direnv allow web
     direnv allow cms
     ./tools/release/build /absolute/private/output
     ```
-    - Worked if: the output has `terrace-{web,cms}-<revision>-linux-x64-gnu.tar.gz`, checksum sidecars, `SHA256SUMS` and `*.release.json`. Output is owner-only and existing artifacts are never overwritten. CI keeps artifacts seven days, so copy them out.
+    - Worked if: the output has `terrace-{web,cms}-<revision>-linux-x64-gnu.tar.gz`, checksum sidecars, `SHA256SUMS` and `*.release.json`; the CMS archive carries `bin/start`, `bin/migrate` and `bin/sweep`. Output is owner-only and existing artifacts are never overwritten. CI keeps artifacts seven days, so copy them out.
 - [ ] **6.13 Verify and keep the bundles.**
     - Who: Claude can do this for you
-    - Status: PROVEN LOCALLY (on the Linux builder with loopback only, for the `3902e16` bundles; `tools/release/README.md`; not run for `dad0a20`, whose smoke check now compares the ledger with the migration registry instead of a fixed count). `./tools/release/smoke` is documented for a dedicated Linux checkout, never your Mac.
+    - Status: PROVEN LOCALLY (on the Linux builder with loopback only; passed for the `680ad56` bundles; `tools/release/README.md`). The smoke now compares the ledger with the migration registry, runs the extracted `bin/sweep` against a synthetic outbox, and CI fails if the smoke goes stale (website PRs 16 and 17); it is documented for a dedicated Linux checkout, never your Mac.
     - Do (`sha256sum -c` is in the README's prose; the smoke lines are its code block):
     ```bash
     sha256sum -c SHA256SUMS
@@ -640,11 +654,11 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     direnv allow identity
     ./tools/release/smoke /absolute/private/output
     ```
-    - Worked if: hashes match, and smoke passes: extracted bundle in an empty Bubblewrap filesystem, migrations twice with an unchanged ledger, editorial and member SSO, publish and withdraw, moderation, private media denied. Keep the archives and checksums outside expiring CI storage and keep the previous release beside the new one.
-- [ ] **6.14 Re-pin Womb to the new bundles and re-run the website and gateway checks.** `platform/website-release.json` pins the `3902e16` archives (six migrations) and the gateway and identity checks hash-pin three TFC producer files from that revision. Dev (`dad0a20`) now has nine migration ledger rows, Next.js 16.4.5 and a changed lifecycle surface.
+    - Worked if: hashes match, and smoke passes: extracted bundle in an empty Bubblewrap filesystem, migrations twice with an unchanged ledger, the extracted `bin/sweep`, editorial and member SSO, publish and withdraw, moderation, private media denied. Keep the archives and checksums outside expiring CI storage and keep the previous release beside the new one.
+- [ ] **6.14 Re-pin Womb to the new bundles and re-run the website and gateway checks.** Done for `680ad56`: `platform/website-release.json` pins its two archives (web `5aa81995…1bc1`, cms `1ed1ecc7…9895`) and the eleven-migration ledger in order, and the gateway and identity checks hash-pin three producer files from that revision. A later revision (`dev` is `b582459`) needs the same steps again.
     - Who: Claude can do this for you
-    - Status: NOT YET BUILT
-    - Do (on Falcon, shared lock):
+    - Status: PROVEN IN VM REHEARSAL (Womb `f8fa07b`, VM rehearsal 2026-11-19: website check PASS, gateway check PASS with 198 protocol assertions, cloud rehearsal check PASS, FULL all-services rehearsal PASS)
+    - Do (on the builder, shared lock; the revision is `680ad567f553449280664cafad2d200011b6abac` today):
     ```bash
     BUILD_LOCK=/path/to/shared-heavy.lock platform/website-check \
       /protected/releases/terrace-web-<revision>-linux-x64-gnu.tar.gz \
@@ -654,21 +668,21 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
       /protected/releases/terrace-cms-<revision>-linux-x64-gnu.tar.gz \
       /source/tfc-at-<revision>
     ```
-    (Argument shapes from `docs/website-host.md` and `docs/website-gateway.md`; they cannot pass until the pins are updated.) See G-13.
-    - Worked if: both checks pass on the new archives.
+    (Argument shapes from `docs/website-host.md` and `docs/website-gateway.md`; the revision is a placeholder.) See G-13.
+    - Worked if: both checks pass on the new archives and the full rehearsal passes with them.
 - [ ] **6.15 Deploy a release: back up first, migrate explicitly, start.** Verify a recoverable backup and a retained previous bundle first. Migration stops both apps, applies the bundle's migrations and records the revision; it is never run at boot.
     - Who: Claude can do this for you
-    - Status: PROVEN IN VM REHEARSAL (`docs/website-host.md`, 83.34 s two-guest check, 25 CMS tables, six-migration ledger of the `3902e16` bundle)
+    - Status: PROVEN IN VM REHEARSAL (`docs/website-host.md`, two-guest check on 2026-11-19 at `48ab695` with the `680ad56` bundles: 37 CMS tables, the eleven-migration ledger in pinned order, explicit migration 6.02 s; the sweep service and timer, and the outbox restored with identical bytes, owner and modes, also passed)
     - Do (as root on the host):
     ```bash
     systemctl start terrace-cms-migrate.service
     systemctl start terrace-cms.service terrace-web.service
     ```
-    Repeat the migration action once to confirm the ledger is unchanged, then start both services again.
+    Repeat the migration action once to confirm the ledger is unchanged, then start both services again. The CMS and website accounts have static ids (44121 and 44122) because uploads and the outbox are restored with their numeric owners; a host that already has these accounts under other numbers needs a planned renumbering first (no such host exists yet).
     - Worked if: startup accepts the revision marker and public content works while private routes stay denied. Code rollback means switching to the previous release root; it does not undo migrations. Database rollback is a separate restore from a verified backup with the matching uploads.
 - [ ] **6.16 Gateway and TLS.** nginx gateway in front of the website and CMS on HTTPS 443 only, with distinct web and CMS hostnames, certificates delivered as systemd credentials, `private, no-store` on every response, nginx access logs off.
     - Who: Claude can do this for you; You (DNS and certificates)
-    - Status: PROVEN IN VM REHEARSAL (gateway check: 197 protocol assertions plus a Chromium account-switch test, `docs/website-gateway.md` and handoff; the full rehearsal repeats 198; synthetic CA). Real certificates: NOT YET BUILT.
+    - Status: PROVEN IN VM REHEARSAL (gateway check at `48ab695`: 198 protocol assertions plus a Chromium account-switch test and the lifecycle stages, `docs/website-gateway.md`; the full rehearsal repeats 198; synthetic CA). Real certificates: NOT YET BUILT.
     - GAP: HTTP port 80 is closed, there is no HTTP-to-HTTPS redirect and no certificate acquisition or renewal ("separate activation work"). Needed: a certificate method (ACME or manual), renewal and expiry alerting. See G-12.
     - Worked if: the browser trusts the certificate, unknown hosts and mismatched SNI/Host get 421, spoofed forwarding is ignored, and identity admin paths are not reachable from outside.
 - [ ] **6.17 Access relay (Headscale with DERP).** Independent host, deny-all peer policy by default.
@@ -720,7 +734,7 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
 - [ ] **6.22 Measure the combined stack.** Required: at least 25 percent free memory and no out-of-memory events under representative load, before adding each of Documenso, Windmill and Vaultwarden, one at a time.
     - Who: Claude can do this for you
     - Status: NOT YET BUILT
-    - GAP: only per-component measurements exist (for example CMS 101.9 MiB, web 47.3 MiB, PostgreSQL 121.2 MiB in a small synthetic run) and test-VM sizing; no combined production peak. See G-24.
+    - GAP: only per-component measurements exist (for example, in the 2026-11-19 website check, CMS 81.9 MiB, web 47.5 MiB and PostgreSQL 125.4 MiB; PostgreSQL sampled peaks of 25 and 29 clients in the full rehearsal) and test-VM sizing; no combined production peak. See G-24.
     - Worked if: a recorded week of the combined workload shows the headroom.
 - [ ] **6.23 Health, alerts and logs.** External probe, certificate expiry, capacity, backup age, bounded log retention.
     - Who: Claude can do this for you
@@ -742,10 +756,10 @@ Restic, client-side encrypted, to a Hetzner Storage Box (primary) and optionally
 | PostgreSQL roles | `pg_dumpall --globals-only` | roles restored first |
 | CMS and community media | restic files after the dump (default budget 5 GB) | sha256 and file count |
 | Headscale SQLite and its Noise and DERP keys | online backup plus files | integrity check and key hashes |
-| Website protected inputs, Documenso, Windmill and Vaultwarden databases and input folders | included automatically when `terrace.backup.enable` is set | per-service recovery checks |
+| Website protected inputs and the member-lifecycle outbox (`/var/lib/terrace-cms-outbox`, live one-time invitation links), Documenso, Windmill and Vaultwarden databases and input folders | included automatically when `terrace.backup.enable` is set (the outbox as `extraPaths.website-outbox`) | per-service recovery checks; the outbox restores with identical bytes, owner and modes |
 | NixOS and Kubernetes config | Git | rebuild from a clean checkout |
 
-Not covered: the K3s datastore and server token, local PV data, repository passwords, SFTP key and B2 keys (these are never in a backup), Home Assistant and Frigate real data and the message outbox folder (unless you add it to `extraPaths`).
+Not covered: the K3s datastore and server token, local PV data, repository passwords, SFTP key and B2 keys (these are never in a backup), and Home Assistant and Frigate real data. (The website outbox is now covered by the website module.)
 
 - [ ] **7.1 Create the off-site accounts.** A Storage Box sub-account (SFTP key, host key verified out of band) and optionally a B2 bucket and application key. Created by you; credentials never go in chat.
     - Who: You
@@ -953,7 +967,7 @@ Nothing below runs against production yet because no production host exists. The
     - Who: Claude can do this for you
     - Status: PROVEN IN VM REHEARSAL
     - Worked if: `RECONCILIATION OK` for both targets, with times recorded.
-- [ ] **9.7 Updates.** Pins to review: Nix inputs (`platform/flake.lock`, nixpkgs `31ecbaca`), Keycloak 26.8.1 (client and realm changes need reviewed reconciliation, not a re-import), Windmill 1.861.0, Documenso v2.21.1, Vaultwarden 1.37.5, Node 24.21.0 and Bun 1.4.4 (website bundle runtime), Payload and Next. The CMS printed a notice that Next 16.4.3 has a known vulnerability, which needs a deliberate dependency update (the handoff queues a Next.js security update on the website side). Inspect a candidate image with `direnv exec . bun platform/oci-image.ts windmill-labs/windmill 1.861.0` (`docs/windmill-host.md`; `docs/oci-images.md` shows the same form for `1.839.0`). Ask Claude: "Review upstream security advisories and propose pin updates with rehearsal evidence."
+- [ ] **9.7 Updates.** Pins to review: Nix inputs (`platform/flake.lock`, nixpkgs `31ecbaca`), Keycloak 26.8.1 (client and realm changes need reviewed reconciliation, not a re-import), Windmill 1.861.0, Documenso v2.21.1, Vaultwarden 1.37.5, Node 24.21.0 and Bun 1.4.4 (website bundle runtime), Payload and Next. Next.js was updated to 16.4.5 (website PR 12). The orchestrator reports remaining dependency advisories that need major upgrades (not recorded in the handoff; not verified here). Inspect a candidate image with `direnv exec . bun platform/oci-image.ts windmill-labs/windmill 1.861.0` (`docs/windmill-host.md`; `docs/oci-images.md` shows the same form for `1.839.0`). Ask Claude: "Review upstream security advisories and propose pin updates with rehearsal evidence."
     - Who: Claude can do this for you
     - Status: TESTED IN CODE ONLY
     - GAP: there is no automatic promotion or rollback pipeline across services, and a pin change must re-run the matching VM check. See G-37.
@@ -978,8 +992,8 @@ Nothing below runs against production yet because no production host exists. The
     - Worked if: every account maps to a current, named person.
 - [ ] **9.12 Retention sweep.** Once retention is decided (1.10) run `lifecycle:sweep` on a schedule (5.17). Ask Claude: "Run the lifecycle sweep and report what expired."
     - Who: Claude can do this for you
-    - Status: NOT YET BUILT (production; G-18)
-    - Worked if: the sweep report shows no pending mirror redactions.
+    - Status: PROVEN IN VM REHEARSAL (daily timer, packaged `bin/sweep`; Womb `f8fa07b`, VM rehearsal 2026-11-19); NOT YET BUILT in production
+    - Worked if: the sweep report shows no pending mirror redactions. The timer does not purge moderated content until you decide retention (1.10).
 
 ### Per event
 
@@ -1001,7 +1015,7 @@ Nothing below runs against production yet because no production host exists. The
     - Worked if: the editor sees only editorial areas.
 - [ ] **9.17 Publish a new website release.** Build, verify, smoke, re-pin Womb, run the website and gateway checks, back up, migrate and start (6.12 to 6.15). Ask Claude: "Prepare release <revision> through the checks and tell me when it is ready to deploy."
     - Who: Claude can do this for you
-    - Status: NOT YET BUILT for the current revision (G-13)
+    - Status: PROVEN IN VM REHEARSAL for the pinned revision `680ad56` (G-13); NOT YET BUILT for the current `dev` `b582459`
     - Worked if: the previous release is still on disk for rollback.
 - [ ] **9.18 After any incident or restore.** Preserve evidence, never delete a failed run, restore only into isolation first, prevent the old host from writing, then switch traffic. Ask Claude: "Restore Terrace from backup into isolation and compare it with the last good counts."
     - Who: Claude can do this for you
@@ -1049,7 +1063,7 @@ Nothing is built for the physical server. `docs/revival.md` says not to invent a
 
 ## Open gaps
 
-Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict between documents. "Closes it" says what would finish it.
+Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict between documents. A row marked CLOSED IN VM REHEARSAL is proven only in the VM rehearsal on synthetic data: not on a provider and not deployed. "Closes it" says what would finish it.
 
 | ID | Gap | Kind | What would close it |
 | --- | --- | --- | --- |
@@ -1057,21 +1071,21 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | G-2 | Plugin and integration inventory; isolated restore and comparison of the Kinsta ZIP (3.5, 3.7) | GAP | An isolated WordPress runtime, a restore recipe, an allowlisted reader for plugin options in the SQL, a ledger template |
 | G-3 | Inventory and protected copy of the existing Hetzner server; retiring it (3.9, 8.8) | GAP | Access recovery, an inventory checklist, a verified restore, then your delete decision |
 | G-4 | Content freeze and final delta strategy (3.10, 8.4) | GAP | A dated freeze plan using the importer's repeat-by-ID behaviour |
-| G-5 | Running the importer against the production database (4.6) | GAP | A packaged importer or a documented operator run on the host, and a reviewed use of `--allow-nonlocal-database` |
+| G-5 | Running the importer against the production database (4.6). The importer is deliberately not packaged (website PR 15: a packaged importer would pass its local-database guard against a live local database); it runs from a reviewed source checkout | GAP | A written, reviewed operator procedure for a backed-up production apply from a source checkout, and your decision to run it |
 | G-6 | Media bytes and newsletter PDFs from the ZIP (4.7) | NOT YET BUILT | The ZIP, the `MediaBytesProvider` reader, hash reconciliation |
 | G-7 | Menus (11 items), plugin options and Kinsta redirect rules from the SQL (4.7) | NOT YET BUILT | `DatabaseTableProvider` implementations and a navigation collection |
-| G-8 | Draft preview for any collection (none exists; needs an owner decision on editor authentication to the website); visual review of 24 `divi-layout-review` items (4.8) | NOT YET BUILT | A draft preview route or a staging site |
+| G-8 | Draft preview for any collection (still none; needs your decision on how editors authenticate to the website, 1.21); review of the held-back documents: 24 `divi-layout-review`, 11 `empty-body`, 5 `leftover-shortcode` (4.8) | NOT YET BUILT | A signed draft preview route or a staging site, then `--reviewed` decisions |
 | G-9 | Production sizing and creation path conflict: option A (CX23 and CX43, Pulumi, Debian bootstrap) versus rehearsal (CPX22 and CPX42, Rescue RAM installer); public pages showed CX, CAX and CPX as unavailable on 2026-10-31 yet CPX servers were created in rehearsals; CX stock never checked with the project token; no invoice reconciliation (1.15, 6.9, 9.5) | GAP and CONFLICT | Your sizing decision, an authenticated stock and price check, one written production creation procedure |
 | G-10 | Production host profiles enabling the modules (6.10) | NOT YET BUILT | Real profiles that build and boot with real options |
 | G-11 | Production secret delivery, generation and escrow retrieval (5.3, 6.11, 7.4) | NOT YET BUILT | sops-nix or agenix (or equivalent) adopted, tested delivery, an escrow retrieval drill |
 | G-12 | Certificate issuance, renewal and HTTP-to-HTTPS redirect for the gateway (6.16) | NOT YET BUILT | A chosen method (ACME or manual), port 80 redirect, expiry alerting |
-| G-13 | Website bundle for `dad0a20` (nine migrations, Next.js 16.4.5); Womb pins `3902e16` (`platform/website-release.json`, six-migration ledger); hash-pinned producer files and the full rehearsal use old bundles; Womb has a dated note about this and the re-pin is queued work (6.12, 6.14) | NOT YET BUILT | Build the bundle, update `website-release.json` and pins, re-run website, gateway and full checks |
-| G-14 | Production environment for the website and CMS is not wired in Womb: `CMS_PUBLIC_ORIGIN`, `LIFECYCLE_*` and `ADDRESS_HEADER` were documented in three places and the website now has one production configuration table (website repo `docs/member-lifecycle.md`, PR 11), but Womb's gateway code overwrites `X-Forwarded-For` (one hop) with no Womb document saying so and no Womb module sets any of these variables (5.7) | GAP | The variables wired into the Womb website module and a test that `ADDRESS_HEADER` and `XFF_DEPTH` match the gateway |
+| G-13 | Website bundle and pins: Womb now pins website `680ad56` (eleven migrations in `platform/website-release.json`, producer hashes, full rehearsal) and passes the website, gateway, cloud profile and FULL checks on it (6.12, 6.14). `dev` is now `b582459`, so each later website revision needs the same re-pin | CLOSED IN VM REHEARSAL | A re-pin and re-run per new website revision |
+| G-14 | Production environment for the website and CMS: wired in Womb (path and origin variables from the modules, `ADDRESS_HEADER=X-Forwarded-For` with `XFF_DEPTH=1` set by the gateway and any other pairing rejected, the intake secret guarded) and the pairing is tested through the gateway by forging headers; the website has one configuration table (5.7). Real hostnames and secret values are still to supply | CLOSED IN VM REHEARSAL | Real hostnames (1.19) and secrets delivery (G-11) |
 | G-15 | Production Keycloak admin access, creating admin and editor accounts, granting roles, listing users (5.5, 5.6, 9.11, 9.16) | GAP | A written procedure (private path to the console, bootstrap admin removal, role grants, audit) |
-| G-16 | Production member provisioning and offboarding; verified email without mail; temporary password delivery (5.11, 5.13) | GAP | A console procedure or a production-safe provisioning tool, and a delivery method |
+| G-16 | Production member provisioning and offboarding; the console procedure is only partly written (what the account must carry is now stated; the provisioning tool stays loopback-only); verified email without mail; temporary password delivery (5.11, 5.13) | GAP | A console procedure or a production-safe provisioning tool, and a delivery method |
 | G-17 | No way to bulk onboard a roster; applications can only be created by `/apply/`, capped at 500 pending (5.18) | NOT YET BUILT | A decision plus, if wanted, a bulk invitation tool |
-| G-18 | Sweep and importer are not in the release bundle (only `bin/start` and `bin/migrate`); the sweep has a documented source-checkout invocation and a recommended daily schedule (PR 11) but no packaged `bin/sweep` and no timer; the importer has no production invocation (5.17, 9.12, 4.6) | GAP | A packaged `bin/sweep`, the Womb timer and service account, and a production importer run |
-| G-19 | Production outbox folder: location, service write access, backup inclusion, operator read path (5.10); the website now requires an absolute directory outside code and media and the same account for CMS and sweep, and refuses to start a public CMS without it | GAP | Define the path, sandbox permission, `extraPaths` entry and a read procedure |
+| G-18 | Sweep: `bin/sweep` is packaged in the CMS bundle (website PR 15) and Womb runs it on a daily timer (03:30, without `--purge-moderated`); proven in the VM rehearsal, not on a host. The importer is unpackaged by decision (see G-5) (5.17, 9.12, 4.6) | CLOSED IN VM REHEARSAL for the sweep; GAP for the importer | The sweep on a real host profile (G-10); a production importer procedure (G-5) |
+| G-19 | Production outbox folder: Womb defines `/var/lib/terrace-cms-outbox` (0700, owned by the CMS account, not readable by the website account, backed up and restored, proven in the VM rehearsal); the website refuses to start a public CMS without it. Still missing: a safe operator read procedure (the doc says only "read it as root") and mail delivery (G-20) (5.10) | GAP (read procedure) | A written operator procedure for reading, delivering and redacting invitation files on a host |
 | G-20 | No mail transport anywhere (invitations, Keycloak, Documenso, payments email) (1.12) | NOT YET BUILT | Your delivery choice, then an implementation and sandbox tests |
 | G-21 | Real Storage Box and B2 never tested; scheduled backup is not quiescent; K3s datastore and PV data not covered; provider image restore undocumented (7.1, 7.9, 7.10, 7.11) | GAP | A real-target drill, a quiesce procedure, K3s and PV coverage or exclusion, provider-image procedure or drop |
 | G-22 | Procedure to promote a restore into service (7.8) | GAP | A written, drilled, owner-approved production procedure |
@@ -1088,13 +1102,15 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | G-33 | On-prem host profile, cloud-to-on-prem migration and rehearsal (10.2 to 10.4) | NOT YET BUILT | Hardware inventory, a verified disk layout, a written migration |
 | G-34 | Headscale human OIDC enrollment, WAN and forced DERP, reviewed grants (6.17) | NOT YET BUILT | Native real-client proof across a WAN and a reviewed policy |
 | G-35 | Stripe sandbox and live setup (1.3, 8.9) | NOT YET BUILT | The account, test Payment Links and reconciliation |
-| G-36 | Document conflicts (see list below this table). Items 1, 2, 4, 5, 7, 8 and 10 are fixed in Womb by the docs PR that carries this file; items 6, 9 and 12 and the website release README are fixed on website `dev` `dad0a20`; only item 3 (a workspace file) remains | CONFLICT | Rewrite the handoff's old lease 4 paragraph |
+| G-36 | Document conflicts (see list below this table). Items 1, 2, 4, 5, 7, 8 and 10 were fixed in Womb by the earlier docs PR (and Womb docs were updated again by the integration PR); items 6, 9 and 12 and the website release README are fixed on website `dev`; only item 3 (a workspace file) remains | CONFLICT | Rewrite the handoff's old lease 4 paragraph |
 | G-37 | Updates promotion, rollback and rotation runbooks across services (9.7, 9.9) | NOT YET BUILT | A written pipeline and per-credential rotation runbooks |
 | G-38 | Deployed-site accessibility, link, performance and external-origin verification procedures (8.1, 8.7) | GAP | A documented audit and measurement procedure against the real origin |
 | G-39 | Reconciling client or realm changes in an existing Keycloak realm (the import is create-only) (5.4) | NOT YET BUILT | A tested authenticated reconciliation procedure |
 | G-40 | Independent emergency access to the identity provider: `docs/revival.md` lists it as remaining evidence and `AGENTS.md` says recovery access must not depend on SSO, but nothing documents or tests a break-glass path for Keycloak, Headscale or the hosts (5.5, 5.6) | GAP | A written, tested emergency-access design that does not need Terrace SSO |
-| G-41 | Open defects from the real-export local rehearsal (handoff, real-export local rehearsal 2026-11-18), being fixed on the website side: the admin screens cannot link a member to an application or create an offboarding (REST only); erasure leaves personal data when the application was never linked; nine near-empty pages and one raw `[tt-event]` shortcode were publish-eligible; publishing in the admin does not activate a redirect until `apply` is re-run and `apply --publish` publishes nothing on an already-imported set; four internal links 404 and 27 `/wp-content/` links still point at the old site; one dead `/join` redirect row (2.14, 4.8, 4.9, 4.10, 5.12, 5.13, 5.16). Fixed on `dev` `dad0a20`: the `/apply/` class-year field and the unstyled apply and invitation pages | GAP (defects) | The website fix workers' merges, then a re-run of the real-export rehearsal |
-| G-42 | Lease reliability depends on a shared builder: lease 4 stopped at the plan step because a non-Terrace job took Falcon's shared build lock and the planner's 100 second wait expired (6.6). A fix is in progress offline: prebuild before arming, fair-queue lock waits and a time ledger | GAP | The tooling fix merged and proven offline, then a fifth lease with your yes |
+| G-41 | Content and flow items left after the real-export rehearsal fixes (website PR 14): the admin picker, offboarding, automatic linking, erasure of unlinked applications, the content gates, `publish` and redirect sync are fixed and re-verified locally. Left: the held-back documents need editor review (24 `divi-layout-review`, 11 `empty-body`, 5 `leftover-shortcode`, overlapping) without a draft preview (G-8); 15 documents have unresolved links (5 internal targets) and 39 old-site upload paths break at cutover until the Kinsta media is imported (G-6); the low follow-ups in the handoff (a real member-credential denial test for moderation reports, a `LIFECYCLE_PUBLIC_ORIGIN` shape check that allows a path, a README note on short checkout names) (4.8, 4.9) | GAP | Editor review, the Kinsta ZIP, and the low follow-ups |
+| G-42 | Lease reliability depends on a shared builder: lease 4 stopped at the plan step because a non-Terrace job took Falcon's shared build lock and the planner's 100 second wait expired (6.6). The tooling fix (prebuild before arming, fair-queue waits in tens of minutes, a time ledger, an always-teardown runner) passed three independent reviews and offline replays, including a simulated foreign lock holder; a fifth lease needs your yes and a re-stage against the current trunk | GAP | A fifth lease with your yes, on a quiet builder queue |
+| G-43 | Builder capacity: the Linux builder's `/home` was about 79 percent used on 2026-11-19; each rehearsal run retains tens of GB until purged, and freed space returns only when host ZFS snapshots rotate (your call, 1.22). Superseded runs must be purged by hand | GAP | Your decision on snapshot pruning and a routine for purging superseded rehearsal runs |
+| G-44 | Remaining dependency advisories that need major upgrades (reported by the orchestrator on 2026-11-19; not in the handoff and not verified here), on top of the Next.js 16.4.5 update (9.7) | NOT YET BUILT | A reviewed major-upgrade plan with rehearsal evidence |
 
 ### Document conflicts and stale statements (G-36)
 
@@ -1103,7 +1119,7 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 3. The handoff's older paragraph "Lease 4 (not started) ... ready to arm" is superseded by the newer lease 4 checkpoint (stopped at the plan step), but still reads as current. Workspace file: not fixable in Womb.
 4. Womb `docs/website-host.md` and `docs/website-gateway.md` describe bundles at `3902e16` and a six-migration ledger; tfc-website dev now has nine ledger rows, derived from the migration registry, and `tools/release/README.md` no longer states a count. Womb side: dated notes added (pins and hashes unchanged); the re-pin is tracked work.
 5. `docs/access-relay.md` and `infra/cloud` default to CX23 and CX43; the rehearsals ran CPX22 and CPX42. Womb side: discrepancy documented in `access-relay.md`, production sizing marked as an owner decision, code defaults unchanged.
-6. Dry-run counts: the handoff said 86 redirects and two gaps; website repo `docs/wordpress-import.md` said 87 and one. Fixed on website `dev` `dad0a20` (86, 80 plus 6, two gaps, the final dry run).
+6. Dry-run counts: the handoff said 86 redirects and two gaps; website repo `docs/wordpress-import.md` said 87 and one. Fixed on website `dev` `dad0a20` (86, 80 plus 6, two gaps, the final dry run); after the content gates the website doc states 85 (79 plus 6) and three gaps, which is the current number.
 7. `docs/identity-host.md` says the proxy denies admin and there is no remote admin route; website repo `docs/member-lifecycle.md` tells a production operator to use the Keycloak admin console. Womb side: kept, with a marked GAP added (G-15).
 8. `docs/service-lifecycle.md` (2026-11-04) listed Documenso, Windmill and Vaultwarden as having no new-platform proof; later docs and the all-services rehearsal prove them in VMs. `docs/backups.md` said they are "not deployed yet". Fixed in Womb: "proven in the VM rehearsal, not deployed to production".
 9. Local ports: `identity/README.md` used 8184, website repo `docs/local-preview.md` 8186, and the lifecycle doc examples 8190. Fixed on `dev` `dad0a20`: the docs explain that 8184 is the standalone identity default, 8186 the `local-stack` default, and the lifecycle examples use 8186.
@@ -1122,9 +1138,9 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | D-3 | Invitation lifetime | 7 days (`LIFECYCLE_INVITATION_DAYS`, `cms/src/lifecycle/policy.ts`) |
 | D-4 | Offboarding and moderation grace period | 30 days (`LIFECYCLE_GRACE_DAYS`, `policy.ts`) |
 | D-5 | Pending application age-out | 60 days (`LIFECYCLE_APPLICATION_DAYS`, `policy.ts`) |
-| D-6 | Retention for moderation content, reports, tombstones, outbox, audit rows | Nothing deleted automatically; no scheduled sweep (recommended: daily, without `--purge-moderated`, until you decide) |
+| D-6 | Retention for moderation content, reports, tombstones, outbox, audit rows | Nothing deleted automatically; the daily sweep timer in Womb runs without `--purge-moderated` until you decide, so moderated content is never purged |
 | D-7 | Erased founder's group name and description | Kept verbatim |
-| D-8 | How invitations and notices are delivered; Keycloak first-password handling; mail transport | Outbox file copied by a person; no transport |
+| D-8 | How invitations and notices are delivered; Keycloak first-password handling; mail transport | Outbox file copied by a person (read as root on the host); no transport; invitation delivery stays manual |
 | D-9 | Whether alumni and current members need different approval evidence | Same process |
 | D-10 | How the real roster becomes accounts (everyone applies versus bulk invite) | Everyone applies at `/apply/` |
 | D-11 | Primary and backup identity administrator; editor list; Keycloak retention | None named |
@@ -1142,21 +1158,23 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | D-23 | Membership workflow switch and Windmill, Documenso, Vaultwarden access | Old workflow preserved; roster script opt-in and untriggered |
 | D-24 | On-prem hardware, disks, network, cameras, accelerator | Unknown; no layout invented |
 | D-25 | Whether the website session store (in memory, one process, eight-hour sessions) is acceptable for launch | In-memory, 8 hours (`web/src/lib/server/member-auth.ts`); restart signs everyone out; no replicas |
+| D-26 | How editors preview drafts on the site, needed to review the documents held back by the content gates (24 Divi, 11 empty body, 5 leftover shortcode; they overlap); a signed preview route and how editors authenticate to the website, or a staging copy | None: no draft preview for any collection; editors read the Payload admin fields and see the site only after publishing |
+| D-27 | The builder's disk space and snapshot retention; whether to prune host ZFS snapshots that hold freed rehearsal space | Superseded rehearsal runs are purged by hand; snapshots are not pruned (`/home` about 79 percent used on 2026-11-19) |
 
 ---
 
 ## Sources read
 
 - The private handoff file (top two resume checkpoints, Kinsta intake, Hetzner sections, owner intent, external blockers).
-- Womb `origin/trunk` `01464be`: `README.md`, `docs/*` (backlog, manual-steps, revival, migration, membership-roster, community-pilot, backups, access-relay, identity-host, identity-recovery, website-host, website-gateway, service-lifecycle, demos, windmill-host, documenso-host, documenso-mail-evidence, vaultwarden-host, cloud-rehearsal, cloud-rescue-install (first part), full-rehearsal, github-migration, oci-images, postgresql-bootstrap-restore (first part)), `platform/README.md`, `platform/single-node.nix`, `platform/hetzner.nix`, `platform/backup.nix` (options), `infra/cloud/README.md`, `infra/nixos/README.md`. `docs/restore-disk-evidence.md` was not read. `AGENTS.md` was read during verification.
-- tfc-website `origin/dev` `8883875`, re-read at `dad0a20` for the changed files (website repo `docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `cms/src/runtime-policy.ts`, `cms/src/lifecycle/outbox.ts`): website repo `docs/wordpress-import.md`, website repo `docs/member-lifecycle.md`, website repo `docs/wordpress-parity-plan.md`, website repo `docs/local-preview.md`, `tools/release/README.md`, `identity/README.md`, `web/README.md`, `web/docs/{community,donations,merchandise}.md`, `cms/README.md`, `cms/COMMUNITY.md`, the two `package.json` scripts, and the release and import tool headers.
+- Womb `origin/trunk` `01464be` (re-read on 2026-11-19 at `f8fa07b` for the changed docs: `website-host.md`, `website-gateway.md`, `full-rehearsal.md`, `cloud-rehearsal.md`, `backups.md`, `platform/README.md`, `platform/website-release.json`): `README.md`, `docs/*` (backlog, manual-steps, revival, migration, membership-roster, community-pilot, backups, access-relay, identity-host, identity-recovery, website-host, website-gateway, service-lifecycle, demos, windmill-host, documenso-host, documenso-mail-evidence, vaultwarden-host, cloud-rehearsal, cloud-rescue-install (first part), full-rehearsal, github-migration, oci-images, postgresql-bootstrap-restore (first part)), `platform/README.md`, `platform/single-node.nix`, `platform/hetzner.nix`, `platform/backup.nix` (options), `infra/cloud/README.md`, `infra/nixos/README.md`. `docs/restore-disk-evidence.md` was not read. `AGENTS.md` was read during verification.
+- tfc-website `origin/dev` `8883875`, re-read at `dad0a20` and again at `b582459` for the changed files (website repo `docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `cms/src/runtime-policy.ts`, `cms/src/lifecycle/outbox.ts`): website repo `docs/wordpress-import.md`, website repo `docs/member-lifecycle.md`, website repo `docs/wordpress-parity-plan.md`, website repo `docs/local-preview.md`, `tools/release/README.md`, `identity/README.md`, `web/README.md`, `web/docs/{community,donations,merchandise}.md`, `cms/README.md`, `cms/COMMUNITY.md`, the two `package.json` scripts, and the release and import tool headers.
 - No credential file, state file or anything in the owner's private folders was read; those are referred to only generically.
 
 ---
 
 ## Verification log
 
-Verified 2026-11-18 by an independent documentation worker against Womb `origin/trunk` `01464be`, tfc-website `origin/dev` `8883875`, `CLAUDE_HANDOFF.md` and `WORKER_RULES.md`; second pass below. Method: every fenced command line and inline command was matched, whitespace-normalised, against the text of the cited repository documents, READMEs, the handoff and the workspace rules; every backticked path was tested for existence in the two source trees; every status label and every default in the gaps and decisions tables was checked against the evidence or grepped in the code.
+Verified 2026-11-18 (fourth pass 2026-11-19) by an independent documentation worker against Womb `origin/trunk` `01464be`, tfc-website `origin/dev` `8883875`, `CLAUDE_HANDOFF.md` and `WORKER_RULES.md`; second pass below. Method: every fenced command line and inline command was matched, whitespace-normalised, against the text of the cited repository documents, READMEs, the handoff and the workspace rules; every backticked path was tested for existence in the two source trees; every status label and every default in the gaps and decisions tables was checked against the evidence or grepped in the code.
 
 | Check | Result |
 | --- | --- |
@@ -1194,3 +1212,14 @@ Re-verified 2026-11-18 (evening) against website `origin/dev` `dad0a20` (PR 11 `
 - Removed the stale "whether the owner gave a yes for lease 4" line from the not-verified list; rewrote the first-person sentence in 1.9; prefixed the four website-repo documents (`local-preview`, `member-lifecycle`, `wordpress-import`, `wordpress-parity-plan`) with "website repo" throughout.
 - Womb `docs/backlog.md`: items 3, 10 and 15 use `dad0a20`, item 10 and 15 now mention the real-export local rehearsal (no import to any real target) and that website PR 14 is open; item 13 stays on Womb #11 (it lists GitLab #8 as a source) and now also points to #12 for live integrations.
 - The public snapshot is now produced by `make-runbook-snapshot.py` with the substitutions listed in the "Public snapshot" section below; it contains no workspace home paths, no private folder names and no builder home paths.
+
+### Fourth pass (integrated platform proof, 2026-11-19)
+
+Re-verified against Womb `origin/trunk` `f8fa07b` (PR 47) and website `origin/dev` `b582459` (website PRs 11 to 19, eleven migrations), the handoff's integrated-proof and lease 5 readiness paragraphs, and the Womb and website docs that changed.
+
+- Commands: every fenced command was re-matched, whitespace-normalised, against the current sources. Fenced command lines are now 78 (a nix block counted as one). All but eight match a source verbatim; the eight are intentional adaptations (the 2.2 worktree add and `cd`, the 2.10 apply with its report path and the extra `cd ..`, the second `cd ..` in 2.13, the `--dry-run` publish line in 4.9 where the source shows `[--dry-run]`, and the two `<revision>` forms in 6.14). Changed because the source changed: the provisioning command (2.13: `cd cms && direnv exec . tools/with-local env KEYCLOAK_HTTP_PORT=8186 bun ../identity/tools/provision-member.ts provision --username ... --application <number> ...`, the email now read from the approved application), the 2.10 folder (`mkdir -m 700 ~/owner-only-dir`, from the importer docs), the 6.8 rehearsal command (now the pinned `680ad56` archives and `$HOME` paths, matching `docs/full-rehearsal.md`). Added from sources: `publish` (4.9) and `systemctl start terrace-cms-sweep.service` (5.17). Removed because the source no longer needs it: the re-run of `apply` to activate redirects (4.10; redirects now follow publication). Offboard, sweep (local), importer `dry-run`, `plan`, `apply`, `rollback`, `--reviewed` and the release build and smoke commands are unchanged and still match.
+- Steps by status (127 steps in Parts 2 to 10, first label of each status line): NOT YET BUILT 55 to 51, PROVEN LOCALLY 38 to 39, TESTED IN CODE ONLY 8 to 6, PROVEN IN VM REHEARSAL 19 to 24, PROVEN ON HETZNER 3 to 3, NOT YET PROVEN ON HETZNER 4 to 4. Part 1 gained 1.21 (draft preview) and 1.22 (builder disk and snapshots).
+- Statuses moved up (evidence: website PR 14 real-stack re-verification, and the VM rehearsal at `48ab695`): 2.14, 5.13 (offboarding now in the admin UI), 5.12 (automatic linking), 5.17 (sweep exits on its own; packaged and timed in the VM), 5.7, 6.12 to 6.14 and 9.17 (pin `680ad56`, checks pass), 9.12, and the 4.x publish and redirect steps (4.9, 4.10, 4.11). Hetzner labels are unchanged: nothing has run on a provider since lease 4; services launch, off-host backup, retire and replacement restore stay NOT YET PROVEN ON HETZNER.
+- Gaps: none removed. CLOSED IN VM REHEARSAL (synthetic data, not on a provider, not deployed): G-13 (pin and checks), G-14 (variables wired, header pairing tested through the gateway), and the sweep part of G-18. Changed: G-5 (importer unpackaged by decision), G-8 (still no draft preview; the held-back document counts), G-16, G-19 (outbox defined and proven; an operator read procedure is still missing), G-36, G-41 (rewritten to what is left), G-42 (tooling fix reviewed). Added: G-43 (builder disk) and G-44 (remaining dependency advisories, orchestrator-reported). Decisions added: D-26 (draft preview) and D-27 (builder disk and snapshots); D-6 and D-8 updated.
+- Numbers changed in the text: real-export publish-eligible documents 56 to 36 (24 Divi, 11 empty body and 5 leftover shortcode are held back, overlapping), redirects 86 to 85 with three gaps, migrations nine to eleven, rehearsal 1733 s to 1840 s, gateway assertions 197 and 198 to 198, per-process memory peaks from the 2026-11-19 website check.
+- Not verified in this pass: the rehearsal receipts and Falcon evidence are quoted from the handoff and Womb docs, not read from the builder; the 36/24/11/5 counts and rehearsal results are quoted from the website's `docs/wordpress-import.md` and the handoff (private reports not read); the "remaining dependency advisories" item is the orchestrator's report only; whether Nix, devenv and direnv are on the Mac; no step of Part 2 was executed; Womb's own nits PR and the lease tooling are private or in flight and were not reviewed.
