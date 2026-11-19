@@ -1,10 +1,11 @@
-# A production host on Hetzner Cloud: the pinned cloud disk module (the only
-# hardware-specific part), one production role and a private host module with
-# the deployment's parameters (never secrets). An on-prem host uses the same
-# role with its own hardware module instead of cloud-disk.
+# A production host: one production role, a hardware module (disk layout, boot
+# loader, network; for Hetzner Cloud the pinned cloud disk module, for on-prem
+# the owner's own) and a private host module with the deployment's parameters
+# (never secrets). See docs/production-profile.md for the interface.
 {
   role,
   localModule,
+  hardwareModule,
   webArchive ? null,
   cmsArchive ? null,
   tfcSource ? null,
@@ -12,7 +13,6 @@
   release ? null,
   identityContract ? null,
 }: let
-  install = builtins.getFlake "path:${toString ./.}";
   platform = builtins.getFlake "path:${toString ../../platform}";
   system = "x86_64-linux";
   pkgs = import platform.inputs.nixpkgs {inherit system;};
@@ -45,5 +45,5 @@ in
   assert lib.assertMsg (role != "app" || identityContract != null || tfcSource != null) "The app role requires the TFC source at the released revision (identity contract).";
     platform.inputs.nixpkgs.lib.nixosSystem {
       inherit system;
-      modules = [install.nixosModules.cloud-disk localModule] ++ roles.${role};
+      modules = [hardwareModule localModule] ++ roles.${role};
     }

@@ -95,7 +95,14 @@ in {
       };
     };
     networking.firewall = {
-      allowedTCPPorts = [80 443];
+      # Port 80 only serves ACME and the HTTPS redirect; a host with neither keeps it closed.
+      allowedTCPPorts =
+        [443]
+        ++ lib.optional (let
+          vhost = config.services.nginx.virtualHosts.${cfg.hostname};
+        in
+          vhost.enableACME || vhost.forceSSL || vhost.addSSL || vhost.rejectSSL)
+        80;
       allowedUDPPorts = [3478];
     };
     environment.systemPackages = [config.services.headscale.package pkgs.sqlite];

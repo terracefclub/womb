@@ -131,6 +131,8 @@ in {
       publicTCPPorts = [22 443];
       publicUDPPorts = [];
       writers = ["postgresql" "keycloak" "nginx" "terrace-cms" "terrace-web"];
+      writerHelpers = ["keycloakPostgreSQLInit" "terrace-website-inputs"];
+      stateWitness = "${config.services.postgresql.dataDir}/PG_VERSION";
       writerTimers = ["terrace-cms-sweep" "terrace-backup" "terrace-backup-check" "terrace-backup-freshness" "terrace-identity-health"];
     };
     # PostgreSQL's own target would otherwise pull the server in at boot.
@@ -198,6 +200,8 @@ in {
     };
     # One explicit major version: restores need the same PostgreSQL major.
     services.postgresql.package = pkgs.postgresql_18;
+    # psql for the on-host `terrace-secrets host-apply` and operator recovery steps.
+    environment.systemPackages = [config.services.postgresql.package];
     # Server-to-server calls to the public origins stay on this host.
     networking.hosts."127.0.0.1" = cfg.publicHostnames;
 

@@ -7,11 +7,29 @@
   config,
   lib,
   pkgs,
+  options,
   ...
 }: let
   cfg = config.terrace.production;
   tool = pkgs.callPackage ./package.nix {};
   marker = "/var/lib/terrace-production/adopted";
+  # The documented restore destination (terrace-backup-restore --dest) and its reconciliation report.
+  restoreMarker = "/var/lib/terrace-restore/reconciliation.txt";
+  # Core dumps would put process memory (with secrets) on disk: pipe them to a no-op.
+  noCore = "|${pkgs.coreutils}/bin/false";
+  portDefinitions = option:
+    lib.concatMap (definition:
+      map (port: {
+        inherit port;
+        inherit (definition) file;
+      })
+      definition.value)
+    option.definitionsWithLocations;
+  # Every firewall port must come from a module that is allowed to open it: a port added
+  # anywhere else is refused here, not silently overridden.
+  portSources = kind: allowed: lib.filter (entry: !(builtins.elem entry.port allowed)) (portDefinitions options.networking.firewall.${kind});
+  strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
+  strayUDP = portSources "allowedUDPPorts" cfg.publicUDPPorts;
   production = cfg.instance == "production";
   reservedSuffixes = ["invalid" "test" "example" "localhost" "local" "localdomain" "internal" "intranet" "private" "lan" "home" "corp" "home.arpa" "example.com" "example.net" "example.org"];
   reserved = name: lib.any (suffix: name == suffix || lib.hasSuffix ".${suffix}" name) reservedSuffixes;
@@ -41,12 +59,18 @@
   memoryOf = unit: config.systemd.services.${unit}.serviceConfig.MemoryMax or null;
   committedMiB = lib.foldl' (sum: unit: sum + mib (memoryOf unit)) 0 (lib.filter (unit: memoryOf unit != null) memoryUnits);
   secretLike = name: builtins.match ".*(SECRET|PASSWORD|PASSWD|TOKEN|PRIVATE_KEY|API_KEY|CREDENTIAL).*" name != null;
+  # Both `environment` and raw `serviceConfig.Environment` assignments ("NAME=value").
+  rawEnvironment = service: let
+    value = service.serviceConfig.Environment or [];
+  in
+    lib.concatMap (item: lib.filter (part: part != "") (lib.splitString " " (toString item))) (lib.toList value);
   serviceEnvironmentLeaks = lib.concatLists (lib.mapAttrsToList (unit: service:
     lib.mapAttrsToList (name: _: "${unit}:${name}") (lib.filterAttrs (name: value:
       value
       != null
       && (secretLike name || lib.hasInfix "<SOPS:" (toString value)))
-    service.environment))
+    service.environment)
+    ++ map (assignment: "${unit}:${assignment}") (lib.filter (assignment: secretLike (builtins.head (lib.splitString "=" assignment)) || lib.hasInfix "<SOPS:" assignment) (rawEnvironment service)))
   config.systemd.services);
   sopsItems = lib.attrValues config.sops.secrets ++ lib.attrValues config.sops.templates;
   rootOnly = item: item.mode == "0400" && item.owner == null && (item.uid == 0 || item.uid == null) && item.group == null && (item.gid == 0 || item.gid == null);
@@ -56,21 +80,40 @@
     runtimeInputs = [pkgs.coreutils pkgs.systemd tool];
     text = ''
       [[ $(id -u) == 0 ]] || { echo 'terrace-production: run as root' >&2; exit 1; }
+      restored=${restoreMarker}
+      populated=${lib.escapeShellArg cfg.stateWitness}
       case "''${1:-}" in
         adopt)
+          case "''${2:-}" in
+            --new)
+              # A new deployment starts from nothing: refuse a host that already holds state or a restore.
+              if [[ -e $populated || -e $restored ]]; then
+                echo 'terrace-production: this host holds data or a restore; use `adopt --restored` after a reconciled restore' >&2
+                exit 1
+              fi ;;
+            --restored)
+              if ! grep -qx 'RECONCILIATION OK' "$restored" 2>/dev/null || [[ ! -e $populated ]]; then
+                echo 'terrace-production: no reconciled restore promoted into place; restore first (docs/production-profile.md)' >&2
+                exit 1
+              fi ;;
+            *) echo 'usage: terrace-production adopt --new|--restored' >&2; exit 2 ;;
+          esac
           # Fail closed: the writers start only on a host whose secrets verify.
           terrace-secrets verify
+          systemctl start terrace-production.target
+          # A writer whose dependency failed stays inactive, so check this profile's own units.
+          failed=()
+          for unit in ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))}; do
+            if systemctl is-failed --quiet "$unit"; then failed+=("$unit"); fi
+          done
+          if (( ''${#failed[@]} )); then
+            echo "terrace-production: not adopted; failed: ''${failed[*]}" >&2
+            exit 1
+          fi
           install -d -m 0700 /var/lib/terrace-production
           if [[ ! -e ${marker} ]]; then
             install -m 0600 /dev/null ${marker}
             date -u +%FT%TZ >${marker}
-          fi
-          systemctl start terrace-production.target
-          # A writer whose dependency failed stays inactive, so report every failed unit.
-          failed=$(systemctl list-units --state=failed --plain --no-legend | cut -d' ' -f1 | tr '\n' ' ')
-          if [[ -n $failed ]]; then
-            echo "Adopted, but units failed: $failed" >&2
-            exit 1
           fi
           echo 'Adopted: the writers start now and at every boot.'
           ;;
@@ -78,7 +121,7 @@
           if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; else echo 'not adopted: no writer starts at boot'; fi
           systemctl is-active terrace-production.target || true
           ;;
-        *) echo 'usage: terrace-production adopt|status' >&2; exit 2 ;;
+        *) echo 'usage: terrace-production adopt --new|--restored | status' >&2; exit 2 ;;
       esac
     '';
   };
@@ -124,6 +167,21 @@ in {
     publicUDPPorts = lib.mkOption {
       type = lib.types.listOf lib.types.port;
       internal = true;
+    };
+    escrowRecipient = lib.mkOption {
+      type = lib.types.str;
+      description = "Required: the offline escrow key's PUBLIC age recipient (not secret). The host accepts only ciphertext encrypted to exactly itself and this recipient.";
+    };
+    stateWitness = lib.mkOption {
+      type = lib.types.str;
+      internal = true;
+      description = "A path that exists once the host holds application state (adopt --new refuses it).";
+    };
+    writerHelpers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [];
+      description = "Services the writers depend on; their failure blocks adoption.";
     };
     writers = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -173,8 +231,9 @@ in {
           message = "Terrace production refuses unencrypted swap: decrypted secrets and runtime files must never reach disk.";
         }
         {
-          assertion = committedMiB <= cfg.memoryMiB && lib.all (unit: memoryOf unit != null) memoryUnits;
-          message = "Terrace production writers commit ${toString committedMiB} MiB of MemoryMax (every writer needs one); the host declares ${toString cfg.memoryMiB} MiB.";
+          # Runbook 6.22: at least 25 percent of memory stays free, so the ceilings fit in 75 percent.
+          assertion = committedMiB * 4 <= cfg.memoryMiB * 3 && lib.all (unit: memoryOf unit != null) memoryUnits;
+          message = "Terrace production writers commit ${toString committedMiB} MiB of MemoryMax (every writer needs one); with 25 percent headroom the host needs ${toString ((committedMiB * 4 + 2) / 3)} MiB and declares ${toString cfg.memoryMiB} MiB.";
         }
         {
           assertion = !config.services.k3s.enable && !(optionalModuleOn ["terrace" "documenso"]) && !(optionalModuleOn ["terrace" "windmill"]) && !(optionalModuleOn ["terrace" "vaultwarden"]) && !(optionalModuleOn ["terrace" "demos"]);
@@ -193,6 +252,26 @@ in {
           message = "Terrace production secret(s) not declared: ${toString (lib.filter (name: !(config.sops.secrets ? ${name})) config.terrace.production.secrets.required)}.";
         }
         {
+          assertion = builtins.match "age1[02-9ac-hj-np-z]{58}" cfg.escrowRecipient != null;
+          message = "Terrace production needs the escrow key's public age recipient (terrace.production.escrowRecipient).";
+        }
+        {
+          assertion = lib.all (secret: secret.sopsFile == config.sops.defaultSopsFile) (lib.attrValues config.sops.secrets);
+          message = "Terrace production secrets come only from the host ciphertext; no per-secret sopsFile.";
+        }
+        {
+          assertion = !config.systemd.coredump.enable && config.boot.kernel.sysctl."kernel.core_pattern" == noCore && config.boot.kernel.sysctl."fs.suid_dumpable" == 0 && lib.all (unit: (config.systemd.services.${unit}.serviceConfig.LimitCORE or null) == 0) cfg.writers;
+          message = "Terrace production writes no core dumps: process memory holds secrets.";
+        }
+        {
+          assertion = strayTCP == [] && strayUDP == [] && config.networking.firewall.extraCommands == "" && config.networking.firewall.extraInputRules == "" && config.networking.nftables.tables == {};
+          message = "Terrace production refuses firewall ports or rules outside the role's public ports: ${toString (map (entry: "${toString entry.port} from ${toString entry.file}") (strayTCP ++ strayUDP))}.";
+        }
+        {
+          assertion = !config.users.mutableUsers && !config.systemd.enableEmergencyMode && config.services.openssh.settings.AllowUsers == ["operator"];
+          message = "Terrace production needs immutable users, no emergency shell and SSH for the operator account only.";
+        }
+        {
           assertion = serviceEnvironmentLeaks == [];
           message = "Terrace production units must not carry secrets in Environment=: ${toString serviceEnvironmentLeaks}.";
         }
@@ -203,6 +282,18 @@ in {
       ];
 
       system.stateVersion = lib.mkDefault "26.05";
+      users.mutableUsers = false;
+      systemd.enableEmergencyMode = false;
+      systemd.coredump.enable = false;
+      boot.kernel.sysctl = {
+        "kernel.core_pattern" = lib.mkForce noCore;
+        "fs.suid_dumpable" = 0;
+      };
+      environment.etc = {
+        "terrace/role".text = cfg.role + "\n";
+        "terrace/instance".text = cfg.instance + "\n";
+        "terrace/escrow-recipient".text = cfg.escrowRecipient + "\n";
+      };
       services.openssh = {
         enable = true;
         ports = [22];
@@ -210,6 +301,8 @@ in {
           PermitRootLogin = "no";
           PasswordAuthentication = false;
           KbdInteractiveAuthentication = false;
+          PermitEmptyPasswords = false;
+          AllowUsers = ["operator"];
         };
       };
       users.users.operator = {
@@ -229,7 +322,10 @@ in {
         after = ["sops-install-secrets.service"];
       };
       systemd.services =
-        lib.genAttrs cfg.writers (_: {wantedBy = lib.mkForce ["terrace-production.target"];})
+        lib.genAttrs cfg.writers (_: {
+          wantedBy = lib.mkForce ["terrace-production.target"];
+          serviceConfig.LimitCORE = 0;
+        })
         // {
           terrace-production-boot = {
             description = "Start the Terrace writers on an adopted host whose secrets verify";

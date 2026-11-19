@@ -73,6 +73,7 @@ in {
       }
     ];
     environment.etc."terrace/secrets-manifest.json".source = config.system.build.sops-nix-manifest;
+    environment.etc."terrace/features".text = lib.concatStringsSep "," cfg.secrets.features + "\n";
     environment.systemPackages = [(pkgs.callPackage ./package.nix {})];
     systemd.tmpfiles.rules = ["d /var/lib/terrace-secrets 0700 root root - -"];
   };

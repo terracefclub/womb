@@ -1,7 +1,9 @@
-# Production profile invariants on fully evaluated Hetzner app and relay hosts
-# and on the rehearsal instance, plus variants that must be rejected.
-# No builds, provider calls, credentials or guest state. docs/production-profile.md
+# Production profile invariants on fully evaluated Hetzner app and relay hosts,
+# a static-network host and the rehearsal instance, plus variants that must be
+# rejected, each for the stated reason. No builds, provider calls, credentials
+# or guest state. docs/production-profile.md
 let
+  install = builtins.getFlake "path:${toString ./.}";
   platform = builtins.getFlake "path:${toString ../../platform}";
   lib = platform.inputs.nixpkgs.lib;
   pkgs = import platform.inputs.nixpkgs {system = "x86_64-linux";};
@@ -14,11 +16,18 @@ let
   };
   # The test-only public key the cloud check already uses.
   operatorKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEoUtCnNlZBsJyHCk+HjpH1L4sIv9N4G3mFVL/+UuUYQ";
+  # Syntactically valid placeholder recipient (no private key exists for it).
+  escrowRecipient = "age1" + lib.concatStrings (lib.replicate 58 "q");
   disk = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_terrace-eval-only";
+  hardwareModule = {
+    imports = [install.nixosModules.cloud-disk];
+    terrace.cloudDisk.device = disk;
+  };
   appParameters = {
     instance = "production";
     memoryMiB = 15360;
     operatorKeys = ["${operatorKey} eval-only"];
+    inherit escrowRecipient;
     app = {
       webHostname = "www.terracefclub.org";
       cmsHostname = "cms.terracefclub.org";
@@ -31,41 +40,44 @@ let
     };
   };
   evaluateApp = parameters: extra:
-    (import ./production-config.nix {
+    import ./production-config.nix {
       role = "app";
-      inherit release;
+      inherit release hardwareModule;
       identityContract = stub;
       localModule = {
         imports = [extra];
         networking.hostName = "app";
-        terrace.cloudDisk.device = disk;
         terrace.production = parameters;
       };
-    }).config;
-  app = evaluateApp appParameters;
-  relay = extra:
-    (import ./production-config.nix {
+    };
+  app = extra: (evaluateApp appParameters extra).config;
+  relayParameters = {
+    instance = "production";
+    memoryMiB = 3840;
+    operatorKeys = ["${operatorKey} eval-only"];
+    inherit escrowRecipient;
+    relay = {
+      hostname = "headscale.terracefclub.org";
+      # A documentation address: only the rehearsal instance accepts it (see `relayDocumentation`).
+      publicIPv4 = "203.0.113.10";
+      backup.primary = {
+        repository = "sftp:terrace@backup.terracefclub.org:relay";
+        port = 23;
+        knownHosts = "[backup.terracefclub.org]:23 ${operatorKey}";
+      };
+    };
+  };
+  evaluateRelay = parameters: extra:
+    import ./production-config.nix {
       role = "relay";
+      inherit hardwareModule;
       localModule = {
         imports = [extra];
         networking.hostName = "relay";
-        terrace.cloudDisk.device = disk;
-        terrace.production = {
-          instance = "production";
-          memoryMiB = 3840;
-          operatorKeys = ["${operatorKey} eval-only"];
-          relay = {
-            hostname = "headscale.terracefclub.org";
-            publicIPv4 = "203.0.113.10";
-            backup.primary = {
-              repository = "sftp:terrace@backup.terracefclub.org:relay";
-              port = 23;
-              knownHosts = "[backup.terracefclub.org]:23 ${operatorKey}";
-            };
-          };
-        };
+        terrace.production = parameters;
       };
-    }).config;
+    };
+  relayAs = instance: extra: (evaluateRelay (relayParameters // {inherit instance;}) extra).config;
   # The VM proof's instance: same role, synthetic names, the rehearsal harness.
   rehearsal = extra:
     app {
@@ -77,11 +89,22 @@ let
         identityHostname = lib.mkForce "identity.terrace.invalid";
       };
     };
+  # An on-prem-style host with static addressing instead of DHCP.
+  staticNetwork = {
+    networking.useDHCP = false;
+    networking.interfaces.eth0.ipv4.addresses = [
+      {
+        address = "192.0.2.20";
+        prefixLength = 24;
+      }
+    ];
+    networking.defaultGateway = "192.0.2.1";
+  };
 
   inventory = (builtins.fromJSON (builtins.readFile ../../platform/production/inventory.json)).secrets;
   delivered = role: lib.sort lib.lessThan (map (entry: entry.name) (lib.filter (entry: builtins.elem role entry.roles && entry.delivered && entry.feature == "core") inventory));
-  # Operating-system units allowed to start at boot, each for the stated reason.
-  # Everything that writes application state is wanted by terrace-production.target.
+  # Units allowed to start at boot, each for the stated reason; everything that
+  # writes application state is wanted by terrace-production.target instead.
   allowedBoot = {
     services = [
       "sops-install-secrets" # decrypts this host's secrets into ramfs
@@ -93,6 +116,8 @@ let
       "dhcpcd"
       "resolvconf"
       "network-local-commands"
+      "network-setup"
+      "network-addresses-eth0"
       "nscd"
       "systemd-timesyncd"
       "systemd-oomd"
@@ -110,74 +135,127 @@ let
       "lastlog2-import"
       "logrotate-checkconf"
     ];
+    required = ["sops-install-secrets" "terrace-production-boot" "sshd" "firewall"];
     timers = ["fstrim" "logrotate"];
     sockets = ["nix-daemon" "systemd-journald-audit"];
     paths = [];
+    targets = [];
   };
+  bootTargets = ["multi-user" "default" "sysinit" "basic" "timers" "sockets" "paths" "network" "network-online" "local-fs" "graphical"];
   wanted = cfg: kind: name: cfg.systemd.${kind}.${name}.wantedBy ++ (cfg.systemd.${kind}.${name}.requiredBy or []) ++ (cfg.systemd.${kind}.${name}.upheldBy or []);
   bootUnits = cfg: kind: lib.filter (name: let w = wanted cfg kind name; in w != [] && w != ["terrace-production.target"]) (lib.attrNames cfg.systemd.${kind});
   gatedUnits = cfg: kind: lib.sort lib.lessThan (lib.filter (name: wanted cfg kind name == ["terrace-production.target"]) (lib.attrNames cfg.systemd.${kind}));
+  # Units pulled in at boot from the target side (systemd.targets.<boot>.wants/requires).
+  targetPulls = cfg: lib.concatMap (target: let t = cfg.systemd.targets.${target} or {}; in (t.wants or []) ++ (t.requires or [])) bootTargets;
   sorted = lib.sort lib.lessThan;
+  subset = small: big: lib.all (item: builtins.elem item big) small;
   check = label: condition: lib.optional (!condition) label;
+  storePath = value: lib.hasPrefix builtins.storeDir (lib.removePrefix "-" (toString value));
+  lockedPassword = value: value == null || builtins.elem value ["!" "!*" "*"];
   violations = role: cfg: let
     p = cfg.terrace.production;
     services = cfg.systemd.services;
     sops = lib.attrValues cfg.sops.secrets ++ lib.attrValues cfg.sops.templates;
+    bootServices = bootUnits cfg "services";
+    allowedServices = allowedBoot.services ++ lib.optional (p.instance == "rehearsal") "terrace-rehearsal-stage";
+    users = lib.attrValues cfg.users.users;
+    wheel = map (user: user.name) (lib.filter (user: builtins.elem "wheel" user.extraGroups || user.group == "wheel") users);
+    unitFiles = lib.concatLists (lib.mapAttrsToList (unit: service: let
+      env = lib.toList (service.serviceConfig.EnvironmentFile or []);
+      credentials = map (entry: lib.last (lib.splitString ":" entry)) (lib.toList (service.serviceConfig.LoadCredential or []));
+    in
+      map (path: "${unit}:${toString path}") (lib.filter storePath (env ++ credentials)))
+    services);
+    vhosts = cfg.services.nginx.virtualHosts;
+    expectedVhosts =
+      if role == "app"
+      then p.publicHostnames ++ ["terrace-reject-unknown"]
+      else p.publicHostnames;
   in
     map (a: "assertion: " + a.message) (lib.filter (a: !a.assertion) cfg.assertions)
-    # The rehearsal harness adds exactly one boot unit: the installer stand-in.
-    ++ check "boot services: ${toString (bootUnits cfg "services")}" (sorted (bootUnits cfg "services") == sorted (allowedBoot.services ++ lib.optional (p.instance == "rehearsal") "terrace-rehearsal-stage"))
+    ++ check "boot services: ${toString (lib.subtractLists allowedServices bootServices)}" (subset bootServices allowedServices && subset allowedBoot.required bootServices)
     ++ check "boot timers: ${toString (bootUnits cfg "timers")}" (sorted (bootUnits cfg "timers") == sorted allowedBoot.timers)
     ++ check "boot sockets: ${toString (bootUnits cfg "sockets")}" (sorted (bootUnits cfg "sockets") == sorted allowedBoot.sockets)
     ++ check "boot paths: ${toString (bootUnits cfg "paths")}" (bootUnits cfg "paths" == allowedBoot.paths)
+    ++ check "boot targets: ${toString (bootUnits cfg "targets")}" (lib.subtractLists (map (t: t) bootTargets) (bootUnits cfg "targets") == allowedBoot.targets)
+    ++ check "boot target wants: ${toString (targetPulls cfg)}" (targetPulls cfg == [])
     ++ check "gated services: ${toString (gatedUnits cfg "services")}" (gatedUnits cfg "services" == sorted p.writers)
     ++ check "gated timers: ${toString (gatedUnits cfg "timers")}" (gatedUnits cfg "timers" == sorted p.writerTimers)
     ++ check "firewall" (cfg.networking.firewall.enable && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts) == [22 443] && lib.unique cfg.networking.firewall.allowedUDPPorts == (lib.optional (role == "relay") 3478))
-    ++ check "ssh policy" (cfg.services.openssh.enable && cfg.services.openssh.ports == [22] && cfg.services.openssh.settings.PermitRootLogin == "no" && !cfg.services.openssh.settings.PasswordAuthentication && !cfg.services.openssh.settings.KbdInteractiveAuthentication && map (k: k.type) cfg.services.openssh.hostKeys == ["ed25519"])
+    ++ check "ssh policy" (cfg.services.openssh.enable && cfg.services.openssh.ports == [22] && cfg.services.openssh.settings.PermitRootLogin == "no" && !cfg.services.openssh.settings.PasswordAuthentication && !cfg.services.openssh.settings.KbdInteractiveAuthentication && cfg.services.openssh.settings.PermitEmptyPasswords == false && cfg.services.openssh.settings.AllowUsers == ["operator"] && cfg.services.openssh.extraConfig == "" && map (k: k.type) cfg.services.openssh.hostKeys == ["ed25519"])
+    ++ check "accounts: wheel ${toString wheel}" (!cfg.users.mutableUsers && wheel == ["operator"] && lib.all (user: lockedPassword user.hashedPassword && user.password == null && lockedPassword user.initialHashedPassword && user.initialPassword == null && user.hashedPasswordFile == null) users)
+    ++ check "sudo rules" (lib.all (rule: (rule.users or []) == [] && (rule.groups or []) == ["wheel"]) cfg.security.sudo.extraRules && cfg.security.sudo.extraConfig == "")
+    ++ check "store paths in EnvironmentFile or LoadCredential: ${toString unitFiles}" (unitFiles == [])
+    ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))
+    ++ check "nginx vhosts: ${toString (lib.attrNames vhosts)}" (sorted (lib.attrNames vhosts) == sorted expectedVhosts && lib.all (vhost: vhost.onlySSL && !vhost.forceSSL && !vhost.addSSL && vhost.listen == [] && vhost.listenAddresses == []) (lib.attrValues vhosts))
+    ++ check "core dumps" (!cfg.systemd.coredump.enable && lib.hasSuffix "/bin/false" cfg.boot.kernel.sysctl."kernel.core_pattern")
     ++ check "secret inventory: ${toString (lib.attrNames cfg.sops.secrets)}" (p.instance != "production" || sorted (lib.attrNames cfg.sops.secrets) == delivered role)
     ++ check "world-readable or non-root secret" (lib.all (item: item.mode == "0400" && item.owner == null && item.group == null) sops)
-    ++ check "ciphertext outside the store" (cfg.sops.defaultSopsFile == "/var/lib/terrace-secrets/secrets.sops.json" && !cfg.sops.validateSopsFiles)
+    ++ check "ciphertext outside the store" (cfg.sops.defaultSopsFile == "/var/lib/terrace-secrets/secrets.sops.json" && !cfg.sops.validateSopsFiles && cfg.environment.etc."terrace/escrow-recipient".text == escrowRecipient + "\n")
     ++ check "test-only override: extra trust or CA variables" (p.instance != "production" || (cfg.security.pki.certificateFiles == [] && lib.all (service: !(service.environment ? NODE_EXTRA_CA_CERTS)) (lib.attrValues services)))
     ++ check "bootstrap administrator" (p.instance != "production" || role != "app" || !(services.keycloak.serviceConfig ? EnvironmentFile))
     ++ check "K3s" (!cfg.services.k3s.enable)
-    ++ check "toplevel does not evaluate" ((builtins.tryEval cfg.system.build.toplevel.drvPath).success && (builtins.tryEval cfg.system.build.diskoScript.drvPath).success)
+    ++ check "toplevel does not evaluate" ((builtins.tryEval cfg.system.build.toplevel.drvPath).success)
     ++ lib.optionals (role == "app") (
       check "static ids" (cfg.users.users.terrace_cms.uid == 44121 && cfg.users.users.terrace_web.uid == 44122)
-      ++ check "loopback services" (builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
+      # Listening sockets, from the evaluated configuration: only nginx (443) and sshd (22) on public addresses.
+      ++ check "listeners" (builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(cfg.services.keycloak.settings ? https-port) && services.terrace-cms.environment.PORT == toString cfg.terrace.website.cmsPort && services.terrace-web.environment.PORT == toString cfg.terrace.website.webPort && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
       ++ check "sweep and backup timers" (builtins.elem "terrace-cms-sweep" (gatedUnits cfg "timers") && builtins.elem "terrace-backup" (gatedUnits cfg "timers") && cfg.systemd.timers.terrace-cms-sweep.timerConfig.Persistent)
       ++ check "env files from templates" (cfg.terrace.website.inputFiles.cms == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-cms.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-web.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/web.env")
       ++ check "backup excludes secrets" (!(cfg.terrace.backup.extraPaths ? website-inputs) && lib.all (path: !(lib.hasPrefix "/run" path) && !(lib.hasPrefix "/var/lib/terrace-secrets" path)) (lib.attrValues cfg.terrace.backup.extraPaths))
     )
     ++ lib.optionals (role == "relay") (
-      check "relay loopback" (cfg.services.headscale.address == "127.0.0.1")
+      check "relay listeners" (cfg.services.headscale.address == "127.0.0.1" && lib.hasPrefix "127.0.0.1:" cfg.services.headscale.settings.metrics_listen_addr && lib.hasPrefix "127.0.0.1:" cfg.services.headscale.settings.grpc_listen_addr)
       ++ check "relay headscale backup" cfg.terrace.backup.headscale.enable
     );
-  rejects = needle: cfg: let v = violations "app" cfg; in lib.assertMsg (lib.any (lib.hasInfix needle) v) "Variant not rejected for ${needle}: ${toString v}";
-  rejectsRelay = needle: cfg: let v = violations "relay" cfg; in lib.assertMsg (lib.any (lib.hasInfix needle) v) "Relay variant not rejected for ${needle}: ${toString v}";
-  fails = label: cfg: lib.assertMsg (!(builtins.tryEval cfg.system.build.toplevel.drvPath).success) "Variant evaluated but must fail: ${label}";
+  has = needle: list: lib.any (lib.hasInfix needle) list;
+  rejects = needle: cfg: let v = violations "app" cfg; in lib.assertMsg (has needle v) "Variant not rejected for ${needle}: ${toString v}";
+  rejectsRelay = needle: cfg: let v = violations "relay" cfg; in lib.assertMsg (has needle v) "Relay variant not rejected for ${needle}: ${toString v}";
+  # A missing required parameter stops evaluation: assert it fails AND that exactly that option is undefined.
+  failsMissing = path: system:
+    lib.assertMsg (!(builtins.tryEval system.config.system.build.toplevel.drvPath).success && !(lib.attrByPath path {isDefined = true;} system.options).isDefined)
+    "Missing ${lib.concatStringsSep "." path} not reported";
   positive = {
     app = violations "app" (app {});
-    relay = violations "relay" (relay {});
+    static = violations "app" (app staticNetwork);
+    relayRehearsal = violations "relay" (relayAs "rehearsal" {});
     rehearsal = violations "app" (rehearsal {});
   };
+  # The production relay with a documentation address must fail for that reason alone,
+  # which proves every other relay invariant in production mode without a real address.
+  relayDocumentation = violations "relay" (relayAs "production" {});
   negatives = [
-    # A required secret missing from the declared set.
+    # Secrets.
     (rejects "secret(s) not declared: website/lifecycle-intake" (app ({config, ...}: {
       sops.secrets = lib.mkForce (lib.genAttrs (lib.remove "website/lifecycle-intake" config.terrace.production.secrets.required) (_: {mode = "0400";}));
     })))
-    # A required parameter missing: evaluation stops.
-    (fails "missing knownHosts" (evaluateApp (appParameters // {app = appParameters.app // {backup.primary = removeAttrs appParameters.app.backup.primary ["knownHosts"];};}) {}))
-    (fails "missing instance" (evaluateApp (removeAttrs appParameters ["instance"]) {}))
-    (fails "missing memoryMiB" (evaluateApp (removeAttrs appParameters ["memoryMiB"]) {}))
-    # Test fixtures imported into a production instance.
+    (rejects "must be root:root 0400" (app {sops.secrets."tls/key".mode = lib.mkForce "0444";}))
+    (rejects "only from the host ciphertext" (app {sops.secrets."tls/key".sopsFile = lib.mkForce "/var/lib/elsewhere.json";}))
+    (rejects "consumers must read sops-nix paths" (app {terrace.backup.targets.primary.passwordFile = lib.mkForce "/root/repository-password";}))
+    (rejectsRelay "consumers must read sops-nix paths" (relayAs "production" {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkForce ["terrace-relay-key:/root/key.pem"];}))
+    (rejects "must not carry secrets in Environment=" (app {systemd.services.terrace-web.environment.EXTRA_SECRET = "eval-only";}))
+    (rejects "must not carry secrets in Environment=" (app {systemd.services.terrace-web.serviceConfig.Environment = "DB_PASSWORD=eval-only";}))
+    (rejects "writes no core dumps" (app {systemd.coredump.enable = lib.mkForce true;}))
+    (rejects "core dumps" (app {boot.kernel.sysctl."kernel.core_pattern" = lib.mkOverride 10 "core";}))
+    (rejects "refuses unencrypted swap" (app {swapDevices = [{device = "/dev/disk/by-label/swap";}];}))
+    (rejects "store paths in EnvironmentFile or LoadCredential" (app {systemd.services.nscd.serviceConfig.EnvironmentFile = "${stub}";}))
+    (failsMissing ["terrace" "production" "escrowRecipient"] (evaluateApp (removeAttrs appParameters ["escrowRecipient"]) {}))
+    (rejects "escrow key's public age recipient" (evaluateApp (appParameters // {escrowRecipient = "age1short";}) {}).config)
+    # Required parameters.
+    (failsMissing ["terrace" "production" "app" "backup" "primary" "knownHosts"] (evaluateApp (appParameters // {app = appParameters.app // {backup.primary = removeAttrs appParameters.app.backup.primary ["knownHosts"];};}) {}))
+    (failsMissing ["terrace" "production" "instance"] (evaluateApp (removeAttrs appParameters ["instance"]) {}))
+    (failsMissing ["terrace" "production" "memoryMiB"] (evaluateApp (removeAttrs appParameters ["memoryMiB"]) {}))
+    (failsMissing ["terrace" "production" "app" "webHostname"] (evaluateApp (appParameters // {app = removeAttrs appParameters.app ["webHostname"];}) {}))
+    # Test fixtures in a production instance.
     (rejects "refuses the rehearsal harness" (app (import ../../platform/production/rehearsal.nix {ca = stub;})))
     (rejects "refuses test fixture units: gateway-test-inputs" (app {systemd.services.gateway-test-inputs.script = "true";}))
     (rejects "test-only override" (app {systemd.services.terrace-web.environment.NODE_EXTRA_CA_CERTS = "/etc/ssl/rehearsal.pem";}))
-    # A synthetic hostname in production mode.
+    # Synthetic hostnames and addresses in production mode.
     (rejects "refuses a synthetic or reserved hostname (web.terrace.invalid)" (app {terrace.production.app.webHostname = lib.mkForce "web.terrace.invalid";}))
     (rejects "refuses a synthetic or reserved hostname (cms.example.org)" (app {terrace.production.app.cmsHostname = lib.mkForce "cms.example.org";}))
-    # Unexpected boot units.
-    (rejects "boot services: " (app {
+    (rejectsRelay "public IPv4" (relayAs "production" {terrace.production.relay.publicIPv4 = lib.mkForce "10.0.0.8";}))
+    # Boot units, gated units and target pulls.
+    (rejects "boot services: rogue-writer" (app {
       systemd.services.rogue-writer = {
         wantedBy = ["multi-user.target"];
         script = "true";
@@ -185,28 +263,54 @@ let
     }))
     (rejects "boot timers: " (app {systemd.timers.terrace-cms-sweep.wantedBy = lib.mkOverride 10 ["timers.target"];}))
     (rejects "gated services: " (app {systemd.services.keycloak.wantedBy = lib.mkOverride 10 ["multi-user.target"];}))
+    (rejects "boot target wants: rogue.service" (app {systemd.targets.multi-user.wants = ["rogue.service"];}))
+    (rejects "boot targets: terrace-production" (app {systemd.targets.terrace-production.wantedBy = ["multi-user.target"];}))
     # Bootstrap and registration flags.
     (rejects "refuses a Keycloak bootstrap administrator" (app {systemd.services.keycloak.serviceConfig.EnvironmentFile = "/run/bootstrap.env";}))
-    (fails "initialAdminPassword" (app {services.keycloak.initialAdminPassword = "eval-only-placeholder";}))
+    (rejects "must not seed a shared bootstrap administrator" (app {services.keycloak.initialAdminPassword = "eval-only-placeholder";}))
     (rejects "must not contain CMS bootstrap settings" (app {sops.templates."terrace-website/cms.env".content = lib.mkAfter "CMS_BOOTSTRAP_ADMIN=1\n";}))
-    # Public binds that the design keeps private.
+    # Listening sockets and the firewall.
     (rejects "keeps PostgreSQL and Keycloak (HTTP and management) on loopback" (app {services.postgresql.settings.listen_addresses = lib.mkForce "*";}))
-    (rejects "firewall must open exactly" (app {networking.firewall.allowedTCPPorts = [5432];}))
-    (rejectsRelay "keeps Headscale's API, metrics and gRPC on loopback" (relay {services.headscale.settings.metrics_listen_addr = lib.mkForce "0.0.0.0:9090";}))
-    # Secret handling.
-    (rejects "must be root:root 0400" (app {sops.secrets."tls/key".mode = lib.mkForce "0444";}))
-    (rejects "consumers must read sops-nix paths" (app {terrace.backup.targets.primary.passwordFile = lib.mkForce "/root/repository-password";}))
-    (rejects "must not carry secrets in Environment=" (app {systemd.services.terrace-web.environment.EXTRA_SECRET = "eval-only";}))
-    (rejects "refuses unencrypted swap" (app {swapDevices = [{device = "/dev/disk/by-label/swap";}];}))
+    (rejects "refuses firewall ports or rules outside the role's public ports: 5432" (app {networking.firewall.allowedTCPPorts = [5432];}))
+    (rejects "refuses firewall ports or rules" (app {networking.firewall.extraCommands = "iptables -A INPUT -j ACCEPT";}))
+    (rejects "refuses firewall ports or rules" (app {
+      networking.nftables.tables.open = {
+        family = "inet";
+        content = "";
+      };
+    }))
+    (rejectsRelay "refuses firewall ports or rules outside the role's public ports: 51820" (relayAs "production" {networking.firewall.allowedUDPPorts = [51820];}))
+    (rejectsRelay "keeps Headscale's API, metrics and gRPC on loopback" (relayAs "production" {services.headscale.settings.metrics_listen_addr = lib.mkForce "0.0.0.0:9090";}))
+    (rejects "nginx vhosts" (app {services.nginx.virtualHosts."admin.terracefclub.org".locations."/".return = "404";}))
+    # Accounts, SSH, sudo, kernel and emergency access.
+    (rejects "immutable users" (app {users.mutableUsers = lib.mkForce true;}))
+    (rejects "accounts" (app {users.users.operator.hashedPassword = "eval-only";}))
+    (rejects "accounts: wheel" (app {
+      users.users.helper = {
+        isNormalUser = true;
+        extraGroups = ["wheel"];
+      };
+    }))
+    (rejects "sudo rules" (app {
+      security.sudo.extraRules = [
+        {
+          users = ["nobody"];
+          commands = ["ALL"];
+        }
+      ];
+    }))
+    (rejects "ssh policy" (app {services.openssh.extraConfig = "PermitTunnel yes";}))
+    (rejects "kernel debug or emergency access" (app {boot.kernelParams = ["systemd.debug-shell"];}))
+    (rejects "no emergency shell" (app {systemd.enableEmergencyMode = lib.mkForce true;}))
     # Capacity and scope.
-    (rejects "commit 6912 MiB" (evaluateApp (appParameters // {memoryMiB = 4096;}) {}))
+    (rejects "with 25 percent headroom the host needs 9216 MiB" (app {terrace.production.memoryMiB = lib.mkForce 8192;}))
     (rejects "does not yet enable K3s" (app {services.k3s.enable = true;}))
-    (rejectsRelay "public IPv4" (relay {terrace.production.relay.publicIPv4 = lib.mkForce "10.0.0.8";}))
-    # Hardware: production needs a root filesystem and an installable boot loader.
     (rejects "per-host hardware module" (app {boot.loader.systemd-boot.enable = lib.mkForce false;}))
   ];
 in
   assert lib.assertMsg (positive.app == []) "Production app violations: ${toString positive.app}";
-  assert lib.assertMsg (positive.relay == []) "Production relay violations: ${toString positive.relay}";
+  assert lib.assertMsg (positive.static == []) "Static-network app violations: ${toString positive.static}";
+  assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";
   assert lib.assertMsg (positive.rehearsal == []) "Rehearsal instance violations: ${toString positive.rehearsal}";
-  assert lib.all lib.id negatives; "PASS: production app, relay and rehearsal instance hold every invariant; ${toString (builtins.length negatives)} rejected variants"
+  assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)."]) "Production relay with a documentation address: ${toString relayDocumentation}";
+  assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance hold every invariant; ${toString (builtins.length negatives)} rejected variants"

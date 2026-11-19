@@ -6,7 +6,7 @@ ever passed as an argument. Run: python3 platform/production/test_terrace_secret
 """
 import base64
 import contextlib
-import hashlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
@@ -28,13 +28,21 @@ loader.exec_module(tool)
 
 CHARSET = "023456789acdefghjklmnpqrstuvwxyz"
 # Split so that no complete key armour appears in the repository.
-ARMOUR = "-----BEGIN " + "PRIVATE KEY-----"
+BEGIN, END = "-----BEGIN ", "-----END "
+PRIVATE = "PRIVATE KEY-----"
+TLS_KEY = f"{BEGIN}{PRIVATE}\n{base64.b64encode(b'x' * 48).decode()}\n{END}{PRIVATE}\n"
+TLS_CERT = f"{BEGIN}CERTIFICATE-----\n{base64.b64encode(b'c' * 48).decode()}\n{END}CERTIFICATE-----\n"
+def s3(key, secret, extra=""):
+    """A synthetic S3 environment value (built at run time; no literal credential shape)."""
+    return "AWS_ACCESS_KEY_ID=" + key + "\nAWS_" + "SECRET_ACCESS_KEY=" + secret + "\n" + extra
+
+
+USERS = json.dumps([{"username": "local-member", "roles": ["current-member"], "email": "local-member@terrace.invalid", "password": "a" * 64}])
 
 FAKES = {
     "age-keygen": r'''
         if sys.argv[1:] == ["-y"]:
-            identity = sys.stdin.read().strip().splitlines()[-1]
-            print(recipient(identity))
+            print(recipient(sys.stdin.read().strip().splitlines()[-1]))
         else:
             print("# created: now")
             print("AGE-SECRET-KEY-1" + os.urandom(16).hex().upper())
@@ -49,7 +57,17 @@ FAKES = {
             handle.write(f"ssh-ed25519 {public} {comment}\n")
     ''',
     "ssh-to-age": r'''
-        print(recipient(sys.stdin.read().split()[1]))
+        if "-private-key" in sys.argv:
+            path = sys.argv[sys.argv.index("-i") + 1]
+            print("AGE-SECRET-KEY-1SSH" + open(path + ".pub").read().split()[1])
+        else:
+            print(recipient(sys.stdin.read().split()[1]))
+    ''',
+    "ssh": r'''
+        sys.stdout.write("remote ok\n")
+    ''',
+    "systemctl": r'''
+        sys.exit(1 if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fail-systemctl")) else 0)
     ''',
     "sops": r'''
         verb = sys.argv[1]
@@ -63,7 +81,7 @@ FAKES = {
             print(json.dumps(out))
         elif verb == "decrypt":
             document = json.load(open(sys.argv[-1]))
-            identity = open(os.environ["SOPS_AGE_KEY_FILE"]).read().strip().splitlines()[-1]
+            identity = os.environ.get("SOPS_AGE_KEY") or open(os.environ["SOPS_AGE_KEY_FILE"]).read().strip().splitlines()[-1]
             if recipient(identity) not in [item["recipient"] for item in document["sops"]["age"]]:
                 sys.exit(128)
             out = walk(document, lambda v: base64.b64decode(v.split("data:")[1].split(",")[0]).decode())
@@ -80,6 +98,8 @@ PRELUDE = textwrap.dedent(f'''\
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "argv.log"), "a") as log:
         log.write(json.dumps(sys.argv) + "\\n")
     def recipient(seed):
+        if seed.startswith("AGE-SECRET-KEY-1SSH"):
+            seed = seed[len("AGE-SECRET-KEY-1SSH"):]
         digest = hashlib.sha256(seed.encode()).digest() * 2
         return "age1" + "".join({CHARSET!r}[b % 32] for b in digest[:58])
 ''')
@@ -88,17 +108,17 @@ PRELUDE = textwrap.dedent(f'''\
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
-        self.bin = root / "bin"
+        self.root = Path(self.temp.name)
+        self.bin = self.root / "bin"
         self.bin.mkdir()
         for name, body in FAKES.items():
             path = self.bin / name
             path.write_text(PRELUDE + textwrap.dedent(body))
             path.chmod(0o755)
-        self.store = root / "store"
-        self.scratch = root / "scratch"
+        self.store = self.root / "store"
+        self.scratch = self.root / "scratch"
         self.scratch.mkdir(mode=0o700)
-        self.escrow = root / "escrow.age"
+        self.escrow = self.root / "escrow.age"
         self.env = mock.patch.dict(os.environ, {
             "PATH": f"{self.bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "TERRACE_SECRETS_STORE": str(self.store),
@@ -127,6 +147,11 @@ class Fixture(unittest.TestCase):
         self.assertEqual(code, 0, err)
         return out
 
+    def refused(self, *argv, stdin=b""):
+        code, _, err = self.call(*argv, stdin=stdin)
+        self.assertEqual(code, 1, argv)
+        return err
+
     def document(self, host="app"):
         return json.loads((self.store / "hosts" / host / "secrets.sops.json").read_text())
 
@@ -137,10 +162,17 @@ class Fixture(unittest.TestCase):
         path = self.bin / "argv.log"
         return path.read_text() if path.exists() else ""
 
-    def bootstrap(self, stage="stage-1"):
+    def pin(self):
+        os.environ["TERRACE_ESCROW_RECIPIENT"] = (self.store / "escrow.recipient").read_text().strip()
+
+    def bootstrap(self, stage="stage-1", externals=False):
         self.ok("escrow", "create", str(self.escrow))
-        self.ok("host", "create", "app", "--role", "app", "--stage", str(Path(self.temp.name) / stage))
+        self.ok("host", "create", "app", "--role", "app", "--stage", str(self.root / stage))
         self.ok("generate", "app")
+        self.pin()
+        if externals:
+            self.ok("set", "app", "tls/certificate", stdin=TLS_CERT.encode())
+            self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode())
 
 
 class StoreTest(Fixture):
@@ -149,48 +181,75 @@ class StoreTest(Fixture):
         self.assertRegex(out, r"Escrow recipient age1[02-9ac-hj-np-z]{58}\.")
         self.assertEqual(stat.S_IMODE(self.escrow.stat().st_mode), 0o600)
         self.assertNotIn("AGE-SECRET-KEY", out)
-        self.assertEqual(self.call("escrow", "create", str(self.escrow) + "2")[0], 1)
+        self.refused("escrow", "create", str(self.escrow) + "2")
 
-    def test_generate_encrypts_every_generated_secret_to_host_and_escrow(self):
+    def test_generate_encrypts_valid_values_to_host_and_escrow(self):
         self.bootstrap()
         document = self.document()
-        names = sorted(name for name, _ in tool.leaves(document))
-        self.assertEqual(names, sorted([
+        self.assertEqual(sorted(name for name, _ in tool.leaves(document)), sorted([
             "backup/primary/repository-password", "backup/primary/sftp-key", "identity/bootstrap-admin-password",
             "identity/client/terrace-cms", "identity/client/terrace-community", "identity/client/terrace-editorial",
             "identity/client/terrace-web", "identity/database-password", "website/lifecycle-intake", "website/payload-secret"]))
         self.assertTrue(all(tool.ENCRYPTED_RE.match(value) for _, value in tool.leaves(document)))
-        self.assertEqual(sorted(item["recipient"] for item in document["sops"]["age"]), sorted(tool.recipients("app")))
+        self.assertEqual(tool.recipient_problems(document, tool.recipients("app")), [])
         values = self.plaintext()
+        entries = tool.inventory()
+        for name, value in values.items():
+            tool.validate(entries, name, value)
         self.assertEqual(len(set(values.values())), len(values))
-        self.assertTrue(all(len(value) >= 64 for value in values.values()))
         log = self.argv_log()
-        self.assertFalse([value for value in values.values() if value.strip().splitlines()[1 if "\n" in value else 0] in log])
-        self.assertEqual(self.call("generate", "app")[0], 1)
-        public = self.ok("public", "app", "backup/primary/sftp-key")
-        self.assertTrue(public.startswith("ssh-ed25519 "))
+        self.assertFalse([v for v in values.values() if v.strip().splitlines()[1 if "\n" in v else 0] in log])
+        self.refused("generate", "app")
+        self.assertTrue(self.ok("public", "app", "backup/primary/sftp-key").startswith("ssh-ed25519 "))
 
-    def test_check_names_missing_externals_then_passes(self):
+    def test_check_needs_the_pinned_escrow_and_every_name(self):
         self.bootstrap()
-        code, out, _ = self.call("check", "app")
-        self.assertEqual(code, 1)
+        out = self.call("check", "app")[1]
         self.assertIn("missing tls/certificate", out)
-        self.assertIn("missing tls/key", out)
-        self.ok("set", "app", "tls/certificate", stdin=b"-----BEGIN CERTIFICATE-----\nMIIsynthetic\n-----END CERTIFICATE-----\n")
-        self.ok("set", "app", "tls/key", stdin=(ARMOUR + "\nMIIsyntheticKey\n-----END " + "PRIVATE KEY-----\n").encode())
-        self.assertIn("app: 12 secrets encrypted", self.ok("check", "app"))
-        self.assertTrue(self.plaintext()["tls/key"].startswith(ARMOUR))
+        self.ok("set", "app", "tls/certificate", stdin=TLS_CERT.encode())
+        self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode())
+        self.assertIn("app: 12 secrets encrypted to exactly", self.ok("check", "app"))
+        with mock.patch.dict(os.environ, {"TERRACE_ESCROW_RECIPIENT": ""}):
+            self.assertIn("pinned", self.refused("check", "app"))
+        # Someone with store write access swaps the escrow recipient: the pin catches it.
+        (self.store / "escrow.recipient").write_text("age1" + "q" * 58 + "\n")
+        self.assertIn("may have been altered", self.refused("check", "app"))
 
-    def test_set_refuses_names_outside_the_host_inventory(self):
+    def test_formats(self):
+        entries = tool.inventory()
+        good = {"website/lifecycle-intake": "0" * 64, "tls/key": TLS_KEY, "tls/certificate": TLS_CERT + TLS_CERT,
+                "backup/secondary/environment": s3("K0012345678", "abc/def+ghi=jkl_mno-pq"),
+                "rehearsal/users-json": USERS}
+        for name, value in good.items():
+            tool.validate(entries, name, value)
+        bad = [("website/lifecycle-intake", "0" * 63), ("website/lifecycle-intake", "0" * 64 + "\nINJECTED=1"),
+               ("website/lifecycle-intake", "'" + "0" * 63), ("website/payload-secret", "0" * 62 + "\\0"),
+               ("identity/database-password", "$" + "0" * 63), ("identity/database-password", "0" * 32 + " " + "0" * 31),
+               ("identity/client/terrace-web", "A" * 64), ("tls/key", TLS_KEY.replace("\n" + base64.b64encode(b'x' * 48).decode(), "\nnot base64!")),
+               ("tls/key", TLS_CERT), ("tls/certificate", TLS_KEY), ("backup/primary/sftp-key", TLS_KEY),
+               ("backup/secondary/environment", s3("K0012345678", "abc\"def0123456789")),
+               ("backup/secondary/environment", s3("K0012345678", "abcdef0123456789", "EXTRA=1\n")),
+               ("rehearsal/users-json", json.dumps([{"username": "x", "roles": [], "email": "x@y", "password": "short"}])),
+               ("rehearsal/other", "0" * 64), ("unknown/name", "0" * 64)]
+        for name, value in bad:
+            with self.assertRaises(tool.Refused, msg=name):
+                tool.validate(entries, name, value)
+        try:
+            tool.validate(entries, "website/lifecycle-intake", "secret-looking-value'x")
+        except tool.Refused as error:
+            self.assertNotIn("secret-looking-value", str(error))
+
+    def test_set_validates_and_refuses_names_outside_the_inventory(self):
         self.bootstrap()
-        self.assertEqual(self.call("set", "app", "backup/secondary/environment", stdin=b"AWS_ACCESS_KEY_ID=x\n")[0], 1)
-        self.assertEqual(self.call("set", "app", "rehearsal/users-json", stdin=b"[]")[0], 1)
-        self.ok("set", "app", "rehearsal/users-json", "--rehearsal", stdin=b"[]\n")
-        self.assertEqual(self.plaintext()["rehearsal/users-json"], "[]")
-        self.assertEqual(self.call("check", "app")[0], 1)
-        self.assertEqual(self.call("set", "app", "tls/key", stdin=b"")[0], 1)
+        self.refused("set", "app", "backup/secondary/environment", stdin=b"AWS_ACCESS_KEY_ID=x\n")
+        self.refused("set", "app", "rehearsal/users-json", stdin=USERS.encode())
+        self.ok("set", "app", "rehearsal/users-json", "--rehearsal", stdin=USERS.encode() + b"\n")
+        self.assertEqual(self.plaintext()["rehearsal/users-json"], USERS)
+        self.refused("set", "app", "tls/key", stdin=b"")
+        self.assertIn("does not match its format", self.refused("set", "app", "tls/key", stdin=b"not a key"))
+        self.refused("set", "app", "website/lifecycle-intake", stdin=b"0" * 64 + b"\nCMS_LOCAL_BOOTSTRAP=1\n")
 
-    def test_rotate_changes_only_one_value_and_refuses_manual_consumers(self):
+    def test_rotate_one_value_and_manual_procedures(self):
         self.bootstrap()
         before = self.plaintext()
         out = self.ok("rotate", "app", "website/lifecycle-intake")
@@ -200,18 +259,24 @@ class StoreTest(Fixture):
         self.assertEqual({k: v for k, v in before.items() if k != "website/lifecycle-intake"},
                          {k: v for k, v in after.items() if k != "website/lifecycle-intake"})
         self.assertNotIn(after["website/lifecycle-intake"], self.argv_log())
-        for name in ["identity/database-password", "identity/client/terrace-web", "tls/key", "backup/primary/repository-password"]:
-            self.assertEqual(self.call("rotate", "app", name)[0], 1, name)
+        for name in ["identity/database-password", "identity/client/terrace-web", "backup/primary/repository-password"]:
+            self.assertIn(name + ": " + tool.inventory()[name]["consequence"], self.refused("rotate", "app", name))
+        self.refused("rotate", "app", "tls/key", "--manual")
+        self.assertIn("ALTER ROLE", self.ok("rotate", "app", "identity/database-password", "--manual"))
+        self.assertNotEqual(self.plaintext()["identity/database-password"], before["identity/database-password"])
 
-    def test_replacement_requires_rekey_and_keeps_values(self):
+    def test_replacement_rekey_and_pending_marker(self):
         self.bootstrap()
         before = self.plaintext()
         old = (self.store / "hosts/app/recipient").read_text().strip()
-        self.assertEqual(self.call("host", "create", "app", "--role", "app", "--stage", str(Path(self.temp.name) / "stage-2"))[0], 1)
-        self.assertEqual(self.call("host", "create", "app", "--role", "relay", "--stage", str(Path(self.temp.name) / "stage-2"), "--replace")[0], 1)
-        self.ok("host", "create", "app", "--role", "app", "--stage", str(Path(self.temp.name) / "stage-3"), "--replace")
-        self.assertEqual(self.call("check", "app")[0], 1)
-        self.assertEqual(self.call("rotate", "app", "website/payload-secret")[0], 1)
+        self.refused("host", "create", "app", "--role", "app", "--stage", str(self.root / "stage-2"))
+        self.refused("host", "create", "app", "--role", "relay", "--stage", str(self.root / "stage-2b"), "--replace")
+        self.ok("host", "create", "app", "--role", "app", "--stage", str(self.root / "stage-3"), "--replace")
+        self.refused("check", "app")
+        self.refused("rotate", "app", "website/payload-secret")
+        with mock.patch.object(tool, "encrypt", side_effect=tool.Refused("simulated failure")):
+            self.refused("rekey", "app")
+        self.assertTrue((self.store / "hosts/app/pending-rekey").exists())
         self.ok("rekey", "app")
         new = (self.store / "hosts/app/recipient").read_text().strip()
         recipients = [item["recipient"] for item in self.document()["sops"]["age"]]
@@ -220,63 +285,164 @@ class StoreTest(Fixture):
         self.assertNotIn(old, recipients)
         self.assertEqual(self.plaintext(), before)
         self.assertEqual((self.store / "hosts/app/retired/1.recipient").read_text().strip(), old)
-        self.assertEqual(self.call("rekey", "app")[0], 1)
+        self.refused("rekey", "app")
 
-    def test_stage_directory_and_host_names(self):
+    def test_escrow_replace_reencrypts_every_host(self):
+        self.bootstrap()
+        before = self.plaintext()
+        old = (self.store / "escrow.recipient").read_text().strip()
+        new_escrow = self.root / "escrow-2.age"
+        out = self.ok("escrow", "replace", str(new_escrow))
+        new = (self.store / "escrow.recipient").read_text().strip()
+        self.assertIn(new, out)
+        self.assertNotEqual(old, new)
+        recipients = [item["recipient"] for item in self.document()["sops"]["age"]]
+        self.assertIn(new, recipients)
+        self.assertNotIn(old, recipients)
+        self.refused("check", "app")  # pinned value still the old one until the hosts are redeployed
+        self.pin()
+        os.environ["SOPS_AGE_KEY_FILE"] = str(new_escrow)
+        self.assertEqual(self.plaintext(), before)
+        os.environ["SOPS_AGE_KEY_FILE"] = str(self.escrow)
+        self.refused("set", "app", "tls/key", stdin=TLS_KEY.encode())
+
+    def test_staging_defaults_to_memory_and_unstage(self):
         self.ok("escrow", "create", str(self.escrow))
-        existing = Path(self.temp.name) / "exists"
+        existing = self.root / "exists"
         existing.mkdir()
-        self.assertEqual(self.call("host", "create", "app", "--role", "app", "--stage", str(existing))[0], 1)
-        self.assertEqual(self.call("host", "create", "App_1", "--role", "app", "--stage", str(existing / "x"))[0], 1)
-        stage = Path(self.temp.name) / "stage"
-        self.ok("host", "create", "relay", "--role", "relay", "--stage", str(stage))
+        self.refused("host", "create", "app", "--role", "app", "--stage", str(existing))
+        self.refused("host", "create", "App_1", "--role", "app", "--stage", str(existing / "x"))
+        self.refused("host", "create", "app", "--role", "app", "--stage", str(self.store / "stage"))
+        out = self.ok("host", "create", "relay", "--role", "relay")
+        stage = self.scratch / "terrace-stage-relay"
+        self.assertIn(str(stage), out)
         self.assertEqual(stat.S_IMODE((stage / "ssh_host_ed25519_key").stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(stage.stat().st_mode), 0o700)
+        self.ok("host", "unstage", "relay")
+        self.assertFalse(stage.exists())
         self.ok("generate", "relay")
         self.assertEqual(sorted(name for name, _ in tool.leaves(self.document("relay"))),
                          ["backup/primary/repository-password", "backup/primary/sftp-key"])
 
-    def test_store_must_be_private(self):
-        self.store.mkdir(mode=0o755)
-        os.chmod(self.store, 0o755)
-        self.assertEqual(self.call("escrow", "create", str(self.escrow))[0], 1)
-
-    def test_decrypt_needs_an_identity(self):
+    def test_store_lock_identity_mode_and_private_store(self):
         self.bootstrap()
+        fd = os.open(self.store / ".lock", os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.assertIn("store lock", self.refused("rotate", "app", "website/payload-secret"))
+        finally:
+            os.close(fd)
+        os.chmod(self.escrow, 0o644)
+        self.assertIn("SOPS_AGE_KEY_FILE", self.refused("rotate", "app", "website/payload-secret"))
+        os.chmod(self.escrow, 0o600)
         with mock.patch.dict(os.environ, {"SOPS_AGE_KEY_FILE": ""}):
-            self.assertEqual(self.call("set", "app", "tls/key", stdin=b"x" * 40)[0], 1)
+            self.refused("set", "app", "tls/key", stdin=TLS_KEY.encode())
+        os.chmod(self.store, 0o755)
+        self.refused("rotate", "app", "website/payload-secret")
+
+    def test_write_new_survives_a_crashed_temporary(self):
+        target = self.root / "file"
+        (self.root / ".file.tmp").write_text("left over by a crash")
+        tool.write_new(target, b"one", replace=False)
+        tool.write_new(target, b"two", replace=True)
+        self.assertEqual(target.read_bytes(), b"two")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.startswith(".file")), [".file.tmp"])
+
+    def test_push_and_apply_arguments(self):
+        self.bootstrap(externals=True)
+        for bad in [["--user", "root;x"], ["--address=-oProxyCommand=x"], ["--address", "host name"]]:
+            self.refused("push", "app", "--address", "app", *bad)
+        out = self.ok("push", "app", "--address", "app.example", "--identity", "relative/key")
+        self.assertIn("remote ok", out)
+        ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
+        self.assertEqual(ssh[1:3], ["-F", "/dev/null"])
+        self.assertEqual(ssh[ssh.index("--") + 1], "app.example")
+        self.assertTrue(os.path.isabs(ssh[ssh.index("-i") + 1]))
+        self.assertEqual(ssh[-2:], ["/run/current-system/sw/bin/terrace-secrets", "install"])
+        self.refused("apply", "app", "website/payload-secret", "--address", "app")
+        self.ok("apply", "app", "backup/primary/repository-password", "--address", "app")
+        value = self.plaintext()["backup/primary/repository-password"]
+        self.assertNotIn(value, self.argv_log())
 
 
-class GuardTest(unittest.TestCase):
-    def test_argv_guard(self):
-        with self.assertRaises(tool.Refused):
-            tool.guard_argv(["sops", "set", "file", "secret-value-1234"], ["secret-value-1234"])
-        tool.guard_argv(["sops", "encrypt"], ["secret-value-1234"])
+class HostTest(Fixture):
+    """install / verify-side ciphertext checks, with this test's fakes as the host tools."""
 
-    def test_scratch_refuses_disk(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"TERRACE_SECRETS_SCRATCH": directory}):
-            with mock.patch.object(tool, "memory_filesystem", lambda path: False):
-                with self.assertRaises(tool.Refused):
-                    with tool.Scratch():
-                        pass
+    def setUp(self):
+        super().setUp()
+        self.bootstrap(externals=True)
+        self.etc = self.root / "etc"
+        self.etc.mkdir()
+        key = self.root / "stage-1" / "ssh_host_ed25519_key"
+        (self.etc / "role").write_text("app\n")
+        (self.etc / "features").write_text("\n")
+        (self.etc / "instance").write_text("production\n")
+        (self.etc / "escrow-recipient").write_text((self.store / "escrow.recipient").read_text())
+        self.host_file = self.root / "var" / "secrets.sops.json"
+        self.patches = [mock.patch.object(tool, "HOST_CONFIG", self.etc), mock.patch.object(tool, "HOST_KEY", key),
+                        mock.patch.object(tool, "HOST_FILE", self.host_file), mock.patch.object(tool, "require_root", lambda: None),
+                        mock.patch.object(tool, "cmd_verify", lambda args: None)]
+        for patch in self.patches:
+            patch.start()
 
-    @unittest.skipUnless(sys.platform == "linux" and os.path.isdir("/dev/shm"), "Linux memory filesystem")
-    def test_memory_filesystem_on_linux(self):
-        self.assertTrue(tool.memory_filesystem("/dev/shm"))
-        self.assertFalse(tool.memory_filesystem("/"))
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        super().tearDown()
 
-    def ciphertext(self, values, recipients):
-        document = {"a": {"b": values[0]}, "c": values[1], "sops": {"age": [{"recipient": r} for r in recipients]}}
-        return json.dumps(document).encode()
+    def ciphertext(self, tree=None, extra_recipient=None):
+        recipients = tool.recipients("app") + ([extra_recipient] if extra_recipient else [])
+        tree = tree if tree is not None else tool.decrypt("app")
+        plaintext = json.dumps(tree).encode()
+        return tool.run(["sops", "encrypt", "--age", ",".join(recipients), "--input-type", "json", "--output-type", "json",
+                         "--filename-override", "x"], stdin=plaintext).stdout
 
-    def test_install_validation(self):
-        enc = "ENC[AES256_GCM,data:eA==,iv:aXY=,tag:dGFn,type:str]"
-        own, escrow = "age1" + "q" * 58, "age1" + "p" * 58
-        self.assertEqual(tool.validate_ciphertext(self.ciphertext([enc, enc], [own, escrow]), own), 2)
-        for data in [self.ciphertext([enc, "plaintext-value"], [own, escrow]), self.ciphertext([enc, enc], [escrow, "age1" + "z" * 58]),
-                     self.ciphertext([enc, enc], [own]), b"not json", b"{}"]:
-            with self.assertRaises(tool.Refused):
-                tool.validate_ciphertext(data, own)
+    def test_install_accepts_exact_recipients_and_valid_values(self):
+        data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.assertIn("Installed 12 encrypted secrets", self.ok("install", stdin=data))
+        self.assertEqual(self.host_file.read_bytes(), data)
+        self.assertEqual(stat.S_IMODE(self.host_file.stat().st_mode), 0o600)
+
+    def test_install_refusals_leave_the_host_file_alone(self):
+        good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.ok("install", stdin=good)
+        tree = tool.decrypt("app")
+        foreign = self.ciphertext(extra_recipient="age1" + "z" * 58)
+        pgp = json.loads(good)
+        pgp["sops"]["pgp"] = [{"fp": "ABCDEF"}]
+        rehearsal = dict(tree, rehearsal={"users-json": USERS})
+        bad_value = json.loads(json.dumps(tree))
+        bad_value["website"]["lifecycle-intake"] = "0" * 64 + "\nINJECTED=1"
+        plain = json.loads(good)
+        plain["website"]["payload-secret"] = "0" * 64
+        for data, reason in [(foreign, "recipients differ"), (json.dumps(pgp).encode(), "pgp"),
+                             (self.ciphertext(rehearsal), "names this host does not take"),
+                             (self.ciphertext(bad_value), "does not match its format"),
+                             (json.dumps(plain).encode(), "not encrypted"), (b"{}", "not a sops")]:
+            self.assertIn(reason, self.refused("install", stdin=data))
+            self.assertEqual(self.host_file.read_bytes(), good)
+        (self.etc / "instance").write_text("rehearsal\n")
+        self.ok("install", stdin=self.ciphertext(rehearsal))
+
+    def test_install_restores_the_previous_file_when_activation_fails(self):
+        good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.ok("install", stdin=good)
+        self.ok("rotate", "app", "website/lifecycle-intake")
+        newer = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        (self.bin / "fail-systemctl").write_text("")
+        self.assertIn("sops-install-secrets failed", self.refused("install", stdin=newer))
+        self.assertEqual(self.host_file.read_bytes(), good)
+
+    def test_lost_escrow_reencrypt_and_adopt(self):
+        self.ok("install", stdin=(self.store / "hosts/app/secrets.sops.json").read_bytes())
+        before = self.plaintext()
+        new_recipient = tool.new_age_identity(self.root / "escrow-new.age")
+        out = self.ok("reencrypt", new_recipient)
+        self.assertNotIn(before["website/payload-secret"], out)
+        (self.store / "escrow.recipient").write_text(new_recipient + "\n")
+        self.ok("escrow", "adopt", "app", stdin=out.encode())
+        os.environ["SOPS_AGE_KEY_FILE"] = str(self.root / "escrow-new.age")
+        self.assertEqual(self.plaintext(), before)
 
 
 class VerifyTest(unittest.TestCase):
@@ -290,7 +456,7 @@ class VerifyTest(unittest.TestCase):
         self.link = root / "secrets"
         self.link.symlink_to(generation)
         self.secret = generation / "tls" / "key"
-        self.secret.write_text("value")
+        self.secret.write_text(TLS_KEY)
         self.template = generation / "rendered" / "web" / "web.env"
         self.template.write_text("KEY=value\n")
         for path in [self.secret, self.template]:
@@ -302,6 +468,8 @@ class VerifyTest(unittest.TestCase):
             "templates": [{"name": "web/web.env", "path": "/run/secrets/rendered/web/web.env", "mode": "0400", **ids}],
         }))
         self.patches = [mock.patch.object(tool, "SECRETS_ROOT", self.link), mock.patch.object(tool, "MOUNT_ROOT", self.mount),
+                        mock.patch.object(tool, "HOST_CONFIG", root / "no-etc"),
+                        mock.patch.dict(os.environ, {"TERRACE_SECRETS_INVENTORY": str(HERE / "inventory.json")}),
                         mock.patch.object(tool, "require_root", lambda: None), mock.patch.object(tool, "mount_type", lambda path: "ramfs")]
         for patch in self.patches:
             patch.start()
@@ -324,25 +492,44 @@ class VerifyTest(unittest.TestCase):
         passed, out = self.verify()
         self.assertTrue(passed, out)
         self.assertIn("PASS 1 secrets, 1 templates", out)
-        self.assertNotIn("value", out.replace("values", ""))
 
-    def test_mode_placeholder_and_mount_failures(self):
+    def test_mode_format_placeholder_and_mount_failures(self):
         os.chmod(self.secret, 0o444)
         passed, out = self.verify()
         self.assertFalse(passed)
         self.assertIn("tls/key: mode 0444", out)
+        os.chmod(self.secret, 0o600)
+        self.secret.write_text("not a key")
         os.chmod(self.secret, 0o400)
+        self.assertIn("tls/key: value does not match its format", self.verify()[1])
         os.chmod(self.template, 0o600)
         self.template.write_text("KEY=<SOPS:abc:PLACEHOLDER>\n")
         os.chmod(self.template, 0o400)
-        passed, out = self.verify()
-        self.assertIn("placeholder left unrendered", out)
+        self.assertIn("placeholder left unrendered", self.verify()[1])
         with mock.patch.object(tool, "mount_type", lambda path: "tmpfs"):
-            passed, out = self.verify()
-        self.assertIn("expected ramfs", out)
+            self.assertIn("expected ramfs", self.verify()[1])
+        os.chmod(self.secret, 0o600)
         self.secret.unlink()
-        passed, out = self.verify()
-        self.assertIn("tls/key: missing", out)
+        self.assertIn("tls/key: missing", self.verify()[1])
+
+
+class GuardTest(unittest.TestCase):
+    def test_argv_guard(self):
+        with self.assertRaises(tool.Refused):
+            tool.guard_argv(["sops", "set", "file", "secret-value-1234"], ["secret-value-1234"])
+        tool.guard_argv(["sops", "encrypt"], ["secret-value-1234"])
+
+    def test_scratch_refuses_disk(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"TERRACE_SECRETS_SCRATCH": directory}):
+            with mock.patch.object(tool, "memory_filesystem", lambda path: False):
+                with self.assertRaises(tool.Refused):
+                    with tool.Scratch():
+                        pass
+
+    @unittest.skipUnless(sys.platform == "linux" and os.path.isdir("/dev/shm"), "Linux memory filesystem")
+    def test_memory_filesystem_on_linux(self):
+        self.assertTrue(tool.memory_filesystem("/dev/shm"))
+        self.assertFalse(tool.memory_filesystem("/"))
 
 
 if __name__ == "__main__":

@@ -24,10 +24,10 @@ in {
     # administrator. Keycloak sees it only while the test copies the rendered
     # file into /run (first start); the protocol deletes the account.
     keycloak.serviceConfig.EnvironmentFile = "-/run/terrace-rehearsal/keycloak-bootstrap.env";
-    # Stand-in for the Rescue installer: copy the operator-generated host key and
-    # the ciphertext staged for this host before secrets are installed.
+    # Stand-in for the Rescue installer, which stages the operator-generated host
+    # key (and only that: the ciphertext arrives later with `terrace-secrets push`).
     terrace-rehearsal-stage = {
-      description = "Rehearsal installer stand-in: stage the host key and encrypted secrets";
+      description = "Rehearsal installer stand-in: stage the operator-generated host key";
       wantedBy = ["sysinit.target"];
       before = ["sops-install-secrets.service" "sshd.service" "sysinit.target"];
       after = ["local-fs.target"];
@@ -47,10 +47,6 @@ in {
           install -d -m 0755 /etc/ssh
           install -m 0600 ${stage}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
           install -m 0644 ${stage}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
-        fi
-        if test -f ${stage}/secrets.sops.json && test ! -e /var/lib/terrace-secrets/secrets.sops.json; then
-          install -d -m 0700 /var/lib/terrace-secrets
-          install -m 0600 ${stage}/secrets.sops.json /var/lib/terrace-secrets/secrets.sops.json
         fi
       '';
     };
@@ -75,6 +71,8 @@ in {
     "gateway-content.sql".source = ../website-gateway/content.sql;
     "terrace-rehearsal-ca.pem".source = trust;
     "rehearsal-pg-directory".text = config.services.postgresql.dataDir;
+    # Positive control for the closure scan: a known non-secret string in the system closure.
+    "terrace-closure-canary".text = "terrace-closure-canary-5b1d0c7e9a3f4c28b6e1d2a7f0c9e8b4\n";
   };
   environment.systemPackages = [
     pkgs.curl

@@ -20,7 +20,11 @@
     || (octet 0 == 169 && octet 1 == 254)
     || (octet 0 == 172 && octet 1 >= 16 && octet 1 <= 31)
     || (octet 0 == 192 && octet 1 == 168)
-    || (octet 0 == 198 && (octet 1 == 18 || octet 1 == 19));
+    || (octet 0 == 198 && (octet 1 == 18 || octet 1 == 19))
+    # Documentation ranges (RFC 5737): placeholders only, accepted by the rehearsal instance alone.
+    || (octet 0 == 192 && octet 1 == 0 && octet 2 == 2)
+    || (octet 0 == 198 && octet 1 == 51 && octet 2 == 100)
+    || (octet 0 == 203 && octet 1 == 0 && octet 2 == 113);
 in {
   imports = [
     ./base.nix
@@ -56,11 +60,19 @@ in {
     assertions = [
       {
         assertion = builtins.match "(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}" relay.publicIPv4 != null && lib.all (n: n <= 255) octets && (cfg.instance != "production" || !nonPublic);
-        message = "Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local or benchmarking range).";
+        message = "Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range).";
       }
       {
         assertion = lib.hasPrefix "sftp:" relay.backup.primary.repository;
         message = "Terrace production relay backup needs an sftp: repository and a pinned known_hosts entry.";
+      }
+      {
+        assertion = lib.all (path: lib.hasPrefix "/run/secrets/" path) (
+          map (entry: lib.last (lib.splitString ":" entry)) config.systemd.services.nginx.serviceConfig.LoadCredential
+          ++ lib.concatMap (target: [target.passwordFile] ++ lib.optional (target.environmentFile != null) target.environmentFile ++ lib.optional (target.sftp.identityFile != null) target.sftp.identityFile)
+          (lib.attrValues (lib.filterAttrs (_: target: target.enable) config.terrace.backup.targets))
+        );
+        message = "Terrace production secret consumers must read sops-nix paths under /run/secrets, nothing else.";
       }
       {
         assertion = config.services.headscale.address == "127.0.0.1" && lib.hasPrefix "127.0.0.1:" config.services.headscale.settings.metrics_listen_addr && lib.hasPrefix "127.0.0.1:" config.services.headscale.settings.grpc_listen_addr;
@@ -74,15 +86,14 @@ in {
       publicTCPPorts = [22 443];
       publicUDPPorts = [3478];
       writers = ["headscale" "nginx"];
+      stateWitness = "/var/lib/headscale/db.sqlite";
       writerTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
     };
     terrace.relay = {
       enable = true;
       inherit (relay) hostname publicIPv4;
     };
-    # Static certificate from sops until ACME (G-12): no port 80.
-    networking.firewall.allowedTCPPorts = lib.mkForce [22 443];
-    networking.firewall.allowedUDPPorts = lib.mkForce [3478];
+    # Static certificate from sops until ACME (G-12): onlySSL, so the relay module opens no port 80.
     services.nginx.virtualHosts.${relay.hostname} = {
       enableACME = lib.mkForce false;
       forceSSL = lib.mkForce false;
