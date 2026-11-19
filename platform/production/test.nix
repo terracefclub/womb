@@ -105,7 +105,7 @@ in {
   in
     builtins.readFile ../website-gateway/lifecycle_steps.py
     + ''
-      import json, re, shlex, time
+      import json, os, re, shlex, time
 
       checks = []
       def ok(condition, label):
@@ -181,6 +181,19 @@ in {
           machine.succeed(producer + " | xargs -0r " + GREP + " " + patterns + " >/run/terrace-scan-hits", timeout=timeout)
           return machine.succeed("wc -l </run/terrace-scan-hits && rm /run/terrace-scan-hits").strip()
 
+      def counts(machine, patterns, disk_patterns, closure_scan):
+          found = {}
+          if closure_scan:
+              found["closure"] = files_with_values(machine, "xargs -r -a ${closure}/store-paths -I{} find {} -type f -print0", patterns, timeout=1800)
+          found["unit files"] = files_with_values(machine, "{ find -L /etc/systemd /run/systemd -type f -print0 2>/dev/null; true; }", patterns)
+          found["unit properties"] = machine.succeed("systemctl show '*' --all --no-pager 2>/dev/null | grep -cF -f " + patterns + " || true").strip()
+          found["journals"] = machine.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f " + patterns + " || true").strip()
+          found["process arguments"] = machine.succeed("cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -cF -f " + patterns + " || true").strip()
+          machine.succeed("sync")
+          found["root-disk files"] = files_with_values(machine, "find / -xdev \\( -path /nix -o -path /var/lib/postgresql -o -path /var/lib/terrace-backup -o -path " + RESTORE + " \\) -prune -o -type f -print0", patterns)
+          found["raw disk"] = machine.succeed("grep -acF -f " + disk_patterns + " /dev/vda || true", timeout=600).strip()
+          return found
+
       def scan(machine, label, closure_scan=True):
           # Patterns come from this host's own ramfs generation, into private tmpfs.
           machine.succeed("rm -rf /run/terrace-scan && install -d -m 0700 /run/terrace-scan")
@@ -188,19 +201,18 @@ in {
           machine.succeed("rehearsal-patterns /run/terrace-scan/disk --exclude-database --directory \"$(readlink /run/secrets)\" >/dev/null")
           count = int(machine.succeed("wc -l </run/terrace-scan/all").strip())
           ok(count >= 20, f"{label}: {count} value patterns")
-          if closure_scan:
-              hits = files_with_values(machine, "xargs -r -a ${closure}/store-paths -I{} find {} -type f -print0", "/run/terrace-scan/all", timeout=1800)
-              ok(hits == "0", f"{label}: no value in the system closure")
-          ok(files_with_values(machine, "{ find -L /etc/systemd /run/systemd -type f -print0 2>/dev/null; true; }", "/run/terrace-scan/all") == "0", f"{label}: no value in unit files")
-          ok(machine.succeed("systemctl show '*' --all --no-pager 2>/dev/null | grep -cF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in unit properties")
-          ok(machine.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in any journal")
-          ok(machine.succeed("cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -cF -f /run/terrace-scan/all || true").strip() == "0", f"{label}: no value in process arguments")
-          machine.succeed("sync")
-          files = files_with_values(machine, "find / -xdev \\( -path /nix -o -path /var/lib/postgresql -o -path /var/lib/terrace-backup -o -path " + RESTORE + " \\) -prune -o -type f -print0", "/run/terrace-scan/all")
-          ok(files == "0", f"{label}: no value in a file on the root disk outside the databases")
-          raw = machine.succeed("grep -acF -f /run/terrace-scan/disk /dev/vda || true", timeout=600).strip()
-          ok(raw == "0", f"{label}: no non-database value anywhere on the raw disk")
-          machine.succeed("rm -rf /run/terrace-scan")
+          # Positive control: a non-secret canary planted in a unit description,
+          # the journal, a process argument and a disk file must be found by the
+          # same scans, so a zero below means absence, not a blind scan.
+          canary = "terrace-scan-canary-" + os.urandom(24).hex()
+          machine.succeed(f"echo {canary} >/run/terrace-scan/canary && echo {canary} >/var/tmp/terrace-scan-canary && sync")
+          machine.succeed(f"systemd-run --unit=terrace-scan-canary -p Description={canary} sh -c 'sleep 900' {canary}")
+          control = counts(machine, "/run/terrace-scan/canary", "/run/terrace-scan/canary", closure_scan=False)
+          ok(all(int(value) > 0 for value in control.values()), f"{label}: canary found by every scan {control}")
+          found = counts(machine, "/run/terrace-scan/all", "/run/terrace-scan/disk", closure_scan)
+          for where, hits in found.items():
+              ok(hits == "0", f"{label}: no secret value in {where}")
+          machine.succeed("systemctl stop terrace-scan-canary.service; rm -f /var/tmp/terrace-scan-canary; rm -rf /run/terrace-scan")
 
       def signature():
           return {
@@ -448,7 +460,11 @@ in {
       with subtest("operator disk never held a plaintext value"):
           operator.succeed("rm -rf /dev/shm/scan && install -d -m 0700 /dev/shm/scan")
           op("sops decrypt --output-type json " + STORE + "/hosts/app/secrets.sops.json | rehearsal-patterns /dev/shm/scan/all >/dev/null")
-          operator.succeed("sync")
+          canary = "terrace-scan-canary-" + os.urandom(24).hex()
+          operator.succeed(f"echo {canary} >/dev/shm/scan/canary && echo {canary} >/var/tmp/terrace-scan-canary && sync")
+          ok(files_with_values(operator, "find / -xdev -path /nix -prune -o -type f -print0", "/dev/shm/scan/canary") != "0" and
+             operator.succeed("grep -acF -f /dev/shm/scan/canary /dev/vda || true", timeout=600).strip() != "0", "operator: canary found by both scans")
+          operator.succeed("rm -f /var/tmp/terrace-scan-canary && sync")
           ok(files_with_values(operator, "find / -xdev -path /nix -prune -o -type f -print0", "/dev/shm/scan/all") == "0", "operator: no value in a file")
           ok(operator.succeed("grep -acF -f /dev/shm/scan/all /dev/vda || true", timeout=600).strip() == "0", "operator: no value on the raw disk")
           ok(operator.succeed("journalctl --namespace='*' -o export --no-pager 2>/dev/null | grep -acF -f /dev/shm/scan/all || true").strip() == "0", "operator: no value in the journal")
