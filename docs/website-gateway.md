@@ -95,8 +95,13 @@ A lifecycle stage then runs through the real gateway with synthetic data only:
 `/news/` and an imported-style post (published, with WordPress provenance) render,
 a body image on the public CMS origin is kept and a foreign one dropped, and the
 old URL answers 301 to the new path. Six `/apply/` submissions from the gateway
-guest, each forging a different `X-Forwarded-For` and `X-Real-IP`, give five
-accepts and one 429 (five applications stored); a submission from the second guest
+guest, posted as a browser with script does (SvelteKit's enhanced form protocol),
+each forging a different `X-Forwarded-For` and `X-Real-IP`, give five accepts and
+a 429 action result (five applications stored); the same exhausted bucket gives the
+same 429 on the private loopback port, and a no-script post into it must get the
+identical HTTP status through the gateway and on the loopback port (it is currently
+500 at both: the website's `/apply/` and `/join/` loads set `Cache-Control` again
+after the action did, a website defect reported separately); a submission from the second guest
 that forges the exhausted address is accepted. An editor approval writes the
 invitation mirror (`0600`, CMS account) with a `https://web.terrace.invalid/join/#…`
 link; redemption works once; the applicant's first sign-in links the application
@@ -121,6 +126,13 @@ guest teardown. Every test-owned job/guest/process must be verified stopped
 before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
+
+Verified 2026-11-19 on the shared Linux builder with the `1733308` bundles: the
+check passed in about 11 minutes (01:54 to 02:06 Pacific) with 198 HTTPS protocol
+assertions, the Chromium account switch, and lifecycle stages of 18 (content),
+80 (application limit), 10 (second address), 39 (approval), 60 (redemption and
+linking) and 61 (erasure) bounded assertions, the sweep-timer redaction and the
+packaged-sweep negative case.
 
 ## Remaining activation and cost gates
 

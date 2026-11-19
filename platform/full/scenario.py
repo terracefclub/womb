@@ -686,11 +686,20 @@ def lifecycle_restored():
     # On the replacement: restored content still renders, then an administrator
     # erasure is completed in the restored mirror only by the sweep timer.
     counts = {'content': lifecycle(gateway, 'content', 'Imported-content checks passed')}
+    # Restored state belongs to the replacement's own CMS account (static UID), by name and number.
+    assert gateway.succeed('id -u terrace_cms').strip() == '44121'
+    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + ' ' + MEDIA).split() == ['terrace_cms:700', 'terrace_cms:700']
+    assert set(gateway.succeed('find ' + OUTBOX + ' ' + MEDIA + ' -mindepth 1 -printf \x27%u\\n\x27').split()) == {'terrace_cms'}
     mirror = OUTBOX + '/*-invitation.json'
     gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
+    gateway.fail('ls ' + OUTBOX + '/*-offboarding.json')
     counts['erase'] = lifecycle(gateway, 'erase', 'Erasure checks passed')
+    # The running CMS wrote its offboarding notice into the restored outbox itself.
+    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-offboarding.json').strip() == 'terrace_cms:600'
     gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
     assert sweep_by_timer()
+    # The sweep, as the same account, rewrote a restored file and wrote the erasure confirmation.
+    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-erasure-confirmation.json ' + mirror).split() == ['terrace_cms:600', 'terrace_cms:600']
     gateway.succeed('jq -e \x27.to == "Former member" and .body == "Redacted after erasure."\x27 ' + mirror + ' >/dev/null')
     gateway.fail('grep -rl local-alumni@terrace.invalid ' + OUTBOX)
     return counts

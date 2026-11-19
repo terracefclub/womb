@@ -42,8 +42,9 @@ bootstrap from empty twice, with the original node destroyed before restore.
 | Vaultwarden | Native module proven in the VM rehearsal ([full-rehearsal.md](full-rehearsal.md), [vaultwarden-host.md](vaultwarden-host.md)) | Item, attachment and combined recovery proven in the VM rehearsal; not deployed to production | Runtime/bootstrap, per-user access and recovery, data/attachment/key restore |
 | Public static CDN | Policy/plan only, see issue #7 | No external purge/invalidation or recovery proof | Actual provider isolation, cache/auth exclusions, invalidation, geographically distributed measurements |
 
-The website's TFC release proof is separate evidence: source `3902e16`, real normal
-SSO and publication/privacy tests on relocated bundles. It is not evidence that
+The website's TFC release proof is separate evidence: source `1733308` (proof tools
+from website `0d0d722`, which ships identical bundles), real normal SSO,
+publication/privacy, moderation and packaged-sweep tests on relocated bundles. It is not evidence that
 Womb's native public deployment has passed. Actual install profiles still leave
 optional services disabled. Legacy membership routing and provider records are
 not exercised by these disposable tests.

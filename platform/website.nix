@@ -198,6 +198,16 @@ in {
       default = "*-*-* 03:30:00";
       description = "systemd OnCalendar for the daily member-lifecycle sweep (CMS bin/sweep, without --purge-moderated).";
     };
+    cmsUid = lib.mkOption {
+      type = lib.types.int;
+      default = 44121;
+      description = "Static UID/GID of the CMS account. Restored uploads and the outbox keep numeric ownership, so a replacement host must assign the same number.";
+    };
+    webUid = lib.mkOption {
+      type = lib.types.int;
+      default = 44122;
+      description = "Static UID/GID of the website account.";
+    };
     webPort = lib.mkOption {
       type = lib.types.port;
       default = 14294;
@@ -239,18 +249,26 @@ in {
         message = "Terrace runtime inputs, uploads and the lifecycle outbox must not overlap.";
       }
       {
+        assertion = cfg.cmsUid != cfg.webUid && cfg.cmsUid >= 10000 && cfg.cmsUid <= 60000 && cfg.webUid >= 10000 && cfg.webUid <= 60000;
+        message = "Terrace website and CMS accounts need distinct static unprivileged UIDs.";
+      }
+      {
         assertion = lib.all (value: value == null || builtins.match "https://[a-z0-9.-]+" value != null) [cfg.lifecyclePublicOrigin cfg.cmsPublicOrigin];
         message = "Terrace public lifecycle and CMS media origins must be bare https origins.";
       }
     ];
-    users.groups.${cmsUser} = {};
-    users.groups.${webUser} = {};
+    # Static IDs: a replacement host restores uploads and the outbox with their
+    # numeric owner, so the accounts must not depend on allocation order.
+    users.groups.${cmsUser}.gid = cfg.cmsUid;
+    users.groups.${webUser}.gid = cfg.webUid;
     users.users.${cmsUser} = {
       isSystemUser = true;
+      uid = cfg.cmsUid;
       group = cmsUser;
     };
     users.users.${webUser} = {
       isSystemUser = true;
+      uid = cfg.webUid;
       group = webUser;
     };
     systemd.tmpfiles.rules = [

@@ -250,8 +250,6 @@ in {
         source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {before} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=120)
         assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
-        # restic keeps numeric ownership; this disposable recovery guest's account numbering differs.
-        before_outbox_owner = source.succeed("stat -c %u:%a ${outbox} ${outbox}/*.json").split()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
         before_rows = data_signature(source)
@@ -280,11 +278,16 @@ in {
         assert data_signature(recovery, True) == before_rows
         assert int(sql(recovery, "select count(*) from pg_tables where schemaname !~ '^pg_' and schemaname != 'information_schema'", True)) == table_count
         recovery.succeed("test ! -e ${inputs} && cp -a ${restored}/files${inputs} ${inputs} && test -z \"$(ls -A ${media})\" && cp -a ${restored}/files${media}/. ${media}/ && chown -R terrace-restore:terrace-restore ${media}")
-        # The outbox (live invitation links) comes back with its bytes, numeric owner and private modes.
+        # The outbox (live invitation links) comes back with its bytes, owner and private modes.
         recovery.succeed("test -z \"$(ls -A ${outbox})\" && cp -a ${restored}/files${outbox}/. ${outbox}/")
         assert recovery.succeed("cd ${outbox} && sha256sum *.json").strip() == before_outbox
-        assert recovery.succeed("stat -c %u:%a ${outbox} ${outbox}/*.json").split() == before_outbox_owner
-        assert [entry.split(":")[1] for entry in before_outbox_owner] == ["700", "600"]
+        # restic keeps numeric owners; the static CMS UID makes them the same account on any host
+        # (this guest otherwise allocates its system accounts in a different order).
+        for machine in [source, recovery]:
+            assert machine.succeed("id -u terrace_cms && id -g terrace_cms").split() == ["44121", "44121"]
+        assert recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split() == ["terrace_cms:700", "terrace_cms:600"]
+        # Behaviour, not just owners: the CMS account reads a restored mirror file and writes beside it.
+        recovery.succeed("runuser -u terrace_cms -- sh -c 'cat ${outbox}/*.json >/dev/null && umask 077 && echo probe >${outbox}/restore-write-probe && rm ${outbox}/restore-write-probe'")
         assert recovery.succeed("cd ${inputs} && sha256sum *.env 2>/dev/null").strip() == before_inputs
         recovery.fail("runuser -u nobody -- test -r ${inputs}/cms.env")
         recovery.fail("nc -z -w 2 127.0.0.1 5432")

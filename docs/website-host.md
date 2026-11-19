@@ -231,6 +231,14 @@ restores the outbox with identical bytes, owner and modes. It measures migration
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
 
+Verified 2026-11-19 on the shared Linux builder with the `1733308` bundles: the
+two-guest test passed (01:55 to 02:09 Pacific) with 37 actual non-system CMS tables
+and the eleven-migration ledger in pinned order. Explicit migration took 5.83 s,
+encrypted backup 7.56 s, complete repository check 5.02 s, isolated restore 5.07 s
+and recovered HTTP verification 11.84 s; the sweep service, its timer catch-up and
+the outbox restore (bytes, numeric owner, modes) passed. Source cgroup peaks were
+105.9 MiB CMS, 47.2 MiB website and 122.8 MiB PostgreSQL.
+
 Verified2026-11-03 on the shared Linux builder (historical, website `3902e16`): the final two-guest test passed
 in83.34seconds with25actual non-system CMS tables and an unchanged six-migration
 ledger. Explicit migration took4.48s, encrypted backup7.05s, complete repository
