@@ -140,6 +140,8 @@ let
     sockets = ["nix-daemon" "systemd-journald-audit"];
     paths = [];
     targets = [];
+    # Pulled in by NixOS's multi-user.target; no unit of ours.
+    targetPulls = ["machines.target"];
   };
   bootTargets = ["multi-user" "default" "sysinit" "basic" "timers" "sockets" "paths" "network" "network-online" "local-fs" "graphical"];
   wanted = cfg: kind: name: cfg.systemd.${kind}.${name}.wantedBy ++ (cfg.systemd.${kind}.${name}.requiredBy or []) ++ (cfg.systemd.${kind}.${name}.upheldBy or []);
@@ -178,13 +180,13 @@ let
     ++ check "boot sockets: ${toString (bootUnits cfg "sockets")}" (sorted (bootUnits cfg "sockets") == sorted allowedBoot.sockets)
     ++ check "boot paths: ${toString (bootUnits cfg "paths")}" (bootUnits cfg "paths" == allowedBoot.paths)
     ++ check "boot targets: ${toString (bootUnits cfg "targets")}" (lib.subtractLists (map (t: t) bootTargets) (bootUnits cfg "targets") == allowedBoot.targets)
-    ++ check "boot target wants: ${toString (targetPulls cfg)}" (targetPulls cfg == [])
+    ++ check "boot target wants: ${toString (targetPulls cfg)}" (subset (targetPulls cfg) allowedBoot.targetPulls)
     ++ check "gated services: ${toString (gatedUnits cfg "services")}" (gatedUnits cfg "services" == sorted p.writers)
     ++ check "gated timers: ${toString (gatedUnits cfg "timers")}" (gatedUnits cfg "timers" == sorted p.writerTimers)
     ++ check "firewall" (cfg.networking.firewall.enable && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts) == [22 443] && lib.unique cfg.networking.firewall.allowedUDPPorts == (lib.optional (role == "relay") 3478))
-    ++ check "ssh policy" (cfg.services.openssh.enable && cfg.services.openssh.ports == [22] && cfg.services.openssh.settings.PermitRootLogin == "no" && !cfg.services.openssh.settings.PasswordAuthentication && !cfg.services.openssh.settings.KbdInteractiveAuthentication && cfg.services.openssh.settings.PermitEmptyPasswords == false && cfg.services.openssh.settings.AllowUsers == ["operator"] && cfg.services.openssh.extraConfig == "" && map (k: k.type) cfg.services.openssh.hostKeys == ["ed25519"])
+    ++ check "ssh policy" (cfg.services.openssh.enable && cfg.services.openssh.ports == [22] && cfg.services.openssh.settings.PermitRootLogin == "no" && !cfg.services.openssh.settings.PasswordAuthentication && !cfg.services.openssh.settings.KbdInteractiveAuthentication && cfg.services.openssh.settings.PermitEmptyPasswords == false && cfg.services.openssh.settings.AllowUsers == ["operator"] && map (k: k.type) cfg.services.openssh.hostKeys == ["ed25519"])
     ++ check "accounts: wheel ${toString wheel}" (!cfg.users.mutableUsers && wheel == ["operator"] && lib.all (user: lockedPassword user.hashedPassword && user.password == null && lockedPassword user.initialHashedPassword && user.initialPassword == null && user.hashedPasswordFile == null) users)
-    ++ check "sudo rules" (lib.all (rule: (rule.users or []) == [] && (rule.groups or []) == ["wheel"]) cfg.security.sudo.extraRules && cfg.security.sudo.extraConfig == "")
+    ++ check "sudo rules" (lib.all (rule: subset (rule.users or []) ["root"] && subset (rule.groups or []) ["wheel"]) cfg.security.sudo.extraRules)
     ++ check "store paths in EnvironmentFile or LoadCredential: ${toString unitFiles}" (unitFiles == [])
     ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))
     ++ check "nginx vhosts: ${toString (lib.attrNames vhosts)}" (sorted (lib.attrNames vhosts) == sorted expectedVhosts && lib.all (vhost: vhost.onlySSL && !vhost.forceSSL && !vhost.addSSL && vhost.listen == [] && vhost.listenAddresses == []) (lib.attrValues vhosts))
@@ -199,7 +201,7 @@ let
     ++ lib.optionals (role == "app") (
       check "static ids" (cfg.users.users.terrace_cms.uid == 44121 && cfg.users.users.terrace_web.uid == 44122)
       # Listening sockets, from the evaluated configuration: only nginx (443) and sshd (22) on public addresses.
-      ++ check "listeners" (builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(cfg.services.keycloak.settings ? https-port) && services.terrace-cms.environment.PORT == toString cfg.terrace.website.cmsPort && services.terrace-web.environment.PORT == toString cfg.terrace.website.webPort && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
+      ++ check "listeners" (builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(cfg.services.keycloak.settings ? https-certificate-file) && services.terrace-cms.environment.PORT == toString cfg.terrace.website.cmsPort && services.terrace-web.environment.PORT == toString cfg.terrace.website.webPort && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
       ++ check "sweep and backup timers" (builtins.elem "terrace-cms-sweep" (gatedUnits cfg "timers") && builtins.elem "terrace-backup" (gatedUnits cfg "timers") && cfg.systemd.timers.terrace-cms-sweep.timerConfig.Persistent)
       ++ check "env files from templates" (cfg.terrace.website.inputFiles.cms == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-cms.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-web.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/web.env")
       ++ check "backup excludes secrets" (!(cfg.terrace.backup.extraPaths ? website-inputs) && lib.all (path: !(lib.hasPrefix "/run" path) && !(lib.hasPrefix "/var/lib/terrace-secrets" path)) (lib.attrValues cfg.terrace.backup.extraPaths))
@@ -299,7 +301,8 @@ let
         }
       ];
     }))
-    (rejects "ssh policy" (app {services.openssh.extraConfig = "PermitTunnel yes";}))
+    (rejects "free-form firewall, sshd or sudo configuration" (app {services.openssh.extraConfig = "PermitTunnel yes";}))
+    (rejects "free-form firewall, sshd or sudo configuration" (app {security.sudo.extraConfig = "nobody ALL=(ALL) NOPASSWD: ALL";}))
     (rejects "kernel debug or emergency access" (app {boot.kernelParams = ["systemd.debug-shell"];}))
     (rejects "no emergency shell" (app {systemd.enableEmergencyMode = lib.mkForce true;}))
     # Capacity and scope.

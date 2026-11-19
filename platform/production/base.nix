@@ -28,6 +28,17 @@
   # Every firewall port must come from a module that is allowed to open it: a port added
   # anywhere else is refused here, not silently overridden.
   portSources = kind: allowed: lib.filter (entry: !(builtins.elem entry.port allowed)) (portDefinitions options.networking.firewall.${kind});
+  # Free-form firewall, SSH and sudo configuration may come only from NixOS's own modules.
+  foreignDefinitions = option: lib.filter (definition: !(lib.hasInfix "/nixos/modules/" (toString definition.file))) option.definitionsWithLocations;
+  foreignConfig = lib.concatMap foreignDefinitions [
+    options.networking.firewall.extraCommands
+    options.networking.firewall.extraStopCommands
+    options.networking.firewall.extraInputRules
+    options.networking.nftables.tables
+    options.networking.nftables.ruleset
+    options.services.openssh.extraConfig
+    options.security.sudo.extraConfig
+  ];
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
   strayUDP = portSources "allowedUDPPorts" cfg.publicUDPPorts;
   production = cfg.instance == "production";
@@ -264,8 +275,8 @@ in {
           message = "Terrace production writes no core dumps: process memory holds secrets.";
         }
         {
-          assertion = strayTCP == [] && strayUDP == [] && config.networking.firewall.extraCommands == "" && config.networking.firewall.extraInputRules == "" && config.networking.nftables.tables == {};
-          message = "Terrace production refuses firewall ports or rules outside the role's public ports: ${toString (map (entry: "${toString entry.port} from ${toString entry.file}") (strayTCP ++ strayUDP))}.";
+          assertion = strayTCP == [] && strayUDP == [] && foreignConfig == [];
+          message = "Terrace production refuses firewall ports or rules outside the role's public ports, and free-form firewall, sshd or sudo configuration: ${toString (map (entry: "${toString entry.port} from ${toString entry.file}") (strayTCP ++ strayUDP) ++ map (definition: toString definition.file) foreignConfig)}.";
         }
         {
           assertion = !config.users.mutableUsers && !config.systemd.enableEmergencyMode && config.services.openssh.settings.AllowUsers == ["operator"];
