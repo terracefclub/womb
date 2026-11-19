@@ -221,7 +221,8 @@ let
     # wants/requires/bindsTo/upholds of every unit allowed at boot or gated by the production target.
     profileUnits = map (name: name + ".service") (allowedServices ++ p.writers ++ p.writerHelpers);
     pullsOf = service: (service.wants or []) ++ (service.requires or []) ++ (service.bindsTo or []) ++ (service.upholds or []);
-    strayPulls = lib.unique (lib.subtractLists (profileUnits ++ allowedPulls role) (lib.concatMap (name: pullsOf (cfg.systemd.services.${name} or {})) (allowedServices ++ p.writers ++ p.writerHelpers)));
+    interfaceDevices = map (name: "sys-subsystem-net-devices-${name}.device") (lib.attrNames cfg.networking.interfaces);
+    strayPulls = lib.unique (lib.subtractLists (profileUnits ++ allowedPulls role ++ interfaceDevices) (lib.concatMap (name: pullsOf (cfg.systemd.services.${name} or {})) (allowedServices ++ p.writers ++ p.writerHelpers)));
     etcUnits = lib.filter (name: lib.hasPrefix "systemd/system/" name || lib.hasPrefix "systemd/user/" name) (lib.attrNames cfg.environment.etc);
     socketUnits = lib.filter (name: (cfg.systemd.sockets.${name}.listenStreams or []) != [] || (cfg.systemd.sockets.${name}.listenDatagrams or []) != []) (lib.attrNames cfg.systemd.sockets);
     unitFiles = lib.concatLists (lib.mapAttrsToList (unit: service: let
