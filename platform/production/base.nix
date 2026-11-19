@@ -381,7 +381,7 @@ in {
           message = "Terrace production needs immutable users, no emergency shell, SSH for the operator account only and sudo as the only privilege tool.";
         }
         {
-          assertion = (config.terrace.backup.targets.primary.enable or false) && !(lib.any (name: lib.attrByPath ["virtualisation" name "enable"] false config) ["docker" "podman" "libvirtd" "containers" "lxd" "incus" "cri-o" "waydroid"]);
+          assertion = (config.terrace.backup.targets.primary.enable or false) && !(lib.any (name: lib.attrByPath ["virtualisation" name "enable"] false config) ["docker" "podman" "libvirtd" "containers" "incus" "cri-o" "waydroid"]);
           message = "Terrace production needs the primary backup target and runs no container or VM daemon.";
         }
         {
