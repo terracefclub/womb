@@ -15,6 +15,9 @@ import sys
 from host import HERE, contained_driver, create_run, owned_guests, unit_off, write_json
 
 
+STORE = '/nix/store/'
+
+
 def private_json(path, limit=65536):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -65,9 +68,16 @@ def purge(path, confirmed=False):
     # Validate the whole deletion set BEFORE mutating anything. Symlink roots
     # cannot redirect traversal. Only the run's dedicated directories are owned.
     targets = [run / name for name in ['state', 'retained', 'escrow']]
+    # A run that died without cleanup may leave its driver GC root: only a symlink
+    # named driver-root directly inside the run directory is ever removed.
+    root = run / 'driver-root'
+    if os.path.lexists(root) and not root.is_symlink():
+        raise ValueError()
     for target in targets:
         if target.is_symlink() or not target.is_dir() or target.stat().st_uid != os.getuid() or target.stat().st_mode & 0o077:
             raise ValueError()
+    if root.is_symlink():
+        root.unlink()
     if directory.exists():
         shutil.rmtree(directory)
     for target in targets:
@@ -112,7 +122,7 @@ def warm(run, run_id, args, lock):
                     child.kill()
                     child.wait(timeout=5)
     driver = Path((run / 'build-output.txt').read_text().strip()) / 'bin/nixos-test-driver'
-    if not str(driver).startswith('/nix/store/') or not driver.is_file() or (run / 'driver-root').resolve() != driver.parent.parent:
+    if not str(driver).startswith(STORE) or not driver.is_file() or (run / 'driver-root').resolve() != driver.parent.parent:
         raise RuntimeError()
     return str(driver)
 
@@ -157,6 +167,16 @@ class SafeArguments(argparse.ArgumentParser):
         raise ValueError()
 
 
+def interrupted(_signum, _frame):
+    raise InterruptedError()
+
+
+def convert_signals():
+    # Termination, interrupt and hangup unwind through the cleanup in execute.
+    for signum in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+        signal.signal(signum, interrupted)
+
+
 def main():
     os.umask(0o077)
     parser = SafeArguments(description=__doc__)
@@ -180,11 +200,7 @@ def main():
     if getattr(args, 'documenso_signing', False):
         args.documenso = True
 
-    def interrupted(_signum, _frame):
-        raise InterruptedError()
-
-    for signum in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
-        signal.signal(signum, interrupted)
+    convert_signals()
     if args.command == 'purge':
         purge(args.run, args.synthetic_only and args.yes)
         print('Completed synthetic run state purged; receipts and unrelated paths retained.')

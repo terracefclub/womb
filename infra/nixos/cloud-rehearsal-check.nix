@@ -28,8 +28,12 @@ let
       ];
     }).config;
   gateway = gatewayWith {};
-  # Every timer the gateway modules define must stay off at boot; the bootstrap arms them.
-  bootTimers = cfg: lib.filter (name: cfg.systemd.timers.${name}.wantedBy != []) (lib.attrNames cfg.systemd.timers);
+  # Every timer, socket and path unit the gateway modules define must stay off at boot;
+  # the bootstrap arms them. Each kind is enumerated from the evaluated configuration.
+  bootUnits = kind: cfg: lib.filter (name: cfg.systemd.${kind}.${name}.wantedBy != []) (lib.attrNames cfg.systemd.${kind});
+  bootTimers = bootUnits "timers";
+  bootSockets = bootUnits "sockets";
+  bootPaths = bootUnits "paths";
   relayFor = privateIPv4:
     (import ./rehearsal-config.nix {
       inherit localModule privateIPv4;
@@ -50,6 +54,14 @@ let
     && cfg.terrace.backup.targets.primary.sftp.identityFile == null
     && cfg.systemd.timers.terrace-backup.wantedBy == [];
   noBoot = cfg: lib.all (name: cfg.systemd.services.${name}.wantedBy == []);
+  # Boot sockets: operating-system plumbing only, none reaches application state.
+  bootSocketAllowlist = [
+    "nix-daemon" # local Nix build daemon socket
+    "podman" # Podman's API socket; the Windmill containers are started by their own writers, which stay off
+    "systemd-journald-audit" # kernel audit records into the journal
+  ];
+  # No path unit may be wanted at boot.
+  bootPathAllowlist = [];
   trust = "/var/lib/terrace-rehearsal-trust/ca.pem";
 in
   assert check gateway && check relay;
@@ -61,6 +73,22 @@ in
   assert lib.assertMsg (bootTimers gateway == ["fstrim" "logrotate"]) "Boot-enabled gateway timers: ${toString (bootTimers gateway)}";
   # The check itself must reject a profile that boots the sweep timer.
   assert builtins.elem "terrace-cms-sweep" (bootTimers (gatewayWith {systemd.timers.terrace-cms-sweep.wantedBy = lib.mkOverride 10 ["timers.target"];}));
+  # Sockets and paths activate their services on demand, so the same rule applies:
+  # only the listed operating-system units may be wanted at boot, each for the stated reason.
+  assert lib.assertMsg (bootSockets gateway == bootSocketAllowlist) "Boot-enabled gateway sockets: ${toString (bootSockets gateway)}";
+  assert lib.assertMsg (bootPaths gateway == bootPathAllowlist) "Boot-enabled gateway paths: ${toString (bootPaths gateway)}";
+  assert builtins.elem "terrace-cms-sweep" (bootSockets (gatewayWith {
+    systemd.sockets.terrace-cms-sweep = {
+      wantedBy = ["sockets.target"];
+      listenStreams = ["127.0.0.1:1"];
+    };
+  }));
+  assert builtins.elem "terrace-cms-sweep" (bootPaths (gatewayWith {
+    systemd.paths.terrace-cms-sweep = {
+      wantedBy = ["paths.target"];
+      pathConfig.PathExists = "/nonexistent";
+    };
+  }));
   assert gateway.systemd.targets.postgresql.wantedBy == [];
   assert builtins.elem (import ../../platform/full/probe-image.nix {inherit pkgs;}) gateway.services.k3s.images;
   assert gateway.environment.etc."rehearsal-probe.yaml".source == ../../platform/full/probe.yaml;

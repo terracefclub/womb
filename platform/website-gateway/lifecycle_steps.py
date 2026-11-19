@@ -25,7 +25,9 @@ LIFECYCLE_ORIGINAL_STEPS = (
     ("apply", 150, r"""
 protocol 'Application rate-limit checks passed: ' apply-burst
 """),
+    # The outbox starts empty: both invitation files are written by the running CMS.
     ("approve", 150, r"""
+if compgen -G "$outbox/*-invitation.json" >/dev/null; then exit 1; fi
 protocol 'Approval checks passed: ' approve local-alumni local-member
 test "$(ls "$outbox"/*-invitation.json | wc -l)" = 2
 test "$(stat -c %U:%a "$outbox"/*-invitation.json | sort -u)" = terrace_cms:600
@@ -61,8 +63,11 @@ protocol 'Member sign-in checks passed: ' sign-in local-member
 protocol 'Application link checks passed: ' link local-member
 """),
     # The running CMS writes each offboarding notice into the restored outbox; an
-    # administrator erasure leaves the invitation files to the sweep.
+    # administrator erasure leaves the invitation files to the sweep. No offboarding
+    # notice may exist in the restored outbox beforehand, so the two counted afterwards
+    # were written by this replacement's CMS rather than carried in the restore.
     ("erase", 180, r"""
+if compgen -G "$outbox/*-offboarding.json" >/dev/null; then exit 1; fi
 protocol 'Erasure checks passed: ' erase local-alumni
 protocol 'Erasure checks passed: ' erase local-member
 test "$(ls "$outbox"/*-offboarding.json | wc -l)" = 2
@@ -72,7 +77,12 @@ grep -l local-member@terrace.invalid "$outbox"/*-invitation.json >/dev/null
 """),
     # The real timer unit: a persistent timer whose last trigger predates a
     # scheduled elapse catches up as soon as it is started.
+    # Before the sweep the invitation files still hold both addresses and no
+    # erasure confirmation exists; the redaction step checks the opposite afterwards.
     ("sweep", 240, r"""
+grep -l local-alumni@terrace.invalid "$outbox"/*-invitation.json >/dev/null
+grep -l local-member@terrace.invalid "$outbox"/*-invitation.json >/dev/null
+if compgen -G "$outbox/*-erasure-confirmation.json" >/dev/null; then exit 1; fi
 before=$(systemctl show terrace-cms-sweep.service -p InvocationID --value)
 systemctl stop terrace-cms-sweep.timer
 mkdir -p /var/lib/systemd/timers
