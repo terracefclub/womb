@@ -122,17 +122,22 @@ for the stated reason:
   variable or a placeholder; no `EnvironmentFile` or `LoadCredential` points
   into the Nix store on any unit; no core dumps (systemd-coredump off,
   `kernel.core_pattern` piped to a no-op, `fs.suid_dumpable = 0`,
-  `LimitCORE=0` on the writers); no unencrypted swap; the escrow recipient is
-  pinned.
+  `LimitCORE=0` on the writers and every other unit that holds secrets); no
+  unencrypted swap; no `SetCredential` or `ImportCredential` (except NixOS's
+  own tmpfiles re-setup); the escrow recipient is pinned.
 - **Network**: the firewall opens exactly the role's ports and every port
   definition must come from an allowed module (an extra port is refused, not
-  overridden); no `extraCommands`, `extraInputRules` or nftables tables;
+  overridden); free-form firewall rules, nftables tables, sshd, sudo or polkit
+  configuration only from the pinned nixpkgs' own modules (identified by its
+  store path, not a path substring); only listed services may be enabled at
+  all and only listed socket units may listen;
   PostgreSQL, Keycloak (HTTP and management), Headscale (API, metrics, gRPC),
   the CMS and the website listen on loopback; nginx has exactly the role's
   virtual hosts, TLS only on the app and HTTPS with the module's redirect on the
   relay, no extra listeners.
 - **Accounts and access**: immutable users; no password on any account (only
-  locked markers); `wheel` is exactly `operator`; sudo rules only for `wheel`;
+  locked markers); `wheel` (users and group members) is exactly `operator`;
+  sudo rules only for root and `wheel`, and no `sudo-rs` or `doas`;
   SSH key-only, `AllowUsers operator`, no `extraConfig`, one ed25519 host key;
   no emergency shell and no debug or rescue kernel parameters.
 - **Units**: services, timers, sockets, paths and targets wanted at boot are a
@@ -157,14 +162,28 @@ host once, explicitly:
 
 - `terrace-production adopt --new` refuses a host that already holds state (a
   PostgreSQL data directory on the app, a Headscale database on the relay) or a
-  restore under `/var/lib/terrace-restore`.
+  restore under `/var/lib/terrace-restore`. It also refuses a **replacement**,
+  two independent ways: `terrace-secrets push` delivers a replacement marker to
+  any host made with `host create --replace` (it arrives over the channel
+  pinned to that host's key), and before adopting, the host lists the snapshots
+  in each of its backup repositories with its own delivered credentials and
+  refuses if any exist for its host name. A repository that is not initialised
+  yet (restic exit 10) is what a genuinely new deployment has. An unreachable
+  repository refuses too, naming the restic exit code; only a first deployment
+  with no repository at all may pass `--without-repository-check`.
 - `terrace-production adopt --restored` refuses unless
   `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
-  restored state is in place.
+  restored state is in place; it then clears the replacement marker.
 
-Both verify the secrets, start the target and write the marker only if none of
-the profile's own units (writers, Keycloak's database init, the website input
-check) failed.
+Each host is adopted once. Both commands verify the secrets, record
+`/var/lib/terrace-production/adopting`, start the target and write the adopted
+marker only when every writer is active (the CMS and website may instead be
+skipped by their migration condition), every helper (Keycloak's database init,
+the website input check) succeeded and every timer runs. If anything is not
+running, the command names it and stops; fix the cause and **run the same adopt
+command again**: while `adopting` says `new`, `adopt --new` resumes instead of
+refusing the database its first attempt created. `terrace-production status`
+shows an unfinished adoption.
 
 ## Cold start of a new deployment
 
@@ -199,7 +218,7 @@ follows the steps above (its installer stand-in stages the host key only).
    PostgreSQL. Then the host is destroyed.
 2. Operator: `terrace-secrets host create app --replace`, `terrace-secrets
    rekey app` with the escrow key; install the replacement with the new host
-   key; `push`.
+   key; `push` (which marks the host as a replacement).
 3. On the replacement (not adopted, so nothing writes):
    `terrace-backup-restore --target primary --snapshot <id> --dest /var/lib/terrace-restore`
    must print `RECONCILIATION OK`. Copy the restored media and outbox
@@ -261,7 +280,9 @@ Build on the Linux builder under the shared lock, never on a Mac.
   `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`
 
-The VM proof instantiates the **same** app role with `instance = "rehearsal"`,
+The VM proof boots the **same** app role and, briefly, the **same** relay role
+(secrets pushed, adopted, Headscale and HTTPS answering, redirect on port 80,
+a backup) with `instance = "rehearsal"`,
 synthetic `.invalid` hostnames, a throwaway escrow key made at build time (so
 its public recipient can be pinned like the owner's), a host key generated at
 test time and secrets generated by `terrace-secrets` inside the operator guest.

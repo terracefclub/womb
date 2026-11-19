@@ -175,9 +175,9 @@ are refused.
 `platform/production/terrace-secrets` (Python standard library plus `sops`,
 `age`, `ssh-to-age` and `ssh-keygen`, all in the dev shell; also built as
 `packages.x86_64-linux.terrace-secrets`). It never prints a value and never puts
-one in a command argument. Plaintext exists only in its memory, in pipes to
-`sops`/`ssh`, and (for `ssh-keygen` output) in a private scratch directory on
-tmpfs/ramfs that it removes; it refuses to run if the scratch directory is not
+one in a command argument. Plaintext exists only in its memory (it disables its own core
+dumps), in pipes to `sops`/`ssh`, and (for `ssh-keygen` output) in a private
+scratch directory on tmpfs/ramfs that it removes; it refuses to run if the scratch directory is not
 memory-backed. Mutating commands take a lock on the store, so two operators
 cannot interleave. Decrypting commands read the escrow (or an operator) identity
 from `SOPS_AGE_KEY_FILE`, which must be private to you (mode `0600`).
@@ -247,13 +247,19 @@ changed values) and `verify`, and restores the previous file if either fails.
   encryption is configured).
 - **Database password**: `rotate --manual identity/database-password`; `push`
   (Keycloak keeps running on its old connection settings); `apply` runs, on the
-  host, `ALTER ROLE keycloak PASSWORD` from the delivered file (the hex value
-  goes to `psql` on stdin) and restarts Keycloak.
+  host, `ALTER ROLE keycloak PASSWORD 'SCRAM-SHA-256$4096:...'` with a verifier
+  the tool computes from the delivered file (PBKDF2-HMAC-SHA256, random salt;
+  the cleartext never enters SQL), in a session that logs no statement text
+  (`log_min_error_statement = panic`, `log_statement = none`, no duration
+  logging), and restarts Keycloak. The upstream Keycloak database init would
+  log its `CREATE ROLE ... PASSWORD '<cleartext>'` if that statement ever failed;
+  the profile runs it with the same no-statement-logging session options.
 - **Backup repository password**: `rotate --manual`; `apply` (before `push`:
   sends the NEW value over the pinned channel on stdin; the host adds it as a
   restic key while the old one still opens the repository); `push`; `apply
-  --finish` (removes every key but the current one). The escrowed store holds
-  the new value; nothing else needs updating.
+  --finish --keep <id>` for every key to keep (for example a separately
+  escrowed one), or `--finish --only-current` to remove every key but the one
+  the delivered password opens. The escrowed store holds the new value.
 - **SFTP key**: `rotate --manual backup/primary/sftp-key`; `public` and enrol the
   new public key at the Storage Box (owner, alongside the old); `push`; run a
   backup; remove the old public key at the Storage Box.
@@ -292,17 +298,23 @@ changed values) and `verify`, and restores the previous file if either fails.
 ## Escrow key lost or leaked
 
 - **Leaked (still in hand)**: `escrow replace NEWFILE` with the old escrow as
-  `SOPS_AGE_KEY_FILE` makes a new escrow key, re-encrypts every host file to
-  {host, new escrow} and records the new recipient. Update every host's
-  `escrowRecipient` parameter, deploy the hosts (they refuse the new ciphertext
-  until then), `push` each host, store the new key offline. Because the old
+  `SOPS_AGE_KEY_FILE` makes a new escrow key, writes every host's re-encrypted
+  file under a temporary name, then switches them all and records the new
+  recipient last; if it stops part-way, run it again with the same NEWFILE and
+  it resumes. Update every host's `escrowRecipient` parameter, deploy the hosts
+  (they refuse the new ciphertext until then) and `push` to each one straight
+  away: a host deployed with the new pin but not yet pushed fails `verify`, so a
+  reboot in between leaves its writers gated until the push. Store the new key
+  offline. Because the old
   escrow decrypts every past ciphertext, rotate every secret of every host
   (above).
 - **Lost (no copy left)**: while the hosts run, each can re-encrypt its own
-  file: make a new escrow key (`age-keygen`, offline), then for each host run
-  `ssh host sudo terrace-secrets reencrypt <new recipient> | terrace-secrets
-  escrow adopt <host>` (ciphertext only crosses the channel), record the new
-  recipient in the store and the host parameters, deploy, `push`. If a host is
+  file: make a new escrow key (`age-keygen`, offline), record its recipient as
+  the store's `escrow.recipient`, then for each host run `terrace-secrets escrow
+  adopt <host> --address HOST` with the new key as `SOPS_AGE_KEY_FILE`: over the
+  pinned channel the host re-encrypts its own file to {itself, new escrow}, and
+  the tool decrypts it with the new key and checks every name and format before
+  storing it. Then update the host parameters, deploy, `push`. If a host is
   gone as well, its secrets are gone: regenerate and rotate them.
 
 ## Re-keying for a replacement host
@@ -338,5 +350,12 @@ and covers everything else, including deleted blocks and those directories.
 `/proc`, `/sys`, `/run` and other memory filesystems are where secrets are meant
 to be, and are not disk.
 
-`infra/nixos/production-eval-check.nix` proves the evaluation invariants, and
-`platform/production/test_terrace_secrets.py` the tool's own guards and formats.
+Which commands are proven where: in the VM, against real `sops`, `age` and
+`ssh-to-age`: `host create` (and `--replace`), `generate`, `set`, `check`,
+`push`, `install` (including its refusal of a foreign recipient), `verify`,
+`rotate`, `rotate --manual`, `rekey`, `apply` for the database password and the
+backup repository password, and `host unstage` for the app and the relay.
+Against stand-in tools only (unit tests): `escrow replace` (including resume),
+`escrow adopt`, `reencrypt`, the store lock, `host-apply` argument and SQL
+handling, and every format rule. `infra/nixos/production-eval-check.nix` proves
+the evaluation invariants.
