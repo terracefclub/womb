@@ -288,7 +288,9 @@ in {
           sql("insert into media(alt,public,filename,mime_type,filesize,width,height) values ('Synthetic private',false,'private.png','image/png',70,1,1),('Synthetic public',true,'public.png','image/png',70,1,1)")
           app.succeed("runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d terrace_cms -f /etc/gateway-content.sql >/dev/null 2>&1")
           output = protocol("test", "Native HTTPS protocol checks passed: ")
-          assertions = int(re.search(r"passed: ([0-9]+) bounded", output)[1])
+          found = re.search(r"passed: ([0-9]+) bounded", output)
+          assert found is not None, output
+          assertions = int(found.group(1))
           ok(assertions == 198, f"198 protocol assertions ({assertions})")
           protocol("content", "Imported-content checks passed")
           for unit, name, value in [("terrace-cms", "LIFECYCLE_OUTBOX_DIR", OUTBOX), ("terrace-cms", "LIFECYCLE_PUBLIC_ORIGIN", "https://web.terrace.invalid"),
