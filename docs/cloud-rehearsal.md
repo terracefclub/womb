@@ -58,6 +58,8 @@ itself, so the lease runner must stage the whole repository tree, with both
 `infra/nixos/` and `platform/website-gateway/`, not `infra/nixos/` alone. If
 `lifecycle_steps.py` is absent the proof stops at import with the fixed error
 "lifecycle steps module missing; the whole repository tree must be staged".
+The same scripts, with their before and after checks, passed the VM rehearsal at `4348d0b`
+(see [full-rehearsal.md](full-rehearsal.md)).
 The three matching outputs are `config.system.build.diskoScript`,
 `config.system.build.toplevel` and `config.system.build.nixos-install`.
 Build each under the shared Linux builder lock with
