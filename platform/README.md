@@ -27,8 +27,12 @@ No cloud resource or existing Womb infrastructure is changed by this directory.
   not cover the K3s datastore or PV data unless listed in `extraPaths`/`media`, and no
   job is enabled. A Retain policy is deletion protection, not a backup.
   A one-node outage is downtime.
-- No GitOps controller, applications, DNS, ingress, certificate issuer,
-  secrets integration, cloud purchase, or production restore is configured yet.
+- No GitOps controller, DNS, certificate issuer, cloud purchase, or production
+  restore is configured yet. The production app and relay roles
+  (`nixosModules.production-app`, `nixosModules.production-relay`,
+  [docs](../docs/production-profile.md)) enable the website, gateway, identity,
+  backup and relay modules with sops-nix secrets ([docs](../docs/secrets.md));
+  they are proven in a VM, not deployed.
 
 The optional native [identity host](../docs/identity-host.md)
 (`nixosModules.identity`, default off) adds PostgreSQL-backed Keycloak, a limited

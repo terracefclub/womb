@@ -217,5 +217,5 @@ absence (runbook 6.5).
 absence of every generated value from the system closure, unit files, journals,
 process arguments and the raw disk, ramfs ownership and modes, rotation of the
 intake secret, and a host replacement with a new key re-keyed from escrow.
-`platform/production/eval-check.nix` proves the evaluation invariants, and
+`infra/nixos/production-eval-check.nix` proves the evaluation invariants, and
 `platform/production/test_terrace_secrets.py` the tool's own guards.

@@ -330,7 +330,8 @@ in {
           ok("Rotated website/lifecycle-intake on app. `push` delivers it and restarts: terrace-cms.service, terrace-web.service." in out, out.strip())
           out = op("terrace-secrets push app --address app --identity /root/.ssh/operator --rehearsal")
           ok("Installed 13 encrypted secrets." in out and "PASS 13 secrets" in out, "push over SSH pinned to the operator-generated host key")
-          app.wait_until_succeeds("test \"$(systemctl show terrace-cms.service terrace-web.service -p MainPID --value | tr '\\n' ' ')\" != " + shlex.quote(" ".join(pids) + " ") + " && systemctl is-active terrace-cms.service terrace-web.service", timeout=240)
+          for unit, pid in zip(["terrace-cms", "terrace-web"], pids):
+              app.wait_until_succeeds(f"now=$(systemctl show {unit}.service -p MainPID --value) && test \"$now\" != 0 && test \"$now\" != {pid} && systemctl is-active {unit}.service", timeout=240)
           new_pids = app.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").split()
           ok(all(a != b for a, b in zip(pids, new_pids)), "CMS and website restarted by sops-install-secrets")
           app.fail("cmp -s /run/terrace-rotation/old /run/secrets/website/lifecycle-intake")

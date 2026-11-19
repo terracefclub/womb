@@ -88,7 +88,7 @@ in {
         message = "Terrace production secondary backup must be an s3:https:// repository.";
       }
       {
-        assertion = config.services.postgresql.settings.listen_addresses == "127.0.0.1" && config.services.keycloak.settings.http-host == "127.0.0.1" && config.services.keycloak.settings.http-management-host == "127.0.0.1";
+        assertion = builtins.elem config.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && config.services.keycloak.settings.http-host == "127.0.0.1" && config.services.keycloak.settings.http-management-host == "127.0.0.1";
         message = "Terrace production keeps PostgreSQL and Keycloak (HTTP and management) on loopback.";
       }
       {

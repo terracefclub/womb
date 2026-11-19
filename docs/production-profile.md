@@ -65,7 +65,7 @@ hostnames, so they cannot disagree.
 
 ## Invariants enforced at evaluation
 
-The role modules assert, and `platform/production/eval-check.nix` re-checks on
+The role modules assert, and `infra/nixos/production-eval-check.nix` re-checks on
 fully evaluated configurations (with negative variants that must fail):
 
 - **Production mode only**: no hostname under a reserved name (`.invalid`,
@@ -189,7 +189,7 @@ operator-generated host key (see [secrets](secrets.md#bootstrap-of-a-brand-new-h
 ## Verification
 
 - Evaluation check (no builds; builder, shared lock):
-  `nix eval --raw --impure --option builders "" --file platform/production/eval-check.nix`
+  `nix eval --raw --impure --option builders "" --file infra/nixos/production-eval-check.nix`
 - VM proof (builder; the wrapper takes the shared lock itself):
   `BUILD_LOCK=$HOME/.falcon-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`

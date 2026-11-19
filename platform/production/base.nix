@@ -191,7 +191,7 @@ in {
           message = "Terrace production units must not carry secrets in Environment=: ${toString serviceEnvironmentLeaks}.";
         }
         {
-          assertion = config.networking.firewall.enable && lib.sort lib.lessThan (lib.unique config.networking.firewall.allowedTCPPorts) == lib.sort lib.lessThan cfg.publicTCPPorts && lib.unique config.networking.firewall.allowedUDPPorts == cfg.publicUDPPorts && config.networking.firewall.allowedTCPPortRanges == [] && config.networking.firewall.allowedUDPPortRanges == [] && config.networking.firewall.interfaces == {} && config.networking.firewall.trustedInterfaces == [];
+          assertion = config.networking.firewall.enable && lib.sort lib.lessThan (lib.unique config.networking.firewall.allowedTCPPorts) == lib.sort lib.lessThan cfg.publicTCPPorts && lib.unique config.networking.firewall.allowedUDPPorts == cfg.publicUDPPorts && config.networking.firewall.allowedTCPPortRanges == [] && config.networking.firewall.allowedUDPPortRanges == [] && config.networking.firewall.interfaces == {} && lib.subtractLists ["lo"] config.networking.firewall.trustedInterfaces == [];
           message = "Terrace production ${cfg.role} firewall must open exactly TCP ${toString cfg.publicTCPPorts} and UDP ${toString cfg.publicUDPPorts}.";
         }
       ];

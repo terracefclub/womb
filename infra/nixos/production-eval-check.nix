@@ -87,6 +87,28 @@ let
       "sops-install-secrets" # decrypts this host's secrets into ramfs
       "terrace-production-boot" # starts the writers only on an adopted host
       "sshd" # operator access, key-only
+      "sshd-keygen" # no-op: the installer staged the only host key
+      "firewall"
+      # Stock NixOS plumbing; none touches application state.
+      "dhcpcd"
+      "resolvconf"
+      "network-local-commands"
+      "nscd"
+      "systemd-timesyncd"
+      "systemd-oomd"
+      "systemd-pstore"
+      "systemd-sysctl"
+      "systemd-modules-load"
+      "systemd-tmpfiles-resetup"
+      "reload-systemd-vconsole-setup"
+      "suid-sgid-wrappers"
+      "post-boot"
+      "prepare-kexec"
+      "generate-shutdown-ramfs"
+      "sleep-actions"
+      "linger-users"
+      "lastlog2-import"
+      "logrotate-checkconf"
     ];
     timers = ["fstrim" "logrotate"];
     sockets = ["nix-daemon" "systemd-journald-audit"];
@@ -118,10 +140,10 @@ let
     ++ check "test-only override: extra trust or CA variables" (p.instance != "production" || (cfg.security.pki.certificateFiles == [] && lib.all (service: !(service.environment ? NODE_EXTRA_CA_CERTS)) (lib.attrValues services)))
     ++ check "bootstrap administrator" (p.instance != "production" || role != "app" || !(services.keycloak.serviceConfig ? EnvironmentFile))
     ++ check "K3s" (!cfg.services.k3s.enable)
-    ++ check "toplevel" (builtins.isString cfg.system.build.toplevel.drvPath && builtins.isString cfg.system.build.diskoScript.drvPath)
+    ++ check "toplevel does not evaluate" ((builtins.tryEval cfg.system.build.toplevel.drvPath).success && (builtins.tryEval cfg.system.build.diskoScript.drvPath).success)
     ++ lib.optionals (role == "app") (
       check "static ids" (cfg.users.users.terrace_cms.uid == 44121 && cfg.users.users.terrace_web.uid == 44122)
-      ++ check "loopback services" (cfg.services.postgresql.settings.listen_addresses == "127.0.0.1" && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
+      ++ check "loopback services" (builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
       ++ check "sweep and backup timers" (builtins.elem "terrace-cms-sweep" (gatedUnits cfg "timers") && builtins.elem "terrace-backup" (gatedUnits cfg "timers") && cfg.systemd.timers.terrace-cms-sweep.timerConfig.Persistent)
       ++ check "env files from templates" (cfg.terrace.website.inputFiles.cms == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-cms.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-web.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/web.env")
       ++ check "backup excludes secrets" (!(cfg.terrace.backup.extraPaths ? website-inputs) && lib.all (path: !(lib.hasPrefix "/run" path) && !(lib.hasPrefix "/var/lib/terrace-secrets" path)) (lib.attrValues cfg.terrace.backup.extraPaths))
@@ -132,7 +154,7 @@ let
     );
   rejects = needle: cfg: let v = violations "app" cfg; in lib.assertMsg (lib.any (lib.hasInfix needle) v) "Variant not rejected for ${needle}: ${toString v}";
   rejectsRelay = needle: cfg: let v = violations "relay" cfg; in lib.assertMsg (lib.any (lib.hasInfix needle) v) "Relay variant not rejected for ${needle}: ${toString v}";
-  fails = cfg: !(builtins.tryEval cfg.system.build.toplevel.drvPath).success;
+  fails = label: cfg: lib.assertMsg (!(builtins.tryEval cfg.system.build.toplevel.drvPath).success) "Variant evaluated but must fail: ${label}";
   positive = {
     app = violations "app" (app {});
     relay = violations "relay" (relay {});
@@ -144,9 +166,9 @@ let
       sops.secrets = lib.mkForce (lib.genAttrs (lib.remove "website/lifecycle-intake" config.terrace.production.secrets.required) (_: {mode = "0400";}));
     })))
     # A required parameter missing: evaluation stops.
-    (fails (evaluateApp (lib.recursiveUpdate appParameters {app.backup.primary = removeAttrs appParameters.app.backup.primary ["knownHosts"];}) {}))
-    (fails (evaluateApp (removeAttrs appParameters ["instance"]) {}))
-    (fails (evaluateApp (removeAttrs appParameters ["memoryMiB"]) {}))
+    (fails "missing knownHosts" (evaluateApp (appParameters // {app = appParameters.app // {backup.primary = removeAttrs appParameters.app.backup.primary ["knownHosts"];};}) {}))
+    (fails "missing instance" (evaluateApp (removeAttrs appParameters ["instance"]) {}))
+    (fails "missing memoryMiB" (evaluateApp (removeAttrs appParameters ["memoryMiB"]) {}))
     # Test fixtures imported into a production instance.
     (rejects "refuses the rehearsal harness" (app (import ../../platform/production/rehearsal.nix {ca = stub;})))
     (rejects "refuses test fixture units: gateway-test-inputs" (app {systemd.services.gateway-test-inputs.script = "true";}))
@@ -165,7 +187,7 @@ let
     (rejects "gated services: " (app {systemd.services.keycloak.wantedBy = lib.mkOverride 10 ["multi-user.target"];}))
     # Bootstrap and registration flags.
     (rejects "refuses a Keycloak bootstrap administrator" (app {systemd.services.keycloak.serviceConfig.EnvironmentFile = "/run/bootstrap.env";}))
-    (fails (app {services.keycloak.initialAdminPassword = "eval-only-placeholder";}))
+    (fails "initialAdminPassword" (app {services.keycloak.initialAdminPassword = "eval-only-placeholder";}))
     (rejects "must not contain CMS bootstrap settings" (app {sops.templates."terrace-website/cms.env".content = lib.mkAfter "CMS_BOOTSTRAP_ADMIN=1\n";}))
     # Public binds that the design keeps private.
     (rejects "keeps PostgreSQL and Keycloak (HTTP and management) on loopback" (app {services.postgresql.settings.listen_addresses = lib.mkForce "*";}))

@@ -98,14 +98,13 @@ the tooling refuses group- or other-accessible files and anything under
 | `targets.<name>.sftp.knownHostsFile` | pinned host key; checking is always strict (not secret, but must be verified out of band) |
 | `targets.<name>.environmentFile` | optional `NAME=value` lines, e.g. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for B2's S3 API |
 
-The legacy root flake uses sops-nix, but the `platform` flake does not yet, and
-no encrypted secrets file exists for these hosts. When sops-nix (or agenix) is
-adopted for the platform hosts, point the options at
-`config.sops.secrets.<name>.path`. **Production secret delivery is still a release
-gate.** Keep production jobs disabled until declarative secret delivery and file
-permissions are verified. Escrow the provider-issued credentials and repository
-passwords independently; never commit real values in this repository. The VM
-test generates throwaway keys inside the test VM only.
+The production profiles ([production-profile](production-profile.md)) point
+these options at sops-nix paths (`/run/secrets/backup/<target>/...`, ramfs,
+`root:root 0400`) and pin the SFTP host key as a profile parameter; see
+[secrets](secrets.md) for generation, escrow and rotation. Repository passwords
+and the SFTP key are in the escrowed secrets store, never in a host backup. No
+real target or credential exists yet. The VM tests generate throwaway keys
+inside the test VMs only.
 
 ## Enabling it on a host
 

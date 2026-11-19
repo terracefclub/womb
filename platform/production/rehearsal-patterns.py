@@ -50,8 +50,8 @@ def main():
     items = values_from_directory(args.directory) if args.directory else values_from_tree(json.load(sys.stdin))
     found = []
     for name, value in items:
-        if args.exclude_database and name.startswith(DATABASE):
-            continue
+        if (args.exclude_database and name.startswith(DATABASE)) or name.endswith("/certificate"):
+            continue  # client secrets live in Keycloak's database by design; certificates are public
         found.extend(patterns(name, value))
     if not found:
         sys.exit("no patterns")
