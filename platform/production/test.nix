@@ -395,6 +395,7 @@ in {
           app.succeed("terrace-production adopt --new")
           app.succeed("test -e /var/lib/terrace-production/adopted && test ! -e /var/lib/terrace-production/adopting")
           ok(True, "adopt --new resumed after the failure")
+          ok(app.succeed("terrace-production adopt --new").strip() == "Already adopted.", "adopt on an adopted host says so")
           app.wait_for_unit("keycloak.service", timeout=360)
           app.wait_for_unit("nginx.service")
           for unit in ["terrace-cms", "terrace-web"]:
@@ -499,6 +500,21 @@ in {
           ok(app.succeed("find /var/lib/postgresql -name '*.log' -type f | wc -l").strip() == "0", "PostgreSQL keeps no log file of its own")
           app.succeed("rm -rf /run/terrace-db")
 
+      with subtest("the upstream Keycloak database init logs no cleartext when its CREATE ROLE fails"):
+          app.succeed("systemctl stop keycloak.service")
+          sql("ALTER ROLE keycloak RENAME TO keycloak_held", "postgres")
+          sql("ALTER SYSTEM SET default_transaction_read_only = on", "postgres")
+          app.succeed("systemctl reload postgresql.service")
+          app.succeed("rm -rf /run/terrace-db && install -d -m 0700 /run/terrace-db && install -m 0400 /run/secrets/identity/database-password /run/terrace-db/patterns && echo 'CREATE ROLE keycloak WITH LOGIN PASSWORD' >>/run/terrace-db/patterns && echo 'cannot execute CREATE ROLE in a read-only transaction' >/run/terrace-db/control")
+          app.fail("systemctl restart keycloakPostgreSQLInit.service")
+          app.wait_until_succeeds("test $(journalctl --namespace='*' -o export --no-pager | grep -acF -f /run/terrace-db/control) -gt 0", timeout=30)
+          ok(True, "the init's CREATE ROLE failed and PostgreSQL logged the error (control)")
+          ok(journal_hits(app, "/run/terrace-db/patterns") == "0", "no cleartext database password and no CREATE ROLE statement text in any journal")
+          app.succeed("PGOPTIONS='-c default_transaction_read_only=off' runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d postgres -c 'ALTER SYSTEM RESET default_transaction_read_only' >/dev/null && systemctl reload postgresql.service")
+          app.succeed("PGOPTIONS='-c default_transaction_read_only=off' runuser -u postgres -- psql -XAt -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE keycloak_held RENAME TO keycloak' >/dev/null")
+          app.succeed("systemctl reset-failed keycloakPostgreSQLInit.service && systemctl start keycloak.service", timeout=360)
+          app.succeed("rm -rf /run/terrace-db")
+
       with subtest("reboot: ramfs vanishes, secrets return from ciphertext, adopted writers start alone"):
           app.succeed("touch /run/secrets.d/terrace-vanish-marker")
           app.shutdown()
@@ -558,7 +574,15 @@ in {
           verify(relay, "4 secrets, 0 templates")
           for unit in ["headscale", "nginx"]:
               ok(relay.succeed(f"systemctl show {unit}.service -p ActiveState --value").strip() == "inactive", f"relay {unit} off before adoption")
-          relay.succeed("terrace-production adopt --new")
+          # An unreachable repository refuses adoption; only the named first-deployment override passes it.
+          block = "${pkgs.iptables}/bin/iptables -I OUTPUT -p tcp --dport 22 -j REJECT && ${pkgs.iptables}/bin/ip6tables -I OUTPUT -p tcp --dport 22 -j REJECT"
+          unblock = "${pkgs.iptables}/bin/iptables -D OUTPUT -p tcp --dport 22 -j REJECT && ${pkgs.iptables}/bin/ip6tables -D OUTPUT -p tcp --dport 22 -j REJECT"
+          relay.succeed(block)
+          ok("backup repository primary unreachable" in relay.fail("terrace-production adopt --new 2>&1"), "relay: unreachable repository refuses adopt --new")
+          ok("backup repository primary unreachable" in relay.fail("terrace-production adopt --new --first-deployment-without-repository app 2>&1"), "relay: override naming another host refused")
+          out = relay.succeed("terrace-production adopt --new --first-deployment-without-repository relay 2>&1")
+          ok("WARNING: adopting as new without seeing backup repository primary" in out and "Adopted" in out, "relay: named first-deployment override accepted with a warning")
+          relay.succeed(unblock)
           relay.wait_for_unit("headscale.service")
           relay.wait_for_unit("nginx.service")
           relay.succeed("headscale users create rehearsal-operator >/dev/null && headscale users list -o json | ${pkgs.jq}/bin/jq -e 'length == 1' >/dev/null")
@@ -639,6 +663,9 @@ in {
           ok("delivered as a replacement" in refused, "adopt --new refused on a restored host (replacement marker)")
           app.succeed("terrace-production adopt --restored")
           app.fail("test -e /var/lib/terrace-secrets/replacement")
+          # The next push learns the host is adopted and clears the operator's replacement marker.
+          ok("replacement marker is cleared" in op("terrace-secrets push app" + PUSH), "push after adoption clears the store's replacement marker")
+          operator.fail("test -e " + STORE + "/hosts/app/replacement")
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", "keycloak") == "0", "no bootstrap administrator on the replacement")
           app.succeed("systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service", timeout=300)

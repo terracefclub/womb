@@ -204,6 +204,7 @@ terrace-secrets rotate app website/lifecycle-intake           # one generated va
 terrace-secrets rotate app identity/database-password --manual   # a secret whose service keeps a copy
 terrace-secrets apply app identity/database-password --address HOST  # hand it to that service
 terrace-secrets host create app --role app --replace && terrace-secrets rekey app
+terrace-secrets host reset-replacement app --confirm app      # only to redeploy a wiped host as NEW
 terrace-secrets escrow replace /offline/terrace-escrow-2.age  # new escrow; re-encrypts every host
 terrace-secrets public app backup/primary/sftp-key            # public half, for enrolment
 # on a host, as root:
@@ -258,7 +259,7 @@ changed values) and `verify`, and restores the previous file if either fails.
   sends the NEW value over the pinned channel on stdin; the host adds it as a
   restic key while the old one still opens the repository); `push`; `apply
   --finish --keep <id>` for every key to keep (for example a separately
-  escrowed one), or `--finish --only-current` to remove every key but the one
+  escrowed one; an id is 4 to 64 lowercase hex digits, checked on both ends), or `--finish --only-current` to remove every key but the one
   the delivered password opens. The escrowed store holds the new value.
 - **SFTP key**: `rotate --manual backup/primary/sftp-key`; `public` and enrol the
   new public key at the Storage Box (owner, alongside the old); `push`; run a
@@ -301,7 +302,9 @@ changed values) and `verify`, and restores the previous file if either fails.
   `SOPS_AGE_KEY_FILE` makes a new escrow key, writes every host's re-encrypted
   file under a temporary name, then switches them all and records the new
   recipient last; if it stops part-way, run it again with the same NEWFILE and
-  it resumes. Update every host's `escrowRecipient` parameter, deploy the hosts
+  it resumes; an aborted run removes its temporary files, and until the
+  replacement is finished every other mutating command, `check` and `push`
+  refuse (finish a half-done replace first). Update every host's `escrowRecipient` parameter, deploy the hosts
   (they refuse the new ciphertext until then) and `push` to each one straight
   away: a host deployed with the new pin but not yet pushed fails `verify`, so a
   reboot in between leaves its writers gated until the push. Store the new key

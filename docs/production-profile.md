@@ -166,11 +166,23 @@ host once, explicitly:
   two independent ways: `terrace-secrets push` delivers a replacement marker to
   any host made with `host create --replace` (it arrives over the channel
   pinned to that host's key), and before adopting, the host lists the snapshots
-  in each of its backup repositories with its own delivered credentials and
-  refuses if any exist for its host name. A repository that is not initialised
-  yet (restic exit 10) is what a genuinely new deployment has. An unreachable
-  repository refuses too, naming the restic exit code; only a first deployment
-  with no repository at all may pass `--without-repository-check`.
+  in each of its backup repositories with its own delivered credentials (within
+  120 seconds) and refuses if the repository holds **any** snapshot: the
+  repository is per role, so this also catches a replacement given a different
+  host name. A repository that is not initialised yet (restic exit 10) is what
+  a genuinely new deployment has. An unreachable or silent repository refuses,
+  naming the restic exit code, because that is exactly when a replacement could
+  be mistaken for a new host. The last resort, `adopt --new
+  --first-deployment-without-repository HOSTNAME` (the host's own name, typed
+  out), is only for a first deployment whose repository does not exist yet,
+  after confirming that no earlier host of this role ever existed; it is
+  refused while the replacement marker is present and prints a fixed warning.
+  `adopt --new` on an adopted host just answers `Already adopted.`
+- The operator's store keeps a host's replacement marker until the first `push`
+  after the host was adopted (the host reports `Host state: adopted`), then
+  clears it. To redeploy a wiped host as a genuinely new deployment under the
+  same name, clear it explicitly: `terrace-secrets host reset-replacement HOST
+  --confirm HOST`.
 - `terrace-production adopt --restored` refuses unless
   `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
   restored state is in place; it then clears the replacement marker.
@@ -231,6 +243,24 @@ follows the steps above (its installer stand-in stages the host key only).
 
 Promoting a restore into service on real data still needs the owner-approved
 procedure (G-22); this rehearsal is its technical basis.
+
+## What the evaluation check does not catch
+
+- A host module that deliberately spoofs its `_file`, or a hostile private module
+  inside the trust base (the pinned nixpkgs and this repository), can define
+  free-form configuration that looks like NixOS's own.
+- Secret values written into a unit's `script` text, a file in the Nix store or
+  an innocuously named variable: the checks look at names, placeholders and the
+  secrets module's paths, not at every string (the VM scans catch values that
+  actually appear, for the rehearsal's values).
+- Units a package brings in that are not wanted at boot or by the production
+  target, and anything started by hand.
+- Runtime behaviour after adoption: the 15-second stability window runs at
+  adopt time only. A writer that fails after a later reboot shows in
+  `systemctl --failed` and nowhere else until alerting exists (G-23).
+- The relay role's replacement and its reboot are not exercised in the VM (only
+  its first boot, delivery, adoption, listeners and a backup); the app role's
+  are.
 
 ## Building a host
 

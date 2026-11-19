@@ -145,13 +145,44 @@ let
   };
   # Services that may be enabled at all (each listens only where the checks above say), and socket units.
   allowedEnabled = role:
-    ["openssh" "nginx" "nscd" "timesyncd" "logrotate" "dhcpcd" "resolved" "userborn" "lvm" "udisks2" "fstrim" "dbus" "getty" "logind" "udev"]
+    [
+      "openssh" # operator access (port 22)
+      "nginx" # the HTTPS front (443; 80 redirect on the relay)
+      "nscd" # name-service cache, local socket only
+      "timesyncd" # NTP client, no listener
+      "logrotate" # rotates local logs, no listener
+      "dhcpcd" # address configuration client (UDP 68/546 client sockets)
+      "resolved" # local stub resolver on 127.0.0.53 when enabled
+      "userborn" # creates system users at boot, no listener
+      "lvm" # disk tooling, no listener
+      "udisks2" # disk tooling (system bus only)
+      "fstrim" # periodic TRIM, no listener
+      "dbus" # system bus, local socket only
+      "getty" # console login (no password exists on any account)
+      "logind" # session management, no listener
+      "udev" # device manager, no listener
+    ]
     ++ (
       if role == "app"
-      then ["postgresql" "keycloak"]
-      else ["headscale"]
+      then [
+        "postgresql" # loopback 5432 and a local socket
+        "keycloak" # loopback 8088 and 9000
+      ]
+      else [
+        "headscale" # loopback 8080, 9090, 50443; STUN UDP 3478
+      ]
     );
   allowedSockets = ["nix-daemon" "systemd-journald-audit"];
+  # Units the profile's own and NixOS's allowed units may pull in through wants/requires/bindsTo/upholds.
+  allowedPulls = role:
+    ["network-online.target" "network.target" "sysinit.target" "multi-user.target" "local-fs.target" "remote-fs.target" "nss-lookup.target" "nss-user-lookup.target" "time-sync.target" "systemd-journald.socket" "sops-install-secrets.service" "terrace-production.target" "systemd-journald-sync@terrace-apps.service" "systemd-journald@terrace-apps.service"]
+    ++ (
+      if role == "app"
+      then ["postgresql.service" "postgresql.target" "postgresql-setup.service" "keycloakPostgreSQLInit.service" "terrace-website-inputs.service" "terrace-cms.service" "terrace-cms-migrate.service" "keycloak.service"]
+      else ["headscale.service"]
+    );
+  # Packages that bring their own unit files, accepted for the stated reason.
+  allowedSystemdPackages = [];
   bootTargets = ["multi-user" "default" "sysinit" "basic" "timers" "sockets" "paths" "network" "network-online" "local-fs" "graphical"];
   wanted = cfg: kind: name: cfg.systemd.${kind}.${name}.wantedBy ++ (cfg.systemd.${kind}.${name}.requiredBy or []) ++ (cfg.systemd.${kind}.${name}.upheldBy or []);
   bootUnits = cfg: kind: lib.filter (name: let w = wanted cfg kind name; in w != [] && w != ["terrace-production.target"]) (lib.attrNames cfg.systemd.${kind});
@@ -181,6 +212,11 @@ let
       else (builtins.head failed).message;
     # From option metadata: reading every service's value would trip renamed-option aliases.
     enabledServices = lib.filter (name: let option = system.options.services.${name}.enable or null; in lib.isOption option && option.isDefined && option.value == true) (lib.attrNames system.options.services);
+    # wants/requires/bindsTo/upholds of every unit allowed at boot or gated by the production target.
+    profileUnits = map (name: name + ".service") (allowedServices ++ p.writers ++ p.writerHelpers);
+    pullsOf = service: (service.wants or []) ++ (service.requires or []) ++ (service.bindsTo or []) ++ (service.upholds or []);
+    strayPulls = lib.unique (lib.subtractLists (profileUnits ++ allowedPulls role) (lib.concatMap (name: pullsOf (cfg.systemd.services.${name} or {})) (allowedServices ++ p.writers ++ p.writerHelpers)));
+    etcUnits = lib.filter (name: lib.hasPrefix "systemd/system/" name || lib.hasPrefix "systemd/user/" name) (lib.attrNames cfg.environment.etc);
     socketUnits = lib.filter (name: (cfg.systemd.sockets.${name}.listenStreams or []) != [] || (cfg.systemd.sockets.${name}.listenDatagrams or []) != []) (lib.attrNames cfg.systemd.sockets);
     unitFiles = lib.concatLists (lib.mapAttrsToList (unit: service: let
       env = lib.toList (service.serviceConfig.EnvironmentFile or []);
@@ -217,6 +253,10 @@ let
     ++ check "accounts: password field on ${toString (map (user: user.name) (lib.filter (user: !(passwordless user)) users))}" (lib.all passwordless users)
     ++ check "enabled services: ${toString (lib.subtractLists (allowedEnabled role) enabledServices)}" (subset enabledServices (allowedEnabled role))
     ++ check "listening sockets: ${toString (lib.subtractLists allowedSockets socketUnits)}" (subset socketUnits allowedSockets)
+    ++ check "unit dependencies: ${toString strayPulls}" (strayPulls == [])
+    ++ check "systemd packages: ${toString (map lib.getName cfg.systemd.packages)}" (subset (map lib.getName cfg.systemd.packages) allowedSystemdPackages)
+    ++ check "unit files through environment.etc: ${toString etcUnits}" (etcUnits == [])
+    ++ check "container or VM daemons" (!(lib.any (name: lib.attrByPath [name "enable"] false cfg.virtualisation) ["docker" "podman" "libvirtd" "containers" "lxd" "incus" "cri-o"]))
     ++ check "sudo rules" (lib.all (rule: subset (rule.users or []) ["root"] && subset (rule.groups or []) ["wheel"]) cfg.security.sudo.extraRules)
     ++ check "store paths in EnvironmentFile or LoadCredential: ${toString unitFiles}" (unitFiles == [])
     ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))
@@ -243,7 +283,8 @@ let
     ++ lib.optionals (role == "app") (
       check "static ids" (cfg.users.users.terrace_cms.uid == 44121 && cfg.users.users.terrace_web.uid == 44122)
       # Listening sockets, from the evaluated configuration: only nginx (443) and sshd (22) on public addresses.
-      ++ check "listeners" (!(services.terrace-cms.environment ? HOST) && !(services.terrace-web.environment ? HOST) && !(services.terrace-cms.environment ? HOSTNAME) && !(services.terrace-web.environment ? HOSTNAME) && builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(cfg.services.keycloak.settings ? https-certificate-file) && services.terrace-cms.environment.PORT == toString cfg.terrace.website.cmsPort && services.terrace-web.environment.PORT == toString cfg.terrace.website.webPort && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
+      ++ check "listeners" (!(lib.any (assignment: lib.hasPrefix "HOST=" assignment || lib.hasPrefix "HOSTNAME=" assignment) (lib.concatMap (unit: lib.concatMap (item: lib.splitString " " (toString item)) (lib.toList (services.${unit}.serviceConfig.Environment or []))) ["terrace-cms" "terrace-web"])) && lib.all (template: !(lib.any (line: lib.hasPrefix "HOST=" line || lib.hasPrefix "HOSTNAME=" line) (lib.splitString "\n" cfg.sops.templates.${template}.content))) ["terrace-website/cms.env" "terrace-website/web.env"] && !(services.terrace-cms.environment ? HOST) && !(services.terrace-web.environment ? HOST) && !(services.terrace-cms.environment ? HOSTNAME) && !(services.terrace-web.environment ? HOSTNAME) && builtins.elem cfg.services.postgresql.settings.listen_addresses ["127.0.0.1" "localhost"] && cfg.services.keycloak.settings.http-host == "127.0.0.1" && cfg.services.keycloak.settings.http-management-host == "127.0.0.1" && !(cfg.services.keycloak.settings ? https-certificate-file) && services.terrace-cms.environment.PORT == toString cfg.terrace.website.cmsPort && services.terrace-web.environment.PORT == toString cfg.terrace.website.webPort && !(builtins.elem cfg.terrace.website.webPort cfg.networking.firewall.allowedTCPPorts) && !(builtins.elem cfg.terrace.website.cmsPort cfg.networking.firewall.allowedTCPPorts))
+      ++ check "Keycloak database init logs no statements" (services.keycloakPostgreSQLInit.environment.PGOPTIONS or "" == "-c log_min_error_statement=panic -c log_statement=none -c log_min_duration_statement=-1")
       ++ check "sweep and backup timers" (builtins.elem "terrace-cms-sweep" (gatedUnits cfg "timers") && builtins.elem "terrace-backup" (gatedUnits cfg "timers") && cfg.systemd.timers.terrace-cms-sweep.timerConfig.Persistent)
       ++ check "env files from templates" (cfg.terrace.website.inputFiles.cms == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-cms.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-web.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/web.env")
       ++ check "backup excludes secrets" (!(cfg.terrace.backup.extraPaths ? website-inputs) && lib.all (path: !(lib.hasPrefix "/run" path) && !(lib.hasPrefix "/var/lib/terrace-secrets" path)) (lib.attrValues cfg.terrace.backup.extraPaths))
@@ -365,6 +406,25 @@ let
       };
     }))
     (rejects "listeners" (app {systemd.services.terrace-web.environment.HOST = "0.0.0.0";}))
+    (rejects "listeners" (app {systemd.services.terrace-web.serviceConfig.Environment = "HOST=0.0.0.0";}))
+    (rejects "listeners" (app {sops.templates."terrace-website/web.env".content = lib.mkAfter "HOST=0.0.0.0\n";}))
+    (rejects "Keycloak database init logs no statements" (app {systemd.services.keycloakPostgreSQLInit.environment.PGOPTIONS = lib.mkForce "-c log_statement=all";}))
+    (rejects "unit dependencies: rogue.service" (app {systemd.services.sshd.wants = ["rogue.service"];}))
+    (rejects "unit dependencies: rogue.service" (app {systemd.services.terrace-web.bindsTo = ["rogue.service"];}))
+    (rejects "systemd packages: " (app ({pkgs, ...}: {systemd.packages = [pkgs.socat];})))
+    (rejects "unit files through environment.etc: systemd/system/rogue.service" (app {environment.etc."systemd/system/rogue.service".text = "[Service]\nExecStart=/bin/sh\n";}))
+    (rejects "runs no container or VM daemon" (app {virtualisation.docker.enable = true;}))
+    (rejects "needs the primary backup target" (app {terrace.backup.targets.primary.enable = lib.mkForce false;}))
+    (rejects "free-form firewall, sshd or sudo configuration" (app {services.nginx.appendHttpConfig = "server { listen 8443; }";}))
+    (rejects "free-form firewall, sshd or sudo configuration" (app {services.nginx.streamConfig = "server { listen 2222; proxy_pass 127.0.0.1:22; }";}))
+    (rejects "free-form firewall, sshd or sudo configuration" (app {
+      services.nginx.defaultListen = [
+        {
+          addr = "0.0.0.0";
+          port = 8080;
+        }
+      ];
+    }))
     (rejects "free-form firewall, sshd or sudo configuration" (app {security.sudo.extraConfig = "nobody ALL=(ALL) NOPASSWD: ALL";}))
     (rejects "kernel debug or emergency access" (app {boot.kernelParams = ["systemd.debug-shell"];}))
     (rejects "no emergency shell" (app {systemd.enableEmergencyMode = lib.mkForce true;}))

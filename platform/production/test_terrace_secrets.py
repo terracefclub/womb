@@ -81,6 +81,8 @@ FAKES = {
             sys.stdout.write(open(os.path.join(here, "reencrypt-output")).read())
         else:
             sys.stdout.write("remote ok\n")
+            if os.path.exists(os.path.join(here, "host-adopted")):
+                sys.stdout.write("Host state: adopted\n")
     ''',
     "systemctl": r'''
         sys.exit(1 if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fail-systemctl")) else 0)
@@ -346,6 +348,9 @@ class StoreTest(Fixture):
             self.refused("escrow", "replace", str(new_escrow))
         self.assertEqual((self.store / "escrow.recipient").read_text(), old)
         self.assertEqual({host: self.plaintext(host) for host in ["app", "relay"]}, before)
+        self.assertEqual(list(self.store.rglob("*.next")), [])  # the aborted run removed its staged files
+        self.assertIn("escrow replacement is unfinished", self.refused("rotate", "app", "website/payload-secret"))
+        self.assertIn("escrow replacement is unfinished", self.refused("check", "app"))
         self.refused("escrow", "replace", str(self.root / "escrow-other.age"))
         self.ok("escrow", "replace", str(new_escrow))
         self.assertNotEqual((self.store / "escrow.recipient").read_text(), old)
@@ -418,6 +423,19 @@ class StoreTest(Fixture):
         self.ok("push", "app", "--address", "app")
         ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
         self.assertEqual(ssh[-3:], ["/run/current-system/sw/bin/terrace-secrets", "install", "--replacement"])
+        self.assertTrue((self.store / "hosts/app/replacement").exists())
+        # Once the host reports itself adopted, the push clears the marker.
+        (self.bin / "host-adopted").write_text("")
+        self.assertIn("replacement marker is cleared", self.ok("push", "app", "--address", "app"))
+        self.assertFalse((self.store / "hosts/app/replacement").exists())
+        # The explicit reset needs the host name twice.
+        (self.store / "hosts/app/replacement").write_text("replacement\n")
+        self.refused("host", "reset-replacement", "app", "--confirm", "relay")
+        self.ok("host", "reset-replacement", "app", "--confirm", "app")
+        self.assertFalse((self.store / "hosts/app/replacement").exists())
+        for bad in ["ABCD1234", "abc", "abcd;rm", "x" * 4]:
+            with self.assertRaises(SystemExit):
+                self.call("apply", "app", "backup/primary/repository-password", "--finish", "--keep", bad, "--address", "app")
         value = self.plaintext()["backup/primary/repository-password"]
         self.assertNotIn(value, self.argv_log())
 
@@ -500,11 +518,16 @@ class HostTest(Fixture):
                 self.call("install", stdin=newer)
         self.assertEqual(self.host_file.read_bytes(), good)
         marker = self.root / "var" / "replacement"
-        with mock.patch.object(tool, "REPLACEMENT_MARKER", marker):
-            self.ok("install", stdin=newer)
+        adopted = self.root / "var" / "adopted"
+        with mock.patch.object(tool, "REPLACEMENT_MARKER", marker), mock.patch.object(tool, "ADOPTED_MARKER", adopted):
+            self.assertIn("Host state: not adopted", self.ok("install", stdin=newer))
             self.assertFalse(marker.exists())
             self.ok("install", "--replacement", stdin=newer)
             self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+            marker.unlink()
+            adopted.write_text("")
+            self.assertIn("Host state: adopted", self.ok("install", "--replacement", stdin=newer))
+            self.assertFalse(marker.exists())
 
     def test_lost_escrow_reencrypt_and_pinned_adopt(self):
         self.ok("install", stdin=(self.store / "hosts/app/secrets.sops.json").read_bytes())
@@ -542,6 +565,11 @@ class HostTest(Fixture):
         self.assertRegex(sql.decode(), r"(?s)SET log_min_error_statement = panic; .*ALTER ROLE keycloak WITH PASSWORD 'SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}';")
         self.assertIn("log_min_error_statement=panic", env["PGOPTIONS"])
         self.assertEqual(calls[1][0], ["systemctl", "restart", "keycloak.service"])
+        # Known answer, computed independently with OpenSSL 3.5 (`openssl kdf ... PBKDF2` and
+        # `openssl dgst -mac HMAC`) for RFC 7677's password "pencil", salt W22ZaJ0SNY7soEsUEjb6gQ==, 4096 iterations.
+        self.assertEqual(tool.scram_verifier("pencil", salt=base64.b64decode("W22ZaJ0SNY7soEsUEjb6gQ==")),
+                         "SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY="
+                         ":wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU=")
         verifier = tool.scram_verifier("pencil", salt=b"\x00" * 16)
         self.assertEqual(verifier, tool.scram_verifier("pencil", salt=b"\x00" * 16))
         self.assertNotEqual(verifier, tool.scram_verifier("pencil"))

@@ -40,12 +40,18 @@
     options.services.openssh.extraConfig
     options.security.sudo.extraConfig
     options.security.polkit.extraConfig
+    options.services.nginx.appendHttpConfig
+    options.services.nginx.commonHttpConfig
+    options.services.nginx.appendConfig
+    options.services.nginx.streamConfig
+    options.services.nginx.defaultListen
+    options.services.nginx.defaultListenAddresses
   ];
   credentialSetters = lib.concatLists (lib.mapAttrsToList (unit: service:
-    map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key} && !(key == "ImportCredential" && builtins.elem unit importingUnits)) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
+    map (key: "${unit}:${key}") (lib.filter (key: service.serviceConfig ? ${key} && !(key == "ImportCredential" && importingUnits.${unit} or null == service.serviceConfig.ImportCredential)) ["SetCredential" "SetCredentialEncrypted" "ImportCredential"]))
   config.systemd.services);
   # NixOS's own tmpfiles re-setup imports `tmpfiles.*` credentials; nothing of ours imports any.
-  importingUnits = ["systemd-tmpfiles-resetup"];
+  importingUnits = {systemd-tmpfiles-resetup = ["tmpfiles.*"];};
   # Units that hold secrets in memory besides the writers.
   secretHolders = ["sops-install-secrets" "terrace-production-boot" "terrace-backup" "terrace-backup-check"] ++ cfg.writerHelpers;
   strayTCP = portSources "allowedTCPPorts" cfg.publicTCPPorts;
@@ -111,21 +117,25 @@
       helpers=(${lib.escapeShellArgs cfg.writerHelpers})
       timers=(${lib.escapeShellArgs cfg.writerTimers})
       # A host whose backup repository already holds snapshots of it is a replacement, whatever its disk says.
+      # The repository is per role: ANY snapshot in it means this role already has a deployment
+      # (also when a replacement was given a different host name).
       repository_check() {
         local target out rc
         for target in "''${targets[@]}"; do
           rc=0
-          out=$(terrace-backup restic "$target" snapshots --json --host ${lib.escapeShellArg config.networking.hostName} 2>/dev/null) || rc=$?
+          out=$(timeout 120 terrace-backup restic "$target" snapshots --json 2>/dev/null) || rc=$?
           if [[ $rc == 0 ]]; then
             if [[ $(jq length <<<"$out") != 0 ]]; then
-              refuse "backup repository $target already holds snapshots of this host; restore, then adopt --restored"
+              refuse "backup repository $target already holds snapshots; this is a replacement: restore, then adopt --restored"
             fi
           elif [[ $rc == 10 ]]; then
             : # not initialised yet: a genuinely new deployment
-          elif [[ ''${1:-} == --without-repository-check ]]; then
-            echo "terrace-production: backup repository $target unreachable (restic exit $rc); continuing as explicitly requested" >&2
+          elif [[ ''${1:-} == --first-deployment-without-repository && ''${2:-} == ${lib.escapeShellArg config.networking.hostName} ]]; then
+            echo "terrace-production: WARNING: adopting as new without seeing backup repository $target (restic exit $rc). Only for a first deployment whose repository does not exist yet, after confirming no earlier host existed." >&2
+          elif [[ $rc == 124 ]]; then
+            refuse "backup repository $target did not answer within 120 s; fix access (a replacement must be restored, not adopted as new)"
           else
-            refuse "backup repository $target unreachable (restic exit $rc); fix access, or for a first deployment with no repository pass --without-repository-check"
+            refuse "backup repository $target unreachable (restic exit $rc); fix access (a replacement must be restored, not adopted as new)"
           fi
         done
       }
@@ -155,6 +165,7 @@
       case "''${1:-}" in
         adopt)
           mode=''${2:-}
+          [[ -e ${marker} ]] && { echo 'Already adopted.'; exit 0; }
           case "$mode" in
             --new)
               [[ -e $replacement ]] && refuse "this host was delivered as a replacement; restore, then adopt --restored"
@@ -164,14 +175,13 @@
                   refuse "this host holds data or a restore; use adopt --restored after a reconciled restore"
                 fi
               fi
-              repository_check "''${3:-}" ;;
+              repository_check "''${3:-}" "''${4:-}" ;;
             --restored)
               if ! grep -qx 'RECONCILIATION OK' "$restored" 2>/dev/null || [[ ! -e $populated ]]; then
                 refuse "no reconciled restore promoted into place; restore first (docs/production-profile.md)"
               fi ;;
-            *) echo 'usage: terrace-production adopt --new [--without-repository-check] | adopt --restored' >&2; exit 2 ;;
+            *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored' >&2; exit 2 ;;
           esac
-          [[ -e ${marker} ]] && { echo 'Already adopted.'; exit 0; }
           [[ -e $adopting && $(cat "$adopting") != "''${mode#--}" ]] && refuse "an adoption as $(cat "$adopting") is in progress; repeat that one"
           # Fail closed: the writers start only on a host whose secrets verify.
           terrace-secrets verify
@@ -208,7 +218,7 @@
           if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; elif [[ -e $adopting ]]; then echo "adoption as $(cat "$adopting") not finished"; else echo 'not adopted: no writer starts at boot'; fi
           systemctl is-active terrace-production.target || true
           ;;
-        *) echo 'usage: terrace-production adopt --new [--without-repository-check] | adopt --restored | status' >&2; exit 2 ;;
+        *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | status' >&2; exit 2 ;;
       esac
     '';
   };
@@ -369,6 +379,10 @@ in {
         {
           assertion = !config.users.mutableUsers && !config.systemd.enableEmergencyMode && config.services.openssh.settings.AllowUsers == ["operator"] && !config.security.sudo-rs.enable && !config.security.doas.enable;
           message = "Terrace production needs immutable users, no emergency shell, SSH for the operator account only and sudo as the only privilege tool.";
+        }
+        {
+          assertion = (config.terrace.backup.targets.primary.enable or false) && !(lib.any (name: lib.attrByPath ["virtualisation" name "enable"] false config) ["docker" "podman" "libvirtd" "containers" "lxd" "incus" "cri-o" "waydroid"]);
+          message = "Terrace production needs the primary backup target and runs no container or VM daemon.";
         }
         {
           assertion = credentialSetters == [];
