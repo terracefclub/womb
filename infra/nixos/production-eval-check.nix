@@ -50,7 +50,7 @@ let
         terrace.production = parameters;
       };
     };
-  app = extra: (evaluateApp appParameters extra).config;
+  app = extra: evaluateApp appParameters extra;
   relayParameters = {
     instance = "production";
     memoryMiB = 3840;
@@ -77,7 +77,7 @@ let
         terrace.production = parameters;
       };
     };
-  relayAs = instance: extra: (evaluateRelay (relayParameters // {inherit instance;}) extra).config;
+  relayAs = instance: extra: evaluateRelay (relayParameters // {inherit instance;}) extra;
   # The VM proof's instance: same role, synthetic names, the rehearsal harness.
   rehearsal = extra:
     app {
@@ -164,7 +164,8 @@ let
   storePath = value: lib.hasPrefix builtins.storeDir (lib.removePrefix "-" (toString value));
   lockedPassword = value: value == null || builtins.elem value ["!" "!*" "*"];
   passwordless = user: lockedPassword user.hashedPassword && user.password == null && lockedPassword user.initialHashedPassword && user.initialPassword == null && user.hashedPasswordFile == null;
-  violations = role: cfg: let
+  violations = role: system: let
+    cfg = system.config;
     p = cfg.terrace.production;
     services = cfg.systemd.services;
     sops = lib.attrValues cfg.sops.secrets ++ lib.attrValues cfg.sops.templates;
@@ -178,7 +179,8 @@ let
       if failed == []
       then "a non-assertion error (evaluate the toplevel for its trace)"
       else (builtins.head failed).message;
-    enabledServices = lib.filter (name: let r = builtins.tryEval ((cfg.services.${name}.enable or false) == true); in r.success && r.value) (lib.attrNames cfg.services);
+    # From option metadata: reading every service's value would trip renamed-option aliases.
+    enabledServices = lib.filter (name: let option = system.options.services.${name}.enable or null; in lib.isOption option && option.isDefined && option.value == true) (lib.attrNames system.options.services);
     socketUnits = lib.filter (name: (cfg.systemd.sockets.${name}.listenStreams or []) != [] || (cfg.systemd.sockets.${name}.listenDatagrams or []) != []) (lib.attrNames cfg.systemd.sockets);
     unitFiles = lib.concatLists (lib.mapAttrsToList (unit: service: let
       env = lib.toList (service.serviceConfig.EnvironmentFile or []);
@@ -282,7 +284,7 @@ let
     (rejects "refuses unencrypted swap" (app {swapDevices = [{device = "/dev/disk/by-label/swap";}];}))
     (rejects "store paths in EnvironmentFile or LoadCredential" (app {systemd.services.nscd.serviceConfig.EnvironmentFile = "${stub}";}))
     (failsMissing ["terrace" "production" "escrowRecipient"] (evaluateApp (removeAttrs appParameters ["escrowRecipient"]) {}))
-    (rejects "escrow key's public age recipient" (evaluateApp (appParameters // {escrowRecipient = "age1short";}) {}).config)
+    (rejects "escrow key's public age recipient" (evaluateApp (appParameters // {escrowRecipient = "age1short";}) {}))
     # Required parameters.
     (failsMissing ["terrace" "production" "app" "backup" "primary" "knownHosts"] (evaluateApp (appParameters // {app = appParameters.app // {backup.primary = removeAttrs appParameters.app.backup.primary ["knownHosts"];};}) {}))
     (failsMissing ["terrace" "production" "instance"] (evaluateApp (removeAttrs appParameters ["instance"]) {}))
