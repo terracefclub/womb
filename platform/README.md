@@ -131,6 +131,9 @@ wall deadline, and cannot exceed it. `CHECK_STOP_GRACE` defaults to 30 seconds
 (max 60), followed by KILL and a bounded cleanup check. Explicit bounds must be
 positive whole seconds. A build timeout may abort a slow initial dependency
 build: warm the driver/closure in a separate bounded run if appropriate.
+Results are not linked by default. `CHECK_OUT_LINK` instead roots the result at a
+new link inside an existing private (0700, caller-owned) directory, for a result
+that runs after the build; the full rehearsal uses it for its driver.
 
 The lock descriptor is not inherited by the build. Cancellation returns 130/143,
 wall timeout 124, queue timeout 75 and invalid inputs/uncertain cleanup 2. A child

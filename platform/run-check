@@ -3,6 +3,7 @@
 import fcntl
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -72,6 +73,15 @@ def main():
     lock_path = os.environ.get("BUILD_LOCK", "")
     if not os.path.isabs(lock_path):
         raise ValueError()
+    # Optional GC root for a result that runs after this build (the full rehearsal
+    # driver): a new link in an existing private directory owned by this user.
+    out_link = os.environ.get("CHECK_OUT_LINK", "")
+    if out_link:
+        parent = os.path.dirname(out_link)
+        info = os.lstat(parent)
+        if (not os.path.isabs(out_link) or os.path.normpath(out_link) != out_link or os.path.lexists(out_link)
+                or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ValueError()
     cancelled = 0
 
     def cancel(signum, _frame):
@@ -100,7 +110,8 @@ def main():
             return 128 + cancelled
         command = ["nix", "build", *sys.argv[1:], "--timeout", str(build_seconds),
                    "--max-jobs", "1", "--cores", "2", "--option", "builders", "",
-                   "--option", "post-build-hook", "", "-L", "--print-out-paths", "--no-link"]
+                   "--option", "post-build-hook", "", "-L", "--print-out-paths",
+                   *(["--out-link", out_link] if out_link else ["--no-link"])]
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         deadline = time.monotonic() + seconds
         while True:

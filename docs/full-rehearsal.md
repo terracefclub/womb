@@ -93,7 +93,11 @@ follows the [Tailscale CLI contract](https://tailscale.com/docs/reference/tailsc
 and [Headscale fixture enrollment](https://headscale.net/stable/ref/registration/).
 This extension remains unaccepted until its source-matched native run passes.
 
-The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
+The driver runs after its build, outside the build's temporary store roots, so
+the runner roots its output in the private run directory (`driver-root`, through
+`run-check`'s `CHECK_OUT_LINK`) until the guests are off: a host garbage collection
+during a run (as on 2026-11-19, which deleted a guest closure mid-run) can no longer
+remove the guests' closures. The build queue is bounded at 1200 seconds, warming at 1800 seconds (each Nix
 build at 1200 seconds), and controller cleanup at 70 seconds. VM execution uses
 the independently validated transient system service/cgroup: queue 1200 seconds,
 active 1800 seconds, then 15 seconds of host stop grace. The build phase retains run-check's documented
