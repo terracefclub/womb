@@ -106,10 +106,14 @@
       adopting=/var/lib/terrace-production/adopting
       replacement=/var/lib/terrace-secrets/replacement
       refuse() { echo "terrace-production: not adopted: $*" >&2; exit 1; }
+      targets=(${lib.escapeShellArgs backupTargets})
+      writers=(${lib.escapeShellArgs cfg.writers})
+      helpers=(${lib.escapeShellArgs cfg.writerHelpers})
+      timers=(${lib.escapeShellArgs cfg.writerTimers})
       # A host whose backup repository already holds snapshots of it is a replacement, whatever its disk says.
       repository_check() {
         local target out rc
-        for target in ${lib.escapeShellArgs backupTargets}; do
+        for target in "''${targets[@]}"; do
           rc=0
           out=$(terrace-backup restic "$target" snapshots --json --host ${lib.escapeShellArg config.networking.hostName} 2>/dev/null) || rc=$?
           if [[ $rc == 0 ]]; then
@@ -128,19 +132,19 @@
       # Success means every writer is active (or skipped by its documented condition) and every helper succeeded.
       settled() {
         local unit state condition problems=()
-        for unit in ${lib.escapeShellArgs cfg.writers}; do
+        for unit in "''${writers[@]}"; do
           state=$(systemctl show "$unit.service" -p ActiveState --value)
           condition=$(systemctl show "$unit.service" -p ConditionResult --value)
           if [[ $state != active ]] && ! { [[ " ${toString cfg.conditionalWriters} " == *" $unit "* ]] && [[ $state == inactive && $condition == no ]]; }; then
             problems+=("$unit.service:$state")
           fi
         done
-        for unit in ${lib.escapeShellArgs cfg.writerHelpers}; do
+        for unit in "''${helpers[@]}"; do
           if systemctl is-failed --quiet "$unit.service" || [[ $(systemctl show "$unit.service" -p Result --value) != success ]]; then
             problems+=("$unit.service:$(systemctl show "$unit.service" -p Result --value)")
           fi
         done
-        for unit in ${lib.escapeShellArgs cfg.writerTimers}; do
+        for unit in "''${timers[@]}"; do
           [[ $(systemctl show "$unit.timer" -p ActiveState --value) == active ]] || problems+=("$unit.timer")
         done
         if (( ''${#problems[@]} )); then
