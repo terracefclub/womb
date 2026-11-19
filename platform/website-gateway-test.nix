@@ -180,10 +180,12 @@ in {
         assert applications() == 5
         lifecycle(client, "apply-other", "Separate-address application checks passed")
         assert applications() == 10
-        lifecycle(gateway, "approve", "Approval checks passed")
+        lifecycle(gateway, "approve local-alumni", "Approval checks passed")
         assert gateway.succeed("stat -c %U:%a " + mirror).strip() == "terrace_cms:600"
-        lifecycle(gateway, "redeem", "Redemption checks passed")
-        lifecycle(gateway, "erase", "Erasure checks passed")
+        lifecycle(gateway, "redeem local-alumni", "Redemption checks passed")
+        lifecycle(gateway, "sign-in local-alumni", "Member sign-in checks passed")
+        lifecycle(gateway, "link local-alumni", "Application link checks passed")
+        lifecycle(gateway, "erase local-alumni", "Erasure checks passed")
         # An administrator erasure cannot rewrite files; the mirror still names the applicant until the sweep runs.
         gateway.succeed("jq -e '.to == \"local-alumni@terrace.invalid\"' " + mirror + " >/dev/null")
         gateway.succeed("systemctl is-enabled terrace-cms-sweep.timer && systemctl is-active terrace-cms-sweep.timer")

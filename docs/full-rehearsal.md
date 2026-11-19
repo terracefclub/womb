@@ -368,21 +368,27 @@ contents are printed by this export.
 ### Website member lifecycle in the rehearsal
 
 Since the re-pin to website `680ad56`, every variant also runs the website
-lifecycle through the real gateway. After the original simultaneous checks it
-renders `/news/` and a synthetic imported-style post (public-origin body image
-kept, foreign image dropped), follows the old WordPress URL's 301, submits six
-applications from the gateway guest with forged client headers (five accepted,
-the sixth limited) and one from the browser guest (accepted), approves one as an
-editor (the invitation mirror appears `0600` in the CMS outbox), redeems it once
-and signs the applicant in, which links the application. The outbox bytes,
-owner and modes and the application rows join the app signature, so they must be
-identical after the quiescent backup and after the originals-off restore. The
-sweep timer is armed only by the explicit bootstrap and stopped before capture.
-After the replacement's restored checks the post still renders, an administrator
-offboards and erases the member (application withdrawn and scrubbed), the mirror
-still names the applicant, and the real sweep timer (backdated persistent stamp)
-then redacts it. The receipt records `websiteLifecycleOriginal` and
-`websiteLifecycleRestored` assertion counts and timings.
+lifecycle through the real gateway, using the same step scripts the cloud
+service proof runs (`platform/website-gateway/lifecycle_steps.py`, prepended to
+the scenario). Before backup it renders `/news/` and a synthetic imported-style
+post and follows an old URL's 301 (VM only), then: `apply` (six posts from the
+gateway guest with forged client headers: five accepted, the sixth limited, at
+the gateway and on the loopback port, with and without script), `approve` (two
+applicants, two invitation files `0600` in the CMS outbox), and `redeem`,
+`sign-in` and `link` for the first applicant only; the second invitation stays
+pending. A second client address then gets its own bucket (VM only). The outbox
+and application rows join the app signature, so they must be identical after the
+quiescent backup and after the originals-off restore. The sweep timer is armed
+only by the explicit bootstrap and stopped before capture.
+
+On the replacement: `ownership` (static CMS ID, restored outbox and invitations
+owned by the CMS account and readable by it), `redeem` of the restored pending
+token (accepted once, refused again), `sign-in` and automatic `link` by verified
+email, `erase` of both members (the running CMS writes two offboarding notices
+into the restored outbox; the invitation files still name the applicants),
+`sweep` by the real timer, and `redaction` (both invitations redacted, two
+erasure confirmations, every file `0600` and owned by the CMS account). The
+receipt records each step's seconds.
 
 ### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
 

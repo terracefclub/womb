@@ -15,6 +15,10 @@ import sys
 import tempfile
 import time
 
+# The website lifecycle steps are shared verbatim with the VM all-services rehearsal.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "platform" / "website-gateway"))
+import lifecycle_steps  # noqa: E402
+
 
 CA = "/var/lib/terrace-rehearsal-trust/ca.pem"
 GATEWAY_INPUTS = "/var/lib/terrace-gateway-test"
@@ -317,34 +321,6 @@ systemctl start vaultwarden.service
 systemctl start terrace-vaultwarden-bootstrap.service
 wait_for curl --fail --silent --max-time 5 http://127.0.0.1:18222/alive
 """
-# Website lifecycle through the real gateway (platform/website-gateway/protocol.py):
-# the original writes an invitation into the outbox; the replacement must use the
-# restored outbox as its own CMS account.
-LIFECYCLE_ORIGINAL = r"""
-export SSL_CERT_FILE="$1"
-python3 /etc/gateway-protocol.py apply-burst | grep -q '^Application rate-limit checks passed: '
-python3 /etc/gateway-protocol.py approve | grep -q '^Approval checks passed: '
-test "$(stat -c %U:%a /var/lib/terrace-cms-outbox/*-invitation.json)" = terrace_cms:600
-"""
-LIFECYCLE_REPLACEMENT = r"""
-export SSL_CERT_FILE="$1"
-outbox=/var/lib/terrace-cms-outbox
-test "$(id -u terrace_cms)" = 44121
-test "$(stat -c %U:%a "$outbox" "$outbox"/*-invitation.json | tr '
-' ' ')" = 'terrace_cms:700 terrace_cms:600 '
-runuser -u terrace_cms -- jq -e '.to == "local-alumni@terrace.invalid"' "$outbox"/*-invitation.json >/dev/null
-python3 /etc/gateway-protocol.py redeem | grep -q '^Redemption checks passed: '
-python3 /etc/gateway-protocol.py erase | grep -q '^Erasure checks passed: '
-# The running CMS wrote a new notice into the restored outbox.
-test "$(stat -c %U:%a "$outbox"/*-offboarding.json)" = terrace_cms:600
-systemctl start terrace-cms-sweep.service
-test "$(systemctl show terrace-cms-sweep.service -p Result --value)" = success
-# The sweep, as the same account, rewrote the restored file and wrote the confirmation.
-jq -e '.to == "Former member" and .body == "Redacted after erasure."' "$outbox"/*-invitation.json >/dev/null
-test "$(stat -c %U:%a "$outbox"/*-erasure-confirmation.json "$outbox"/*-invitation.json | tr '
-' ' ')" = 'terrace_cms:600 terrace_cms:600 '
-if grep -rl local-alumni@terrace.invalid "$outbox"; then exit 1; fi
-"""
 RELAY_SIGNATURE = r"""
 headscale users list -o json | jq -cS 'sort_by(.id)'
 sha256sum /var/lib/headscale/noise_private.key /var/lib/headscale/derp_server_private.key
@@ -489,6 +465,18 @@ def inactive(host, names):
              *(name + ".timer" for name in timers))
 
 
+def lifecycle(host, phase):
+    """Run the shared website lifecycle steps; a failure names only its phase and step."""
+    require(phase in ("original", "replacement"), "lifecycle phase rejected")
+    steps = lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS if phase == "original" else lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS
+    timings = {}
+    for label, seconds, script in steps:
+        before = time.monotonic()
+        host.run(f"website-lifecycle-{phase}-{label}", lifecycle_steps.LIFECYCLE_PROLOGUE + script, CA, seconds=seconds)
+        timings[label] = round(time.monotonic() - before, 2)
+    return timings
+
+
 def bootstrap_app(host):
     host.run("gateway-bootstrap", BOOTSTRAP_APP, seconds=720)
     host.run("windmill-role-boundary", WIND_ROLES)
@@ -571,7 +559,7 @@ def original(app, relay, inputs, verify_repository):
     app.run("synthetic-media", MEDIA_FIXTURE)
     node = pvc(app, "original")
     assertions = protocol(app, "")
-    app.run("website-lifecycle", LIFECYCLE_ORIGINAL, CA, seconds=240)
+    lifecycle_timings = lifecycle(app, "original")
     replicas = quiesce(app, relay)
     signature = app_signature(app)
     app.run("repository-init", "terrace-backup init primary", seconds=90, repository=True)
@@ -585,7 +573,7 @@ def original(app, relay, inputs, verify_repository):
         "verified": True, "servers": sorted([app.id, relay.id]), "snapshots": snapshots,
         "repositoryConfigSha256": repo_hash, "inputSha256": {name: digest(value) for name, value in inputs.items()},
         "gatewaySignature": signature, "relaySignature": relay_signature, "pvc": node,
-        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True, "outboxInvitation": True,
+        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True, "websiteLifecycleSeconds": lifecycle_timings,
         "writersStopped": True,
     }
 
@@ -620,12 +608,12 @@ install -m 0600 -o headscale -g headscale \
     require(bootstrap_relay(relay) == backup["relaySignature"], "restored relay identity changed")
     assertions = protocol(app, "-restored")
     require(assertions == backup["protocolAssertions"], "restored protocol assertion count changed")
-    app.run("restored-website-lifecycle", LIFECYCLE_REPLACEMENT, CA, seconds=300)
+    lifecycle_timings = lifecycle(app, "replacement")
     quiesce(app, relay)
     stop_database(app)
     return {
         "servers": sorted([app.id, relay.id]), "protocolAssertions": assertions,
-        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True, "restoredOutboxUsedByCms": True,
+        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True, "websiteLifecycleSeconds": lifecycle_timings,
         "relayIdentityAndPrivateHTTPS": True, "writersStopped": True,
     }
 

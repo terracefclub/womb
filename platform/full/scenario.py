@@ -658,53 +658,39 @@ def applications():
     return int(sql('select count(*) from member_applications'))
 
 
+def lifecycle_steps(phase, steps):
+    # The exact step scripts the cloud lease runs (lifecycle_steps.py, prepended to
+    # this scenario), on the same host as root with the same shell options.
+    timings = {}
+    for label, seconds, script in steps:
+        before = time.monotonic()
+        status, _ = gateway.execute('bash -ceu ' + shlex.quote('set -o pipefail\n' + LIFECYCLE_PROLOGUE + script)
+                                    + ' terrace /etc/ssl/certs/ca-certificates.crt', timeout=seconds)
+        if status != 0:
+            raise AssertionError('website lifecycle ' + phase + ' step ' + label + ' failed')
+        timings[label] = round(time.monotonic() - before, 2)
+    return timings
+
+
 def lifecycle_original():
-    # Imported-style content, the public application form behind the real
-    # gateway (per-address limit despite forged headers), editor approval into
-    # the private outbox, single-use redemption and automatic member linking.
+    # Imported-style content and a second client address are VM-only extras; the
+    # shared steps add two applicants, redeem one and leave the other pending.
     counts = {'content': lifecycle(gateway, 'content', 'Imported-content checks passed')}
     assert applications() == 0
-    counts['applyBurst'] = lifecycle(gateway, 'apply-burst', 'Application rate-limit checks passed')
+    steps = lifecycle_steps('original', LIFECYCLE_ORIGINAL_STEPS)
     assert applications() == 5
     counts['applyOtherAddress'] = lifecycle(client, 'apply-other', 'Separate-address application checks passed')
     assert applications() == 10
-    counts['approve'] = lifecycle(gateway, 'approve', 'Approval checks passed')
-    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-invitation.json').strip() == 'terrace_cms:600'
-    counts['redeem'] = lifecycle(gateway, 'redeem', 'Redemption checks passed')
-    return counts
-
-
-def sweep_by_timer():
-    # Exercise the real timer unit: a persistent timer whose last trigger
-    # predates a scheduled elapse catches up as soon as it is started.
-    before = gateway.succeed('systemctl show terrace-cms-sweep.service -p InvocationID --value').strip()
-    gateway.succeed('systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d \x273 days ago\x27 /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer')
-    gateway.wait_until_succeeds('test "$(systemctl show terrace-cms-sweep.service -p InvocationID --value)" != ' + shlex.quote(before) + ' && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive', timeout=180)
-    assert dict(line.split('=', 1) for line in gateway.succeed('systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User').splitlines()) == {'Result': 'success', 'ExecMainStatus': '0', 'User': 'terrace_cms'}
-    return True
+    return {'checks': counts, 'stepSeconds': steps}
 
 
 def lifecycle_restored():
-    # On the replacement: restored content still renders, then an administrator
-    # erasure is completed in the restored mirror only by the sweep timer.
+    # The replacement redeems the restored pending token, links, erases both
+    # applicants and lets the sweep timer redact the restored outbox.
     counts = {'content': lifecycle(gateway, 'content', 'Imported-content checks passed')}
-    # Restored state belongs to the replacement's own CMS account (static UID), by name and number.
-    assert gateway.succeed('id -u terrace_cms').strip() == '44121'
-    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + ' ' + MEDIA).split() == ['terrace_cms:700', 'terrace_cms:700']
+    assert gateway.succeed('stat -c %U:%a ' + MEDIA).strip() == 'terrace_cms:700'
     assert set(gateway.succeed('find ' + OUTBOX + ' ' + MEDIA + ' -mindepth 1 -printf \x27%u\\n\x27').split()) == {'terrace_cms'}
-    mirror = OUTBOX + '/*-invitation.json'
-    gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
-    gateway.fail('ls ' + OUTBOX + '/*-offboarding.json')
-    counts['erase'] = lifecycle(gateway, 'erase', 'Erasure checks passed')
-    # The running CMS wrote its offboarding notice into the restored outbox itself.
-    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-offboarding.json').strip() == 'terrace_cms:600'
-    gateway.succeed('jq -e \x27.to == "local-alumni@terrace.invalid"\x27 ' + mirror + ' >/dev/null')
-    assert sweep_by_timer()
-    # The sweep, as the same account, rewrote a restored file and wrote the erasure confirmation.
-    assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-erasure-confirmation.json ' + mirror).split() == ['terrace_cms:600', 'terrace_cms:600']
-    gateway.succeed('jq -e \x27.to == "Former member" and .body == "Redacted after erasure."\x27 ' + mirror + ' >/dev/null')
-    gateway.fail('grep -rl local-alumni@terrace.invalid ' + OUTBOX)
-    return counts
+    return {'checks': counts, 'stepSeconds': lifecycle_steps('replacement', LIFECYCLE_REPLACEMENT_STEPS)}
 
 
 def quiesce_writers():

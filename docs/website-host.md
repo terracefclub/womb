@@ -129,7 +129,11 @@ systemctl start terrace-cms-sweep.service
 
 A sweep requested while an explicit migration runs waits for it (and is skipped
 if one is still active when it starts); starting a migration stops a running sweep,
-which is idempotent and retried. A failed sweep leaves the unit failed with a
+which is idempotent and retried (website `680ad56`:
+`cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
+writes every mirror file to a private temporary file and renames it into place,
+`reconcileMirror` marks a row only once its file is confirmed and retries unmarked
+rows, and stale temporary files from an interrupted write are removed). A failed sweep leaves the unit failed with a
 labelled line in the private journal; the next run retries.
 
 The CMS and website accounts have static IDs (`cmsUid` 44121, `webUid` 44122)

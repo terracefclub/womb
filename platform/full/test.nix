@@ -364,5 +364,6 @@ in {
       then "True"
       else "False"
     }\n"
+    + builtins.readFile ../website-gateway/lifecycle_steps.py
     + builtins.readFile ./scenario.py;
 }

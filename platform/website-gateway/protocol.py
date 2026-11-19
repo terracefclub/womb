@@ -347,7 +347,9 @@ def apply(attempts, base=WEB, html=False):
 
 def apply_burst():
     # Six submissions from one real address (the gateway guest), each forging a different client address.
-    attempts = [(APPLICANT + "@terrace.invalid", "203.0.113.10")] + [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 6)]
+    # The first two are the synthetic applicants later approved (local-alumni, local-member).
+    attempts = [(name + "@terrace.invalid", f"203.0.113.{10 + index}") for index, name in enumerate(APPLICANTS)]
+    attempts += [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 5)]
     check(apply(attempts) == [("success", 200)] * 5 + [("failure", 429)])
     # The same exhausted bucket on the private loopback port (with the header the gateway writes) and as a
     # no-script post at both layers: the application's 429 passes through the gateway unchanged.
@@ -390,29 +392,37 @@ def invitation_file(email):
     return matches[0]
 
 
-def approve():
+APPLICANTS = {"local-alumni": "alumni", "local-member": "current-member"}
+
+
+def applicant(username):
+    # Synthetic realm users whose verified email is their application's contact address.
+    check(username in APPLICANTS)
+    return username + "@terrace.invalid"
+
+
+def approve(*usernames):
     global stage
-    stage = "editor approval issues an invitation"
-    editor = staff("local-editorial-editor", "editor")
-    email = APPLICANT + "@terrace.invalid"
-    pending = application(editor, email)
-    check(pending["status"] == "pending")
-    status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH",
-                              {"status": "approved", "grantRole": "alumni"}, {"Origin": "https://attacker.invalid"})
-    check(status == 403)
-    status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH",
-                              {"status": "approved", "grantRole": "alumni"}, {"Origin": CMS})
-    check(status == 200 and application(editor, email)["status"] == "approved")
-    message = invitation_file(email)
-    check(re.fullmatch(r"https://web\.terrace\.invalid/join/#[A-Za-z0-9_-]{20,}", re.search(r"https://\S+", message["body"])[0]) is not None)
+    for username in usernames or (APPLICANT,):
+        stage = f"editor approval issues an invitation ({username})"
+        email = applicant(username)
+        editor = staff("local-editorial-editor", "editor")
+        pending = application(editor, email)
+        check(pending["status"] == "pending")
+        decision = {"status": "approved", "grantRole": APPLICANTS[username]}
+        status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH", decision, {"Origin": "https://attacker.invalid"})
+        check(status == 403)
+        status, _, _ = editor.api(CMS + "/api/member-applications/" + str(pending["id"]), "PATCH", decision, {"Origin": CMS})
+        check(status == 200 and application(editor, email)["status"] == "approved")
+        message = invitation_file(email)
+        check(re.fullmatch(r"https://web\.terrace\.invalid/join/#[A-Za-z0-9_-]{20,}", re.search(r"https://\S+", message["body"])[0]) is not None)
     print(f"Approval checks passed: {count} bounded assertions; invitation mirror written to the private outbox.")
 
 
-def redeem():
+def redeem(username=APPLICANT):
     global stage
-    stage = "invitation redemption and first member sign-in"
-    email = APPLICANT + "@terrace.invalid"
-    link = re.search(r"https://web\.terrace\.invalid/join/#([A-Za-z0-9_-]+)", invitation_file(email)["body"])
+    stage = f"invitation redemption ({username})"
+    link = re.search(r"https://web\.terrace\.invalid/join/#([A-Za-z0-9_-]+)", invitation_file(applicant(username))["body"])
     check(link is not None)
     anonymous = Client()
     # Single use: the first post accepts it, the repeat is refused.
@@ -427,22 +437,35 @@ def redeem():
                                               {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "Accept": "text/html"})
     check(status == 404 and b"That code was not accepted." in body and b"Invitation accepted." not in body)
     private(headers)
-    member, status = sign_in(APPLICANT, "web")
+    print(f"Redemption checks passed: {count} bounded assertions; single-use invitation.")
+
+
+def member_sign_in(username=APPLICANT):
+    global stage
+    stage = f"member sign-in ({username})"
+    applicant(username)
+    member, status = sign_in(username, "web")
     check(status == 303)
     status, headers, _ = member.request(WEB + "/members/")
     check(status == 200)
     private(headers)
-    # The CMS links the first sign-in to its application by the token's verified email.
-    admin = staff("local-editorial-admin", "admin")
-    linked = application(admin, email)
-    check(linked["status"] == "approved" and isinstance(linked.get("member"), int))
-    print(f"Redemption checks passed: {count} bounded assertions; single-use invitation and automatic application link.")
+    print(f"Member sign-in checks passed: {count} bounded assertions.")
 
 
-def erase():
+def link(username=APPLICANT):
     global stage
-    stage = "administrator offboarding and erasure"
-    email = APPLICANT + "@terrace.invalid"
+    stage = f"automatic application link ({username})"
+    # The CMS links a sign-in to its redeemed application by the token's verified email.
+    admin = staff("local-editorial-admin", "admin")
+    linked = application(admin, applicant(username))
+    check(linked["status"] == "approved" and isinstance(linked.get("member"), int))
+    print(f"Application link checks passed: {count} bounded assertions.")
+
+
+def erase(username=APPLICANT):
+    global stage
+    stage = f"administrator offboarding and erasure ({username})"
+    email = applicant(username)
     admin = staff("local-editorial-admin", "admin")
     linked = application(admin, email)
     member_id = linked["member"]
@@ -458,7 +481,7 @@ def erase():
     check(status == 200 and scrubbed["status"] == "withdrawn" and scrubbed["name"] == "Erased applicant")
     check(scrubbed["contactEmail"] != email and not scrubbed.get("note"))
     # The tombstone is refused at sign-in (the website's denied page) and no member session exists.
-    erased, status = sign_in(APPLICANT, "web")
+    erased, status = sign_in(username, "web")
     check(status == 403)
     status, headers, _ = erased.request(WEB + "/members/")
     check(status == 303 and headers["Location"].startswith("/auth/login"))
@@ -466,12 +489,14 @@ def erase():
 
 
 ACTIONS = {"seed": seed, "test": test, "content": content, "apply-burst": apply_burst, "apply-other": apply_other,
-           "approve": approve, "redeem": redeem, "erase": erase}
+           "approve": approve, "redeem": redeem, "sign-in": member_sign_in, "link": link, "erase": erase}
+# Only these take synthetic applicant usernames (checked against APPLICANTS).
+WITH_APPLICANTS = {"approve": 2, "redeem": 1, "sign-in": 1, "link": 1, "erase": 1}
 
 try:
-    if len(sys.argv) != 2 or sys.argv[1] not in ACTIONS:
+    if len(sys.argv) < 2 or sys.argv[1] not in ACTIONS or len(sys.argv) - 2 > WITH_APPLICANTS.get(sys.argv[1], 0):
         raise RuntimeError("Invalid action")
-    ACTIONS[sys.argv[1]]()
+    ACTIONS[sys.argv[1]](*sys.argv[2:])
 except BaseException:
     # HTTP/form/parser errors can carry tokens, passwords or callback URLs.
     print(f"Native HTTPS protocol check failed at {stage}; {count} bounded checks completed.", file=sys.stderr)
