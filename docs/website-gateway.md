@@ -1,6 +1,6 @@
 # Optional HTTPS origin gateway
 
-> **Note, 2026-11-19.** Re-pinned to website `dev` `1733308` (website PRs #14 and #15). The gateway now supplies the lifecycle origins and the client-address pairing below, and the check exercises the member lifecycle end to end.
+> **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18: lifecycle linking, packaged `bin/sweep`, release-proof fixes and no-script form status). The gateway now supplies the lifecycle origins and the client-address pairing below, and the check exercises the member lifecycle end to end.
 
 `platform/website-gateway.nix` adds an opt-in nginx gateway to the accepted native
 website/CMS bundles. Actual host profiles remain disabled. Importing the module
@@ -47,7 +47,7 @@ of their native modules.
 
 ## Disposable actual-bundle proof
 
-The check consumes the pinned `1733308` web/CMS archives and **only three
+The check consumes the pinned `680ad56` web/CMS archives and **only three
 hash-pinned, secret-free source files** from that TFC revision: the realm
 generator, shared client/role contract and pure production-input validator.
 Their hashes are checked before Nix-store copying; the source checkout and its
@@ -58,9 +58,9 @@ On the x86-64 Linux builder, under the shared heavy-job queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-gateway-check \
-  /protected/releases/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  /source/tfc-at-1733308738ea43f61720a3528e7fc98685a08e38
+  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /source/tfc-at-680ad567f553449280664cafad2d200011b6abac
 ```
 
 Two guests contain the actual immutable app pair and native PostgreSQL/Keycloak.
@@ -97,14 +97,15 @@ a body image on the public CMS origin is kept and a foreign one dropped, and the
 old URL answers 301 to the new path. Six `/apply/` submissions from the gateway
 guest, posted as a browser with script does (SvelteKit's enhanced form protocol),
 each forging a different `X-Forwarded-For` and `X-Real-IP`, give five accepts and
-a 429 action result (five applications stored); the same exhausted bucket gives the
-same 429 on the private loopback port, and a no-script post into it must get the
-identical HTTP status through the gateway and on the loopback port (it is currently
-500 at both: the website's `/apply/` and `/join/` loads set `Cache-Control` again
-after the action did, a website defect reported separately); a submission from the second guest
-that forges the exhausted address is accepted. An editor approval writes the
+a 429 action result (five applications stored). The same exhausted bucket gives the
+same 429 on the private loopback port, and a no-script post into it gets HTTP 429
+and the limit page both through the gateway and on the loopback port, so the
+gateway passes the application's status through. From the second guest, six
+no-script posts (the first forging the gateway guest's exhausted address) give
+HTTP 200 and the received page five times, then 429: a separate address has its
+own bucket and a forged header cannot move a client into another one. An editor approval writes the
 invitation mirror (`0600`, CMS account) with a `https://web.terrace.invalid/join/#…`
-link; redemption works once; the applicant's first sign-in links the application
+link; redemption works once (a repeat is refused, as a no-script post with HTTP 404); the applicant's first sign-in links the application
 by verified email; an administrator offboards and erases the member, which
 withdraws and scrubs the application and closes member access. The mirror still
 names the applicant until the real sweep timer fires (a backdated persistent
@@ -127,12 +128,7 @@ before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
 
-Verified 2026-11-19 on the shared Linux builder with the `1733308` bundles: the
-check passed in about 11 minutes (01:54 to 02:06 Pacific) with 198 HTTPS protocol
-assertions, the Chromium account switch, and lifecycle stages of 18 (content),
-80 (application limit), 10 (second address), 39 (approval), 60 (redemption and
-linking) and 61 (erasure) bounded assertions, the sweep-timer redaction and the
-packaged-sweep negative case.
+@@VERIFIED@@
 
 ## Remaining activation and cost gates
 

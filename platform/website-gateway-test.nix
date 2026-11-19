@@ -178,8 +178,8 @@ in {
         assert applications() == 0
         lifecycle(gateway, "apply-burst", "Application rate-limit checks passed")
         assert applications() == 5
-        lifecycle(client, "apply-other", "Separate-address application check passed")
-        assert applications() == 6
+        lifecycle(client, "apply-other", "Separate-address application checks passed")
+        assert applications() == 10
         lifecycle(gateway, "approve", "Approval checks passed")
         assert gateway.succeed("stat -c %U:%a " + mirror).strip() == "terrace_cms:600"
         lifecycle(gateway, "redeem", "Redemption checks passed")

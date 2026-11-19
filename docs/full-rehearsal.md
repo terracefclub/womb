@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -335,9 +335,9 @@ install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
 direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
   --output $HOME/terrace-work/full-rehearsal-output \
-  --webArchive $HOME/terrace-work/website-bundle-1733308-output/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  --cmsArchive $HOME/terrace-work/website-bundle-1733308-output/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  --tfcSource $HOME/terrace-work/website-bundle-1733308
+  --webArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-680ad56
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted
@@ -367,7 +367,7 @@ contents are printed by this export.
 
 ### Website member lifecycle in the rehearsal
 
-Since the re-pin to website `1733308`, every variant also runs the website
+Since the re-pin to website `680ad56`, every variant also runs the website
 lifecycle through the real gateway. After the original simultaneous checks it
 renders `/news/` and a synthetic imported-style post (public-origin body image
 kept, foreign image dropped), follows the old WordPress URL's 301, submits six

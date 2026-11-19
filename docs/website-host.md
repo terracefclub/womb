@@ -1,6 +1,6 @@
 # Optional native website host
 
-> **Note, 2026-11-19.** Re-pinned to website `dev` `1733308` (website PR #15, which adds the packaged CMS `bin/sweep`, on top of PR #14). The ledger now has eleven migrations, recorded in `platform/website-release.json` and checked in order by the VM test. The module now supplies the member-lifecycle settings listed under [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep).
+> **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18, including the packaged CMS `bin/sweep`). The ledger now has eleven migrations, recorded in `platform/website-release.json` and checked in order by the VM test. The module now supplies the member-lifecycle settings listed under [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep).
 
 This disabled-by-default module runs the accepted TFC website and CMS bundles
 as separate native NixOS services. It adds no gateway, public listener, DNS,
@@ -16,7 +16,7 @@ remain disabled in actual host profiles; CDN activation remains separate.
 ## Accepted inputs
 
 `platform/website-release.json` pins the exact secret-free Linux x86-64 glibc
-archives from TFC source `1733308738ea43f61720a3528e7fc98685a08e38` (website `dev`, PR #15).
+archives from TFC source `680ad567f553449280664cafad2d200011b6abac` (website `dev`, PR #15).
 `website-release.nix` checks the raw archive SHA256, source/runtime manifest and
 every packaged file hash before producing immutable Nix packages. The archive hash
 must match before that archive is copied into the Nix store. It uses local retained
@@ -31,8 +31,8 @@ Never put environment files, credentials, uploads or a database into a bundle.
 
 Import `platform/website.nix` or `nixosModules.website`. A reviewed host can
 construct `release = import ./platform/website-release.nix { inherit pkgs;
-webArchive = "/protected/releases/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz";
-cmsArchive = "/protected/releases/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz"; };`
+webArchive = "/protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz";
+cmsArchive = "/protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz"; };`
 and set `terrace.website.webPackage = release.web`, `cmsPackage = release.cms`,
 `revision = release.revision` and `enable = true`. This is an integration
 example, not an enabled host configuration.
@@ -209,8 +209,8 @@ On the x86-64 Linux builder, under the shared queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-check \
-  /protected/releases/terrace-web-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-1733308738ea43f61720a3528e7fc98685a08e38-linux-x64-gnu.tar.gz
+  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz
 ```
 
 This separate check accepts local hash-pinned artifacts so ordinary flake
@@ -231,13 +231,7 @@ restores the outbox with identical bytes, owner and modes. It measures migration
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
 
-Verified 2026-11-19 on the shared Linux builder with the `1733308` bundles: the
-two-guest test passed (01:55 to 02:09 Pacific) with 37 actual non-system CMS tables
-and the eleven-migration ledger in pinned order. Explicit migration took 5.83 s,
-encrypted backup 7.56 s, complete repository check 5.02 s, isolated restore 5.07 s
-and recovered HTTP verification 11.84 s; the sweep service, its timer catch-up and
-the outbox restore (bytes, numeric owner, modes) passed. Source cgroup peaks were
-105.9 MiB CMS, 47.2 MiB website and 122.8 MiB PostgreSQL.
+@@VERIFIED@@
 
 Verified2026-11-03 on the shared Linux builder (historical, website `3902e16`): the final two-guest test passed
 in83.34seconds with25actual non-system CMS tables and an unchanged six-migration

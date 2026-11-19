@@ -303,14 +303,17 @@ def action_result(body):
 ENHANCED = {"Accept": "application/json", "x-sveltekit-action": "true"}
 
 
+HTML_OUTCOMES = [("limited", b"Too many applications from here"), ("received", b"Your request was received.")]
+
+
 def apply(attempts, base=WEB, html=False):
     """Open the form for every attempt, wait out the minimum fill time, then submit each in order.
 
     By default each post is what a browser with script sends (use:enhance): HTTP 200 carrying the action
-    result. With html=True it is a plain no-script form post, whose status is the action's own.
+    result. With html=True it is a plain no-script form post: the action's own HTTP status and page.
     """
     global stage
-    stage = "application form through the gateway" if base == WEB else "application form on the private loopback port"
+    stage = ("application form through the gateway" if base == WEB else "application form on the private loopback port") + (" (no script)" if html else "")
     tokens = []
     for email, forged in attempts:
         client = Client()
@@ -329,11 +332,12 @@ def apply(attempts, base=WEB, html=False):
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "X-Forwarded-For": forged, "X-Real-IP": forged}
         headers.update({"Accept": "text/html"} if html else ENHANCED)
         status, response_headers, body = client.request(base + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), headers)
+        private(response_headers)
         if html:
-            results.append(status)
+            # Fixed application wording only (never submitted values).
+            results.append((status, next((label for label, text in HTML_OUTCOMES if text in body), "other")))
         else:
             check(status == 200)
-            private(response_headers)
             kind, code, _ = action_result(body)
             results.append((kind, code))
     stage += f": results {results}"
@@ -344,19 +348,19 @@ def apply_burst():
     # Six submissions from one real address (the gateway guest), each forging a different client address.
     attempts = [(APPLICANT + "@terrace.invalid", "203.0.113.10")] + [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 6)]
     check(apply(attempts) == [("success", 200)] * 5 + [("failure", 429)])
-    # The same exhausted bucket on the private loopback port, with the header the gateway writes: the same result.
+    # The same exhausted bucket on the private loopback port (with the header the gateway writes) and as a
+    # no-script post at both layers: the application's 429 passes through the gateway unchanged.
     check(apply([("burst-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294") == [("failure", 429)])
-    # A no-script post into that bucket: the gateway must pass the application's own status through unchanged.
-    through = apply([("burst-html@terrace.invalid", "192.0.2.1")], html=True)
-    direct = apply([("burst-html-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294", html=True)
-    check(through == direct and through[0] in [429, 500])
-    print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited (429 action result through the gateway and on the loopback port) despite forged client headers; no-script post status {through[0]} at both layers.")
+    check(apply([("burst-html@terrace.invalid", "192.0.2.1")], html=True) == [(429, "limited")])
+    check(apply([("burst-html-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294", html=True) == [(429, "limited")])
+    print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited (429 with script and without, through the gateway and on the loopback port) despite forged client headers.")
 
 
 def apply_other():
-    # A different real client address, forging the exhausted address, still has its own bucket.
-    check(apply([("other-network@terrace.invalid", "127.0.0.1")]) == [("success", 200)])
-    print(f"Separate-address application check passed: {count} bounded assertions.")
+    # A second real client address, no-script posts, first forging the exhausted gateway address: its own bucket.
+    attempts = [("other-network@terrace.invalid", "127.0.0.1")] + [(f"other-{index}@terrace.invalid", f"203.0.113.{index}") for index in range(1, 6)]
+    check(apply(attempts, html=True) == [(200, "received")] * 5 + [(429, "limited")])
+    print(f"Separate-address application checks passed: {count} bounded assertions; no-script 200 five times then 429 in its own bucket.")
 
 
 def staff(username, role):
@@ -417,6 +421,11 @@ def redeem():
         kind, code, data = action_result(body)
         check(status == 200 and (kind, code) == expected[:2] and expected[2] in data)
         private(headers)
+    # The repeat as a no-script post: HTTP 404 and the refusal page.
+    status, headers, body = anonymous.request(WEB + "/join/", "POST", urllib.parse.urlencode({"token": link[1]}).encode(),
+                                              {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "Accept": "text/html"})
+    check(status == 404 and b"That code was not accepted." in body and b"Invitation accepted." not in body)
+    private(headers)
     member, status = sign_in(APPLICANT, "web")
     check(status == 303)
     status, headers, _ = member.request(WEB + "/members/")

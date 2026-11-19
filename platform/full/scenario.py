@@ -649,7 +649,9 @@ def lifecycle(machine, action, label):
     output = machine.succeed('python3 /etc/gateway-protocol.py ' + action, timeout=180).strip()
     assert re.fullmatch(label + r'[^:]*: [0-9]+ bounded assertions(;.*)?\.', output)
     print(output)
-    return int(re.search(r': ([0-9]+) ', output)[1])
+    found = re.search(r': ([0-9]+) ', output)
+    assert found is not None
+    return int(found[1])
 
 
 def applications():
@@ -664,8 +666,8 @@ def lifecycle_original():
     assert applications() == 0
     counts['applyBurst'] = lifecycle(gateway, 'apply-burst', 'Application rate-limit checks passed')
     assert applications() == 5
-    counts['applyOtherAddress'] = lifecycle(client, 'apply-other', 'Separate-address application check passed')
-    assert applications() == 6
+    counts['applyOtherAddress'] = lifecycle(client, 'apply-other', 'Separate-address application checks passed')
+    assert applications() == 10
     counts['approve'] = lifecycle(gateway, 'approve', 'Approval checks passed')
     assert gateway.succeed('stat -c %U:%a ' + OUTBOX + '/*-invitation.json').strip() == 'terrace_cms:600'
     counts['redeem'] = lifecycle(gateway, 'redeem', 'Redemption checks passed')
