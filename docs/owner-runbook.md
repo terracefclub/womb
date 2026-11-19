@@ -1,4 +1,4 @@
-> The working copy of this runbook is `/Users/tristan/Projects/terrace/OWNER_RUNBOOK.md`; this file is the reviewed snapshot (2026-11-18, Womb `01464be`, website `dev` `dad0a20`) and may lag the working copy.
+> This is a sanitised snapshot of the owner's private working copy of this runbook (2026-11-18, Womb `01464be`, website `dev` `dad0a20`). Machine-specific paths and private file names are replaced by placeholders, and it may lag the working copy. `$TERRACE_ROOT` stands for the root of the owner's workspace.
 
 # Terrace revival: owner runbook
 
@@ -17,10 +17,10 @@ Work top to bottom. Tick the box when the "Worked if" line is true. Do not skip 
   - **Claude can do this for you**: ask Claude in a session. Anything that needs the Linux builder (Falcon, the Linux builder named in the handoff) or a Hetzner lease is in this group. Nix, VM and release builds are never run on your Mac.
   - **Needs your decision**: Claude can prepare options, but the choice is yours.
 - **Status** (what exists today, with evidence)
-  - **PROVEN ON HETZNER**: ran on real Hetzner servers (probes 1 to 4 and known-full leases 2 and 3, handoff Womb checkpoints). Only what lease 3 (run `90e965da`) reached counts for install, boot and networking.
+  - **PROVEN ON HETZNER**: ran on real Hetzner servers (probes 1 to 4, probe 2 run twice, and known-full leases 1 to 4; every one tore down cleanly with the baseline preserved; handoff Womb checkpoints). Lease 1 stopped at the app plan, lease 2 at FORMAT, lease 3 at the services launch after install, reboot and networking, and lease 4 at the first plan step on builder-lock contention. Only what lease 3 (run `90e965da`) reached counts for install, boot and networking.
   - **NOT YET PROVEN ON HETZNER**: attempted in leases 3 and 4, not reached. Lease 3 stopped at the services launch (stale provider binding, fixed offline). Lease 4 (run `7d217921`, 2026-11-18) stopped at the first plan step because a non-Terrace job took Falcon's shared build lock; it proved nothing new beyond lease 3. Do not treat as proven; it is also not known to be broken.
   - **PROVEN IN VM REHEARSAL**: passed on the Falcon builder in disposable QEMU guests with synthetic data (`docs/full-rehearsal.md` and the per-service docs).
-  - **PROVEN LOCALLY**: ran on a Mac or loopback stack with synthetic data (handoff website section, `docs/local-preview.md`), or, for release packaging, on the Linux builder with loopback only. A recorded real-browser or live-stack run is required; tests alone are not enough.
+  - **PROVEN LOCALLY**: ran on a Mac or loopback stack with synthetic data (handoff website section, website repo `docs/local-preview.md`), or, for release packaging, on the Linux builder with loopback only. A recorded real-browser or live-stack run is required; tests alone are not enough.
   - **TESTED IN CODE ONLY**: unit or integration tests exist (including tests against a real local PostgreSQL or a fake Keycloak API); no recorded run of the real flow end to end.
   - **NOT YET BUILT**: nothing exists, or no procedure is written. Used together with **GAP** when there is no documented procedure.
 - Part 1 is a list of inputs, not steps, so it has no status. The step counts reported with this file cover Parts 2 to 10.
@@ -29,7 +29,7 @@ Work top to bottom. Tick the box when the "Worked if" line is true. Do not skip 
 
 | Environment | What it is | Data | Who touches it |
 | --- | --- | --- | --- |
-| Local preview on your Mac | Loopback-only Keycloak, CMS and website started by `./tools/local-stack start` (`docs/local-preview.md`). Website `http://127.0.0.1:4194/`, CMS `http://127.0.0.1:3040/admin/login`, Keycloak `http://127.0.0.1:8186/admin/`. | Synthetic only | You |
+| Local preview on your Mac | Loopback-only Keycloak, CMS and website started by `./tools/local-stack start` (website repo `docs/local-preview.md`). Website `http://127.0.0.1:4194/`, CMS `http://127.0.0.1:3040/admin/login`, Keycloak `http://127.0.0.1:8186/admin/`. | Synthetic only | You |
 | Disposable Hetzner rehearsal | Two leased servers (app and relay) created, installed, tested and deleted in one run. Driven by private tooling on Falcon (`.devenv/github-migration/`) and `docs/cloud-rehearsal.md`. Names are synthetic `.invalid`. Each run needs your fresh explicit yes. Its planner waits on Falcon's shared build lock, which other jobs also use (G-42). | Synthetic only | Claude, with your yes |
 | Production | Does not exist yet. No production host profile, no real DNS, no real data on any server. | Real, later | Claude and you |
 | On-prem (later) | One x86_64 server at the club. Hardware unknown. | Real, later | You (hardware), Claude (software) |
@@ -51,9 +51,9 @@ Tick each when done. "Unblocks" says what waits on it. "Default now" is what the
 - [ ] **1.1 Full Kinsta backup ZIP** (database and files).
     - Why: WordPress content export (WXR) has no media bytes, menus or plugin settings. The ZIP is the recovery copy and the source for images, newsletter PDFs and menus.
     - Unblocks: Parts 3 and 4 (media bytes, 12 newsletters, events and initiatives with images, menu structure, redirect plugin rules), the isolated restore, cutover.
-    - Default now: not supplied. `web/tools/wp-import/zip-hooks.ts` reports `todo-kinsta-zip`. (`docs/wordpress-import.md`, handoff)
+    - Default now: not supplied. `web/tools/wp-import/zip-hooks.ts` reports `todo-kinsta-zip`. (website repo `docs/wordpress-import.md`, handoff)
 - [ ] **1.2 Settings that Kinsta keeps outside the ZIP**: redirects, custom Nginx rules, IP-deny rules, DNS records and TTL, domains and TLS, scheduled jobs, cache/CDN exclusions, access restrictions.
-    - Why: the ZIP excludes MyKinsta settings and custom server configuration. (`docs/wordpress-parity-plan.md`, "Close the full-backup gap")
+    - Why: the ZIP excludes MyKinsta settings and custom server configuration. (website repo `docs/wordpress-parity-plan.md`, "Close the full-backup gap")
     - Unblocks: redirect parity at cutover, DNS cutover.
     - Default now: none captured.
 - [ ] **1.3 Stripe account** for the receiving organisation, with test Payment Links for each fund and frequency, receipts and subscription management enabled, and your approved donation wording.
@@ -61,7 +61,7 @@ Tick each when done. "Unblocks" says what waits on it. "Default now" is what the
     - Unblocks: live donations. Existing recurring gifts stay at the old provider; nothing migrates automatically.
     - Default now: `DONATIONS_MODE=disabled`; the established Terrace donation page remains.
 - [ ] **1.4 Dedicated Hetzner project credential and access recovery.**
-    - Why: production must live in the dedicated Terrace project, never the personal homelab project. A project-scoped Read & Write token is kept as a protected file under `/Users/tristan/Projects/terrace-private/credentials` (reference only; you confirmed its use on 2026-11-07 for the rehearsals). You also still need Console access to the dedicated project, and the old server's SSH key is unknown ("we might have to regenerate this").
+    - Why: production must live in the dedicated Terrace project, never the personal homelab project. A project-scoped Read & Write token is kept as a protected file in the credentials folder outside every checkout (reference only; you confirmed its use on 2026-11-07 for the rehearsals). You also still need Console access to the dedicated project, and the old server's SSH key is unknown ("we might have to regenerate this").
     - Unblocks: every Hetzner lease, the real production servers, inventory of the existing server.
     - Default now: a read-only inventory ran on 2026-11-07 (one running CPX11 in Ashburn, two primary IPs, one SSH key). The existing server is protected and outside every write target. (handoff "Authorized Hetzner cloud rehearsal progress"; `docs/access-relay.md` "Open prerequisites")
 - [ ] **1.5 Domain and DNS registrar access.** Access to the registrar/DNS for `terracefclub.org` (infrastructure domain). The handoff and docs do not say who controls DNS for `princetonterraceclub.org` (the current public WordPress site); record that too.
@@ -71,27 +71,27 @@ Tick each when done. "Unblocks" says what waits on it. "Default now" is what the
 - [ ] **1.6 Real roster of current members and alumni.**
     - Why: it is the reference for approving applicants. Note: the system has no bulk invite (see gap G-17); applicants apply one by one at `/apply/`.
     - Unblocks: real invitations.
-    - Default now: none; synthetic accounts only. (`docs/manual-steps.md`, `docs/member-lifecycle.md`)
+    - Default now: none; synthetic accounts only. (`docs/manual-steps.md`, website repo `docs/member-lifecycle.md`)
 - [ ] **1.7 Approver names and approval policy**: who approves, the fallback approvers, whether editors may approve or only administrators, what verification the club expects, and whether alumni and current members need different evidence.
-    - Default now in code: editors and administrators can both review and decide applications; the policy wording is a placeholder. (`docs/member-lifecycle.md`, "Permissions summary")
+    - Default now in code: editors and administrators can both review and decide applications; the policy wording is a placeholder. (website repo `docs/member-lifecycle.md`, "Permissions summary")
 - [ ] **1.8 Moderation owner and a backup**, response targets and an appeal process.
-    - Default now: none; reports are queued for editors and administrators. Needed before real invitations. (`docs/member-lifecycle.md` section 6)
+    - Default now: none; reports are queued for editors and administrators. Needed before real invitations. (website repo `docs/member-lifecycle.md` section 6)
 - [ ] **1.9 Primary and backup identity administrator** for production Keycloak, plus the named list of editors and which of them are `editorial-admin`.
     - Why: no shared administrator session is acceptable; accounts are per person. (`docs/identity-host.md`, `cms/README.md`)
-    - The editors list is not named as an owner item in the docs. I added it because accounts cannot be created without names.
+    - The editors list is not named as an owner item in the docs; it is added here because accounts cannot be created without names.
 - [ ] **1.10 Retention decisions** (all current numbers are placeholders):
     - how long to keep moderation content, reports and their notes
     - tombstones of erased members and audit rows
     - the message outbox (it holds invitation links)
     - whether an erased founder's group name and description are kept (default: kept verbatim)
     - Keycloak data and logs (`docs/identity-host.md`: "approved retention policy")
-    - Source: `docs/member-lifecycle.md` sections 8, 9 and "Decisions the owner still owes".
+    - Source: website repo `docs/member-lifecycle.md` sections 8, 9 and "Decisions the owner still owes".
 - [ ] **1.11 Lifecycle numbers**: invitation lifetime (default 7 days, `LIFECYCLE_INVITATION_DAYS`), offboarding and moderation grace period (default 30 days, `LIFECYCLE_GRACE_DAYS`), pending application age-out (default 60 days, `LIFECYCLE_APPLICATION_DAYS`).
 - [ ] **1.12 Mail delivery choice.** There is no mail transport anywhere today.
     - What it affects: invitations and notices (today an operator copies a link from an outbox file); Keycloak verification and password-setup mail (the production realm contains no mail settings); Documenso signing mail (local sink only); the membership workflow's payment email.
-    - Default now: outbox rows plus a local file mirror, delivered by a person. (`docs/member-lifecycle.md` sections 3, 4; `identity/README.md`; `docs/documenso-host.md`)
+    - Default now: outbox rows plus a local file mirror, delivered by a person. (website repo `docs/member-lifecycle.md` sections 3, 4; `identity/README.md`; `docs/documenso-host.md`)
 - [ ] **1.13 Gravity Forms keep or drop**, form by form. Seven form definitions (97 fields) were supplied: contact, newsletter contribution, donation and merchandise are the visible ones. Historical entries are already excluded by you.
-    - Default now: no form is rebuilt. The only new intake form is `/apply/`. (`docs/wordpress-parity-plan.md`)
+    - Default now: no form is rebuilt. The only new intake form is `/apply/`. (website repo `docs/wordpress-parity-plan.md`)
 - [ ] **1.14 Off-site backup accounts**: a Hetzner Storage Box sub-account (SFTP key, verified host key) and optionally a Backblaze B2 bucket and key. Choose where the repository passwords are escrowed, in a password manager that does not depend on Terrace servers. Name an owner for every backed-up dataset.
     - Default now: none exists; every owner is "TBD". (`docs/backups.md`, `docs/manual-steps.md`)
 - [ ] **1.15 Hosting size and budget confirmation.** Total recurring hosting must stay strictly below US$80 per month including backups, tax and overlap with the old server. Provide the account currency, VAT status, the existing server's itemised invoice and authenticated stock.
@@ -107,29 +107,29 @@ Tick each when done. "Unblocks" says what waits on it. "Default now" is what the
 
 ## Part 2. See it working on your Mac
 
-All synthetic. Run it only while you are watching, then stop it. Do not leave it running. Written from `docs/local-preview.md`, `identity/README.md`, `cms/README.md`, `web/README.md` and `docs/member-lifecycle.md` at website `dev` `dad0a20` (first checked at `8883875`).
+All synthetic. Run it only while you are watching, then stop it. Do not leave it running. Written from website repo `docs/local-preview.md`, `identity/README.md`, `cms/README.md`, `web/README.md` and website repo `docs/member-lifecycle.md` at website `dev` `dad0a20` (first checked at `8883875`).
 
 Where you type: every command below goes into Terminal on your Mac, **from the top folder of the website checkout** (the folder that contains `tools/`, `web/`, `cms/` and `identity/`), unless a step says otherwise. Step 2.2 creates that checkout and 2.3 onwards assume you are inside it. Do not type anything that prints a password, and never paste one anywhere.
 
 - [ ] **2.1 Check the tools exist.** Nix, devenv and direnv must be available.
     - Who: Claude can do this for you
     - Status: NOT YET BUILT as a documented check
-    - GAP: no documented procedure. `docs/local-preview.md` only says "with Nix, devenv and direnv available" and that nothing is installed in your user profile; no command to check them is written anywhere (the three version commands in the earlier draft were not in any source and were removed). Do not install anything yourself: project rules forbid user package installs. Needed: Claude confirms all three work on this Mac before you start.
+    - GAP: no documented procedure. Website repo `docs/local-preview.md` only says "with Nix, devenv and direnv available" and that nothing is installed in your user profile; no command to check them is written anywhere (the three version commands in the earlier draft were not in any source and were removed). Do not install anything yourself: project rules forbid user package installs. Needed: Claude confirms all three work on this Mac before you start.
     - Worked if: Claude tells you all three are present.
-- [ ] **2.2 Get a clean checkout of the website at `dev`, in a short path.** The checkout at `/Users/tristan/Projects/terrace/worktrees/tfc-github-primary` is on branch `codex/kinsta-backup-preflight`, an old one, so do not use it.
+- [ ] **2.2 Get a clean checkout of the website at `dev`, in a short path.** The owner's older website checkout is on an old feature branch, so do not use it.
     - Who: Claude can do this for you (the commands are yours to run if you prefer)
     - Status: PROVEN LOCALLY (the worktree commands are the workspace standard in `WORKER_RULES.md`; the local stack ran from such worktrees)
     - Do (adapted: `tfc-preview` and `codex/tfc-preview` are names chosen here; pick other names if either exists):
     ```bash
-    git -C /Users/tristan/Projects/terrace/.repos/tfc-website.git fetch origin
-    git -C /Users/tristan/Projects/terrace/.repos/tfc-website.git worktree add /Users/tristan/Projects/terrace/worktrees/tfc-preview -b codex/tfc-preview origin/dev
-    cd /Users/tristan/Projects/terrace/worktrees/tfc-preview
+    git -C $TERRACE_ROOT/.repos/tfc-website.git fetch origin
+    git -C $TERRACE_ROOT/.repos/tfc-website.git worktree add $TERRACE_ROOT/worktrees/tfc-preview -b codex/tfc-preview origin/dev
+    cd $TERRACE_ROOT/worktrees/tfc-preview
     ```
     Keep the checkout path short. `tools/local-stack` cannot create its PostgreSQL socket if the path is too long (handoff, PR9 notes: over 103 bytes). Computed from `cms/tools/with-local`, the socket file is the checkout path plus 42 bytes, so the checkout path itself must be at most 61 bytes; the path above is 53.
     - Worked if: `git log -1 --oneline` in the checkout shows `dad0a20` or a later `dev` commit.
 - [ ] **2.3 Approve the three shells once.** Inside the checkout:
     - Who: You
-    - Status: PROVEN LOCALLY (`docs/local-preview.md`)
+    - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
     - Do:
     ```bash
     direnv allow identity
@@ -139,7 +139,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     - Worked if: no error. (Nothing is installed in your user profile.)
 - [ ] **2.4 Start the stack.** Inside the checkout:
     - Who: You
-    - Status: PROVEN LOCALLY (`docs/local-preview.md`)
+    - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
     - Do:
     ```bash
     ./tools/local-stack start
@@ -152,7 +152,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     - Worked if: it prints the three URLs, the synthetic usernames and credential references, and never passwords. If it fails, it prints "Local stack command failed" and leaves its logs in the component `.state/local-stack.log` files; ask Claude to read them, because they are private.
 - [ ] **2.5 Check health.**
     - Who: You
-    - Status: PROVEN LOCALLY (`docs/local-preview.md`)
+    - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
     - Do:
     ```bash
     ./tools/local-stack status
@@ -160,7 +160,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     - Worked if: the exit status is 0 (all three services healthy; type `echo $?` straight afterwards to see it). A non-zero exit means at least one is not healthy.
 - [ ] **2.6 Find the synthetic sign-in names and where their passwords are.** Open `identity/.state/credentials.json` yourself in an editor. Do not paste the values anywhere.
     - Who: You
-    - Status: PROVEN LOCALLY (`docs/local-preview.md`)
+    - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
     - Names and keys:
 
     | Purpose | Username | Key in the file |
@@ -187,7 +187,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     - Worked if: you reach the Payload dashboard. Among the collections you should see Events, Newsletters, Initiatives, Media, Redirects, Posts and Pages, and the "Member lifecycle" and "Community moderation" groups.
 - [ ] **2.10 Put synthetic news and pages on the site.** A fresh CMS has no published content. Apply the invented fixture plan with publishing on, to the local preview database only. The stack from 2.4 must still be running.
     - Who: Claude can do this for you (or You)
-    - Status: PROVEN LOCALLY (handoff PR10 note: the worker applied the fixture with `--publish` in a local stack and saw 200 and 301 responses). The exact command below is assembled from the documented flags in `docs/wordpress-import.md` and `cms/tools/wp-import.ts`; no source gives a local-stack walkthrough.
+    - Status: PROVEN LOCALLY (handoff PR10 note: the worker applied the fixture with `--publish` in a local stack and saw 200 and 301 responses). The exact command below is assembled from the documented flags in website repo `docs/wordpress-import.md` and `cms/tools/wp-import.ts`; no source gives a local-stack walkthrough.
     - Do: make an owner-only folder outside every Git checkout (the tool refuses a folder inside one; the `install -d -m 0700` form is borrowed from `docs/full-rehearsal.md`, the website docs only say to use an owner-only directory), then run the apply from the checkout's `cms/` folder. Replace `/absolute/private/dir` with the real path, for example a new folder in your home directory:
     ```bash
     install -d -m 0700 /absolute/private/dir
@@ -218,7 +218,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
         KEYCLOAK_HTTP_PORT=8186 direnv exec identity bun identity/tools/provision-member.ts provision --username verify.alumna --email person@example.org --name "Verify Alumna" --role alumni
         ```
         6. The temporary password is in `identity/.state/provisioned/<username>.txt` (mode 0600), never printed. Sign in with it at the website's **Members** link; Keycloak forces a change.
-    - Worked if: the account reaches the member area. (`docs/member-lifecycle.md`, "Verify")
+    - Worked if: the account reaches the member area. (website repo `docs/member-lifecycle.md`, "Verify")
 - [ ] **2.14 Offboard it.** Create a **Member offboardings** record for that member, then close the realm side from the checkout's top folder. GAP: the admin screens cannot create this record yet (the rehearsal had to use the CMS REST API; fix in progress, G-41), so ask Claude to create it as the administrator `local-editorial-admin` (editors cannot offboard):
     - Who: You
     - Status: PROVEN LOCALLY (handoff, real-export local rehearsal 2026-11-18: offboard and restore, through the REST API for the CMS side; not a production procedure)
@@ -229,7 +229,7 @@ Where you type: every command below goes into Terminal on your Mac, **from the t
     - Worked if: the member can no longer reach `/members/`. Their profile, stories and groups are hidden but kept.
 - [ ] **2.15 Stop the stack.**
     - Who: You
-    - Status: PROVEN LOCALLY (`docs/local-preview.md`)
+    - Status: PROVEN LOCALLY (website repo `docs/local-preview.md`)
     - Do (with the same port flags if you used them in 2.4):
     ```bash
     ./tools/local-stack stop
@@ -244,10 +244,10 @@ Rule: keep WordPress intact until an isolated restore, import reconciliation, UR
 
 - [ ] **3.1 Download the Kinsta backup ZIP.** Kinsta allows one download backup per week and keeps it for 48 hours, so download it the moment it is ready.
     - Who: You
-    - Status: NOT YET BUILT (a provider screen, not a repo tool). Provider path as recorded in `docs/wordpress-parity-plan.md` (checked 2026-11-04).
+    - Status: NOT YET BUILT (a provider screen, not a repo tool). Provider path as recorded in website repo `docs/wordpress-parity-plan.md` (checked 2026-11-04).
     - Do: in MyKinsta choose **Sites, then the site, then Backups, then Download, then Create backup now**, and download the ZIP. If a final WP Engine backup still exists, keep it too as extra evidence.
     - Worked if: you have one ZIP. Write down the site and environment, the backup timestamp and timezone, the download date and the byte count.
-- [ ] **3.2 Store it safely.** Put the untouched ZIP in an owner-only directory outside every Git checkout (for example under `/Users/tristan/Projects/terrace-private/`, which already holds the WXR export), mode 0600 on the file. Keep a second protected, recoverable copy somewhere else.
+- [ ] **3.2 Store it safely.** Put the untouched ZIP in an owner-only directory outside every Git checkout (for example the owner's private folder outside every checkout, which already holds the WXR export), mode 0600 on the file. Keep a second protected, recoverable copy somewhere else.
     - Who: You
     - Status: NOT YET BUILT (the docs require this, but give no command for the second copy or where it lives)
     - GAP: no documented procedure for the second copy or its location. Needed: your choice of the second place, and who can read it.
@@ -260,12 +260,12 @@ Rule: keep WordPress intact until an isolated restore, import reconciliation, UR
     direnv allow web
     direnv exec web python3 -B web/tools/kinsta-backup-preflight.py /protected/terrace/kinsta-backup.zip
     ```
-    (`docs/wordpress-parity-plan.md`, "Check a downloaded ZIP before recovery")
+    (website repo `docs/wordpress-parity-plan.md`, "Check a downloaded ZIP before recovery")
     - Worked if: it prints only counts, byte sizes and the archive SHA256. It confirms a nonempty SQL file beside `public/` and a nonempty `public/wp-load.php`, and reports how many files are under `public/wp-content/uploads/`. Save that receipt with the ZIP. It does not prove the SQL is consistent or the files complete.
 - [ ] **3.4 Export what the ZIP leaves out**: redirects, custom Nginx rules, IP-deny rules, DNS records with TTL, domains and TLS, scheduled jobs, cache/CDN exclusions, access restrictions.
     - Who: You
     - Status: NOT YET BUILT
-    - GAP: no documented procedure. `docs/wordpress-parity-plan.md` lists what to capture ("Export redirects separately; capture exact host/path/query behavior...") but gives no screens, commands or file format. Needed: a checklist of MyKinsta and DNS-provider screens, where to store the output, and how to turn the redirect list into the importer's redirect format. See G-1.
+    - GAP: no documented procedure. Website repo `docs/wordpress-parity-plan.md` lists what to capture ("Export redirects separately; capture exact host/path/query behavior...") but gives no screens, commands or file format. Needed: a checklist of MyKinsta and DNS-provider screens, where to store the output, and how to turn the redirect list into the importer's redirect format. See G-1.
     - Worked if: a private ledger holds each item. Store secret references, never values.
 - [ ] **3.5 Inventory plugins and integrations**: active, inactive and must-use plugins with versions, themes, membership/access rules, Gravity Form IDs and conditional logic, notifications, add-on feeds, SMTP, payment and webhook configuration, Drive/document/calendar ownership.
     - Who: You (with Claude reading the exported SQL later)
@@ -285,7 +285,7 @@ Rule: keep WordPress intact until an isolated restore, import reconciliation, UR
     - Status: NOT YET BUILT
     - GAP: no documented procedure or tooling. The parity plan has a requirements table only. Needed: an isolated WordPress/MariaDB runtime (nothing is built), a written restore recipe, and a comparison report format. See G-2.
     - Worked if: counts and hashes match the preflight receipt and a person signs off.
-- [ ] **3.8 Re-run the WXR preflight on the supplied export.** The protected WXR and Gravity Forms JSON are in `/Users/tristan/Projects/terrace-private/wordpress-export-2026-11-03/` (reference only).
+- [ ] **3.8 Re-run the WXR preflight on the supplied export.** The protected WXR and Gravity Forms JSON are in the protected export folder outside every checkout (reference only).
     - Who: Claude can do this for you
     - Status: PROVEN LOCALLY (real export, 2026-11-03; reproduced exactly 2026-11-18)
     - Do:
@@ -311,13 +311,13 @@ Rule: keep WordPress intact until an isolated restore, import reconciliation, UR
 
 What the tooling does today (dev `dad0a20`): turn the WXR into a private plan, report on it, and write Payload documents as drafts into a local database. It has never been applied to a production database. A local rehearsal (handoff, real-export local rehearsal 2026-11-18, worktree at `8883875`, local database only) imported the owner's real export: 215 documents created with 0 failures, a re-apply that wrote nothing, a rollback to zero, then `apply --publish` published 56 documents and activated 51 redirects. A crawl found all 38 posts and 16 pages returning 200 and 50 of 51 redirect sources answering 301 to a 200, with no 5xx. Everything for production remains undone from step 4.6.
 
-Real-export dry-run results to compare against (2026-11-18; handoff and `docs/wordpress-import.md`): 245 items, 87 publish candidates, 215 mapped (122 media references, 41 posts, 25 pages, 14 events, 12 newsletters, 1 initiative), 30 unmapped (11 venues and organizers embedded in events, 11 menu items, 4 Divi layouts, 3 style records, 1 event with no start date), 86 redirects (80 redirect, 6 served in place) with 2 gaps (site root and one reserved-route collision), 56 publish-eligible. `docs/wordpress-import.md` now states the same 86 and 2.
+Real-export dry-run results to compare against (2026-11-18; handoff and website repo `docs/wordpress-import.md`): 245 items, 87 publish candidates, 215 mapped (122 media references, 41 posts, 25 pages, 14 events, 12 newsletters, 1 initiative), 30 unmapped (11 venues and organizers embedded in events, 11 menu items, 4 Divi layouts, 3 style records, 1 event with no start date), 86 redirects (80 redirect, 6 served in place) with 2 gaps (site root and one reserved-route collision), 56 publish-eligible. Website repo `docs/wordpress-import.md` now states the same 86 and 2.
 
 Use `PRIV` for an existing owner-only (0700) directory outside every Git checkout and `EXPORT` for the protected WXR. Every `--report` and `--out` path must be a new file: the tools create reports exclusively at mode 0600 and refuse to overwrite, so give every run its own file name. Plan and report commands that use `cms/tools/wp-import.ts` run from the `cms/` folder of a source checkout, because the release bundle does not contain them (G-5).
 
 - [ ] **4.1 Dry run on the real export.** Writes only a safe report.
     - Who: Claude can do this for you
-    - Status: PROVEN LOCALLY (real export, report `terrace-private/wordpress-export-2026-11-03/wp-import-dryrun-2026-11-18-final.safe.json`, mode 0600)
+    - Status: PROVEN LOCALLY (real export, a safe aggregate report kept in the protected export folder, mode 0600)
     - Do:
     ```bash
     direnv exec web bun web/tools/wp-import/import.ts dry-run --report $PRIV/wp-import-dryrun-DATE.safe.json < $EXPORT
@@ -371,7 +371,7 @@ Use `PRIV` for an existing owner-only (0700) directory outside every Git checkou
 - [ ] **4.8 Review flagged items visually.** 24 items are flagged `divi-layout-review` (Divi layouts were flattened to text and basic HTML). Compare each with the live WordPress page.
     - Who: You (editors)
     - Status: NOT YET BUILT
-    - GAP: there is no draft preview for any collection (stated in `docs/wordpress-import.md` at `dad0a20`). The existing preview toggle only switches sample versus published content, and drafts return 404 on the public site. Editors can only read the fields in the Payload admin. Needed: a draft preview route and an owner decision on how editors authenticate to the website, or a staging copy of the site. Known defect from the rehearsal: nine near-empty pages and one raw `[tt-event]` shortcode were publish-eligible, so review those before publishing (G-41). See G-8.
+    - GAP: there is no draft preview for any collection (stated in website repo `docs/wordpress-import.md` at `dad0a20`). The existing preview toggle only switches sample versus published content, and drafts return 404 on the public site. Editors can only read the fields in the Payload admin. Needed: a draft preview route and an owner decision on how editors authenticate to the website, or a staging copy of the site. Known defect from the rehearsal: nine near-empty pages and one raw `[tt-event]` shortcode were publish-eligible, so review those before publishing (G-41). See G-8.
     - Worked if: each reviewed item is marked fixed or accepted. Also fix `alt-missing` media alt text in the admin.
 - [ ] **4.9 Publish.** Two ways: add `--publish` to the apply run (only documents that run creates, only those marked eligible, and never anything with a blocking flag), or have an editor publish in the admin. Updates to an already-published document are written as a draft version, so the public page never changes by itself.
     - Who: You (editors), Claude can run the apply
@@ -462,12 +462,12 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: each editor signs in at the CMS admin with **Sign in with Terrace** and sees only what their role allows.
 - [ ] **5.7 Set the production environment so applications can open.** For the website and CMS (delivered as protected env files):
     - Who: Claude can do this for you
-    - Status: TESTED IN CODE ONLY (`docs/member-lifecycle.md`, `cms/README.md`, `web/README.md`). Not run on any deployed host.
+    - Status: TESTED IN CODE ONLY (website repo `docs/member-lifecycle.md`, `cms/README.md`, `web/README.md`). Not run on any deployed host.
     - Required values (names only; never print values):
         - CMS: `LIFECYCLE_INTAKE_SECRET` (32+ chars; unset means `/apply/` and `/join/` show "not open" and the endpoints answer 503), `LIFECYCLE_OUTBOX_DIR` (absolute, outside the code and media directories; a public CMS refuses to start without it), `LIFECYCLE_PUBLIC_ORIGIN` (a bare public https origin; a public CMS refuses to start without it), `CMS_ORIGIN`, `CMS_PUBLIC_DEPLOYMENT=1`, the CMS and member auth settings, `CMS_MEDIA_DIR`, `DATABASE_URI`.
         - Website: `ADDRESS_HEADER` (a header the proxy overwrites with the real client address) together with `XFF_DEPTH`, or `LIFECYCLE_DIRECT_CLIENTS=1` if there is no proxy; `/apply/` stays closed otherwise. Also `ORIGIN` equal to `MEMBER_AUTH_ORIGIN`, `CMS_ORIGIN`, and `CMS_PUBLIC_ORIGIN` (without it every inline body image is dropped and the CSP names no media origin).
         - Omit every `CMS_LOCAL_BOOTSTRAP` and `CMS_BOOTSTRAP_*` key.
-    - GAP (reduced): website PR 11 added one "Production configuration" table to `docs/member-lifecycle.md` listing every CMS and website variable, what happens when it is unset, and that the website logs a `[config]` line (names only) per missing setting. The Womb side is still open. That table names `ADDRESS_HEADER` with `XFF_DEPTH` set to the number of trusted proxies for `X-Forwarded-For`. Womb's gateway code (`platform/website-gateway.nix`) sets `X-Forwarded-For` to `$remote_addr`, one hop, so `X-Forwarded-For` with depth `1` matches by reading the code, but no Womb document says so, no test checks the pairing, and no Womb module sets `ADDRESS_HEADER`, `XFF_DEPTH`, `LIFECYCLE_*` or `CMS_PUBLIC_ORIGIN` at all. See G-14.
+    - GAP (reduced): website PR 11 added one "Production configuration" table to website repo `docs/member-lifecycle.md` listing every CMS and website variable, what happens when it is unset, and that the website logs a `[config]` line (names only) per missing setting. The Womb side is still open. That table names `ADDRESS_HEADER` with `XFF_DEPTH` set to the number of trusted proxies for `X-Forwarded-For`. Womb's gateway code (`platform/website-gateway.nix`) sets `X-Forwarded-For` to `$remote_addr`, one hop, so `X-Forwarded-For` with depth `1` matches by reading the code, but no Womb document says so, no test checks the pairing, and no Womb module sets `ADDRESS_HEADER`, `XFF_DEPTH`, `LIFECYCLE_*` or `CMS_PUBLIC_ORIGIN` at all. See G-14.
     - Worked if: `/apply/` opens, approval succeeds, and a spoofed `X-Forwarded-For` from a client does not choose its own rate-limit bucket.
 - [ ] **5.8 Open applications.** Share the `/apply/` address with people on the approved roster. Applications stay pending until reviewed; at most 500 pending are held, pending applications are withdrawn after `LIFECYCLE_APPLICATION_DAYS` (60 by default), and a staff notice is added when the queue passes 400.
     - Who: You
@@ -543,19 +543,19 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
 
 ### 6A. What Hetzner has proven, in order
 
-- [ ] **6.1 Know what is already proven on real servers.** Probes 1 to 4 and known-full leases 1 to 3 (handoff Womb checkpoints, 2026-11-07 to 2026-11-13). Proven on Hetzner, with Tristan's yes each time:
+- [ ] **6.1 Know what is already proven on real servers.** Probes 1 to 4 (probe 2 ran twice) and known-full leases 1 to 4 (handoff Womb checkpoints, 2026-11-07 to 2026-11-18), each with the owner's yes. All of them tore down cleanly with the baseline preserved. Lease 1 stopped at the app plan, lease 2 at FORMAT, lease 3 at the services launch after install, reboot and networking, and lease 4 at the first plan step. What is proven on Hetzner:
     - Who: You (read and accept)
-    - Status: PROVEN ON HETZNER (handoff "Resume checkpoint 2026-11-13"; `docs/cloud-rescue-install.md`)
+    - Status: PROVEN ON HETZNER (handoff "Resume checkpoint 2026-11-13" and its lease 3 record: `install` passed on both hosts (FORMAT, target copy, FINISH), `boot-installed` passed on both, and `repository-start` passed at 01:15:40; `docs/cloud-rescue-install.md`)
     - The list, in order:
         1. Create two servers (app CPX42, relay CPX22, nbg1) inside an armed expiring lease, with the original server outside every write target.
         2. Pin the Rescue host key independently (console fingerprint, no trust on first use).
         3. Boot the RAM installer (stock to RAM, UEFI confirmed on CPX22 and the CPX42 app type).
         4. Record the install plan from the measured disks (app `/dev/sda` 327,684,194,304 bytes, relay `/dev/sda` 81,923,145,728 bytes).
-        5. Format, copy the Nix closure and install (`FORMAT`, store copy, `FINISH`) on both hosts.
+        5. Format, copy the Nix closure and install (`FORMAT`, store copy, `FINISH`) on both hosts (lease 3 `install`, app about 22 minutes, relay 8).
         6. Reboot into the installed disk and reach SSH on port 22 within about 9 seconds.
-        7. Start the repository listener.
+        7. Start the repository listener (lease 3 `repository-start`; in lease 4 the listener never started).
         8. Tear down: delete the servers, IPs, key and firewall, prove absence in three reads, preserve the baseline, remove the credentials copy.
-    - Worked if: you accept it. Receipts are in `/home/tristan/terrace-work/cloud-90e965daf611c47b5a52fd666a996611` on Falcon (reference only). Lease 4 repeated steps 1 to 3 (create, key pin, RAM installer, install-target check) and step 8 (teardown) on 2026-11-18 and stopped at step 4 for the lock reason in 6.6; it adds no new proven step.
+    - Worked if: you accept it. Receipts are in the lease 3 run directory `cloud-90e965daf611c47b5a52fd666a996611` under the builder's work folder (reference only). Lease 4 repeated steps 1 to 3 (create, key pin, RAM installer, install-target check) and step 8 (teardown) on 2026-11-18 and stopped at step 4 for the lock reason in 6.6; the repository listener never started, and it adds no new proven step.
 - [ ] **6.2 Next lease: services launch on both installed hosts.** Gateway bootstrap, 198 protocol assertions, relay nginx started with `LoadCredential`.
     - Who: Claude can do this for you (needs your yes for the lease)
     - Status: NOT YET PROVEN ON HETZNER: attempted in leases 3 and 4, not reached. Lease 3 stopped here because the provider binding was older than 120 seconds. Lease 4 stopped earlier, at the app plan step (6.6). PR45 added `require_launch_window` and the launcher refreshes both bindings (`cloud-controller.py binding --phase <phase> --role <role>`) right before launch. Proven offline only.
@@ -570,7 +570,7 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: restored data matches (database counts, file hashes, SQLite integrity, SSO login) and the originals are absent.
 - [ ] **6.5 Final audit and teardown of any lease.**
     - Who: Claude can do this for you
-    - Status: PROVEN ON HETZNER for the teardown and audit of a run that stopped early: leases 2, 3 and 4 each ended with absence in three reads and the baseline preserved. Not yet exercised after a complete run.
+    - Status: PROVEN ON HETZNER for the teardown and audit of a run that stopped early: every probe and lease 1 to 4 ended with absence in three reads and the baseline preserved. Not yet exercised after a complete run.
     - Worked if: zero servers, IPs, SSH keys or firewalls remain from the run; the baseline (one CPX11, two primary IPs, one SSH key) is unchanged; no token copy remains; the timer is inactive.
 - [ ] **6.6 Lease 4 result, and the decision on a fifth lease.** Lease 4 (run `7d217921`, 2026-11-18 21:30 to 21:59 PST, CPX42 app and CPX22 relay in nbg1, at `01464be`) created both hosts, pinned the host keys without trusting first use, dispatched and verified the RAM installer on both and passed the app's install-target check again. It then stopped at the first plan step: a non-Terrace job took Falcon's shared build lock 5 seconds before the planner started and the planner's 100 second lock wait expired. No platform code was at fault. Everything was torn down and audited (absence in three reads, baseline preserved). It proved nothing new beyond lease 3.
     - Who: Needs your decision
@@ -589,17 +589,17 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Status: PROVEN IN VM REHEARSAL (`docs/full-rehearsal.md`, "All-services composition"). Archive names there are the 3902e16 bundles (G-13).
     - Do:
     ```bash
-    install -d -m 0700 /home/tristan/terrace-work/full-rehearsal-output
-    direnv exec . env BUILD_LOCK=/home/tristan/.falcon-heavy.lock \
+    install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
+    direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
       ./platform/full-rehearsal run --all-services \
-      --output /home/tristan/terrace-work/full-rehearsal-output \
-      --webArchive /home/tristan/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-      --cmsArchive /home/tristan/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
-      --tfcSource /home/tristan/terrace-work/release-a2
+      --output $HOME/terrace-work/full-rehearsal-output \
+      --webArchive $HOME/terrace-work/release-390-output/terrace-web-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+      --cmsArchive $HOME/terrace-work/release-390-output/terrace-cms-3902e16c8c681638282e5983869d53efa8bb424c-linux-x64-gnu.tar.gz \
+      --tfcSource $HOME/terrace-work/release-a2
     ```
     Purge only a completed, verified, synthetic run:
     ```bash
-    direnv exec . ./platform/full-rehearsal purge /home/tristan/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID --synthetic-only --yes
+    direnv exec . ./platform/full-rehearsal purge $HOME/terrace-work/full-rehearsal-output/run-REPLACE_WITH_RECEIPT_RUN_ID --synthetic-only --yes
     ```
     - Worked if: the receipt shows `complete=true` and `computeOff=true`; all guests and processes are absent; purge removes only that run's disks, repository and escrow.
 
@@ -862,7 +862,7 @@ Do not start Part 8 until Parts 3 to 7 are ticked or each open item is accepted 
     `web/tools/design-screenshots.mjs` takes full-page screenshots of home, events, newsletter, shows archive, shop and donate at 1280, 901, 375 and 320 pixels, but it accepts only a plain loopback HTTP origin, so it cannot test the real site.
     - GAP: no documented accessibility audit, link-check or performance measurement procedure for the deployed site. See G-38.
     - Worked if: each gate group has a dated, recorded result.
-- [ ] **8.2 Cutover gates that are not code** (from `docs/wordpress-parity-plan.md` and `docs/migration.md`). Confirm every one:
+- [ ] **8.2 Cutover gates that are not code** (from website repo `docs/wordpress-parity-plan.md` and `docs/migration.md`). Confirm every one:
     - Who: You
     - Status: NOT YET BUILT
     - [ ] editorial review of imported pages done (4.8)
@@ -1009,7 +1009,7 @@ Nothing below runs against production yet because no production host exists. The
     - Worked if: reconciliation passes before traffic moves.
 - [ ] **9.19 A Hetzner lease for testing.** Never idle compute. Say the exact yes ("Yes, run lease N") only after Claude states the budget (the internal planning cap is under $5 per run) and the stop conditions. Confirm afterwards: zero servers, IPs, keys or firewalls from the run and the baseline unchanged.
     - Who: Needs your decision
-    - Status: PROVEN ON HETZNER (probes and leases 2, 3 and 4 each tore down with three absence reads; no lease has completed the services, backup and restore stages)
+    - Status: PROVEN ON HETZNER (every probe and lease 1 to 4 tore down with three absence reads; no lease has completed the services, backup and restore stages)
     - Worked if: Claude's teardown report shows absence in three reads.
 
 ---
@@ -1066,7 +1066,7 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | G-11 | Production secret delivery, generation and escrow retrieval (5.3, 6.11, 7.4) | NOT YET BUILT | sops-nix or agenix (or equivalent) adopted, tested delivery, an escrow retrieval drill |
 | G-12 | Certificate issuance, renewal and HTTP-to-HTTPS redirect for the gateway (6.16) | NOT YET BUILT | A chosen method (ACME or manual), port 80 redirect, expiry alerting |
 | G-13 | Website bundle for `dad0a20` (nine migrations, Next.js 16.4.5); Womb pins `3902e16` (`platform/website-release.json`, six-migration ledger); hash-pinned producer files and the full rehearsal use old bundles; Womb has a dated note about this and the re-pin is queued work (6.12, 6.14) | NOT YET BUILT | Build the bundle, update `website-release.json` and pins, re-run website, gateway and full checks |
-| G-14 | Production environment for the website and CMS is not wired in Womb: `CMS_PUBLIC_ORIGIN`, `LIFECYCLE_*` and `ADDRESS_HEADER` were documented in three places and the website now has one production configuration table (`docs/member-lifecycle.md`, PR 11), but Womb's gateway code overwrites `X-Forwarded-For` (one hop) with no Womb document saying so and no Womb module sets any of these variables (5.7) | GAP | The variables wired into the Womb website module and a test that `ADDRESS_HEADER` and `XFF_DEPTH` match the gateway |
+| G-14 | Production environment for the website and CMS is not wired in Womb: `CMS_PUBLIC_ORIGIN`, `LIFECYCLE_*` and `ADDRESS_HEADER` were documented in three places and the website now has one production configuration table (website repo `docs/member-lifecycle.md`, PR 11), but Womb's gateway code overwrites `X-Forwarded-For` (one hop) with no Womb document saying so and no Womb module sets any of these variables (5.7) | GAP | The variables wired into the Womb website module and a test that `ADDRESS_HEADER` and `XFF_DEPTH` match the gateway |
 | G-15 | Production Keycloak admin access, creating admin and editor accounts, granting roles, listing users (5.5, 5.6, 9.11, 9.16) | GAP | A written procedure (private path to the console, bootstrap admin removal, role grants, audit) |
 | G-16 | Production member provisioning and offboarding; verified email without mail; temporary password delivery (5.11, 5.13) | GAP | A console procedure or a production-safe provisioning tool, and a delivery method |
 | G-17 | No way to bulk onboard a roster; applications can only be created by `/apply/`, capped at 500 pending (5.18) | NOT YET BUILT | A decision plus, if wanted, a bulk invitation tool |
@@ -1098,18 +1098,18 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 
 ### Document conflicts and stale statements (G-36)
 
-1. `docs/backlog.md` (2026-11-05), `docs/revival.md` and `docs/manual-steps.md` said dedicated Hetzner credentials are unavailable and no provider apply was run; the handoff records an authorised token on 2026-11-07 and disposable probes and leases 1 to 3 since (lease 4 in progress, no result). Fixed in Womb by the docs PR carrying this file.
+1. `docs/backlog.md` (2026-11-05), `docs/revival.md` and `docs/manual-steps.md` said dedicated Hetzner credentials are unavailable and no provider apply was run; the handoff records an authorised token on 2026-11-07 and disposable probes and leases 1 to 4 since (lease 4 stopped before the services). Fixed in Womb by the docs PR carrying this file.
 2. `docs/community-pilot.md` (proposed, 2026-10-28) recommends HumHub with MariaDB; the accepted decision is the Payload and SvelteKit pilot. `docs/backups.md` still named a "community" database and moderator ownership by reference to it. Fixed in Womb (superseded banner and a backups note); `platform/backup-test.nix` and the `backup.nix` option example still use the name `community` for a synthetic database.
 3. The handoff's older paragraph "Lease 4 (not started) ... ready to arm" is superseded by the newer lease 4 checkpoint (stopped at the plan step), but still reads as current. Workspace file: not fixable in Womb.
 4. Womb `docs/website-host.md` and `docs/website-gateway.md` describe bundles at `3902e16` and a six-migration ledger; tfc-website dev now has nine ledger rows, derived from the migration registry, and `tools/release/README.md` no longer states a count. Womb side: dated notes added (pins and hashes unchanged); the re-pin is tracked work.
 5. `docs/access-relay.md` and `infra/cloud` default to CX23 and CX43; the rehearsals ran CPX22 and CPX42. Womb side: discrepancy documented in `access-relay.md`, production sizing marked as an owner decision, code defaults unchanged.
-6. Dry-run counts: the handoff said 86 redirects and two gaps; `docs/wordpress-import.md` said 87 and one. Fixed on website `dev` `dad0a20` (86, 80 plus 6, two gaps, the final dry run).
-7. `docs/identity-host.md` says the proxy denies admin and there is no remote admin route; `docs/member-lifecycle.md` tells a production operator to use the Keycloak admin console. Womb side: kept, with a marked GAP added (G-15).
+6. Dry-run counts: the handoff said 86 redirects and two gaps; website repo `docs/wordpress-import.md` said 87 and one. Fixed on website `dev` `dad0a20` (86, 80 plus 6, two gaps, the final dry run).
+7. `docs/identity-host.md` says the proxy denies admin and there is no remote admin route; website repo `docs/member-lifecycle.md` tells a production operator to use the Keycloak admin console. Womb side: kept, with a marked GAP added (G-15).
 8. `docs/service-lifecycle.md` (2026-11-04) listed Documenso, Windmill and Vaultwarden as having no new-platform proof; later docs and the all-services rehearsal prove them in VMs. `docs/backups.md` said they are "not deployed yet". Fixed in Womb: "proven in the VM rehearsal, not deployed to production".
-9. Local ports: `identity/README.md` used 8184, `docs/local-preview.md` 8186, and the lifecycle doc examples 8190. Fixed on `dev` `dad0a20`: the docs explain that 8184 is the standalone identity default, 8186 the `local-stack` default, and the lifecycle examples use 8186.
+9. Local ports: `identity/README.md` used 8184, website repo `docs/local-preview.md` 8186, and the lifecycle doc examples 8190. Fixed on `dev` `dad0a20`: the docs explain that 8184 is the standalone identity default, 8186 the `local-stack` default, and the lifecycle examples use 8186.
 10. Many Womb docs link to GitLab issues and merge requests; GitHub is primary. Fixed in Womb where a GitHub equivalent exists (issues; website blob links); remaining GitLab links are labelled historical. GitLab `!N` merge-request numbers do not map to GitHub PR numbers except the four listed in `docs/github-migration.md`.
 11. Recovery targets: `docs/backups.md` says at most 24 hours of data loss and four hours to recover (taken from the superseded community pilot); `docs/migration.md` proposes a 24 hour RPO and same-day recovery with an operator. Both are unmeasured. Found in verification; noted in Womb `backups.md`, not reconciled.
-12. tfc-website `docs/wordpress-import.md` said `cms/tools/ci.ts` "now expects seven ledger rows" and pointed to `tools/local-up`. Found in the first verification pass; fixed on `dev` `dad0a20`.
+12. Website repo `docs/wordpress-import.md` said `cms/tools/ci.ts` "now expects seven ledger rows" and pointed to `tools/local-up`. Found in the first verification pass; fixed on `dev` `dad0a20`.
 
 ---
 
@@ -1147,10 +1147,10 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 
 ## Sources read
 
-- `/Users/tristan/Projects/terrace/CLAUDE_HANDOFF.md` (top two resume checkpoints, Kinsta intake, Hetzner sections, owner intent, external blockers).
+- The private handoff file (top two resume checkpoints, Kinsta intake, Hetzner sections, owner intent, external blockers).
 - Womb `origin/trunk` `01464be`: `README.md`, `docs/*` (backlog, manual-steps, revival, migration, membership-roster, community-pilot, backups, access-relay, identity-host, identity-recovery, website-host, website-gateway, service-lifecycle, demos, windmill-host, documenso-host, documenso-mail-evidence, vaultwarden-host, cloud-rehearsal, cloud-rescue-install (first part), full-rehearsal, github-migration, oci-images, postgresql-bootstrap-restore (first part)), `platform/README.md`, `platform/single-node.nix`, `platform/hetzner.nix`, `platform/backup.nix` (options), `infra/cloud/README.md`, `infra/nixos/README.md`. `docs/restore-disk-evidence.md` was not read. `AGENTS.md` was read during verification.
-- tfc-website `origin/dev` `8883875`, re-read at `dad0a20` for the changed files (`docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `cms/src/runtime-policy.ts`, `cms/src/lifecycle/outbox.ts`): `docs/wordpress-import.md`, `docs/member-lifecycle.md`, `docs/wordpress-parity-plan.md`, `docs/local-preview.md`, `tools/release/README.md`, `identity/README.md`, `web/README.md`, `web/docs/{community,donations,merchandise}.md`, `cms/README.md`, `cms/COMMUNITY.md`, the two `package.json` scripts, and the release and import tool headers.
-- No credential file, state file or anything under `/Users/tristan/Projects/terrace-private/` was read; those are referred to by path only.
+- tfc-website `origin/dev` `8883875`, re-read at `dad0a20` for the changed files (website repo `docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `cms/src/runtime-policy.ts`, `cms/src/lifecycle/outbox.ts`): website repo `docs/wordpress-import.md`, website repo `docs/member-lifecycle.md`, website repo `docs/wordpress-parity-plan.md`, website repo `docs/local-preview.md`, `tools/release/README.md`, `identity/README.md`, `web/README.md`, `web/docs/{community,donations,merchandise}.md`, `cms/README.md`, `cms/COMMUNITY.md`, the two `package.json` scripts, and the release and import tool headers.
+- No credential file, state file or anything in the owner's private folders was read; those are referred to only generically.
 
 ---
 
@@ -1167,7 +1167,7 @@ Verified 2026-11-18 by an independent documentation worker against Womb `origin/
 | Fenced commands changed in this pass | 2 (2.13, 2.14 and 5.13: port 8190 became the default 8186; the source document now uses 8186 too) |
 | Fenced commands added | 4 (2.2 worktree commands from `WORKER_RULES.md`, and a `cd ..` in 2.10) |
 | Inline commands (draft) | 11, of which 3 removed (2.1: `nix --version`, `devenv version`, `direnv version` exist in no source; step now says GAP: no documented procedure) and 1 annotated (6.2 `cloud-controller.py binding`: handoff only, repository tool named) |
-| Backticked repository paths checked | 101 distinct; all repository paths exist. Not checkable: private or runtime paths (`terrace-private/...` including the dry-run report, Falcon `terrace-work/...`, `identity/.state/...`, `/var/lib/...`) |
+| Backticked repository paths checked | 101 distinct; all repository paths exist. Not checkable: private or runtime paths (the owner's private folders including the dry-run report, the builder's work folders, `identity/.state/...`, `/var/lib/...`) |
 
 Status labels changed (12): 2.1 PROVEN LOCALLY to NOT YET BUILT (no documented check); 2.13, 2.14, 5.8 (local part), 5.9, 5.10, 5.12, 5.13, 5.17, 9.13 and 4.11 PROVEN LOCALLY to TESTED IN CODE ONLY (the evidence is tests, some against a fake Keycloak API, with no recorded live run); 9.3 split (moderation reports stay PROVEN LOCALLY, applications become TESTED IN CODE ONLY). Clarified without changing the label: 4.2, 6.2, 6.13, 6.16, 9.4, 9.19, and the legend entries for PROVEN LOCALLY, TESTED IN CODE ONLY and IN PROGRESS (lease 4 is pre-arm per the handoff). Hetzner labels (6.1, 6.17) were checked against the lease 3 record and kept.
 
@@ -1175,15 +1175,22 @@ Gaps: 0 removed (each G-1 to G-39 is still undocumented in the sources); 2 added
 
 Other corrections: 6.4 pointed at 6.5 instead of 6.7; 1.15, 6.9 and G-9 said CX was unavailable, but the same pages showed CPX unavailable while CPX servers were created; the 16 MiB journal claim in 6.23 was 8 MiB for the website module; the `$5` rehearsal cap source; Part 2 rewritten for literal use (where to type, short checkout path with the computed 61-byte limit, private window for the member sign-in, report files must be new).
 
-Not verified: contents of the private dry-run report and anything under `terrace-private`; Kinsta, MyKinsta and provider screens; the claims quoted from the handoff about Falcon receipts; the Documenso, Windmill and Vaultwarden "Worked if" outcomes beyond what their host documents state; whether Tristan gave a yes for lease 4; whether the Mac has Nix, devenv and direnv (2.1); no step of Part 2 was executed here.
+Not verified: contents of the private dry-run report and anything in the owner's private folders; Kinsta, MyKinsta and provider screens; the claims quoted from the handoff about Falcon receipts; the Documenso, Windmill and Vaultwarden "Worked if" outcomes beyond what their host documents state; whether the Mac has Nix, devenv and direnv (2.1); no step of Part 2 was executed here.
 
 ### Second pass (after lease 4 and website PRs 11 to 13)
 
 Re-verified 2026-11-18 (evening) against website `origin/dev` `dad0a20` (PR 11 `afde392`, PR 12 `9431810`, PR 13 `dad0a20`), the handoff's lease 4 checkpoint and its "Real-export local rehearsal result" paragraph.
 
-- Fenced commands re-matched against a fresh `dad0a20` source tree and the handoff: no new mismatches. The only differences from sources remain the intentional placeholders and adaptations listed above; the 2.13, 2.14 and 5.13 port changes now agree with the source, which moved to 8186. Files changed on dev that touch cited commands or paths (`docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `web/tools/design-screenshots.mjs`, `cms/src/runtime-policy.ts`) were re-read; `design-screenshots.mjs` still accepts only a plain loopback origin. One cited command form was added: the production sweep invocation `cd /path/to/checkout/cms && bun run lifecycle:sweep` (5.17, quoted from `docs/member-lifecycle.md`, not adapted).
+- Fenced commands re-matched against a fresh `dad0a20` source tree and the handoff: no new mismatches. The only differences from sources remain the intentional placeholders and adaptations listed above; the 2.13, 2.14 and 5.13 port changes now agree with the source, which moved to 8186. Files changed on dev that touch cited commands or paths (website repo `docs/member-lifecycle.md`, `docs/wordpress-import.md`, `docs/local-preview.md`, `identity/README.md`, `tools/release/README.md`, `web/README.md`, `web/tools/design-screenshots.mjs`, `cms/src/runtime-policy.ts`) were re-read; `design-screenshots.mjs` still accepts only a plain loopback origin. One cited command form was added: the production sweep invocation `cd /path/to/checkout/cms && bun run lifecycle:sweep` (5.17, quoted from website repo `docs/member-lifecycle.md`, not adapted).
 - Lease statuses: every "IN PROGRESS (lease 4)" label replaced (6.2 to 6.6, 6.17, 7.8, 8.8, 9.19, the legend, 1.20) with "NOT YET PROVEN ON HETZNER: attempted in leases 3 and 4, not reached"; 6.5 and 9.19 now say teardown was proven by leases 2, 3 and 4; 6.6 rewritten as the lease 4 result and the decision on a fifth lease; 6.1 notes lease 4 repeated steps 1 to 3 and 8 and added nothing; the environments table notes the shared-lock dependency. Lease headings 6.2 to 6.5 no longer say "Lease 4".
 - Status labels moved back up to PROVEN LOCALLY, or their evidence widened, on the new evidence (handoff, real-export local rehearsal 2026-11-18), 19 steps: 2.12, 2.13, 2.14, 4.2, 4.9, 4.10, 4.11, 5.9, 5.10, 5.13, 5.15, 5.16, 9.13, 9.14, 9.3, 5.8 (the form; production stays TESTED IN CODE ONLY), 5.12 (REST only), and 4.3 and 4.5 (already PROVEN LOCALLY, now also for the real plan). The CMS side of 2.14, 5.12 and 5.13 is REST only because the admin screens cannot do it yet (G-41). 5.17 stays TESTED IN CODE ONLY: the sweep was not part of the rehearsal. Net change since the draft: 2.1 and 5.17 down, 9.3 split, the other first-pass downgrades reversed with real evidence.
 - Gaps: 0 removed. Added G-42 (builder-lock contention). G-41 rewritten from "flows never verified in a browser" (now verified) to the rehearsal's open defects. Reworded G-8, G-13 (dev `dad0a20`, nine migrations), G-14 and G-18 (PR 11 documents a source-checkout sweep invocation and a schedule; no packaged entrypoint or timer), G-19 (PR 11 documents the directory rules), G-36 (items 6, 9, 12 and the release README are fixed on the website; only item 3 remains). Conflicts 4, 6, 9 and 12 updated.
 - Steps updated for PR 11 to 13: 4 intro and 4.8, 5.7 (single configuration table; a public CMS refuses to start without `LIFECYCLE_OUTBOX_DIR` and `LIFECYCLE_PUBLIC_ORIGIN`), 5.10 (same-account rule, retried mirror files, `mirror.undeliverable`), 5.17 (production invocation, daily schedule recommendation, `mirror.failed`), 6.12 to 6.14 (`dad0a20`, nine migrations, registry-derived ledger, Next.js 16.4.5), 2.2 and the header (`dad0a20`). Decision D-6 notes the recommended schedule.
 - Not verified in this pass: the rehearsal numbers are quoted from the handoff (the rehearsal's private reports were not read); whether PR 11 to 13 fixed any defect other than the two named for PR 13; Womb docs were not re-checked against anything newer than trunk `01464be`.
+
+### Third pass (independent review of the Womb PR)
+
+- Lease statements made consistent everywhere: probes 1 to 4 (probe 2 ran twice) and known-full leases 1 to 4 all tore down cleanly with the baseline preserved; lease 1 stopped at the app plan, lease 2 at FORMAT, lease 3 at the services launch after install, reboot and networking, lease 4 at the first plan step. 6.1 keeps the install and repository-listener items, now citing the lease 3 record (`install`, `boot-installed`, `repository-start` passed at 01:15:40), and says the listener never started in lease 4.
+- Removed the stale "whether the owner gave a yes for lease 4" line from the not-verified list; rewrote the first-person sentence in 1.9; prefixed the four website-repo documents (`local-preview`, `member-lifecycle`, `wordpress-import`, `wordpress-parity-plan`) with "website repo" throughout.
+- Womb `docs/backlog.md`: items 3, 10 and 15 use `dad0a20`, item 10 and 15 now mention the real-export local rehearsal (no import to any real target) and that website PR 14 is open; item 13 stays on Womb #11 (it lists GitLab #8 as a source) and now also points to #12 for live integrations.
+- The public snapshot is now produced by `make-runbook-snapshot.py` with the substitutions listed in the "Public snapshot" section below; it contains no workspace home paths, no private folder names and no builder home paths.
