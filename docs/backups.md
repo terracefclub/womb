@@ -1,6 +1,6 @@
 # Encrypted off-site backups and isolated restore
 
-Updated 2026-11-02. Implements the backup module for [issue #4](https://gitlab.com/terrace/tech/womb/-/issues/4)
+Updated 2026-11-02 (stale notes corrected 2026-11-18). Implements the backup module for [issue #4](https://gitlab.com/terrace/tech/womb/-/issues/4) (historical GitLab issue; current tracking is GitHub [Womb #11](https://github.com/terracefclub/womb/issues/11))
 declaratively in `platform/backup.nix` (NixOS module `terrace.backup`, default
 off) with a two-VM test in `platform/backup-test.nix`. Nothing here is deployed:
 there is no Storage Box, no B2 bucket and no production secret yet (see
@@ -31,10 +31,13 @@ before real data is loaded.** Until then "TBD" means nobody is responsible.
 | Dataset | Where | Method | Owner | Off-site | Restore check |
 | --- | --- | --- | --- | --- | --- |
 | CMS database (`cms`, Payload) | PostgreSQL on the application host | `pg_dump -Fc` in a `REPEATABLE READ` snapshot | TBD | Primary and optional secondary | Row counts per table vs counts taken in the same snapshot |
-| Community database (`community`) | same cluster | same | TBD (also moderator ownership, see [community pilot](community-pilot.md)) | same | same |
+| Community database (`community`), only if one is created | same cluster | same | TBD (also moderator ownership) | same | same |
+
+Note (2026-11-18): the accepted community pilot is Payload and SvelteKit, whose community collections live in the CMS database (`cms`), so the CMS row covers them. `community` was the database name in the superseded HumHub plan ([community pilot](community-pilot.md)); it remains only as an example and as a synthetic test database in `platform/backup-test.nix`. Choose the real database list when the production host profile is written.
+
 | Keycloak database (`keycloak`) | same cluster | same | TBD | same | Table counts plus a separate [actual schema/issuer/signing-key recovery check](identity-recovery.md), with no real accounts |
 | PostgreSQL roles | same cluster | `pg_dumpall --globals-only` (contains password hashes; protected by repository encryption) | TBD | same | Roles restored first; database owners checked in the VM test |
-| CMS and community media | `terrace.backup.media` paths (default budget: 5 GB, see community pilot) | restic file backup, taken after the database dump; sha256 manifest | TBD | same | sha256 and file count per directory |
+| CMS and community media | `terrace.backup.media` paths (default budget: 5 GB, a planning figure from the superseded community pilot) | restic file backup, taken after the database dump; sha256 manifest | TBD | same | sha256 and file count per directory |
 | Headscale SQLite | `/var/lib/headscale/db.sqlite` on the relay | `sqlite3 .backup` (consistent), `integrity_check`, table counts | TBD | same | integrity check plus table counts |
 | Headscale Noise and DERP private keys | `/var/lib/headscale/*.key` | restic file backup; sha256 manifest | TBD | same | sha256 of every restored file |
 | Extra configuration (`terrace.backup.extraPaths`) | per host | restic file backup; sha256 manifest | TBD | same | sha256 |
@@ -51,8 +54,9 @@ Explicit exclusions and gaps (not covered by this module):
   (that would be circular). Losing every copy of a repository password makes that
   repository permanently unreadable. Keep an escrow copy in the team password
   manager, outside the servers. Owner: TBD.
-- Documenso, Windmill, Vaultwarden, Home Assistant and Frigate are not deployed
-  yet; each needs a row here, an owner and a restore check before it holds real
+- Documenso, Windmill and Vaultwarden are proven in the VM rehearsal (see
+  [full-rehearsal.md](full-rehearsal.md)) but not deployed to production; Home
+  Assistant and Frigate run only as synthetic demos. Each needs a row here, an owner and a restore check before it holds real
   data. Removing an application never deletes its backed-up data.
 - WordPress backups are tracked in the TFC website repository, not here.
 
@@ -67,7 +71,7 @@ These overlapping rules bound the retained snapshot count to at most 21.
 `restic check` runs weekly (Sunday 05:30,
 randomised by up to 30 minutes) with a 5% data subset
 (`terrace.backup.check.readDataSubset`), so each week re-reads a different slice.
-Proposed recovery targets from the [community pilot](community-pilot.md) are at
+Proposed recovery targets (first stated in the superseded [community pilot](community-pilot.md); [migration](migration.md) proposes a 24 hour RPO and same-day recovery) are at
 most 24 hours of data loss (daily schedule) and four hours to recover; they are
 unmeasured against a real repository.
 

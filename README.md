@@ -36,6 +36,7 @@ its configuration remains local to this worktree.
 - [Incremental delivery and acceptance criteria](docs/backlog.md)
 - [Migration and recovery requirements](docs/migration.md)
 - [Access and physical-hardware prerequisites](docs/manual-steps.md)
+- [Owner runbook: every step from seeing it work to cutover, with proven status and gaps](docs/owner-runbook.md)
 - [Contributor rules](AGENTS.md)
 
 The root `flake.nix`, `nixos/`, `__main__.py`, and `windmill/` are legacy source.

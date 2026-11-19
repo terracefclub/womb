@@ -230,7 +230,7 @@ permission, worker and restart acceptance; all 15 recorded host identities were
 gone afterward. This differs from the earlier loading-screen failure, whose
 unobserved defaults established no PKCE result. Raw queries were not retained,
 so these facts do not distinguish absent from malformed parameters.
-The merged [PKCE prerequisite](https://gitlab.com/terrace/tech/womb/-/merge_requests/36)
+The merged [PKCE prerequisite](https://gitlab.com/terrace/tech/womb/-/merge_requests/36) (historical GitLab MR)
 now pins official 1.861 and enables its native per-provider setting. Its fresh
 runtime check passed; the browser proof below establishes individual SSO against
 the same strict S256 client policy.

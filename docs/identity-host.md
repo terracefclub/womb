@@ -39,7 +39,7 @@ TLS file replacement requires restarting Nginx to refresh its credential snapsho
 ## Realm contract boundary
 
 The source of application clients, audiences and role separation remains the
-[TFC identity contract](https://gitlab.com/terrace/tech/tfc-website/-/blob/dev/identity/tools/realm-config.ts)
+[TFC identity contract](https://github.com/terracefclub/tfc-website/blob/dev/identity/tools/realm-config.ts)
 and its tests. Supply a reviewed, user-free `terrace-realm.json` derived from
 that contract with exact production HTTPS callbacks and distinct protected client
 credentials. Record its source revision and checksum in protected operations
@@ -73,6 +73,14 @@ Management/metrics are never proxied. The proxy overwrites forwarded
 host, scheme, port and client address. Keycloak's backend (8088), management
 interface (9000) and PostgreSQL bind to loopback. Port 80 is not opened by this
 module. Local root remains trusted; no remote admin route is provided yet.
+
+> **GAP (2026-11-18): no production procedure for Keycloak administration exists.**
+> Nothing documents how an operator reaches the administration console, creates or
+> removes the first administrator, creates editor or member accounts, grants roles or
+> lists users on a production host. The proxy denial above is intentional and stays.
+> The website `docs/member-lifecycle.md` tells a production operator to use the
+> Keycloak admin console, so this procedure is needed before real accounts exist.
+> It is tracked as G-15 in the [owner runbook](owner-runbook.md).
 
 The Keycloak service has a 768 MiB Java heap, 1.5 GiB memory high threshold,
 2 GiB hard limit, two CPU quota, 256 tasks, 32 HTTP workers, ten database

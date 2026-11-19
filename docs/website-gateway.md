@@ -1,5 +1,7 @@
 # Optional HTTPS origin gateway
 
+> **Note, 2026-11-18.** The pinned bundles and the six-migration ledger described here are website `3902e16`. Website `dev` is now `dad0a20` (first noted at `8883875`): it has nine migrations (adding the WordPress import, member-lifecycle and mirror-marker migrations) and Next.js 16.4.5 and new required variables (`LIFECYCLE_*`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER` with `XFF_DEPTH`; see the website `docs/member-lifecycle.md`). Womb's pins and hashes are deliberately unchanged here; building new bundles and re-pinning is tracked work and has not been done.
+
 `platform/website-gateway.nix` adds an opt-in nginx gateway to the accepted native
 website/CMS bundles. Actual host profiles remain disabled. Importing the module
 alone starts nothing. This adds no DNS record, cloud resource, ACME account,

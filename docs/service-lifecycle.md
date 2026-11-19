@@ -37,9 +37,9 @@ bootstrap from empty twice, with the original node destroyed before restore.
 | Keycloak + PostgreSQL | `identity-test.nix`: real startup, restart, outage/readiness, runtime realm guard, bounded proxy/admin surfaces | `identity-restore-test.nix`: real 101-table schema, realm ID/issuer/JWKS and protected inputs restored into fresh guest; source unchanged | Real per-person enrollment/recovery, module removal/retain + explicit synthetic delete, old-node-off restore, public cutover |
 | Website + Payload CMS + PostgreSQL/uploads | `website-test.nix`: actual pinned Linux bundles, six migrations repeated, live application stop ordering, 25-table recovery, anonymous/private/draft controls and image cache | Encrypted inputs/DB/uploads restored to separate guest, source unchanged; code immutable, cache disposable | Native public HTTPS/SSO follow-up pending separately; consistent live-write snapshot, empty bootstrap twice, old-node-off restore, rollback/install |
 | Home Assistant / Frigate demos | `demos-test.nix`: both/individual selection, restart, module-off retention, teardown requires `--yes`, scoped synthetic deletion then empty rebootstrap | Unselected/unrelated state preserved; explicitly synthetic fixtures only | Real devices, cameras/NIC/disks, real per-user SSO, secrets escrow and app-aware restore; no physical deployment claim |
-| Documenso | Preserved legacy membership workflow only | No new platform bootstrap/restore proof | Runtime module, per-user SSO, signing/email sandbox, storage/secrets/restore lifecycle |
-| Windmill | Preserved workflow; `tests/membership` checks synthetic atomic Sheets replay protocol | This is workflow replay, not Windmill/Documenso/Sheets provider recovery | Runtime/bootstrap, per-user SSO, migration and job replay boundaries, no real messages/payments |
-| Vaultwarden | No native/new-platform module found | No VM recovery evidence | Runtime/bootstrap, per-user access and recovery, data/attachment/key restore |
+| Documenso | Native module proven in the VM rehearsal (2026-11-05, [full-rehearsal.md](full-rehearsal.md), [documenso-host.md](documenso-host.md)); the preserved legacy membership workflow is separate | Fresh-node recovery proven in the VM rehearsal; not deployed to production | Runtime module, per-user SSO, signing/email sandbox, storage/secrets/restore lifecycle |
+| Windmill | Proven in the VM rehearsal ([full-rehearsal.md](full-rehearsal.md), [windmill-host.md](windmill-host.md)); `tests/membership` also checks the synthetic atomic Sheets replay protocol | Replacement-host recovery proven in the VM rehearsal; not deployed to production; workflow replay is not provider recovery | Runtime/bootstrap, per-user SSO, migration and job replay boundaries, no real messages/payments |
+| Vaultwarden | Native module proven in the VM rehearsal ([full-rehearsal.md](full-rehearsal.md), [vaultwarden-host.md](vaultwarden-host.md)) | Item, attachment and combined recovery proven in the VM rehearsal; not deployed to production | Runtime/bootstrap, per-user access and recovery, data/attachment/key restore |
 | Public static CDN | Policy/plan only, see issue #7 | No external purge/invalidation or recovery proof | Actual provider isolation, cache/auth exclusions, invalidation, geographically distributed measurements |
 
 The website's TFC release proof is separate evidence: source `3902e16`, real normal
@@ -72,7 +72,7 @@ found in the audited app paths; live inventory was not queried.
 | Resource and pressure | Native limits and VM sizes are declared. No measured combined host peak, disk-full/OOM/backup pressure or provider capacity proof. |
 | Rollback and installation | Explicit migrations prevent accidental startup migration. Schema downgrade/compatible rollback and blank-host install remain separate gates. Bare-metal disk/NIC/camera inventory is unknown. |
 
-Tracked in [issue #11](https://gitlab.com/terrace/tech/womb/-/issues/11), milestone
+Tracked in GitHub [Womb #11](https://github.com/terracefclub/womb/issues/11) (historical: [GitLab #11](https://gitlab.com/terrace/tech/womb/-/issues/11)), milestone
 Terrace revival; the supervisor/matrix do not close that acceptance issue.
 
 ## Combined disposable rehearsal acceptance
