@@ -53,6 +53,13 @@ runs, and the restored outbox must be owned, written and redacted by the CMS
 account. Each step fails with one fixed label (`website-lifecycle-<phase>-<step>`).
 These exact scripts are proven in the VM all-services rehearsal
 ([full-rehearsal.md](full-rehearsal.md)); **they have not yet run on a provider**.
+`infra/nixos/rehearsal_services.py` loads that module by a path relative to
+itself, so the lease runner must stage the whole repository tree, with both
+`infra/nixos/` and `platform/website-gateway/`, not `infra/nixos/` alone. If
+`lifecycle_steps.py` is absent the proof stops at import with the fixed error
+"lifecycle steps module missing; the whole repository tree must be staged".
+The same scripts, with their before and after checks, passed the VM rehearsal at `4348d0b`
+(see [full-rehearsal.md](full-rehearsal.md)).
 The three matching outputs are `config.system.build.diskoScript`,
 `config.system.build.toplevel` and `config.system.build.nixos-install`.
 Build each under the shared Linux builder lock with

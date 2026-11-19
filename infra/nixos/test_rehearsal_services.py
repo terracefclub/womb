@@ -247,6 +247,78 @@ class ServiceProofTests(unittest.TestCase):
         with self.assertRaises(services.Rejected):
             services.lifecycle(SimpleNamespace(role="app", run=lambda *args, **kwargs: None), "unknown")
 
+    def test_lifecycle_forwards_each_step_ceiling_exactly_with_the_documented_margin(self):
+        ceilings = {
+            "original": {"apply": 150, "approve": 150, "redeem": 90, "sign-in": 90, "link": 90},
+            "replacement": {"ownership": 30, "redeem": 90, "sign-in": 90, "link": 90,
+                            "erase": 180, "sweep": 240, "redaction": 30},
+        }
+        steps = {"original": services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS,
+                 "replacement": services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS}
+        for phase, expected in ceilings.items():
+            with self.subTest(phase=phase):
+                self.assertEqual([label for label, _, _ in steps[phase]], list(expected))
+                self.assertEqual({label: seconds for label, seconds, _ in steps[phase]}, expected)
+                forwarded = []
+                host = SimpleNamespace(role="app", run=lambda stage, script, *args, seconds=30:
+                                       forwarded.append((stage, seconds)))
+                services.lifecycle(host, phase)
+                self.assertEqual(forwarded, [(f"website-lifecycle-{phase}-{label}", seconds)
+                                             for label, seconds in expected.items()])
+        self.assertEqual(services.SSH_SLACK_SECONDS, 20)
+
+    def test_controller_timeout_is_each_ceiling_plus_the_ssh_margin_and_names_its_own_step(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            for phase, steps in (("original", services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS),
+                                 ("replacement", services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS)):
+                for failing, ceiling, _ in steps:
+                    seen = []
+
+                    def run(argv, seconds, *, capture, failing=failing, seen=seen):
+                        # The remote timeout and the controller timeout derive from one ceiling.
+                        remote = shlex.split(argv[-1])
+                        self.assertEqual(remote[:3], ["timeout", "--kill-after=10", remote[2]])
+                        seen.append((int(remote[2]), seconds))
+                        if len(seen) == len(self.step_names(phase, failing)):
+                            raise subprocess.TimeoutExpired(argv, seconds)
+                        return b""
+
+                    host = services.Host(directory, "app", {"serverId": 4}, ["ssh", "operator@192.0.2.5"],
+                                         run, directory / "rest.sock", time.time() + 100000)
+                    # Only the failing step may time out, so stop each run at that step.
+                    with self.subTest(phase=phase, step=failing), self.assertRaises(services.Rejected) as raised:
+                        services.lifecycle(host, phase)
+                    self.assertEqual(str(raised.exception), f"app website-lifecycle-{phase}-{failing} failed")
+                    ceilings = [seconds for label, seconds, _ in steps][:len(seen)]
+                    self.assertEqual(seen, [(seconds, seconds + services.SSH_SLACK_SECONDS) for seconds in ceilings])
+                    self.assertEqual(seen[-1], (ceiling, ceiling + services.SSH_SLACK_SECONDS))
+
+    def step_names(self, phase, failing):
+        steps = (services.lifecycle_steps.LIFECYCLE_ORIGINAL_STEPS if phase == "original"
+                 else services.lifecycle_steps.LIFECYCLE_REPLACEMENT_STEPS)
+        return [label for label, _, _ in steps][:[label for label, _, _ in steps].index(failing) + 1]
+
+    def test_missing_lifecycle_steps_module_fails_with_one_fixed_labelled_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = Path(root) / "platform" / "website-gateway" / "lifecycle_steps.py"
+            with self.assertRaises(services.Rejected) as raised:
+                services.load_lifecycle_steps(missing)
+            self.assertEqual(str(raised.exception), services.LIFECYCLE_STEPS_MISSING)
+            self.assertNotIn(root, str(raised.exception))
+            missing.parent.mkdir(parents=True)
+            missing.symlink_to(Path(root) / "absent")
+            with self.assertRaises(services.Rejected):
+                services.load_lifecycle_steps(missing)
+            missing.unlink()
+            missing.write_text("LIFECYCLE_PROLOGUE = 'x'\n")
+            self.assertEqual(services.load_lifecycle_steps(missing).LIFECYCLE_PROLOGUE, "x")
+        # The harness resolves the shared file relative to itself, not through sys.path.
+        self.assertEqual(services.LIFECYCLE_STEPS_PATH,
+                         Path(services.__file__).resolve().parents[2] / "platform" / "website-gateway" / "lifecycle_steps.py")
+        self.assertTrue(services.LIFECYCLE_STEPS_PATH.is_file())
+        self.assertIn("whole repository tree", services.LIFECYCLE_STEPS_MISSING)
+
     def test_restore_covers_the_outbox_and_sweep_stays_off_until_bootstrap(self):
         self.assertIn(services.OUTBOX, services.APP_PATHS)
         self.assertIn(services.OUTBOX, services.APP_SIGNATURE)

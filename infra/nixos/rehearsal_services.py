@@ -4,6 +4,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,11 +15,6 @@ import subprocess
 import sys
 import tempfile
 import time
-
-# The website lifecycle steps are shared verbatim with the VM all-services rehearsal.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "platform" / "website-gateway"))
-import lifecycle_steps  # noqa: E402
-
 
 CA = "/var/lib/terrace-rehearsal-trust/ca.pem"
 GATEWAY_INPUTS = "/var/lib/terrace-gateway-test"
@@ -69,6 +65,26 @@ class Rejected(ValueError):
 def require(condition, reason):
     if not condition:
         raise Rejected(reason)
+
+
+# The website lifecycle steps are shared verbatim with the VM all-services rehearsal, so
+# this harness depends on the repository layout: the lease runner must stage the whole
+# repository tree (infra/nixos/ and platform/website-gateway/), not infra/nixos/ alone.
+# The module is resolved by path relative to this file and a missing file fails at once.
+LIFECYCLE_STEPS_PATH = Path(__file__).resolve().parents[2] / "platform" / "website-gateway" / "lifecycle_steps.py"
+LIFECYCLE_STEPS_MISSING = "lifecycle steps module missing; the whole repository tree must be staged"
+
+
+def load_lifecycle_steps(path=LIFECYCLE_STEPS_PATH):
+    if not path.is_file():
+        raise Rejected(LIFECYCLE_STEPS_MISSING)
+    spec = importlib.util.spec_from_file_location("lifecycle_steps", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+lifecycle_steps = load_lifecycle_steps()
 
 
 # The commands below follow the accepted native order in platform/full/scenario.py.
@@ -394,6 +410,10 @@ def deployment_replicas(data):
     return sorted(result)
 
 
+# The controller waits this long beyond the remote timeout for ssh itself to return.
+SSH_SLACK_SECONDS = 20
+
+
 class Host:
     def __init__(self, directory, role, binding, ssh, runner, socket, expires):
         self.directory = directory
@@ -418,11 +438,11 @@ class Host:
                    "-R", "127.0.0.1:22422:" + str(self.socket), ssh[-1]]
         try:
             if data is None:
-                return self.runner([*ssh, command], reserve + 20, capture=capture)
+                return self.runner([*ssh, command], reserve + SSH_SLACK_SECONDS, capture=capture)
             with tempfile.TemporaryFile() as stream:
                 stream.write(data)
                 stream.seek(0)
-                return self.runner([*ssh, command], reserve + 20, stdin=stream, capture=capture)
+                return self.runner([*ssh, command], reserve + SSH_SLACK_SECONDS, stdin=stream, capture=capture)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             raise Rejected(f"{self.role} {stage} failed") from None
 
@@ -654,7 +674,7 @@ test "$(findmnt -rn -o FSTYPE --mountpoint /)" = ext4
 # the app's installed-identity run precedes the relay check, so the relay needs
 # APP_IDENTITY_SECONDS more of its window than the app.
 SERVICE_START_SECONDS = 30
-APP_IDENTITY_SECONDS = 50  # Host.run's default 30 s budget plus its 20 s SSH slack
+APP_IDENTITY_SECONDS = 50  # Host.run's default 30 s budget plus SSH_SLACK_SECONDS
 
 
 def require_launch_window(directory, phase, rescue, now, start=SERVICE_START_SECONDS):

@@ -1,6 +1,10 @@
 import json
 import argparse
 import ast
+import contextlib
+import io
+import hashlib
+import signal
 import stat
 import os
 from pathlib import Path
@@ -104,6 +108,152 @@ class CliComposition(unittest.TestCase):
         args = execute.call_args.args[0]
         self.assertTrue(args.all_services and args.documenso and args.documenso_signing and args.relay_peers)
 
+class DriverRoot(unittest.TestCase):
+    """The driver's GC root: created before guests start, released on every exit."""
+
+    def setUp(self):
+        self.parent = tempfile.TemporaryDirectory()
+        self.addCleanup(self.parent.cleanup)
+        self.base = Path(self.parent.name).resolve()
+        self.base.chmod(0o700)
+        self.store = self.base / 'store'
+        self.output = self.store / 'driver-output'
+        (self.output / 'bin').mkdir(parents=True)
+        self.driver = self.output / 'bin' / 'nixos-test-driver'
+        self.driver.write_text('#!/bin/sh\n')
+        for name in ['web', 'cms', 'tfc']:
+            (self.base / name).write_text('synthetic')
+        self.args = argparse.Namespace(webArchive=str(self.base / 'web'), cmsArchive=str(self.base / 'cms'),
+                                       tfcSource=str(self.base / 'tfc'), documenso=False, relay_peers=False,
+                                       documenso_signing=False, all_services=False)
+        self.out = self.base / 'out'
+        self.out.mkdir(mode=0o700)
+        patcher = patch.object(full, 'STORE', str(self.store) + os.sep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.run, self.run_id = create_run(self.base)
+
+    def popen(self, link_to='output'):
+        test, calls = self, []
+
+        class Child:
+            returncode = 0
+
+            def __init__(self, command, env, stdout, **_kwargs):
+                calls.append(env)
+                stdout.write(str(test.output).encode())
+                if link_to == 'output':
+                    os.symlink(test.output, env['CHECK_OUT_LINK'])
+                elif link_to:
+                    os.symlink(link_to, env['CHECK_OUT_LINK'])
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        return patch.object(full.subprocess, 'Popen', Child), calls
+
+    def test_warm_roots_the_driver_in_the_run_directory_and_checks_it_resolves(self):
+        popen, calls = self.popen()
+        with popen:
+            self.assertEqual(full.warm(self.run, self.run_id, self.args, '/synthetic/lock'), str(self.driver))
+        self.assertEqual(calls[0]['CHECK_OUT_LINK'], str(self.run / 'driver-root'))
+        self.assertTrue((self.run / 'driver-root').is_symlink())
+        self.assertEqual((self.run / 'driver-root').resolve(), self.output)
+
+    def test_warm_refuses_a_root_that_is_missing_or_resolves_elsewhere(self):
+        elsewhere = self.base / 'elsewhere'
+        elsewhere.mkdir()
+        for link_to in (None, elsewhere):
+            run, run_id = create_run(self.base)
+            popen, _ = self.popen(link_to)
+            with self.subTest(root=link_to), popen, self.assertRaises(RuntimeError):
+                full.warm(run, run_id, self.args, '/synthetic/lock')
+
+    def execute(self, warm_roots=True, containment=None):
+        """Run execute with a fake build and containment; return the run directory."""
+        def warm(run, run_id, _args, _lock):
+            os.symlink(self.output, run / 'driver-root')
+            if not warm_roots:
+                raise RuntimeError()
+            return str(self.driver)
+
+        def contained(run, run_id, command, _lock, **_kwargs):
+            # Guests would start here: the root must already resolve to the driver output.
+            self.assertEqual((run / 'driver-root').resolve(), self.output)
+            self.assertEqual(command[0], str(self.driver))
+            return containment(run, run_id) if containment else self.succeed(run)
+
+        with patch.object(full.sys, 'platform', 'linux'), patch.object(full.os, 'geteuid', return_value=1000), \
+                patch.dict(os.environ, {'BUILD_LOCK': '/synthetic/lock'}), \
+                patch.object(full, 'warm', warm), patch.object(full, 'contained_driver', contained):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    full.execute(argparse.Namespace(**{**vars(self.args), "output": str(self.out)}))
+            finally:
+                [run] = self.out.glob('run-*')
+                self.last = run
+        return self.last
+
+    def succeed(self, run):
+        artifacts = {}
+        for name, directory in [('encrypted-repository.tar', 'retained'), ('recovery-escrow.tar', 'escrow')]:
+            data = name.encode()
+            path = run / directory / name
+            path.write_bytes(data)
+            path.chmod(0o600)
+            artifacts[name] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        write_json(run / 'evidence' / 'scenario-result.json', {
+            'scope': 'terrace-disposable-synthetic', 'checks': {'allGuestsStopped': True}, 'artifacts': artifacts})
+        return {}
+
+    def test_root_is_released_after_success_and_the_receipt_is_complete(self):
+        run = self.execute()
+        self.assertFalse(os.path.lexists(run / 'driver-root'))
+        self.assertTrue(self.output.is_dir())
+        receipt = json.loads((run / 'receipt.json').read_text())
+        self.assertTrue(receipt['complete'] and receipt['computeOff'])
+
+    def test_root_is_released_after_a_failed_build_or_failed_guests(self):
+        with self.assertRaises(RuntimeError):
+            self.execute(warm_roots=False)
+        self.assertFalse(os.path.lexists(self.last / 'driver-root'))
+        self.out = self.base / 'out2'
+        self.out.mkdir(mode=0o700)
+
+        def fail(_run, _run_id):
+            raise RuntimeError()
+
+        with self.assertRaises(RuntimeError):
+            self.execute(containment=fail)
+        self.assertFalse(os.path.lexists(self.last / 'driver-root'))
+        self.assertFalse(json.loads((self.last / 'receipt.json').read_text())['complete'])
+        self.assertTrue(self.output.is_dir())
+
+    def test_root_is_released_when_a_signal_interrupts_the_guests(self):
+        for number, signum in enumerate([signal.SIGTERM, signal.SIGINT, signal.SIGHUP]):
+            self.out = self.base / f'signal{number}'
+            self.out.mkdir(mode=0o700)
+
+            def interrupt(_run, _run_id, signum=signum):
+                os.kill(os.getpid(), signum)
+                for _ in range(100):
+                    __import__('time').sleep(0.05)
+                raise AssertionError('signal was not converted to an exception')
+
+            previous = {name: signal.getsignal(name) for name in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]}
+            full.convert_signals()
+            try:
+                with self.subTest(signal=signal.Signals(signum).name), self.assertRaises(InterruptedError):
+                    self.execute(containment=interrupt)
+            finally:
+                for name, handler in previous.items():
+                    signal.signal(name, handler)
+            self.assertFalse(os.path.lexists(self.last / 'driver-root'))
+            self.assertFalse(json.loads((self.last / 'receipt.json').read_text())['complete'])
+
 
 class SyntheticPurge(unittest.TestCase):
     def setUp(self):
@@ -200,6 +350,30 @@ class SyntheticPurge(unittest.TestCase):
         with self.assertRaises(ValueError):
             full.purge(self.run, True)
         self.assert_preserved()
+
+    def test_leftover_driver_root_is_removed_but_never_followed(self):
+        target = self.base / 'rooted-output'
+        target.mkdir()
+        (target / 'keep').write_text('retained')
+        (self.run / 'driver-root').symlink_to(target, target_is_directory=True)
+        full.purge(self.run, True)
+        self.assertFalse(os.path.lexists(self.run / 'driver-root'))
+        self.assertEqual((target / 'keep').read_text(), 'retained')
+        self.assertEqual(self.sentinel.read_text(), 'retained')
+        self.assertTrue(json.loads((self.run / 'receipt.json').read_text())['syntheticStatePurged'])
+
+    def test_driver_root_that_is_not_a_symlink_blocks_the_whole_purge(self):
+        for make in (lambda path: path.mkdir(), lambda path: path.write_text('not a link')):
+            path = self.run / 'driver-root'
+            make(path)
+            with self.assertRaises(ValueError):
+                full.purge(self.run, True)
+            self.assert_preserved()
+            self.assertTrue(self.runtime.exists())
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
 
     def test_public_or_symlink_receipt_rejected(self):
         (self.run / 'receipt.json').chmod(0o644)

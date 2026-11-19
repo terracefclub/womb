@@ -394,6 +394,23 @@ into the restored outbox; the invitation files still name the applicants),
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
 
+### Observed review-nit closure with restored lifecycle checks — November 19, 2026 (Pacific)
+
+Womb `4348d0b` (PR 49, code-identical to the later head) re-ran the `--all-services`
+rehearsal with website `680ad56` from 07:20 to 08:05 (scenario 1793.29 seconds); the
+protocol assertions stayed at 198 in the original, restored and concurrent-restored
+phases. The shared lifecycle steps now also assert, before the action, that no
+offboarding notice exists in the restored outbox before `erase`, that no invitation
+exists before `approve`, and that both invitation files still hold the applicants'
+addresses with no erasure confirmation before `sweep`. They took, before backup:
+apply 15.5 s, approve 1.56 s, redeem 0.63 s, sign-in 0.81 s, link 0.74 s; on the
+replacement: ownership 0.09 s, redeem 0.71 s, sign-in 0.76 s, link 0.78 s, erase 3.39 s,
+sweep 6.51 s, redaction 0.10 s. The run's synthetic state was purged afterwards
+(receipt kept). At the same commit the infrastructure, run-check and runner unit tests,
+the cloud rehearsal configuration check (now also failing closed on boot-enabled
+sockets and paths), and the website and gateway checks passed. These steps are proven
+in the VM rehearsal only; **they have not yet run on a provider**.
+
 ### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
 
 Womb `48ab695` with the website `680ad56` bundles completed the `--all-services`
