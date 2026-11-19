@@ -48,7 +48,7 @@ in {
         cores = 1;
       };
       security.pki.certificateFiles = ["${ca}/ca.pem"];
-      environment.systemPackages = [tool pkgs.sops pkgs.age pkgs.openssl pkgs.bun pkgs.jq pkgs.curl pkgs.netcat-openbsd patterns];
+      environment.systemPackages = [tool pkgs.sops pkgs.age pkgs.ssh-to-age pkgs.openssl pkgs.bun pkgs.jq pkgs.curl pkgs.netcat-openbsd patterns];
       services.openssh = {
         enable = true;
         hostKeys = [
@@ -401,9 +401,13 @@ in {
           escrow = operator.succeed("cat " + STORE + "/escrow.recipient").strip()
           ok(new_recipient != old_recipient and recipients == sorted([new_recipient, escrow]), "re-keyed to the new host and the escrow only")
           ok(op("sops decrypt --output-type json " + STORE + "/hosts/app/secrets.sops.json | jq -S -c . | sha256sum").strip() == plain, "same values after re-key")
-          revoked = "HOME=/var/empty env -u SOPS_AGE_KEY_FILE SOPS_AGE_SSH_PRIVATE_KEY_FILE={} sops decrypt --output-type json " + STORE + "/hosts/app/secrets.sops.json >/dev/null 2>&1"
-          operator.fail(revoked.format("/root/stage/app/ssh_host_ed25519_key"))
-          operator.succeed(revoked.format("/root/stage/app-2/ssh_host_ed25519_key"))
+          # Decrypt as each host would: sops-nix converts the ed25519 host key to an
+          # age identity (sops' own SSH option only matches ssh-ed25519 recipients).
+          revoked = ("umask 077; ssh-to-age -private-key -i {}/ssh_host_ed25519_key -o /dev/shm/host.age && "
+                     "HOME=/var/empty env -u SOPS_AGE_KEY_FILE SOPS_AGE_KEY_FILE=/dev/shm/host.age sops decrypt --output-type json " + STORE + "/hosts/app/secrets.sops.json >/dev/null 2>&1; "
+                     "rc=$?; rm -f /dev/shm/host.age; exit $rc")
+          operator.fail(revoked.format("/root/stage/app"))
+          operator.succeed(revoked.format("/root/stage/app-2"))
           ok(True, "retired host key cannot decrypt; the new one can")
           stage("/root/stage/app-2")
 
