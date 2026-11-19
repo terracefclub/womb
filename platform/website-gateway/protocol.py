@@ -296,7 +296,7 @@ def content():
 
 APPLY_OUTCOMES = [("limited", b"Too many applications from here"), ("moved", b"Your connection changed"),
                   ("reload", b"Please reload the page"), ("closed", b"Applications are not open"), ("unavailable", b"temporarily unavailable"),
-                  ("fields", b"Please check the"), ("received", b"received")]
+                  ("fields", b"Please check the"), ("received", b"Your request was received.")]
 
 
 def apply(attempts):
@@ -325,20 +325,21 @@ def apply(attempts):
         # Fixed application wording only (never submitted values): which outcome the page reported.
         outcomes.append(next((label for label, text in APPLY_OUTCOMES if text in body), "other"))
     stage = f"application form through the gateway: statuses {statuses} outcomes {outcomes}"
-    return statuses
+    # A non-enhanced form post renders the page with status 200 even for fail(429); the page text says which.
+    check(all(status == 200 for status in statuses))
+    return outcomes
 
 
 def apply_burst():
     # Six submissions from one real address, each forging a different client address.
     attempts = [(APPLICANT + "@terrace.invalid", "203.0.113.10")] + [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 6)]
-    statuses = apply(attempts)
-    check(statuses == [200, 200, 200, 200, 200, 429])
+    check(apply(attempts) == ["received"] * 5 + ["limited"])
     print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited despite forged client headers.")
 
 
 def apply_other():
     # A different real client address, forging the exhausted address, still has its own bucket.
-    check(apply([("other-network@terrace.invalid", "127.0.0.1")]) == [200])
+    check(apply([("other-network@terrace.invalid", "127.0.0.1")]) == ["received"])
     print(f"Separate-address application check passed: {count} bounded assertions.")
 
 
@@ -393,10 +394,11 @@ def redeem():
     link = re.search(r"https://web\.terrace\.invalid/join/#([A-Za-z0-9_-]+)", invitation_file(email)["body"])
     check(link is not None)
     anonymous = Client()
-    for expected in [200, 404]:
-        status, headers, _ = anonymous.request(WEB + "/join/", "POST", urllib.parse.urlencode({"token": link[1]}).encode(),
-                                               {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB})
-        check(status == expected)
+    # Single use: the first post accepts it, the repeat is refused (the page states which; status stays 200).
+    for accepted in [True, False]:
+        status, headers, body = anonymous.request(WEB + "/join/", "POST", urllib.parse.urlencode({"token": link[1]}).encode(),
+                                                  {"Content-Type": "application/x-www-form-urlencoded", "Origin": WEB})
+        check(status == 200 and (b"Invitation accepted." in body) == accepted and (b"That code was not accepted." in body) == (not accepted))
         private(headers)
     member, status = sign_in(APPLICANT, "web")
     check(status == 303)
