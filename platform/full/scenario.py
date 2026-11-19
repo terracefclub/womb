@@ -678,7 +678,7 @@ def sweep_by_timer():
     before = gateway.succeed('systemctl show terrace-cms-sweep.service -p InvocationID --value').strip()
     gateway.succeed('systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d \x273 days ago\x27 /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer')
     gateway.wait_until_succeeds('test "$(systemctl show terrace-cms-sweep.service -p InvocationID --value)" != ' + shlex.quote(before) + ' && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive', timeout=180)
-    assert gateway.succeed('systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User --value').split() == ['success', '0', 'terrace_cms']
+    assert dict(line.split('=', 1) for line in gateway.succeed('systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User').splitlines()) == {'Result': 'success', 'ExecMainStatus': '0', 'User': 'terrace_cms'}
     return True
 
 

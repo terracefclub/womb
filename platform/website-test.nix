@@ -232,11 +232,11 @@ in {
         cms_pid = source.succeed("systemctl show terrace-cms.service -p MainPID --value").strip()
         source.succeed(f"tr '\\0' '\\n' </proc/{cms_pid}/environ | grep -qx 'LIFECYCLE_OUTBOX_DIR=${outbox}'")
         source.succeed("systemctl is-enabled terrace-cms-sweep.timer && systemctl is-active terrace-cms-sweep.timer")
-        assert source.succeed("systemctl show terrace-cms-sweep.service -p User,Type --value").split() == ["terrace_cms", "oneshot"]
+        assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p User,Type").splitlines()) == {"User": "terrace_cms", "Type": "oneshot"}
         # A pending synthetic outbox row (no file copy yet): the sweep writes its private mirror.
         pending = sql(source, "insert into message_outbox(kind,recipient_label,recipient_email,subject,body) values ('denial','Synthetic Applicant','host-applicant@terrace.invalid','Synthetic subject','Synthetic body') returning id").splitlines()[0]
         source.succeed("systemctl start terrace-cms-sweep.service")
-        assert source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus --value").split() == ["success", "0"]
+        assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
         mirror = "${outbox}/" + pending.zfill(6) + "-denial.json"
         assert source.succeed(f"stat -c %U:%a {mirror}").strip() == "terrace_cms:600"
         source.succeed(f"jq -e '.to == \"host-applicant@terrace.invalid\"' {mirror} >/dev/null")
@@ -246,7 +246,7 @@ in {
         before = source.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
         source.succeed("systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d '3 days ago' /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer")
         source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {before} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=120)
-        assert source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus --value").split() == ["success", "0"]
+        assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()

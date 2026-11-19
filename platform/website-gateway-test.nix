@@ -190,7 +190,7 @@ in {
         before = gateway.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
         gateway.succeed("systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d '3 days ago' /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer")
         gateway.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != '{before}' && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=180)
-        assert gateway.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User --value").split() == ["success", "0", "terrace_cms"]
+        assert dict(line.split("=", 1) for line in gateway.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,User").splitlines()) == {"Result": "success", "ExecMainStatus": "0", "User": "terrace_cms"}
         gateway.succeed("jq -e '.to == \"Former member\" and .body == \"Redacted after erasure.\"' " + mirror + " >/dev/null")
         gateway.fail("grep -rl local-alumni@terrace.invalid /var/lib/terrace-cms-outbox")
         # Platform-level negative case: the packaged sweep refuses a public deployment without its outbox,

@@ -294,6 +294,11 @@ def content():
     print(f"Imported-content checks passed: {count} bounded assertions; news list, imported post, public body image and old-URL redirect.")
 
 
+APPLY_OUTCOMES = [("limited", b"Too many applications from here"), ("moved", b"Your connection changed"),
+                  ("reload", b"Please reload the page"), ("closed", b"Applications are not open"), ("unavailable", b"temporarily unavailable"),
+                  ("fields", b"Please check the"), ("received", b"received")]
+
+
 def apply(attempts):
     """Open the form for every attempt, wait out the minimum fill time, then submit each in order."""
     global stage
@@ -309,14 +314,17 @@ def apply(attempts):
         check(form.token is not None)
         tokens.append((client, form.token, email, forged))
     time.sleep(3.5)
-    statuses = []
+    statuses, outcomes = [], []
     for client, token, email, forged in tokens:
         fields = {"t": token, "website": "", "name": "Synthetic Applicant", "affiliation": "alumni", "classYear": "",
                   "contactEmail": email, "note": "Synthetic rehearsal application."}
-        status, headers, _ = client.request(WEB + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), {
+        status, headers, body = client.request(WEB + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), {
             "Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "X-Forwarded-For": forged, "X-Real-IP": forged})
         private(headers)
         statuses.append(status)
+        # Fixed application wording only (never submitted values): which outcome the page reported.
+        outcomes.append(next((label for label, text in APPLY_OUTCOMES if text in body), "other"))
+    stage = f"application form through the gateway: statuses {statuses} outcomes {outcomes}"
     return statuses
 
 
