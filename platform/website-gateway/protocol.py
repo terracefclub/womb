@@ -44,7 +44,7 @@ class Client:
     def request(self, url, method="GET", data=None, headers=None):
         # All redirects/actions are checked before use; no arbitrary URL fetch.
         check(urllib.parse.urlsplit(url).netloc in [
-            "web.terrace.invalid", "cms.terrace.invalid", "identity.terrace.invalid", "127.0.0.1:8088"
+            "web.terrace.invalid", "cms.terrace.invalid", "identity.terrace.invalid", "127.0.0.1:8088", "127.0.0.1:14294"
         ])
         request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
         try:
@@ -299,14 +299,18 @@ APPLY_OUTCOMES = [("limited", b"Too many applications from here"), ("moved", b"Y
                   ("fields", b"Please check the"), ("received", b"Your request was received.")]
 
 
-def apply(attempts):
-    """Open the form for every attempt, wait out the minimum fill time, then submit each in order."""
+def apply(attempts, base=WEB, accept="text/html"):
+    """Open the form for every attempt, wait out the minimum fill time, then submit each in order.
+
+    A browser's non-enhanced form post asks for text/html and gets the action's HTTP status (fail(429) is 429).
+    Without that Accept header SvelteKit answers with its JSON action protocol: HTTP 200 and the result inside.
+    """
     global stage
-    stage = "application form through the gateway"
+    stage = "application form through the gateway" if base == WEB else "application form on the private loopback port"
     tokens = []
     for email, forged in attempts:
         client = Client()
-        status, headers, body = client.request(WEB + "/apply/", headers={"X-Forwarded-For": forged, "X-Real-IP": forged})
+        status, headers, body = client.request(base + "/apply/", headers={"X-Forwarded-For": forged, "X-Real-IP": forged})
         check(status == 200)
         private(headers)
         form = ApplyForm()
@@ -318,28 +322,35 @@ def apply(attempts):
     for client, token, email, forged in tokens:
         fields = {"t": token, "website": "", "name": "Synthetic Applicant", "affiliation": "alumni", "classYear": "",
                   "contactEmail": email, "note": "Synthetic rehearsal application."}
-        status, headers, body = client.request(WEB + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), {
-            "Content-Type": "application/x-www-form-urlencoded", "Origin": WEB, "X-Forwarded-For": forged, "X-Real-IP": forged})
+        status, headers, body = client.request(base + "/apply/", "POST", urllib.parse.urlencode(fields).encode(), {
+            "Content-Type": "application/x-www-form-urlencoded", "Accept": accept, "Origin": WEB, "X-Forwarded-For": forged, "X-Real-IP": forged})
         private(headers)
         statuses.append(status)
-        # Fixed application wording only (never submitted values): which outcome the page reported.
-        outcomes.append(next((label for label, text in APPLY_OUTCOMES if text in body), "other"))
-    stage = f"application form through the gateway: statuses {statuses} outcomes {outcomes}"
-    # A non-enhanced form post renders the page with status 200 even for fail(429); the page text says which.
-    check(all(status == 200 for status in statuses))
-    return outcomes
+        if accept == "application/json":
+            result = json.loads(body)
+            outcomes.append((result.get("type"), result.get("status")))
+        else:
+            # Fixed application wording only (never submitted values): which outcome the page reported.
+            outcomes.append(next((label for label, text in APPLY_OUTCOMES if text in body), "other"))
+    stage += f": statuses {statuses} outcomes {outcomes}"
+    return statuses, outcomes
 
 
 def apply_burst():
-    # Six submissions from one real address, each forging a different client address.
+    # Six submissions from one real address (the gateway guest), each forging a different client address.
     attempts = [(APPLICANT + "@terrace.invalid", "203.0.113.10")] + [(f"burst-{index}@terrace.invalid", f"198.51.{index}.7") for index in range(1, 6)]
-    check(apply(attempts) == ["received"] * 5 + ["limited"])
-    print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited despite forged client headers.")
+    check(apply(attempts) == ([200] * 5 + [429], ["received"] * 5 + ["limited"]))
+    # The same exhausted bucket seen two other ways. Through the gateway with SvelteKit's JSON action protocol
+    # (no text/html Accept): HTTP 200 carrying the 429 failure. Directly on the private loopback port, with the
+    # header the gateway would write: the same 429 page, so the gateway passes the application's status through.
+    check(apply([("burst-json@terrace.invalid", "192.0.2.1")], accept="application/json") == ([200], [("failure", 429)]))
+    check(apply([("burst-direct@terrace.invalid", "127.0.0.1")], base="http://127.0.0.1:14294") == ([429], ["limited"]))
+    print(f"Application rate-limit checks passed: {count} bounded assertions; five accepted, sixth limited (HTTP 429 through the gateway and on the loopback port) despite forged client headers.")
 
 
 def apply_other():
     # A different real client address, forging the exhausted address, still has its own bucket.
-    check(apply([("other-network@terrace.invalid", "127.0.0.1")]) == ["received"])
+    check(apply([("other-network@terrace.invalid", "127.0.0.1")]) == ([200], ["received"]))
     print(f"Separate-address application check passed: {count} bounded assertions.")
 
 
