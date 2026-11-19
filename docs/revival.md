@@ -13,12 +13,13 @@ OS, applications, data and recovery state have not been verified healthy.
   cloud purchase. Preserve existing server data.
   Update 2026-11-18: the owner authorised a dedicated Terrace Hetzner project
   token on 2026-11-07 (read-only inventory first, existing server outside every
-  write target). Disposable, lease-bound provider rehearsals, each needing a
+  write target). Disposable, lease-bound provider rehearsals (leases 1 to 4), each needing a
   fresh explicit approval, have run since. Known-full lease 3 (run `90e965da`,
   2026-11-13) proved on Hetzner: host-key pinning, the RAM installer, the install
   plan, FORMAT and install, reboot from the installed disk and networking.
-  Services launch, off-host backup, retire and replacement restore are not yet
-  proven on Hetzner. No production host exists and no production provider apply
+  Lease 4 (run `7d217921`, 2026-11-18) was stopped by builder-lock contention
+  before the plan step and proved nothing beyond lease 3. Services launch,
+  off-host backup, retire and replacement restore are not yet proven on Hetzner. No production host exists and no production provider apply
   has been made (see the [owner runbook](owner-runbook.md) Part 6).
 - One x86_64 server on premises later. Hardware, disks, accelerators and network
   are unknown; do not invent a disk layout. Single-node downtime is acceptable.
