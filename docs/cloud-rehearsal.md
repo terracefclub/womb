@@ -37,6 +37,13 @@ For the gateway, use `--argstr role gateway` and supply
 `--arg webArchive /absolute/reviewed/web.tar.gz`,
 `--arg cmsArchive /absolute/reviewed/cms.tar.gz` and
 `--argstr tfcSource /absolute/reviewed/tfc-source` in place of `privateIPv4`.
+The source must be a checkout of the website at the pinned revision in
+`platform/website-release.json`: its identity contract files are hash-checked
+against `platform/test-identity-contract.nix`. The gateway profile keeps the
+daily CMS sweep timer off at boot like every other writer; the service proof
+arms it after adoption, adds an invitation to the outbox before backup, and on
+the replacement requires the CMS account to use the restored outbox (a new
+notice from the CMS and a sweep redaction).
 The three matching outputs are `config.system.build.diskoScript`,
 `config.system.build.toplevel` and `config.system.build.nixos-install`.
 Build each under the shared Linux builder lock with

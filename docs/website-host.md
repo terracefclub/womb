@@ -127,8 +127,17 @@ every administrator-initiated erasure:
 systemctl start terrace-cms-sweep.service
 ```
 
-The migration unit conflicts with the sweep. A failed sweep leaves the unit
-failed with a labelled line in the private journal; the next run retries.
+A sweep requested while an explicit migration runs waits for it (and is skipped
+if one is still active when it starts); starting a migration stops a running sweep,
+which is idempotent and retried. A failed sweep leaves the unit failed with a
+labelled line in the private journal; the next run retries.
+
+The CMS and website accounts have static IDs (`cmsUid` 44121, `webUid` 44122)
+because uploads and the outbox are restored with their numeric owners. These apply
+to new hosts. NixOS does not renumber existing users: a host that already has these
+accounts with allocated numbers needs a planned renumbering (stop the services,
+change the IDs, `chown` their state) before adopting the static values, and backups
+taken before the change still carry the old numbers. No such host exists yet.
 
 ## Health, private logs and capacity
 

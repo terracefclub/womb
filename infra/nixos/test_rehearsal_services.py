@@ -190,7 +190,8 @@ class ServiceProofTests(unittest.TestCase):
     def test_remote_shells_parse(self):
         for name in ("INACTIVE", "BOOTSTRAP_APP", "BOOTSTRAP_RELAY", "APP_SIGNATURE",
                      "MEDIA_FIXTURE", "PVC_PROBE", "STOP_APP", "RESTORE", "COPY_RESTORED",
-                     "ADOPT_POSTGRES", "WIND_ROLES", "START_APPLICATIONS", "RELAY_SIGNATURE", "INSTALL_INPUT"):
+                     "ADOPT_POSTGRES", "WIND_ROLES", "START_APPLICATIONS", "RELAY_SIGNATURE", "INSTALL_INPUT",
+                     "LIFECYCLE_ORIGINAL", "LIFECYCLE_REPLACEMENT"):
             with self.subTest(name=name):
                 result = subprocess.run(["bash", "-n"], input=getattr(services, name).encode(),
                                         capture_output=True, timeout=5)
@@ -210,9 +211,18 @@ class ServiceProofTests(unittest.TestCase):
                 self.assertIn(name + ".timer", units)
             for unit in ("documenso-test-mailpit.service", "terrace-vaultwarden-migration-server.service",
                          "terrace-identity-health.timer", "cloud-rehearsal-inputs.service",
+                         "terrace-cms-sweep.timer", "terrace-cms-sweep.service",
                          "postgresql-setup.service", *(name + ".service" for name in services.APP_SETUP)):
                 self.assertEqual(unit in units, role == "app")
             self.assertEqual("cloud-rehearsal-relay-address.service" in units, role == "relay")
+
+
+    def test_restore_covers_the_outbox_and_sweep_stays_off_until_bootstrap(self):
+        self.assertIn(services.OUTBOX, services.APP_PATHS)
+        self.assertIn(services.OUTBOX, services.APP_SIGNATURE)
+        self.assertLess(services.BOOTSTRAP_APP.index("systemctl start terrace-cms.service"),
+                        services.BOOTSTRAP_APP.index("systemctl start terrace-cms-sweep.timer"))
+        self.assertTrue(services.STOP_APP.lstrip().startswith("systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service"))
 
 
 if __name__ == "__main__":

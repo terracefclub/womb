@@ -18,6 +18,7 @@ import time
 
 CA = "/var/lib/terrace-rehearsal-trust/ca.pem"
 GATEWAY_INPUTS = "/var/lib/terrace-gateway-test"
+OUTBOX = "/var/lib/terrace-cms-outbox"
 ROLES = ("app", "relay")
 APP_WRITERS = (
     "postgresql", "keycloak", "nginx", "k3s", "terrace-web", "terrace-cms",
@@ -30,7 +31,7 @@ APP_ONESHOTS = (
     "terrace-documenso-bootstrap", "terrace-windmill-migrate", "terrace-windmill-bootstrap",
     "terrace-vaultwarden-migrate", "terrace-vaultwarden-migration-server",
     "terrace-vaultwarden-bootstrap", "terrace-vaultwarden-guard", "terrace-identity-health",
-    "documenso-test-mailpit",
+    "documenso-test-mailpit", "terrace-cms-sweep",
 )
 APP_SETUP = (
     "terrace-documenso-inputs", "terrace-documenso-database", "terrace-documenso-image",
@@ -40,7 +41,7 @@ APP_SETUP = (
 RELAY_SETUP = ("cloud-rehearsal-relay-address",)
 BACKUP_UNITS = ("terrace-backup", "terrace-backup-check", "terrace-backup-freshness")
 APP_PATHS = (
-    GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media",
+    GATEWAY_INPUTS, "/var/lib/terrace-website-inputs", "/var/lib/terrace-cms-media", OUTBOX,
     "/var/lib/rancher/k3s/server", "/var/lib/rancher/k3s/storage", "/etc/rancher/node",
     "/var/lib/terrace-documenso-inputs", "/var/lib/terrace-documenso",
     "/var/lib/terrace-windmill-inputs", "/var/lib/terrace-windmill",
@@ -110,6 +111,8 @@ truncate -s 0 "$envfile"
 chmod 0400 "$envfile"
 systemctl start terrace-cms-migrate.service
 systemctl start terrace-cms.service terrace-web.service
+# The daily lifecycle sweep is a writer too: armed only after explicit bootstrap.
+systemctl start terrace-cms-sweep.timer
 systemctl start k3s.service
 wait_for k3s kubectl wait --for=condition=Ready node/gateway --timeout=5s
 local_retain() {
@@ -156,6 +159,13 @@ done
 for table in users ciphers attachments; do
   sql terrace_vaultwarden "select md5(coalesce(string_agg(row_to_json(r)::text,chr(10) order by row_to_json(r)::text),'')) from $table r"
 done
+sql terrace_cms "select md5(coalesce(string_agg(row_to_json(a)::text,chr(10) order by a.id),'')) from member_applications a"
+# Live invitation links exist only in this private mirror: owner, modes and bytes.
+cd /var/lib/terrace-cms-outbox
+stat -c '%U %a' .
+find . -type f -printf '%P %U %m\n' | LC_ALL=C sort
+find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum
+cd /
 sha256sum /var/lib/terrace-website-inputs/*.env \
   /var/lib/terrace-documenso-inputs/secrets.json \
   /var/lib/terrace-windmill-inputs/bootstrap.json /var/lib/terrace-windmill/migrated-image \
@@ -196,6 +206,7 @@ k3s kubectl get node gateway -o jsonpath='{.metadata.uid}{"\n"}'
 k3s kubectl get pvc rehearsal -o jsonpath='{.spec.volumeName}{"\n"}'
 """
 STOP_APP = r"""
+systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service
 systemctl stop vaultwarden.service
 systemctl stop podman-terrace-windmill-worker.service
 systemctl stop podman-terrace-windmill-server.service
@@ -305,6 +316,34 @@ systemctl is-active --quiet podman-terrace-windmill-worker.service
 systemctl start vaultwarden.service
 systemctl start terrace-vaultwarden-bootstrap.service
 wait_for curl --fail --silent --max-time 5 http://127.0.0.1:18222/alive
+"""
+# Website lifecycle through the real gateway (platform/website-gateway/protocol.py):
+# the original writes an invitation into the outbox; the replacement must use the
+# restored outbox as its own CMS account.
+LIFECYCLE_ORIGINAL = r"""
+export SSL_CERT_FILE="$1"
+python3 /etc/gateway-protocol.py apply-burst | grep -q '^Application rate-limit checks passed: '
+python3 /etc/gateway-protocol.py approve | grep -q '^Approval checks passed: '
+test "$(stat -c %U:%a /var/lib/terrace-cms-outbox/*-invitation.json)" = terrace_cms:600
+"""
+LIFECYCLE_REPLACEMENT = r"""
+export SSL_CERT_FILE="$1"
+outbox=/var/lib/terrace-cms-outbox
+test "$(id -u terrace_cms)" = 44121
+test "$(stat -c %U:%a "$outbox" "$outbox"/*-invitation.json | tr '
+' ' ')" = 'terrace_cms:700 terrace_cms:600 '
+runuser -u terrace_cms -- jq -e '.to == "local-alumni@terrace.invalid"' "$outbox"/*-invitation.json >/dev/null
+python3 /etc/gateway-protocol.py redeem | grep -q '^Redemption checks passed: '
+python3 /etc/gateway-protocol.py erase | grep -q '^Erasure checks passed: '
+# The running CMS wrote a new notice into the restored outbox.
+test "$(stat -c %U:%a "$outbox"/*-offboarding.json)" = terrace_cms:600
+systemctl start terrace-cms-sweep.service
+test "$(systemctl show terrace-cms-sweep.service -p Result --value)" = success
+# The sweep, as the same account, rewrote the restored file and wrote the confirmation.
+jq -e '.to == "Former member" and .body == "Redacted after erasure."' "$outbox"/*-invitation.json >/dev/null
+test "$(stat -c %U:%a "$outbox"/*-erasure-confirmation.json "$outbox"/*-invitation.json | tr '
+' ' ')" = 'terrace_cms:600 terrace_cms:600 '
+if grep -rl local-alumni@terrace.invalid "$outbox"; then exit 1; fi
 """
 RELAY_SIGNATURE = r"""
 headscale users list -o json | jq -cS 'sort_by(.id)'
@@ -441,7 +480,7 @@ def inactive(host, names):
     timers = BACKUP_UNITS
     if host.role == "app":
         services += (*APP_ONESHOTS, *APP_SETUP)
-        timers += ("terrace-identity-health",)
+        timers += ("terrace-identity-health", "terrace-cms-sweep")
         if "postgresql" in names:
             services += ("postgresql-setup",)
     else:
@@ -532,6 +571,7 @@ def original(app, relay, inputs, verify_repository):
     app.run("synthetic-media", MEDIA_FIXTURE)
     node = pvc(app, "original")
     assertions = protocol(app, "")
+    app.run("website-lifecycle", LIFECYCLE_ORIGINAL, CA, seconds=240)
     replicas = quiesce(app, relay)
     signature = app_signature(app)
     app.run("repository-init", "terrace-backup init primary", seconds=90, repository=True)
@@ -545,7 +585,7 @@ def original(app, relay, inputs, verify_repository):
         "verified": True, "servers": sorted([app.id, relay.id]), "snapshots": snapshots,
         "repositoryConfigSha256": repo_hash, "inputSha256": {name: digest(value) for name, value in inputs.items()},
         "gatewaySignature": signature, "relaySignature": relay_signature, "pvc": node,
-        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True,
+        "replicas": replicas, "protocolAssertions": assertions, "idempotentBootstrap": True, "outboxInvitation": True,
         "writersStopped": True,
     }
 
@@ -580,11 +620,12 @@ install -m 0600 -o headscale -g headscale \
     require(bootstrap_relay(relay) == backup["relaySignature"], "restored relay identity changed")
     assertions = protocol(app, "-restored")
     require(assertions == backup["protocolAssertions"], "restored protocol assertion count changed")
+    app.run("restored-website-lifecycle", LIFECYCLE_REPLACEMENT, CA, seconds=300)
     quiesce(app, relay)
     stop_database(app)
     return {
         "servers": sorted([app.id, relay.id]), "protocolAssertions": assertions,
-        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True,
+        "retainedPVCReadWrite": True, "nativeDatabaseAdoption": True, "restoredOutboxUsedByCms": True,
         "relayIdentityAndPrivateHTTPS": True, "writersStopped": True,
     }
 

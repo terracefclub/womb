@@ -112,7 +112,7 @@ in {
   services.k3s.images = [pkgs.k3s.airgap-images probeImage];
   systemd.services = lib.mkMerge [
     (lib.genAttrs writers (_: {wantedBy = lib.mkForce [];}))
-    (lib.genAttrs ["terrace-cms" "terrace-cms-migrate" "terrace-web"] (_: {
+    (lib.genAttrs ["terrace-cms" "terrace-cms-migrate" "terrace-cms-sweep" "terrace-web"] (_: {
       environment.NODE_EXTRA_CA_CERTS = trust;
     }))
     {
@@ -138,6 +138,9 @@ in {
   ];
   systemd.targets.postgresql.wantedBy = lib.mkForce [];
   systemd.timers.terrace-identity-health.wantedBy = lib.mkForce [];
+  # The daily sweep would pull in postgresql.target on a blank or half-adopted
+  # boot; the explicit bootstrap arms it after adoption.
+  systemd.timers.terrace-cms-sweep.wantedBy = lib.mkForce [];
   terrace.backup = {
     postgresql.databases = ["keycloak"];
     extraPaths = {

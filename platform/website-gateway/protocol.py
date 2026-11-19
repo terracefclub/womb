@@ -324,6 +324,7 @@ def apply(attempts, base=WEB, html=False):
         form.feed(body.decode())
         check(form.token is not None)
         tokens.append((client, form.token, email, forged))
+    # The website refuses a submission sooner than three seconds after its form token was issued.
     time.sleep(3.5)
     results = []
     for client, token, email, forged in tokens:
@@ -456,8 +457,11 @@ def erase():
     status, _, scrubbed = admin.api(CMS + "/api/member-applications/" + str(linked["id"]) + "?depth=0")
     check(status == 200 and scrubbed["status"] == "withdrawn" and scrubbed["name"] == "Erased applicant")
     check(scrubbed["contactEmail"] != email and not scrubbed.get("note"))
+    # The tombstone is refused at sign-in (the website's denied page) and no member session exists.
     erased, status = sign_in(APPLICANT, "web")
-    check(erased.request(WEB + "/members/")[0] != 200)
+    check(status == 403)
+    status, headers, _ = erased.request(WEB + "/members/")
+    check(status == 303 and headers["Location"].startswith("/auth/login"))
     print(f"Erasure checks passed: {count} bounded assertions; offboarded, erased, application scrubbed and member access closed.")
 
 

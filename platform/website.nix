@@ -321,12 +321,15 @@ in {
     };
     systemd.services.terrace-cms-migrate = lib.recursiveUpdate cmsRuntime {
       description = "Explicit CMS migration; never part of automatic startup";
-      conflicts = ["terrace-cms.service" "terrace-web.service" "terrace-cms-sweep.service"];
+      conflicts = ["terrace-cms.service" "terrace-web.service"];
       requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
-      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-web.service" "terrace-cms-sweep.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-web.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
       serviceConfig = {
         Type = "oneshot";
         TimeoutStartSec = 180;
+        # A running sweep is interrupted (it is idempotent and retried); a sweep
+        # requested during the migration waits for it, see terrace-cms-sweep.
+        ExecStartPre = ["+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" (identityGuard "cms")];
       };
       script = ''
         set -euo pipefail
@@ -392,12 +395,23 @@ in {
     # Daily member-lifecycle housekeeping: expire invitations, withdraw stale
     # applications, finish outbox mirror writes and redactions after erasure.
     # Same account, environment file, guards and migration gate as the CMS.
+    # cmsRuntime keeps uploads writable: the bundle launcher refuses a CMS_MEDIA_DIR
+    # it cannot write, although the sweep itself only writes the outbox.
     systemd.services.terrace-cms-sweep = lib.recursiveUpdate cmsRuntime {
       description = "Terrace CMS member-lifecycle sweep (bin/sweep)";
       requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
-      after = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      # Ordered after an explicit migration: a sweep requested while one runs waits for it,
+      # and never stops it (the migration unit does not conflict with the sweep).
+      after = ["terrace-website-inputs.service" "terrace-cms-migrate.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
       serviceConfig = {
         Type = "oneshot";
+        ExecCondition = "+${pkgs.writeShellScript "terrace-cms-sweep-yield" ''
+          state=$(${pkgs.systemd}/bin/systemctl show terrace-cms-migrate.service -p ActiveState --value)
+          if test "$state" = active || test "$state" = activating || test "$state" = reloading; then
+            echo 'CMS migration in progress; this sweep run is skipped.'
+            exit 1
+          fi
+        ''}";
         ExecStartPre = [(identityGuard "cms") requireMigration];
         # bin/sweep bounds itself at 120 s (exit 2 when it times out).
         TimeoutStartSec = 150;

@@ -58,6 +58,10 @@ in {
             touch /var/lib/terrace-cms/stop-verified
           fi
         ''}"
+        # Test-only stand-in for a long migration, used by the sweep-yield check.
+        "+${pkgs.writeShellScript "website-test-slow-migration" ''
+          if test -e /run/website-test-slow-migration; then ${pkgs.coreutils}/bin/sleep 20; fi
+        ''}"
       ];
       terrace.backup.targets.primary = {
         repository = "sftp:restic@recovery:website-repository";
@@ -196,6 +200,10 @@ in {
             # Each refused start also starts the namespace journal sync unit; four refusals within
             # ten seconds would otherwise trip that unit's default start limit, not the gate under test.
             source.succeed(undo + "; systemctl reset-failed terrace-cms-migrate.service terrace-website-inputs.service systemd-journald-sync@terrace-apps.service")
+        # The reset above must not hide a broken sync unit: it starts cleanly on its own.
+        source.succeed("systemctl start systemd-journald-sync@terrace-apps.service")
+        assert dict(line.split("=", 1) for line in source.succeed("systemctl show systemd-journald-sync@terrace-apps.service -p Result,ActiveState").splitlines())["Result"] == "success"
+        source.fail("systemctl is-failed --quiet systemd-journald-sync@terrace-apps.service")
         source.succeed("systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
         source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value | grep -v '^$' >/var/lib/terrace-cms/old-pids && systemctl start terrace-cms-migrate.service && test -f /var/lib/terrace-cms/stop-verified")
         source.fail("systemctl is-active --quiet terrace-cms.service")
@@ -234,6 +242,8 @@ in {
         cms_pid = source.succeed("systemctl show terrace-cms.service -p MainPID --value").strip()
         source.succeed(f"tr '\\0' '\\n' </proc/{cms_pid}/environ | grep -qx 'LIFECYCLE_OUTBOX_DIR=${outbox}'")
         source.succeed("systemctl is-enabled terrace-cms-sweep.timer && systemctl is-active terrace-cms-sweep.timer")
+        timer = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.timer -p TimersCalendar,Persistent").splitlines())
+        assert "OnCalendar=*-*-* 03:30:00" in timer["TimersCalendar"] and timer["Persistent"] == "yes", timer
         assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p User,Type").splitlines()) == {"User": "terrace_cms", "Type": "oneshot"}
         # A pending synthetic outbox row (no file copy yet): the sweep writes its private mirror.
         pending = sql(source, "insert into message_outbox(kind,recipient_label,recipient_email,subject,body) values ('denial','Synthetic Applicant','host-applicant@terrace.invalid','Synthetic subject','Synthetic body') returning id").splitlines()[0]
@@ -249,6 +259,19 @@ in {
         source.succeed("systemctl stop terrace-cms-sweep.timer && mkdir -p /var/lib/systemd/timers && touch -d '3 days ago' /var/lib/systemd/timers/stamp-terrace-cms-sweep.timer && systemctl start terrace-cms-sweep.timer")
         source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {before} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=120)
         assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
+        # A sweep requested during a migration waits for it and never stops it.
+        migration = source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID --value").strip()
+        source.succeed("touch /run/website-test-slow-migration && systemctl start --no-block terrace-cms-migrate.service")
+        source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx activating", timeout=30)
+        running = source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID --value").strip()
+        assert running != migration
+        source.succeed("systemctl start --no-block terrace-cms-sweep.service && sleep 3")
+        assert source.succeed("systemctl show terrace-cms-migrate.service -p ActiveState --value").strip() == "activating"
+        source.wait_until_succeeds("systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive && test \"$(systemctl show terrace-cms-sweep.service -p ExecMainStartTimestampMonotonic --value)\" -gt \"$(systemctl show terrace-cms-migrate.service -p ExecMainExitTimestampMonotonic --value)\"", timeout=180)
+        migrated = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID,Result,ActiveState").splitlines())
+        assert migrated == {"InvocationID": running, "Result": "success", "ActiveState": "inactive"}, migrated
+        assert dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus").splitlines()) == {"Result": "success", "ExecMainStatus": "0"}
+        source.succeed("rm /run/website-test-slow-migration && systemctl start terrace-cms.service terrace-web.service")
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
