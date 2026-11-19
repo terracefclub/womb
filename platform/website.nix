@@ -17,28 +17,47 @@
     && !(lib.hasPrefix "/nix/store/" value)
     && value != "/nix/store"
     && lib.all (part: part != "." && part != "..") (lib.splitString "/" value);
-  inputCheck = pkgs.writeShellScript "terrace-website-input-check" ''
-    set -euo pipefail
-    directory=${lib.escapeShellArg cfg.inputsDirectory}
-    if ! test -d "$directory" || test -L "$directory" ||
-       test "$(stat -c %u:%a "$directory")" != 0:700; then
-      echo 'Terrace website input directory rejected; require a private root-owned runtime directory.' >&2
-      exit 1
-    fi
-    for file in cms.env web.env; do
-      path="$directory/$file"
-      if ! test -f "$path" || test -L "$path" ||
-         ! test "$(stat -c %u:%a "$path")" = 0:400; then
-        echo 'Terrace website environment input rejected; require root-owned mode0400 regular files.' >&2
+  # Environment files: in the private input directory, or delivered elsewhere
+  # by a secret manager (inputFiles, for example sops-nix templates on ramfs).
+  envFiles =
+    if cfg.inputFiles == null
+    then {
+      cms = "${cfg.inputsDirectory}/cms.env";
+      web = "${cfg.inputsDirectory}/web.env";
+    }
+    else cfg.inputFiles;
+  inputCheck = pkgs.writeShellScript "terrace-website-input-check" (''
+      set -euo pipefail
+    ''
+    + (
+      if cfg.inputFiles == null
+      then ''
+        directory=${lib.escapeShellArg cfg.inputsDirectory}
+        if ! test -d "$directory" || test -L "$directory" ||
+           test "$(stat -c %u:%a "$directory")" != 0:700; then
+          echo 'Terrace website input directory rejected; require a private root-owned runtime directory.' >&2
+          exit 1
+        fi
+        for file in cms.env web.env; do
+          path="$directory/$file"
+      ''
+      else ''
+        for path in ${lib.escapeShellArg envFiles.cms} ${lib.escapeShellArg envFiles.web}; do
+      ''
+    )
+    + ''
+          if ! test -f "$path" || test -L "$path" ||
+             ! test "$(stat -c %u:%a "$path")" = 0:400; then
+            echo 'Terrace website environment input rejected; require root-owned mode0400 regular files.' >&2
+            exit 1
+          fi
+        done
+      if ! ${pkgs.jq}/bin/jq -e '.component == "cms" and .revision == "${cfg.revision}" and .runtime.node == "${pin.node}"' ${cfg.cmsPackage}/release.json >/dev/null 2>&1 ||
+         ! ${pkgs.jq}/bin/jq -e '.component == "web" and .revision == "${cfg.revision}" and .runtime.node == "${pin.node}"' ${cfg.webPackage}/release.json >/dev/null 2>&1; then
+        echo 'Terrace website release manifest rejected; require one reviewed component pair.' >&2
         exit 1
       fi
-    done
-    if ! ${pkgs.jq}/bin/jq -e '.component == "cms" and .revision == "${cfg.revision}" and .runtime.node == "${pin.node}"' ${cfg.cmsPackage}/release.json >/dev/null 2>&1 ||
-       ! ${pkgs.jq}/bin/jq -e '.component == "web" and .revision == "${cfg.revision}" and .runtime.node == "${pin.node}"' ${cfg.webPackage}/release.json >/dev/null 2>&1; then
-      echo 'Terrace website release manifest rejected; require one reviewed component pair.' >&2
-      exit 1
-    fi
-  '';
+    '');
   health = port: route: ''
     ${pkgs.curl}/bin/curl --fail --silent --output /dev/null --connect-timeout 2 --max-time 5 \
       --retry 30 --retry-connrefused --retry-delay 2 --retry-max-time 120 \
@@ -93,7 +112,7 @@
       // {
         User = cmsUser;
         Group = cmsUser;
-        EnvironmentFile = "${cfg.inputsDirectory}/cms.env";
+        EnvironmentFile = envFiles.cms;
         ExecStartPre = identityGuard "cms";
         WorkingDirectory = cfg.cmsPackage;
         StateDirectory = "terrace-cms";
@@ -162,6 +181,22 @@ in {
       type = lib.types.str;
       default = "/var/lib/terrace-website-inputs";
       description = "Root-owned0700 runtime directory containing root-owned0400 cms.env and web.env. Backed up when terrace.backup is enabled.";
+    };
+    inputFiles = lib.mkOption {
+      type = lib.types.nullOr (lib.types.submodule {
+        options = {
+          cms = lib.mkOption {
+            type = lib.types.str;
+            description = "Absolute runtime path of the root-owned 0400 CMS environment file.";
+          };
+          web = lib.mkOption {
+            type = lib.types.str;
+            description = "Absolute runtime path of the root-owned 0400 website environment file.";
+          };
+        };
+      });
+      default = null;
+      description = "Environment files delivered by a secret manager outside inputsDirectory (for example sops-nix templates). When set, inputsDirectory is not used and not backed up: the secret manager is the source of truth.";
     };
     mediaDirectory = lib.mkOption {
       type = lib.types.str;
@@ -240,6 +275,10 @@ in {
       {
         assertion = lib.all validDirectory [cfg.inputsDirectory cfg.mediaDirectory cfg.outboxDirectory cfg.databaseSocketDirectory];
         message = "Terrace website directories must be normalized absolute runtime paths outside the Nix store.";
+      }
+      {
+        assertion = cfg.inputFiles == null || (lib.all (path: lib.hasPrefix "/" path && !(lib.hasPrefix "/nix/store" path) && !(lib.hasInfix "\n" path)) [cfg.inputFiles.cms cfg.inputFiles.web] && cfg.inputFiles.cms != cfg.inputFiles.web);
+        message = "Terrace website inputFiles must be two distinct absolute runtime paths outside the Nix store.";
       }
       {
         assertion = let
@@ -377,7 +416,7 @@ in {
         // {
           User = webUser;
           Group = webUser;
-          EnvironmentFile = "${cfg.inputsDirectory}/web.env";
+          EnvironmentFile = envFiles.web;
           ExecStartPre = identityGuard "web";
           WorkingDirectory = cfg.webPackage;
           MemoryHigh = "512M";
@@ -430,7 +469,7 @@ in {
     terrace.backup = lib.mkIf config.terrace.backup.enable {
       postgresql.databases = lib.mkIf cfg.manageDatabase ["terrace_cms"];
       media.website = cfg.mediaDirectory;
-      extraPaths.website-inputs = cfg.inputsDirectory;
+      extraPaths.website-inputs = lib.mkIf (cfg.inputFiles == null) cfg.inputsDirectory;
       # Live invitation links exist only here; restore them with the database.
       extraPaths.website-outbox = cfg.outboxDirectory;
     };

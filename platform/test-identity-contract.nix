@@ -14,9 +14,11 @@
         inherit path;
         name = builtins.baseNameOf relative;
       };
-  realm = checked "identity/tools/production-realm.ts" "91ff97ec6d0902e085a29cf3e96349ee7ef99c21eabffedc033543b67931603e";
-  clients = checked "identity/tools/realm-config.ts" "0df304749356778154387550267dfea1dcd232be0682eeb4e07a5b52016810d3";
-  input = checked "cms/src/auth/production-input.ts" "59f359df123bda17222684d45cdd0b9ca2c65423e4274ad32dc67856a4870f9d";
+  # The same pins as the production producer (identity-contract.nix).
+  pins = builtins.fromJSON (builtins.readFile ./identity-contract.json);
+  realm = checked "identity/tools/production-realm.ts" pins."identity/tools/production-realm.ts";
+  clients = checked "identity/tools/realm-config.ts" pins."identity/tools/realm-config.ts";
+  input = checked "cms/src/auth/production-input.ts" pins."cms/src/auth/production-input.ts";
 in
   pkgs.runCommand "terrace-gateway-test-contract" {} ''
     mkdir -p $out/identity/tools $out/cms/src/auth
