@@ -213,9 +213,17 @@ absence (runbook 6.5).
 
 ## Verification
 
-`platform/production-check` (VM) proves delivery only through this mechanism,
-absence of every generated value from the system closure, unit files, journals,
-process arguments and the raw disk, ramfs ownership and modes, rotation of the
-intake secret, and a host replacement with a new key re-keyed from escrow.
+`platform/production-check` (VM) proves: delivery only through this mechanism
+(`verify` PASS, 13 secrets and 5 templates in the rehearsal instance); absence
+of every value from the system closure, unit files and properties, every
+journal, process arguments, files on the root disk outside the databases and
+the raw disk (Keycloak's own client-secret copies in PostgreSQL excepted), each
+scan first shown to find a planted non-secret canary; `root:root 0400` on ramfs
+and nothing left after a reboot; rotation of the intake secret (old value
+refused with 403, both services restarted onto the new value, website and CMS
+still agree); and a host replacement: backup, original disk destroyed, new host
+key, `rekey` from escrow (the retired key can no longer decrypt), restore with
+reconciliation, identical data and the lifecycle continuing. The operator
+guest's disk and journal hold no value either.
 `infra/nixos/production-eval-check.nix` proves the evaluation invariants, and
 `platform/production/test_terrace_secrets.py` the tool's own guards.
