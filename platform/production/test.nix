@@ -475,7 +475,7 @@ in {
           push("database password")
           ok(pids(["keycloak"]) == before, "push alone does not restart Keycloak")
           out = op("terrace-secrets apply app identity/database-password" + PUSH)
-          ok("Keycloak database role updated and Keycloak restarted." in out, "database password applied on the host")
+          ok("Database role keycloak updated with a SCRAM verifier and Keycloak restarted." in out, "database password applied on the host as a SCRAM verifier")
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(pids(["keycloak"]) != before, "Keycloak restarted onto the new database password")
           app.succeed("PGPASSWORD=\"$(cat /run/secrets/identity/database-password)\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null")
