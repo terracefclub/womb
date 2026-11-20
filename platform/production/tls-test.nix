@@ -416,8 +416,9 @@ in {
             app.succeed(f"cat {path} >/dev/null")
             app.fail(f"runuser -u nginx -- sh -c 'cat {path}' >/dev/null 2>&1")
         ok(True, "the nginx user cannot read the TLS key (ACME directory and lego copy)")
-        credentials = app.succeed("systemctl show nginx.service -p LoadCredential --value")
-        ok(f"{directory}/key.pem" in credentials and f"{directory}/fullchain.pem" in credentials and state(app, "nginx.service", "RefreshOnReload") == "credentials", f"nginx gets the pair as credentials refreshed on reload ({credentials.strip()})")
+        unit = app.succeed("systemctl cat nginx.service")
+        loads = [line for line in unit.splitlines() if line.startswith("LoadCredential=")]
+        ok(any(line.endswith(f"{directory}/key.pem") for line in loads) and any(line.endswith(f"{directory}/fullchain.pem") for line in loads) and "RefreshOnReload=credentials" in unit.splitlines(), f"nginx gets the pair as credentials refreshed on reload {loads}")
         ok(app.succeed("cmp -s /run/credentials/nginx.service/terrace-website-key " + directory + "/key.pem && echo same").strip() == "same", "nginx's credential copy is the ACME key")
         accounts = app.succeed("find /var/lib/acme/.lego/accounts -type f -printf '%m %u\\n' | sort -u").strip().splitlines()
         ok(accounts == ["600 acme"], f"account key 0600 acme {accounts}")
