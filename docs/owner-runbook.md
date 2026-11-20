@@ -1,4 +1,4 @@
-> This is a sanitised snapshot of the owner's private working copy of this runbook (2026-11-19, Womb `81ef6dd`, website `dev` `9fa1341`). Machine-specific paths and private file names are replaced by placeholders, and it may lag the working copy. `$TERRACE_ROOT` stands for the root of the owner's workspace.
+> This is a sanitised snapshot of the owner's private working copy of this runbook (2026-11-20, Womb `d3cd717`, website `dev` `9fa1341`). Machine-specific paths and private file names are replaced by placeholders, and it may lag the working copy. `$TERRACE_ROOT` stands for the root of the owner's workspace.
 
 # Terrace revival: owner runbook
 
