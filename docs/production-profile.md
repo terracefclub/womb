@@ -349,6 +349,13 @@ HTTPS, redirect, backup), never on a provider. Not proven: a real provider
 host, real DNS and certificates, real secret values or an escrow retrieval with
 the owner.
 
+## Keycloak administration
+
+The app role also installs `terrace-identity-admin` (root-only wrapper) and the
+never-started-at-boot `terrace-identity-bootstrap-admin.service`
+(`platform/production/identity-admin.nix`). Procedures, the break-glass path and
+their VM proof: [identity administration](identity-admin.md) (G-15, G-39, G-40).
+
 ## Out of scope, with what each needs
 
 | Follow-up | Gap | What it needs |
@@ -356,7 +363,6 @@ the owner.
 | TLS against a public CA | G-12 | Built and VM-proven against a local ACME server ([TLS](tls.md), `tls.mode = "acme"`; manual stays the default). Needs the owner's CA choice and terms acceptance, a contact address, real DNS, and a first real issuance; DNS-01 is not built |
 | Mail transport | G-20 | Owner's provider choice; SMTP credentials become sops secrets; outbox delivery job; a test against a local sink |
 | Alerting and log retention | G-23 | Delivery channel, external probe, certificate and backup-age alerts that reach a person, a tested failing check |
-| Keycloak production administration | G-15, G-39 | First administrator via `kc.sh bootstrap-admin` with the escrowed `identity/bootstrap-admin-password`, its removal, role grants, OIDC client-secret rotation through the admin API, realm reconciliation |
 | Production sizing | G-9 | Owner decision (above) |
 | Installer stages the ciphertext | G-11 | `rescue_install.py` change and a lease rehearsal (above) |
 | Documenso, Windmill, Vaultwarden in production | 6.18-6.20, 6.22 | Owner sign-off, then the prerequisites above, one at a time |

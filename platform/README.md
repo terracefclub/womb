@@ -32,7 +32,9 @@ No cloud resource or existing Womb infrastructure is changed by this directory.
   (`nixosModules.production-app`, `nixosModules.production-relay`,
   [docs](../docs/production-profile.md)) enable the website, gateway, identity,
   backup and relay modules with sops-nix secrets ([docs](../docs/secrets.md));
-  they are proven in a VM, not deployed.
+  they are proven in a VM, not deployed. Keycloak administration on the app
+  role (`terrace-identity-admin`, [docs](../docs/identity-admin.md)) has its own
+  VM check, `platform/production-identity-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`.
 
 The optional native [identity host](../docs/identity-host.md)
 (`nixosModules.identity`, default off) adds PostgreSQL-backed Keycloak, a limited

@@ -35,6 +35,7 @@ in {
     ../website-gateway.nix
     ../identity.nix
     ../backup.nix
+    ./identity-admin.nix
   ];
   options.terrace.production.app = {
     webHostname = lib.mkOption {
