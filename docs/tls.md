@@ -331,7 +331,10 @@ nixpkgs) on the test network. Pebble's HTTPS certificate is made at boot inside
 its guest; its roots are fetched from its management API at test time. The
 rehearsal harness (`platform/production/tls-rehearsal.nix`, refused in
 production) lets the ACME client trust pebble (`LEGO_CA_CERTIFICATES`) and the
-expiry check use pebble's roots. No guest has a route off the test network.
+expiry check use pebble's roots. No guest has a route off the test network. The
+VM proofs give the expiry check an explicit trust anchor file
+(`terrace.production.tls.trustAnchorFile`), so the default system trust store
+path of `terrace-tls check` is not exercised by a VM proof.
 
 It proves: nothing ACME and no port 80 before adoption; an ACME host needs and
 accepts no `tls/*`; placeholder, then issuance by HTTP-01 for the three names
