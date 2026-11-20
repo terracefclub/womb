@@ -52,3 +52,34 @@ it does not prescribe a production host count or authorize a provider apply.
 Issue descriptions: problem, intended behavior, acceptance criteria. Labels:
 `platform`, `website`, `migration`, `integrations`, `community`. Distinguish ready,
 in progress, review, and external dependency. Keep evidence in the linked MR.
+
+## Follow-ups recorded 2026-11-20
+
+Small review findings that did not block a merge. Each is open work, not a defect
+known to affect a deployed host (none exists).
+
+- `terrace-tls prepare-acme` inspects only the first stored certificate
+  directory entry, and silently ignores a mistyped `--overwrite` when no valid
+  certificate exists (`platform/production/tls.nix`; [TLS](tls.md)).
+- `terrace-identity-admin` ([identity administration](identity-admin.md)): a
+  `--dry-run` can turn on master-realm hardening; a failure of the hardening
+  step aborts the command that triggered it (no lockout, because
+  `break-glass begin` needs no login); the `first-admin` success path's
+  hardening call and the timer's hardening-off branch have unit or VM coverage
+  gaps.
+- The production VM proof's early trust guard (`trust_consistent`) runs on the
+  app only, not the relay, and its fingerprint comparison is nearly
+  tautological. The proof also no longer exercises the expiry check's default
+  system trust store.
+- The same latent weakness PR 55 fixed in the production proof (a test CA with a
+  random key trusted through `security.pki`, which copies it into a separately
+  cached bundle that a rebuild can leave stale) remains in the tests that still
+  use `security.pki`: `platform/relay-test.nix`, `platform/windmill-test.nix`,
+  `platform/identity-test.nix`, `platform/identity-restore-test.nix`,
+  `platform/vaultwarden-test.nix`, `platform/vaultwarden-functional-test.nix`,
+  `platform/documenso-test.nix`, `platform/documenso-functional-test.nix`,
+  `platform/website-gateway-test.nix`, `platform/full/test.nix` and
+  `platform/full/relay-peers.nix`. Real hosts are unaffected.
+- The website repository's realm contract should enable admin events for the
+  `terrace` realm (`adminEventsEnabled`); the realm reconciliation then applies
+  it. Until then the journal lines are the record of site-account changes.

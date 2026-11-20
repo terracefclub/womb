@@ -2,7 +2,7 @@
 
 # Terrace revival: owner runbook
 
-Prepared 2026-11-18, independently verified the same day (see the Verification log at the end), from `CLAUDE_HANDOFF.md` (website checkpoint 2026-11-18, Womb checkpoint 2026-11-13), Womb `origin/trunk` `01464be` and tfc-website `origin/dev` `8883875`, then re-checked against `dad0a20` and lease 4's result (second pass) and again on 2026-11-19 against Womb `origin/trunk` `f8fa07b` and website `origin/dev` `b582459` (fourth pass), and against Womb `81ef6dd` and website `9fa1341` (sixth pass). Nothing in this file is new procedure. Every command is copied from a repository document, and the source is given in parentheses; where a command was adapted (a placeholder, a port or a directory chosen for you) the step says so. Where no procedure is written down, the step says **GAP: no documented procedure** and says what is missing.
+Prepared 2026-11-18, independently verified the same day (see the Verification log at the end), from `CLAUDE_HANDOFF.md` (website checkpoint 2026-11-18, Womb checkpoint 2026-11-13), Womb `origin/trunk` `01464be` and tfc-website `origin/dev` `8883875`, then re-checked against `dad0a20` and lease 4's result (second pass) and again on 2026-11-19 against Womb `origin/trunk` `f8fa07b` and website `origin/dev` `b582459` (fourth pass), and against Womb `81ef6dd` and website `9fa1341` (sixth pass), and against Womb `da10c76` (PR 54, ACME certificates) on 2026-11-20 (seventh pass). Nothing in this file is new procedure. Every command is copied from a repository document, and the source is given in parentheses; where a command was adapted (a placeholder, a port or a directory chosen for you) the step says so. Where no procedure is written down, the step says **GAP: no documented procedure** and says what is missing.
 
 ---
 
@@ -496,16 +496,78 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     systemctl start terrace-identity-health.service
     ```
     - Worked if: the units are active and the health unit succeeds. The realm import creates a missing realm and skips an existing one; it is not reconciliation. Never delete a realm to force an update (G-39).
-- [ ] **5.5 Get into the production Keycloak admin console.**
-    - Who: Claude can do this for you
-    - Status: NOT YET BUILT
-    - GAP: no documented procedure (partly addressed in Womb `docs/secrets.md`: the first-administrator bootstrap password is generated and escrowed, `identity/bootstrap-admin-password`, never declared on a production host, but how an operator reaches the console, creates the first administrator and removes the bootstrap account is still open, G-15). The proxy denies the root, administration and master-realm paths and "no remote admin route is provided yet". The backend is on loopback port 8088 and management on 9000. `docs/identity-host.md` does not say how an operator opens the admin console (an SSH local forward is how the K3s API and Home Assistant are reached, but it is not written for Keycloak). Needed: the procedure and a bootstrap administrator that is removed afterwards. See G-15.
-    - Worked if: a named administrator signs in over a private path and the temporary bootstrap account no longer exists.
-- [ ] **5.6 Create editor accounts and grant roles.** CMS access comes only from the realm roles `editorial-editor` and `editorial-admin`; member approval grants none. A removed role takes effect within 60 seconds; revoke the session for immediate effect.
-    - Who: You, using the Keycloak admin console
-    - Status: NOT YET BUILT (production)
-    - GAP: no documented procedure beyond "grant/remove roles in Keycloak" (`cms/README.md`). Locally the synthetic editors are seeded. Verified-email and first-password handling have no mail transport behind them (G-16, G-20).
-    - Worked if: each editor signs in at the CMS admin with **Sign in with Terrace** and sees only what their role allows.
+    - After a website re-pin (the new release changes the identity contract), reconcile the existing realm; take a backup first (`docs/identity-host.md`). On the app host, as root, with a named administrator (5.5):
+    ```bash
+    sudo terrace-identity-admin realm plan  --admin <you>
+    sudo terrace-identity-admin realm apply --admin <you> --plan-sha256 <hash from the plan>
+    ```
+    The plan compares only what the contract declares and prints each change with a hash (`docs/identity-admin.md`, section 6). It shows realm settings to update, roles to create, user-profile attributes, clients (a new client only if its secret is already delivered; the plan says `(secret: the delivered value)`, never the value), protocol mappers and scopes, and scope mappings; it also lists what it keeps (undeclared roles, clients, mappers and scopes). Read it yourself: the hosting policy does not bound protocol mappers, scope mappings, `fullScopeAllowed`, `consentRequired` or free-form client attributes, and the plan prints each mapper's type and configuration and each new client's full definition. Apply never deletes a user, credential, session, client, role or the realm, and never changes an existing client's secret (6.32). `apply` recomputes the plan from the pinned release and refuses unless the hash matches, applies, then re-plans and fails unless converged; exit status 1 is a refusal and 3 means the plan holds a refused item (an attribute dropped, a client disabled, something not understood), so nothing can be applied. `realm plan --definition FILE` plans against another root-owned file for review only.
+    - Reconciliation status: PROVEN IN VM REHEARSAL (Womb PR 53, merged as `d3cd717`; the VM proof applied a changed definition showing all nine change kinds, with users, credentials and sessions unchanged, then a no-op second run and three refused plans). Not proven: it was tested on an edited copy of the pinned template, not on a real website release.
+    - Worked if (reconciliation): `Applied N change(s); the realm now matches the definition.` and a second `plan` says `Converged`.
+- [ ] **5.5 Get into Keycloak administration (first administrator, more administrators, break-glass).** There is no web console in production: the proxy answers 404 for the root, `/admin/` and every master-realm path, and no admin hostname or SSH tunnel is provided. Administration is `sudo terrace-identity-admin` over SSH on the app host, as root, through Keycloak's loopback backend (`docs/identity-admin.md`; Womb `docs/identity-host.md`, which says the website document's "admin console" reads, for production, as "use `terrace-identity-admin`"). Administrators are named accounts in the master realm; every command asks `--admin NAME` and that account's password (from the terminal, or one line of stdin with `--password-stdin`; never an argument).
+    - Who: Claude can do this for you, with you at the terminal for the passwords
+    - Status: PROVEN IN VM REHEARSAL (Womb PR 53, merged as `d3cd717`; `docs/identity-admin.md`: a real Keycloak whose master realm has no administrator, the whole sequence below, break-glass with the proxy stopped and every administrator locked out). Not proven: any real host, real accounts or passwords, a real operator terminal session (the proof feeds passwords on stdin), a Keycloak upgrade, a sustained lockout attack, a Keycloak database restore after these commands. See G-15 and G-40.
+    - Before you start: the host is adopted (6.30), `sudo systemctl show keycloak.service -p ActiveState` says `active`, and `ssh operator@<app address>` works with your operator key (use `ssh -t` for a password prompt). Status at any time, read-only and with no login:
+    ```bash
+    sudo terrace-identity-admin status
+    ```
+    Worked if: `Keycloak ready: yes`, and the lists of named and temporary administrators and waiting handoff files are what you expect.
+    - Do, first administrator (once per deployment; the master realm of a new deployment has no administrator, and the profile refuses a bootstrap administrator in its configuration):
+      1. On the operator machine, hand the escrowed bootstrap password to the host over the pinned SSH channel (it lands in `/run/terrace-identity-admin/`, root `0400`, tmpfs):
+    ```bash
+    terrace-secrets apply app identity/bootstrap-admin-password --address <app address>
+    ```
+      Worked if: `Delivered identity/bootstrap-admin-password to /run/terrace-identity-admin/bootstrap-admin-password`.
+      2. On the host, look first, then do it (add `--set-password` to type the initial password instead of receiving a generated one):
+    ```bash
+    sudo terrace-identity-admin first-admin --username <you> --email <you@...> --first-name <First> --last-name <Last> --dry-run
+    sudo terrace-identity-admin first-admin --username <you> --email <you@...> --first-name <First> --last-name <Last>
+    ```
+      It stops Keycloak (about a minute in which nobody can sign in anywhere), creates the temporary administrator `terrace-bootstrap`, starts Keycloak, creates your named administrator with the `admin` role, proves it signs in and holds `admin`, turns on master-realm brute-force protection and admin events, deletes `terrace-bootstrap`, checks it is refused and removes the delivered file. Worked if: `First administrator <you> ready (...); it signs in and holds the admin role.` and `terrace-bootstrap deleted and refused`; `status` shows only your account and `Delivered bootstrap password: absent`; running it again says `Already done`.
+      3. Replace the initial password (every new administrator must, before any other command is accepted):
+    ```bash
+    sudo cat /run/terrace-identity-admin/handoff/master-<you>.password   # only if it was generated; on your own terminal
+    ssh -t operator@<app address> sudo terrace-identity-admin password --admin <you>
+    ```
+      Worked if: `Password of <you> changed; the old one is refused.` The handoff file is removed.
+      4. The bootstrap value is single use: rotate it in the store (nothing to push; it is never delivered):
+    ```bash
+    terrace-secrets rotate app identity/bootstrap-admin-password --manual
+    ```
+    - If not: if `first-admin` was interrupted, check `status` and `systemctl is-active keycloak` (systemd starts Keycloak again even if the tool died while it was stopped), then run the **same command** again while the delivered file is still there; it resumes, repairs a half-created named administrator and deletes the bootstrap account only after the named administrator is proven. It never resets an account that has a password of its own: it refuses and keeps the bootstrap account, and if that is your working administrator you finish with `break-glass end --admin <you>`. If the delivered file is gone (a reboot clears tmpfs), deliver it again with step 1. If the escrow key is not at hand, use break-glass (below). `status` shows whether master-realm hardening is on; the check below fails while it is off and a named administrator exists.
+    - Forgotten temporary accounts: `terrace-identity-temporary-admin-check.timer` (armed by adoption, every 15 minutes) fails `terrace-identity-temporary-admin-check.service`, visible in `systemctl --failed`, and logs at `crit` while a `terrace-bootstrap` or `terrace-recovery-*` account is older than the alert age (default 240 minutes, D-41), or while a named administrator exists and master-realm brute-force protection or admin events are off. Run it by hand with `sudo terrace-identity-admin check-temporary`.
+    - Do, more administrators (`--dry-run` is accepted on each):
+    ```bash
+    sudo terrace-identity-admin admin create --admin <you> --username <them> --email <...> --first-name <...> --last-name <...> [--dry-run]
+    sudo terrace-identity-admin admin disable --admin <you> --username <them> [--dry-run]
+    sudo terrace-identity-admin admin enable  --admin <you> --username <them> [--dry-run]
+    ```
+    Hand the generated initial password over privately and delete the handoff file; they run `password` before anything else. `disable` ends the account's sessions and refuses to disable the last enabled named administrator. `enable` also clears a brute-force lockout. Worked if: `list --realm master` shows the account with `admin`.
+    - Break-glass (no administrator can sign in, and single sign-on or the proxy may be down; G-40):
+    ```bash
+    ssh -t operator@<app address>                    # host access by SSH key only
+    sudo terrace-identity-admin break-glass begin --dry-run
+    sudo terrace-identity-admin break-glass begin
+    sudo cat /run/terrace-identity-admin/handoff/master-terrace-recovery-<time>-<random>.password
+    sudo terrace-identity-admin admin enable --admin terrace-recovery-<time>-<random> --username <you>   # or admin create
+    sudo terrace-identity-admin break-glass end --admin <you>
+    ```
+    `begin` needs no Keycloak login: it stops Keycloak (**nobody can sign in anywhere for about a minute**), creates `terrace-recovery-<UTC time>-<random>` with a host-generated password written to the handoff file, starts Keycloak and checks the account signs in. It refuses while a working temporary administrator exists (use that one); a stranded `terrace-bootstrap` or a recovery account whose handoff was lost does not block it. Repair named access with the recovery account (`admin enable`, which also clears a lockout, `admin create`, `password`), then run `end` as a named administrator (refused as the recovery account): it deletes every temporary administrator, checks a recovery password still on hand no longer signs in, removes the handoff files and confirms none is left in the database. Both steps are journal lines (`sudo journalctl -t terrace-identity-admin --since today`), and the temporary-account check fails loudly while one is left: after `end`, run `sudo terrace-identity-admin check-temporary` and `systemctl --failed` and confirm nothing is left. It depends on an operator SSH key in the host's `operatorKeys`, `sudo`, the host and its PostgreSQL `keycloak` database; it does not depend on Terrace single sign-on, the proxy, any named administrator, the escrow key or the bootstrap password. If the operator SSH keys are lost, there is no console login: build a replacement host with a new operator key and restore it from backup (6.33; this needs the escrow key), then break-glass on the replacement.
+    - Trade-off (D-40): `first-admin` turns on brute-force protection (five wrong passwords lock an account temporarily, up to 15 minutes), so anyone who can run code on the host can lock named administrators out again and again. That is a denial of administration, not a takeover; the remedy is break-glass.
+    - Worked if: a named administrator signs in through the tool (the first command accepted after the forced password change), the temporary bootstrap account no longer exists and `status` lists no temporary administrator.
+- [ ] **5.6 Create editor accounts and grant roles.** CMS access comes only from the realm roles `editorial-editor` and `editorial-admin`; member approval grants none. A removed role takes effect within 60 seconds; `revoke` ends the user's sessions for immediate effect.
+    - Who: You (or Claude for you), as a named administrator over SSH on the app host with `terrace-identity-admin` (5.5)
+    - Status: PROVEN IN VM REHEARSAL (Womb PR 53, merged as `d3cd717`; `docs/identity-admin.md`: dry runs and refusals, a first sign-in through the HTTPS gateway with Keycloak's forced password change, grant and revoke ending sessions). Not proven: real accounts or passwords, a real operator terminal session.
+    - Do (`--dry-run` is accepted on each):
+    ```bash
+    sudo terrace-identity-admin user create --admin <you> --username <name> --email <...> --first-name <...> --last-name <...> --role editorial-editor [--dry-run]
+    sudo terrace-identity-admin grant  --admin <you> --username <name> --role editorial-admin [--dry-run]
+    sudo terrace-identity-admin revoke --admin <you> --username <name> --role editorial-admin [--dry-run] [--keep-sessions]
+    sudo terrace-identity-admin user disable --admin <you> --username <name> [--dry-run]
+    ```
+    `--role` on `user create` is `editorial-editor` or `editorial-admin`. `user create` makes the account with a verified address and a temporary password: Keycloak forces a new password at the first sign-in, through the CMS **Sign in with Terrace** page. The generated password is in `/run/terrace-identity-admin/handoff/terrace-<name>.password`; hand it over privately and delete the file. `grant` and `revoke` take only the two editorial roles; the member roles `current-member` and `alumni` are refused (members follow the website's approval flow, 5.9 onwards, G-16) and any other role is refused. The last enabled holder of `editorial-admin` cannot lose the role or be disabled: grant it to someone else first. Every command is idempotent (a repeated grant says `already has`, a repeated create says `already exists` and changes neither password nor roles).
+    - Worked if: each editor signs in at the CMS admin with **Sign in with Terrace** (forced password change first) and sees only what their role allows; `list` (9.11) shows the role.
+    - If not: read the journal, `sudo journalctl -t terrace-identity-admin --since today` (one line per change, refusal and dry run; values never appear). A refusal names the reason. If it is a lockout after wrong passwords, wait or use `admin enable` (5.5).
 - [ ] **5.7 Set the production environment so applications can open.** For the website and CMS (delivered as protected env files):
     - Who: Claude can do this for you
     - Status: PROVEN IN VM REHEARSAL for the Womb wiring (VM rehearsal 2026-11-19, tested at Womb `48ab695`, merged as `f8fa07b`: the website and gateway modules set `LIFECYCLE_OUTBOX_DIR`, `LIFECYCLE_PUBLIC_ORIGIN`, `CMS_PUBLIC_ORIGIN`, and `ADDRESS_HEADER=X-Forwarded-For` with `XFF_DEPTH=1`, and the check rejects any other pairing); the secret values and a real host are not proven. Not deployed.
@@ -759,9 +821,45 @@ The member system is a dedicated Terrace Keycloak with approval required for eve
     - Worked if: startup accepts the revision marker and public content works while private routes stay denied. Code rollback means switching to the previous release root; it does not undo migrations. Database rollback is a separate restore from a verified backup with the matching uploads.
 - [ ] **6.16 Gateway and TLS.** nginx gateway in front of the website and CMS on HTTPS 443 only, with distinct web and CMS hostnames, certificates delivered as systemd credentials, `private, no-store` on every response, nginx access logs off.
     - Who: Claude can do this for you; You (DNS and certificates)
-    - Status: PROVEN IN VM REHEARSAL (gateway check at `48ab695`: 198 protocol assertions plus a Chromium account-switch test and the lifecycle stages, `docs/website-gateway.md`; the full rehearsal repeats 198; synthetic CA). Real certificates: NOT YET BUILT.
-    - GAP: HTTP port 80 is closed, there is no HTTP-to-HTTPS redirect and no certificate acquisition or renewal ("separate activation work"). Needed: a certificate method (ACME or manual), renewal and expiry alerting. See G-12.
-    - Worked if: the browser trusts the certificate, unknown hosts and mismatched SNI/Host get 421, spoofed forwarding is ignored, and identity admin paths are not reachable from outside.
+    - Status: PROVEN IN VM REHEARSAL (gateway check at `48ab695`: 198 protocol assertions plus a Chromium account-switch test and the lifecycle stages, `docs/website-gateway.md`; the full rehearsal repeats 198; synthetic CA). Certificate issuance, renewal and the port-80 redirect (Womb PR 54, `da10c76`, `docs/tls.md`): PROVEN IN VM REHEARSAL against a local test certificate authority (pebble) on synthetic names; the TLS VM proof ran 133 assertions with no tolerated retries. Nothing has touched a public certificate authority, real DNS or a provider. The manual mode (you deliver `tls/certificate` and `tls/key` with `terrace-secrets`; port 80 stays closed on the app host) remains the default.
+    - Do (`docs/tls.md`; placeholders: the hostnames and the club address, which are your decisions D-35 to D-38). Each host terminates TLS for its own names and orders its own certificate: the app host one certificate for the website, CMS and identity names, the relay one for its own name. Before a host in ACME mode is adopted (or switched), DNS for every name must point at the host that serves it (A, and AAAA if it has IPv6) and ports 80 and 443 must be reachable from the internet. Check from outside the host, for each name:
+    ```bash
+    dig +short A www.example.org        # the host's address, and AAAA if it has IPv6
+    curl -sI http://www.example.org/    # once the host runs: 301 to https (manual mode on the app: no answer on 80)
+    ```
+    For a new host, select ACME mode in the private host module:
+    ```nix
+    # in the private host module (docs/production-profile.md#building-a-host)
+    terrace.production.tls = {
+      mode = "acme";
+      acme = {
+        directory = "https://acme-v02.api.letsencrypt.org/directory";
+        acceptTerms = true; # owner decision, see above
+        contact = "REPLACE_WITH_CLUB_ADDRESS";
+      };
+    };
+    ```
+    ```bash
+    terrace-secrets host create app --role app --feature acme-tls   # instead of the plain create
+    terrace-secrets generate app        # "Supply with `set`: none."
+    terrace-secrets check app
+    ```
+    Then install, push and adopt as in 6.28 to 6.30; adoption starts the first order. The relay is the same with `--role relay`. For an existing manual host, run the DNS and port checks above, then switch it (the switch restarts nginx, a few seconds without HTTPS):
+    ```bash
+    sudo terrace-tls prepare-acme       # on the host, before deploying the ACME configuration
+    ```
+    Deploy the ACME configuration (`tls.mode = "acme"`). When `sudo terrace-tls status` no longer says `NOT YET ISSUED BY ACME`, drop the manual pair from the store (it refuses without `--yes`, because it deletes the manual certificate and key; keep your own copy if you may fall back), then push:
+    ```bash
+    terrace-secrets host tls app acme --yes
+    ```
+    Check it within a few minutes of adoption or of the switch:
+    ```bash
+    sudo terrace-tls status       # mode, names, issuer, expiry, PLACEHOLDER or NOT YET ISSUED BY ACME, order unit state
+    systemctl --failed            # acme-order-renew-<name> or terrace-tls-check if anything failed
+    ```
+    - GAP: not proven on any public certificate authority, real DNS or CAA records, provider port-80 reachability, the live manual-to-ACME switch on the app role (proven on the relay only), a relay replacement, or a timer firing on its own schedule. Not built: alert delivery for a failing check or order (G-23) and DNS-01. See G-12.
+    - Worked if: the browser trusts the certificate, unknown hosts and mismatched SNI/Host get 421, spoofed forwarding is ignored, and identity admin paths are not reachable from outside. In ACME mode also: the issuer shown by `sudo terrace-tls status` is the public certificate authority you chose, there is no `PLACEHOLDER` and no `NOT YET ISSUED BY ACME` line, and `systemctl --failed` is empty.
+    - If not (`docs/tls.md`): read the journal of the order unit, `journalctl -u acme-order-renew-<name>.service`. A failed order retries on its own 3 times a day, an hour apart, then stays a failed unit; the unit has a budget of three starts a day (boots, configuration switches, the timer, manual starts and its own retries), and a further start is refused with `start-limit-hit` even when nothing else is wrong. `sudo terrace-tls renew` resets that budget and runs the order (it renews only if due; `sudo terrace-tls renew --force --yes` orders a new certificate now and counts against the certificate authority's rate limits). If DNS does not yet point at the host, or port 80 is not reachable, validation fails: fix DNS first, then run `sudo terrace-tls renew`. Until the first order succeeds the host serves a self-signed placeholder that browsers reject (a live switch after `prepare-acme` keeps serving the old manual certificate instead). If ACME cannot work (DNS not ready, certificate authority unreachable, rate limit, a CDN in the way), fall back to the manual mode as `docs/tls.md` describes.
 - [ ] **6.17 Access relay (Headscale with DERP).** Independent host, deny-all peer policy by default.
     - Who: Claude can do this for you
     - Status: PROVEN IN VM REHEARSAL (`docs/access-relay.md`; real Tailscale clients, scoped sensor access and key recovery in the full rehearsal). The relay installed and booted from disk on Hetzner (lease 3); its services are NOT YET PROVEN ON HETZNER (leases 3 and 4 did not reach them).
@@ -847,6 +945,7 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
     terrace-secrets set app tls/certificate < fullchain.pem       # each external value, from stdin
     terrace-secrets check app                                     # names, encryption, exact recipients
     ```
+    For an ACME host (6.16), create it with `terrace-secrets host create app --role app --feature acme-tls` instead of the plain create: that host has no `tls/*`, so there is no certificate to `set`.
     - Worked if: `check` passes (names, encryption, exact recipients: the host and the pinned escrow, nothing else). Values are never printed or put in an argument.
 - [ ] **6.26 Write the private host module and build the host.** The host module and the encrypted store stay in a private directory. It supplies every deployment-specific value, which has no default: `instance` (`"production"`), `operatorKeys`, `memoryMiB` (the writers' ceilings must fit in 75 percent), `escrowRecipient`, the three hostnames (`app.webHostname`, `app.cmsHostname`, `app.identityHostname`), the pinned identity contract, the backup repository and its pinned Storage Box host key, and the reviewed release pair (`terrace.website.webPackage`, `cmsPackage`, `revision`); the relay needs `relay.hostname`, `relay.publicIPv4` and its backup parameters. A hardware module supplies the disk layout, an installable boot loader and the network, and nothing else (Hetzner Cloud uses the existing cloud disk module that leases 3 and 4 installed and booted). Build on the Linux builder under the shared lock, never on a Mac.
     - Who: Claude can do this for you, after 1.19 and 1.26
@@ -885,6 +984,7 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
          cmsArchive = /protected/terrace-cms-<rev>-linux-x64-gnu.tar.gz;
          tfcSource = /source/tfc-at-<rev>; }).config.system.build.toplevel'
     ```
+    To select ACME mode, add the `terrace.production.tls` block from 6.16 to the host module (it needs your decisions D-35 to D-38; the contact address is a placeholder).
     - Worked if: the build succeeds. Evaluation stops with a clear message when a required value is missing or unsafe (reserved hostnames such as `.invalid`, a private relay address, a rehearsal harness, extra trust anchors, a missing root filesystem or boot loader).
 - [ ] **6.27 Prove the profile before installing it.**
     - Who: Claude can do this for you (builder, shared lock)
@@ -912,10 +1012,11 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
     - Who: Claude can do this for you
     - Status: PROVEN IN VM REHEARSAL (app and relay; a 15-second stability window after start; a refusal when the repository was unreachable and the named override)
     - Do (as root on the host):
+    **Adopting starts the gated services on this host (the writers, their timers and, in ACME mode, the first certificate order); if this host replaces an old one, adopt it only after the old host is retired.**
     ```bash
     terrace-production adopt --new | --restored                   # once per host: arm the writers
     ```
-    For a brand-new host that is `terrace-production adopt --new`. If anything is not running it names it and stops: fix the cause and run the same command again; `terrace-production status` shows an unfinished adoption. The last-resort `terrace-production adopt --new --first-deployment-without-repository HOSTNAME` (the host's own name, typed out) is only for a first deployment whose backup repository does not exist yet, after confirming no earlier host of this role ever existed (1.27).
+    For a brand-new host that is `terrace-production adopt --new`. In ACME mode nothing of ACME runs before adoption, and DNS for every name must already point at the host (6.16). If anything is not running it names it and stops: fix the cause and run the same command again; `terrace-production status` shows an unfinished adoption. The last-resort `terrace-production adopt --new --first-deployment-without-repository HOSTNAME` (the host's own name, typed out) is only for a first deployment whose backup repository does not exist yet, after confirming no earlier host of this role ever existed (1.27).
     - Worked if: the command ends with every writer and timer running and the adopted marker written; a second `adopt --new` answers "Already adopted."
 - [ ] **6.31 Migrate, start and initialise the backup (the first release steps).** Until the first migration the CMS and website are skipped, not failed.
     - Who: Claude can do this for you
@@ -929,7 +1030,7 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
     - Worked if: both services are running, the migration ledger is as pinned, and after `terrace-backup init primary` the next backup succeeds (a scheduled backup before it fails visibly in `systemctl --failed`).
 - [ ] **6.32 Rotate a secret.**
     - Who: Claude can do this for you; you approve
-    - Status: PROVEN IN VM REHEARSAL for a generated secret (the intake secret: old value refused, both services on the new one, PostgreSQL, Keycloak and nginx not restarted), the database password and the backup repository password (`rotate --manual`, `apply`); NOT exercised: the SFTP key, Keycloak client secrets (they need the admin path, G-15) and TLS or B2 credentials
+    - Status: PROVEN IN VM REHEARSAL for a generated secret (the intake secret: old value refused, both services on the new one, PostgreSQL, Keycloak and nginx not restarted), the database password and the backup repository password (`rotate --manual`, `apply`); Keycloak client secrets: PROVEN IN VM REHEARSAL for the CMS client `terrace-cms` only (Womb PR 53, merged as `d3cd717`; the other three, `terrace-web`, `terrace-community` and `terrace-editorial`, use the same code path but were not rotated); NOT exercised: the SFTP key and TLS or B2 credentials
     - Do (as in the document's command list):
     ```bash
     terrace-secrets rotate app website/lifecycle-intake           # one generated value, then push
@@ -937,12 +1038,19 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
     terrace-secrets apply app identity/database-password --address HOST  # hand it to that service
     terrace-secrets public app backup/primary/sftp-key            # public half, for enrolment
     ```
-    A generated value is `rotate` then `push`. For the database password: `rotate --manual`, `push`, then `apply`. For the repository password, `apply` comes before `push`, then `apply --finish`. For the SFTP key: `rotate --manual`, enrol the new public key at the Storage Box beside the old, `push`, run a backup, remove the old key. Keycloak client secrets must be set in Keycloak first (G-15). TLS and B2 credentials: `set`, `push`, then revoke the old one at its issuer.
+    A generated value is `rotate` then `push`. For the database password: `rotate --manual`, `push`, then `apply`. For the repository password, `apply` comes before `push`, then `apply --finish`. For the SFTP key: `rotate --manual`, enrol the new public key at the Storage Box beside the old, `push`, run a backup, remove the old key. Keycloak keeps its own copy of each client secret, so rotating one has three steps, quickly and back to back in a quiet moment (sign-ins through that client fail between `push` and `sync`; the store comes first so the escrow always holds the value in service; `docs/secrets.md`, `docs/identity-admin.md` section 5):
+    ```bash
+    terrace-secrets rotate app identity/client/terrace-cms --manual     # operator machine
+    terrace-secrets push app --address <app address>                     # consumers restart on the new value
+    sudo terrace-identity-admin client-secret sync --admin <you> --client terrace-cms [--dry-run]   # on the host
+    ```
+    `sync` sets Keycloak's secret to the delivered file (no operator handles the plaintext), checks that Keycloak accepts the new value and refuses the previous one, and restarts any consumer not yet on it. Clients: `terrace-web`, `terrace-community`, `terrace-cms`, `terrace-editorial`. Worked if: `Keycloak now uses the delivered secret; the previous one is refused.`; a second `sync` says `already has the delivered secret`. TLS and B2 credentials: `set`, `push`, then revoke the old one at its issuer. An ACME host has no manual TLS certificate to rotate (6.16); a live manual host is switched with `sudo terrace-tls prepare-acme` first.
     - Worked if: the consumers restart as the document says, the old value is refused and the services work on the new one.
 - [ ] **6.33 Replace a host (a new host restores the old one's data).** Old host: stop the sweep timer, website, CMS, Keycloak and nginx, run a backup, note the snapshot id, stop PostgreSQL, then destroy it. Operator: make a new host key and re-key from escrow, install the replacement with the new key and `push` (which marks it a replacement, so it cannot be adopted as new). On the replacement: restore into isolation, copy the restored media, outbox and stopped PostgreSQL data into place as the all-services rehearsal does (`platform/full/scenario.py`, `fresh_restore`), then adopt as restored.
     - Who: Claude can do this for you; you approve
     - Status: PROVEN IN VM REHEARSAL for the app role (re-keyed from escrow, the retired key can no longer decrypt, restored with reconciliation, identical data, lifecycle continuing); the relay's replacement and reboot are NOT exercised. Promoting a restore into service on real data still needs your approved procedure (G-22).
     - Do (verbatim):
+    **Adopting starts the gated services on the replacement (the writers, their timers and, in ACME mode, the first certificate order); the documented procedure has the old host stopped, backed up and destroyed first, so adopt the replacement only after the old host is retired.**
     ```bash
     terrace-secrets host create app --role app --replace && terrace-secrets rekey app
     terrace-backup-restore --target primary --snapshot <id> --dest /var/lib/terrace-restore
@@ -950,6 +1058,8 @@ Everything in this subsection is PROVEN IN VM REHEARSAL on synthetic data (Womb 
     terrace-secrets host reset-replacement app --confirm app      # only to redeploy a wiped host as NEW
     ```
     The last line is not part of a replacement: it exists only to redeploy a wiped host under the same name as a genuinely new deployment. After the restore, run the migration action (the ledger must stay unchanged) and start the two services.
+
+    For an ACME host (6.16), create the replacement with the same `--feature acme-tls` together with `--replace` (`docs/tls.md`). `/var/lib/acme` is deliberately not in the backup (it would carry a TLS key and the account key off-site), so the replacement registers a new account and orders a fresh certificate as soon as it is adopted, once DNS points at it. That counts against the certificate authority's rate limits (Let's Encrypt's published figures at the time of writing: 5 certificates a week for the same names, 10 new accounts per address per 3 hours; check its current page): about four replacements or forced renewals of the same host in one week are safe, and beyond that use the manual mode for the rest of the week.
     - Worked if: `terrace-backup-restore` prints `RECONCILIATION OK`, `adopt --restored` accepts (it refuses without that report), and the migration ledger is unchanged.
 - [ ] **6.34 Revoke after a host compromise.** Treat every value that host could decrypt, current and older, as known. Take the host offline at the provider console and keep its disk for evidence; never reuse its host key. Make a replacement host key and re-key (the compromised key leaves the recipients), install a replacement and push. Rotate every secret of that host in this order: the database password, Keycloak client secrets, `PAYLOAD_SECRET`, the intake secret, the repository password, the SFTP key (and remove its old public key at the Storage Box), TLS (revoke the old certificate), B2 credentials, the bootstrap administrator password. If the escrow key could have been reachable from it, also do 6.35. Destroy the old disk once evidence is no longer needed and confirm absence (6.5).
     - Who: You decide; Claude helps
@@ -1126,7 +1236,7 @@ Do not start Part 8 until Parts 3 to 7 are ticked or each open item is accepted 
 - [ ] **8.6 Change DNS to the new origin.**
     - Who: You
     - Status: NOT YET BUILT (G-31)
-    - GAP: no documented procedure and no DNS change has been made. The gateway needs the exact hostnames first (1.19) and a real certificate (G-12).
+    - GAP: no documented procedure and no DNS change has been made. The gateway needs the exact hostnames first (1.19) and a certificate for each name: ACME issuance is built and proven in the VM rehearsal against a local test certificate authority only (6.16, G-12), so no public certificate has been ordered.
     - Worked if: the new hostname resolves to the production host and serves a trusted certificate.
 - [ ] **8.7 Verify after the switch.** Checks that exist and what they cover:
     - Who: Claude can do this for you
@@ -1202,7 +1312,7 @@ Nothing below runs against production yet because no production host exists. The
 - [ ] **9.9 Credential rotation.** Rotate only with consumers mapped and a recoverable backup. Documented mechanics: replacing the identity database password file does not rotate an existing database role; TLS file replacement needs an nginx restart; Windmill, Documenso and Vaultwarden need the stopped-writer sequence; the Windmill encryption key must not change before Windmill state is backed up and recovery verified; Documenso encryption keys must stay with recovery inputs; GitHub mirror deploy key rotation is documented (`docs/github-migration.md`: create a new deploy key, grant only that key protected-branch write, replace the Actions secret, verify a mirror run, then revoke the old key). Ask Claude: "Plan the rotation of <credential>, listing every consumer and the backup state first."
     - Who: Claude can do this for you; You approve
     - Status: NOT YET BUILT
-    - GAP: no rotation runbook for Keycloak client secrets, database passwords, restic passwords or Hetzner tokens. Legacy credentials that leaked in old source need consumer mapping first (G-28). See G-37.
+    - GAP: no rotation runbook for database passwords, restic passwords or Hetzner tokens. Legacy credentials that leaked in old source need consumer mapping first (G-28). See G-37.
     - Worked if: old credentials are rejected and every consumer still works.
 - [ ] **9.10 Redbubble catalogue.** The six curated product links must be re-checked periodically; there is no automatic sync.
     - Who: You
@@ -1210,8 +1320,12 @@ Nothing below runs against production yet because no production host exists. The
     - Worked if: each link still opens the right product.
 - [ ] **9.11 Access review.** List administrators, editors and approved Windmill, Documenso and Vaultwarden users against your current named lists. Remove people who left (the stopped-writer bootstrap for Documenso, Windmill and Vaultwarden, and role removal in Keycloak).
     - Who: You
-    - Status: NOT YET BUILT
-    - GAP: no listing tool for Keycloak users and roles in production (G-15).
+    - Status: PROVEN IN VM REHEARSAL for Keycloak (Womb PR 53, merged as `d3cd717`; the Windmill, Documenso and Vaultwarden lists stay as before and are not built in production)
+    - Do (on the app host, as root; `docs/identity-admin.md`):
+    ```bash
+    sudo terrace-identity-admin list --admin <you> [--realm terrace|master|all] [--show-email] [--json]
+    ```
+    It shows per account the username, first and last name, enabled and direct realm roles, plus the realm roles and the clients with their redirect URIs. Email addresses appear only with `--show-email`. Never credentials, attributes, sessions or tokens. Check every account against your named list; disable or revoke the rest (5.6).
     - Worked if: every account maps to a current, named person.
 - [ ] **9.12 Retention sweep.** Once retention is decided (1.10) run `lifecycle:sweep` on a schedule (5.17). Ask Claude: "Run the lifecycle sweep and report what expired."
     - Who: Claude can do this for you
@@ -1232,9 +1346,15 @@ Nothing below runs against production yet because no production host exists. The
     - Who: You
     - Status: PROVEN LOCALLY
     - Worked if: a recorded decision exists.
-- [ ] **9.16 New editor or new administrator.** Grant the role in Keycloak (5.6). Ask Claude for a role-access check once a production console procedure exists.
+- [ ] **9.16 New editor or new administrator.** Grant the role with the tool (5.6). Administrators of Keycloak itself are added with `admin create` (5.5).
     - Who: You
-    - Status: NOT YET BUILT (G-15)
+    - Status: PROVEN IN VM REHEARSAL (Womb PR 53, merged as `d3cd717`; G-15)
+    - Do (on the app host, as root):
+    ```bash
+    sudo terrace-identity-admin grant  --admin <you> --username <name> --role editorial-admin [--dry-run]
+    sudo terrace-identity-admin list --admin <you> [--realm terrace|master|all] [--show-email] [--json]
+    ```
+    `list` shows email addresses only with `--show-email`. Check that the person now holds exactly the role intended.
     - Worked if: the editor sees only editorial areas.
 - [ ] **9.17 Publish a new website release.** Build, verify, smoke, re-pin Womb, run the website and gateway checks, back up, migrate and start (6.12 to 6.15). Ask Claude: "Prepare release <revision> through the checks and tell me when it is ready to deploy."
     - Who: Claude can do this for you
@@ -1301,10 +1421,10 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | G-9 | Production sizing and creation path conflict: option A (CX23 and CX43, Pulumi, Debian bootstrap) versus rehearsal (CPX22 and CPX42, Rescue RAM installer); public pages showed CX, CAX and CPX as unavailable on 2026-10-31 yet CPX servers were created in rehearsals; CX stock never checked with the project token; no invoice reconciliation (1.15, 6.9, 9.5) | GAP and CONFLICT | Your sizing decision, an authenticated stock and price check, one written production creation procedure |
 | G-10 | Production host profiles enabling the modules (6.10): `app` and `relay` exist and are proven in the VM rehearsal (Womb PR 50); the relay's replacement and reboot are not exercised, the stability check runs at adopt time only, and the Hetzner leases have not yet installed them | CLOSED IN VM REHEARSAL | A provider install of the production profile (lease), your parameters (hostnames, size, operator keys) and the on-prem hardware module (G-33) |
 | G-11 | Production secret delivery, generation, rotation and re-keying (5.3, 6.11, 7.4): sops-nix with a host key and an offline escrow key, and the `terrace-secrets` tool, are proven in the VM rehearsal. Still open: the installer does not stage the ciphertext (the secrets are pushed after first boot instead; an installer change and a lease rehearsal are needed), no real secret exists, an escrow retrieval drill with you has not run, `escrow replace`, `escrow adopt` and `reencrypt` are unit-tested only, and Keycloak client-secret rotation needs the admin path (G-15) | CLOSED IN VM REHEARSAL (with the open items listed) | Real values, an escrow retrieval drill with you, the installer staging the ciphertext, and a provider run |
-| G-12 | Certificate issuance, renewal and HTTP-to-HTTPS redirect for the gateway (6.16) | NOT YET BUILT | A chosen method (ACME or manual), port 80 redirect, expiry alerting |
+| G-12 | Certificate issuance, renewal and HTTP-to-HTTPS redirect for the gateway (6.16): ACME (HTTP-01) is built and proven in the VM rehearsal against a local test certificate authority (Womb PR 54, `da10c76`, `docs/tls.md`); the manual mode stays the default | CLOSED IN VM REHEARSAL | Still not proven: a public certificate authority, real DNS and CAA records, provider port-80 reachability, the live manual-to-ACME switch on the app role (proven on the relay only), a relay replacement, a timer firing on its own schedule. Not built: alert delivery (G-23) and DNS-01. Your decisions D-35 to D-38 |
 | G-13 | Website bundle and pins: Womb now pins website `680ad56` (eleven migrations in `platform/website-release.json`, producer hashes, full rehearsal) and passes the website, gateway, cloud profile and FULL checks on it (6.12, 6.14). `dev` is now `9fa1341` (twelve migrations), so each later website revision needs the same re-pin and rebuilt bundles | CLOSED IN VM REHEARSAL | A re-pin and re-run per new website revision |
 | G-14 | Production environment for the website and CMS: wired in Womb (path and origin variables from the modules, `ADDRESS_HEADER=X-Forwarded-For` with `XFF_DEPTH=1` set by the gateway and any other pairing rejected, the intake secret guarded) and the pairing is tested through the gateway by forging headers; the website has one configuration table (5.7). Real hostnames and secret values are still to supply | CLOSED IN VM REHEARSAL | Real hostnames (1.19) and secrets delivery (G-11) |
-| G-15 | Production Keycloak admin access, creating admin and editor accounts, granting roles, listing users (5.5, 5.6, 9.11, 9.16). Partly: the bootstrap administrator password is generated and escrowed (never declared on a production host) but the first-administrator procedure, its removal, role grants and client-secret rotation through the admin API are open | GAP (partly closed) | A written procedure (private path to the console, bootstrap admin removal, role grants, audit) |
+| G-15 | Production Keycloak admin access, creating admin and editor accounts, granting roles, listing users, client-secret rotation (5.5, 5.6, 6.32, 9.11, 9.16): `terrace-identity-admin` on the app host, first administrator from the escrowed bootstrap password, no web console (Womb PR 53, merged as `d3cd717`; `docs/identity-admin.md`) | CLOSED IN VM REHEARSAL | Still not proven: any real host, real accounts or passwords, a real operator terminal session (the proof feeds passwords on stdin), a Keycloak upgrade, rotation of the three client secrets other than the CMS one, a sustained lockout attack, a Keycloak database restore after these commands. Second factor for administrators is not provided (D-39) |
 | G-16 | Production member provisioning and offboarding; the console procedure is only partly written (what the account must carry is now stated; the provisioning tool stays loopback-only); verified email without mail; temporary password delivery (5.11, 5.13) | GAP | A console procedure or a production-safe provisioning tool, and a delivery method |
 | G-17 | No way to bulk onboard a roster; applications can only be created by `/apply/`, capped at 500 pending (5.18) | NOT YET BUILT | A decision plus, if wanted, a bulk invitation tool |
 | G-18 | Sweep: `bin/sweep` is packaged in the CMS bundle (website PR 15) and Womb runs it on a daily timer (03:30, without `--purge-moderated`); proven in the VM rehearsal, not on a host. The importer is unpackaged by decision (see G-5) (5.17, 9.12, 4.6) | CLOSED IN VM REHEARSAL for the sweep; GAP for the importer | The sweep on a real host profile (G-10); a production importer procedure (G-5) |
@@ -1328,8 +1448,8 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | G-36 | Document conflicts (see list below this table). Items 1, 2, 4, 5, 7, 8 and 10 were fixed in Womb by the earlier docs PR (and Womb docs were updated again by the integration PR); items 6, 9 and 12 and the website release README are fixed on website `dev`; only item 3 (a workspace file) remains | CONFLICT | Rewrite the handoff's old lease 4 paragraph |
 | G-37 | Updates promotion, rollback and rotation runbooks across services (9.7, 9.9) | NOT YET BUILT | A written pipeline and per-credential rotation runbooks |
 | G-38 | Deployed-site accessibility, link, performance and external-origin verification procedures (8.1, 8.7) | GAP | A documented audit and measurement procedure against the real origin |
-| G-39 | Reconciling client or realm changes in an existing Keycloak realm (the import is create-only) (5.4) | NOT YET BUILT | A tested authenticated reconciliation procedure |
-| G-40 | Independent emergency access to the identity provider: `docs/revival.md` lists it as remaining evidence and `AGENTS.md` says recovery access must not depend on SSO, but nothing documents or tests a break-glass path for Keycloak, Headscale or the hosts (5.5, 5.6) | GAP | A written, tested emergency-access design that does not need Terrace SSO |
+| G-39 | Reconciling client or realm changes in an existing Keycloak realm (the import is create-only) (5.4): `terrace-identity-admin realm plan` and `realm apply --plan-sha256` (Womb PR 53, merged as `d3cd717`) | CLOSED IN VM REHEARSAL | Still not proven: reconciliation against a real website release (the proof edits a copy of the pinned template), a Keycloak upgrade, a restore of the Keycloak database afterwards; the hosting policy does not bound protocol mappers, scope mappings, `fullScopeAllowed`, `consentRequired` or free-form client attributes, so a person must read the plan |
+| G-40 | Independent emergency access to the identity provider: `terrace-identity-admin break-glass begin` and `end` on the app host, needing an operator SSH key, sudo and the Keycloak database, not Terrace SSO, the proxy, a named administrator or the escrow key (5.5; Womb PR 53, merged as `d3cd717`). Headscale and the hosts themselves have no separate break-glass path | CLOSED IN VM REHEARSAL (Keycloak only) | Still not proven: a real host, a real operator terminal session, a sustained lockout attack (the proof shows one round and its remedy), a Keycloak database restore afterwards. Loss of every operator SSH key needs a replacement host restored from backup and the escrow key |
 | G-41 | Content and flow items left after the real-export rehearsal fixes (website PR 14): the admin picker, offboarding, automatic linking, erasure of unlinked applications, the content gates, `publish` and redirect sync are fixed and re-verified locally. Left: the held-back documents need editor review (24 `divi-layout-review`, 11 `empty-body`, 5 `leftover-shortcode`, overlapping) without a draft preview (G-8); 15 documents have unresolved links (5 internal targets) and 39 old-site upload paths break at cutover until the Kinsta media is imported (G-6); the low follow-ups in the handoff (a real member-credential denial test for moderation reports, a `LIFECYCLE_PUBLIC_ORIGIN` shape check that allows a path, a README note on short checkout names) (4.8, 4.9) | GAP | Editor review, the Kinsta ZIP, and the low follow-ups |
 | G-42 | Lease reliability depends on a shared builder: lease 4 stopped at the plan step because a non-Terrace job took Falcon's shared build lock and the planner's 100 second wait expired (6.6). The tooling fix (prebuild before arming, fair-queue waits in tens of minutes, a time ledger, an always-teardown runner) passed three independent reviews and offline replays, including a simulated foreign lock holder; a fifth lease needs your yes and a re-stage against the current trunk | GAP | A fifth lease with your yes, on a quiet builder queue |
 | G-43 | Builder capacity: the Linux builder's `/home` was about 79 percent used on 2026-11-19; each rehearsal run retains tens of GB until purged, and freed space returns only when host ZFS snapshots rotate (your call, 1.22). Superseded runs must be purged by hand | GAP | Your decision on snapshot pruning and a routine for purging superseded rehearsal runs |
@@ -1345,7 +1465,7 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 4. Womb `docs/website-host.md` and `docs/website-gateway.md` describe bundles at `3902e16` and a six-migration ledger; tfc-website dev now has nine ledger rows, derived from the migration registry, and `tools/release/README.md` no longer states a count. Womb side: dated notes added (pins and hashes unchanged); the re-pin is tracked work.
 5. `docs/access-relay.md` and `infra/cloud` default to CX23 and CX43; the rehearsals ran CPX22 and CPX42. Womb side: discrepancy documented in `access-relay.md`, production sizing marked as an owner decision, code defaults unchanged.
 6. Dry-run counts: the handoff said 86 redirects and two gaps; website repo `docs/wordpress-import.md` said 87 and one. Fixed on website `dev` `dad0a20` (86, 80 plus 6, two gaps, the final dry run); after the content gates the website doc states 85 (79 plus 6) and three gaps, which is the current number.
-7. `docs/identity-host.md` says the proxy denies admin and there is no remote admin route; website repo `docs/member-lifecycle.md` tells a production operator to use the Keycloak admin console. Womb side: kept, with a marked GAP added (G-15).
+7. `docs/identity-host.md` says the proxy denies admin and there is no remote admin route; website repo `docs/member-lifecycle.md` tells a production operator to use the Keycloak admin console. Womb side: kept, with a marked GAP added (G-15). Resolved in the sense Womb `docs/identity-host.md` gives (Womb PR 53, merged as `d3cd717`): there is no web console in production, and "use the admin console" reads, for production, as "use `terrace-identity-admin`" (5.5).
 8. `docs/service-lifecycle.md` (2026-11-04) listed Documenso, Windmill and Vaultwarden as having no new-platform proof; later docs and the all-services rehearsal prove them in VMs. `docs/backups.md` said they are "not deployed yet". Fixed in Womb: "proven in the VM rehearsal, not deployed to production".
 9. Local ports: `identity/README.md` used 8184, website repo `docs/local-preview.md` 8186, and the lifecycle doc examples 8190. Fixed on `dev` `dad0a20`: the docs explain that 8184 is the standalone identity default, 8186 the `local-stack` default, and the lifecycle examples use 8186.
 10. Many Womb docs link to GitLab issues and merge requests; GitHub is primary. Fixed in Womb where a GitHub equivalent exists (issues; website blob links); remaining GitLab links are labelled historical. GitLab `!N` merge-request numbers do not map to GitHub PR numbers except the four listed in `docs/github-migration.md`.
@@ -1376,7 +1496,7 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | D-16 | Event and menu source of truth; Google Calendar and Drive | Sample events labelled fictional; official events page linked |
 | D-17 | Donations: Stripe account, links, wording; live switch | Unset `DONATIONS_MODE` behaves as `disabled` (`web/src/lib/server/donations.ts`); old donation page remains; no tax-deductibility claim |
 | D-18 | Backups: Storage Box and B2, dataset owners, escrow location, provider image backups, quiet window | Two targets in the plan, none exist; owners "TBD"; retention 3 plus 7 daily, 4 weekly, 6 monthly |
-| D-19 | Public hostnames and certificate method | `headscale.terracefclub.org` and `vaultwarden.terracefclub.org` only; port 80 closed |
+| D-19 | Public hostnames and certificate method | `headscale.terracefclub.org` and `vaultwarden.terracefclub.org` only; manual certificate mode is the default (port 80 closed on the app host); ACME mode is built (D-35 to D-38) |
 | D-20 | CDN provider and timing | None; after origin acceptance; all responses currently `private, no-store` |
 | D-21 | Content freeze and cutover date | None |
 | D-22 | When to retire WordPress | Keep until parity and rollback pass |
@@ -1392,6 +1512,14 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 | D-32 | Whether `terrace-production adopt --new --first-deployment-without-repository HOSTNAME` should exist | It exists, with a fixed warning, and is refused while the replacement marker is present |
 | D-33 | Where the escrow key is kept and who else can retrieve it | No escrow key exists; the tool prints only the public recipient; you hold the private key offline; no retrieval drill has run |
 | D-34 | Whether to keep a suppression list of erased people's addresses for roster re-runs | None built; erased people must be removed from the roster file by hand |
+| D-35 | Which certificate authority, and accepting its terms of service (`acceptTerms = true` records that you accepted its subscriber agreement) | Let's Encrypt production (`https://acme-v02.api.letsencrypt.org/directory`); any other public authority needs `tls.acme.otherAuthority = true`; no choice made, no account exists |
+| D-36 | A contact address the club actually reads for account and expiry notices (not a personal address that may lapse) | None: required with ACME, the docs use `REPLACE_WITH_CLUB_ADDRESS` as a placeholder; no address chosen here |
+| D-37 | ACME or manual certificates, for each host (app and relay) | Manual (`tls.mode` default); ACME is built and VM-proven only, and needs DNS for every name pointing at the host first |
+| D-38 | Accepting that certificates are excluded from backup (`/var/lib/acme` holds a TLS key and the account key, so it stays off-site storage): a replacement host orders a fresh certificate, which counts against the authority's rate limits | Excluded by design (the VM proof checks the snapshots); manual mode for the rest of the week if the limits are reached |
+| D-39 | Whether administrators need a second factor. The tool gives none: enrolling a one-time-password device needs a browser on a master-realm login page, which the proxy denies. A second factor would need the admin console behind an SSH tunnel with `hostname-admin`, which the production profile refuses today (a profile change, not only a setting) | None: administrators use SSH key, `sudo` and a password limited by brute-force protection (Womb PR 53, merged as `d3cd717`) |
+| D-40 | Accepting the lockout trade-off: brute-force protection on the master realm (five wrong passwords lock an account temporarily, up to 15 minutes) means anyone who can run code on the host can lock named administrators out on purpose; it is a denial of administration, not a takeover, and the remedy is break-glass | Protection on (`first-admin` enables it); no permanent lockout |
+| D-41 | The alert age for leftover temporary administrator accounts (`terrace.production.identityAdmin.temporaryMaxAgeMinutes`) | 240 minutes; the check runs every 15 minutes and fails in `systemctl --failed`; delivery to a person is G-23 |
+| D-42 | Who the named primary and backup identity administrators are (each needs a named master-realm account, so administration survives one person being away; see also D-11) | None named |
 
 ---
 
@@ -1406,7 +1534,7 @@ Each row is a GAP (no documented procedure), a NOT YET BUILT item, or a conflict
 
 ## Verification log
 
-Verified 2026-11-18 by an independent documentation worker against Womb `origin/trunk` `01464be`, tfc-website `origin/dev` `8883875`, `CLAUDE_HANDOFF.md` and `WORKER_RULES.md` (first pass). Later passes, each described below: second pass against website `dad0a20` and lease 4; third pass (review of the Womb PR); fourth pass against Womb `f8fa07b` (tested at `48ab695`) and website `b582459`; fifth pass (Part 2 executed on a Mac); sixth pass against Womb `81ef6dd` (PR 50, tested at `cbf129f`) and website `9fa1341`. Method: every fenced command line and inline command was matched, whitespace-normalised, against the text of the cited repository documents, READMEs, the handoff and the workspace rules; every backticked path was tested for existence in the two source trees; every status label and every default in the gaps and decisions tables was checked against the evidence or grepped in the code.
+Verified 2026-11-18 by an independent documentation worker against Womb `origin/trunk` `01464be`, tfc-website `origin/dev` `8883875`, `CLAUDE_HANDOFF.md` and `WORKER_RULES.md` (first pass). Later passes, each described below: second pass against website `dad0a20` and lease 4; third pass (review of the Womb PR); fourth pass against Womb `f8fa07b` (tested at `48ab695`) and website `b582459`; fifth pass (Part 2 executed on a Mac); sixth pass against Womb `81ef6dd` (PR 50, tested at `cbf129f`) and website `9fa1341`; seventh pass against Womb `da10c76` (PR 54, ACME certificates); eighth pass against Womb PR 53 (merged as `d3cd717`). Method: every fenced command line and inline command was matched, whitespace-normalised, against the text of the cited repository documents, READMEs, the handoff and the workspace rules; every backticked path was tested for existence in the two source trees; every status label and every default in the gaps and decisions tables was checked against the evidence or grepped in the code.
 
 | Check | Result |
 | --- | --- |
@@ -1474,3 +1602,30 @@ Re-verified against Womb `origin/trunk` `81ef6dd` (PR 50: production host profil
 - Gaps: none removed. CLOSED IN VM REHEARSAL: G-10 (profiles) and G-11 (secrets delivery), each with its open items stated (the installer does not stage the ciphertext, no escrow retrieval drill, unit-tested-only escrow commands, no provider run). Changed: G-15 (partly: the bootstrap password is generated and escrowed; the first-administrator procedure is open). Added: G-45 (running the roster tool or the importer on a Womb host: no Bun or checkout there, and the website example path `/etc/terrace/cms.env` differs from the rendered file under `/run/secrets/rendered/terrace-website/`) and G-46 (the evaluation check's limits and the adopt-time-only stability check). G-12 (TLS issuance), G-20 (mail) and G-23 (alerting) are unchanged. Part 1 gained 1.23 to 1.30 and the decisions table D-28 to D-34 (D-10 updated).
 - Nits from the last review fixed: this log's first line now names every pass's commits; every step that said the integrated rehearsal ran at trunk `f8fa07b` now says "tested at `48ab695`, merged as `f8fa07b`".
 - Not verified in this pass: no `terrace-secrets` or `terrace-production` command was run; the VM proof receipt, commit and counts (199 assertions, 71 rejected variants, 637 s) are quoted from the Womb documents and the orchestrator's message, not read from the builder; the escrow key's custody and a retrieval drill do not exist; the website roster tool was read, not run; the memory figures are the documents' own; whether the lease tooling is ready for a fifth lease is the orchestrator's report.
+
+### Seventh pass (ACME certificates, 2026-11-20)
+
+Re-verified against Womb `origin/trunk` `da10c76` (PR 54, squash-merged: certificate issuance, renewal, the port-80 redirect and an expiry check), reading `docs/tls.md` in full and the TLS parts of `docs/secrets.md`, `docs/production-profile.md`, `docs/manual-steps.md`, `docs/website-gateway.md` and `docs/backlog.md` from the bare repository at that commit.
+
+- Runbook changes: 6.16 now carries the ACME commands (host-module block, `terrace-secrets host create ... --feature acme-tls`, `terrace-secrets host tls app acme --yes`, `sudo terrace-tls prepare-acme`, `sudo terrace-tls status`, the DNS and port-80 checks), a "Worked if" for ACME mode and an "If not" line from `docs/tls.md`; 6.25, 6.26, 6.30, 6.32 and 6.33 mention the ACME variant, `prepare-acme`, that `/var/lib/acme` is deliberately not backed up and the rate-limit cost of a fresh order; 6.30 and 6.33 gained a bold warning before `adopt`; 8.6 no longer says nothing exists; G-12 rewritten; D-19 default updated; D-35 to D-38 added.
+- Labels moved: G-12 NOT YET BUILT to CLOSED IN VM REHEARSAL (the gap label for "proven only in the VM rehearsal"). No step's first status label changed (6.16 was already PROVEN IN VM REHEARSAL for the gateway; its status now also states the certificate work at the same level, against a local test authority, never a public one). Steps 6.24 to 6.35 keep their labels.
+- Evidence (receipts and checksums read on the builder by the orchestrator on 2026-11-20 at the final PR head `f2b91aa`, whose tree is identical to the merged commit; not re-read by the agent that edited this runbook): Womb PR 54 squash-merged as `da10c76`; TLS VM proof `platform/production-tls-check` 133 assertions with no tolerated retries; production VM proof 199 assertions; evaluation check `infra/nixos/production-eval-check.nix` 106 rejected variants; three review rounds.
+- Wording nits fixed: the 6.30 and 6.33 adopt warnings (checked against `docs/production-profile.md`: adopting starts the gated target and, with ACME, the first order; the replacement procedure has the old host destroyed first; the docs do not themselves say two live hosts conflict, so the warning states what adopting starts and the documented order); "verbatim" in 5.19, 5.21, 5.24 (website `docs/member-lifecycle.md` at `9fa1341`, exact match including the production block) and 6.35 (`docs/secrets.md`, exact match) was re-checked and kept.
+- Not proven: a public certificate authority (no account, order, terms or rate limit exercised; the rate-limit figures are the authority's published numbers), real DNS and CAA records, provider port-80 reachability, validation over IPv6 from a public authority, a CDN in front of the names, the live manual-to-ACME switch on the app role (proven on the relay only), a replacement of the relay, a change of the hostname list on a running host, a timer firing on its own schedule, clock skew against a real authority, lego or nixpkgs updates. Not built: alert delivery (G-23) and DNS-01 or wildcard certificates.
+- Since then Womb trunk moved to `bb0d526` (PR 55, a test-only fix to the production VM proof): the proof is 200 assertions from that commit on; the 199 above is the figure on `da10c76`. From `bb0d526` no VM proof exercises the expiry check against the system's default trust store (it uses an explicit trust anchor file), so that behaviour is not proven.
+- Not verified here: no `terrace-tls` or `terrace-secrets` command was run by hand outside the VM proof.
+
+### Eighth pass (Keycloak administration, 2026-11-20)
+
+Written against Womb `origin/codex/womb-ia` at `5209818194c12a13d60edcd4ff5a7b02dddaf39c` (Womb PR 53, merged as `d3cd717`), read from the bare repository: `docs/identity-admin.md` in full, and the identity parts of `docs/identity-host.md`, `docs/secrets.md`, `docs/production-profile.md`, `docs/backlog.md` and `docs/revival.md`. The pull request is merged as `d3cd717` (trunk `d3cd717b691cf8b3eacc61c8c88ca0aad200c7ec`, parent `bb0d526`); the docs read at that trunk are identical to the branch head, so every command cited here is unchanged.
+
+- Runbook changes: 5.4 gained the reconciliation commands (`realm plan`, `realm apply --plan-sha256`); 5.5 rewritten from a gap into the first-administrator sequence, more administrators and break-glass; 5.6 rewritten around `user create`, `grant`, `revoke`, `user disable`; 9.11 and 9.16 give `list` and `grant`; 6.32 gives the client-secret rotation (`rotate --manual`, `push`, `client-secret sync`); G-36 item 7 resolved as the doc words it; D-39 to D-42 added.
+- Labels moved: G-15, G-39 and G-40 to CLOSED IN VM REHEARSAL (G-40 for Keycloak only); steps 5.5, 5.6, 9.11 and 9.16 NOT YET BUILT to PROVEN IN VM REHEARSAL; 5.4 keeps its label and notes the reconciliation as PROVEN IN VM REHEARSAL; 6.32 now states the CMS client as proven in the VM.
+- Evidence (read on the builder by the orchestrator on 2026-11-20 at the final PR head `5209818`, whose tree is identical to the merged commit; not re-read by the agent that edited this runbook): identity-admin VM proof 323 assertions, which passed twice more after its test certificate authority was deleted and rebuilt (the second time with a new key under the same store path); existing production VM proof 200 assertions; TLS VM proof 133 assertions; production evaluation check 123 rejected variants; unit tests 33 and 28 OK; cloud rehearsal check PASS; four review rounds, final verdict APPROVE WITH NITS with nothing merge-blocking.
+- Known follow-ups (the reviewer's remaining minor items, not merge-blocking): a `--dry-run` can turn on master-realm hardening; a failure of the hardening step aborts the command that triggered it (no lockout, since `break-glass begin` needs no login); the `first-admin` success path's hardening call and the timer's hardening-off branch have unit or VM coverage gaps.
+- Not proven: any real host, real accounts or passwords, a real operator terminal session, a Keycloak upgrade, reconciliation against a real website release, rotation of the three client secrets other than the CMS one, a sustained lockout attack, a Keycloak database restore after these commands. No second factor is provided (D-39).
+- Not verified here: no `terrace-identity-admin` or `terrace-secrets` command was run by hand outside the VM proof.
+
+### Ninth pass (production proof repair, 2026-11-20)
+
+Womb PR 55 (`bb0d526`), test-only: the production VM proof now has 200 assertions. Root cause: the proof's build-time, random-key test certificate authority was rebuilt while a cached copy of the trust bundle kept the old one. Real hosts are unaffected. The same latent weakness remains in the website gateway check, the full rehearsal and the identity, relay, Vaultwarden, Documenso and Windmill tests (listed in Womb `docs/backlog.md`). No runbook step changed.

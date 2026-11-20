@@ -347,7 +347,11 @@ changed. The relay role has been booted only in that VM proof (secrets, an
 unreachable-repository refusal and the named override, adoption, Headscale,
 HTTPS, redirect, backup), never on a provider. Not proven: a real provider
 host, real DNS and certificates, real secret values or an escrow retrieval with
-the owner.
+the owner. Since `bb0d526` (a test-only fix, PR 55) the production VM proof has
+200 assertions; the figure above is the dated run at `cbf129f`. The VM proofs
+give the expiry check an explicit trust anchor file, so the default system
+trust store path of `terrace-tls check` is not exercised by any VM proof
+([TLS](tls.md#verification)).
 
 ## Keycloak administration
 
