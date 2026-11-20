@@ -29,6 +29,7 @@ in {
   imports = [
     ./base.nix
     ./secrets.nix
+    ./tls.nix
     ../relay.nix
     ../backup.nix
   ];
@@ -67,8 +68,9 @@ in {
         message = "Terrace production relay backup needs an sftp: repository and a pinned known_hosts entry.";
       }
       {
+        # With ACME the certificate pair comes from the ACME directory (tls.nix checks that).
         assertion = lib.all (path: lib.hasPrefix "/run/secrets/" path) (
-          map (entry: lib.last (lib.splitString ":" entry)) config.systemd.services.nginx.serviceConfig.LoadCredential
+          lib.filter (path: cfg.tls.mode == "manual" || !(builtins.elem path [cfg.tls.certificateFile cfg.tls.keyFile])) (map (entry: lib.last (lib.splitString ":" entry)) config.systemd.services.nginx.serviceConfig.LoadCredential)
           ++ lib.concatMap (target: [target.passwordFile] ++ lib.optional (target.environmentFile != null) target.environmentFile ++ lib.optional (target.sftp.identityFile != null) target.sftp.identityFile)
           (lib.attrValues (lib.filterAttrs (_: target: target.enable) config.terrace.backup.targets))
         );
@@ -83,7 +85,7 @@ in {
       enable = true;
       role = "relay";
       publicHostnames = [relay.hostname];
-      # Port 80 is the relay module's own HTTPS redirect (and ACME HTTP-01 later).
+      # Port 80: the relay module's HTTPS redirect, or with ACME the challenge and redirect (tls.nix).
       publicTCPPorts = [22 80 443];
       publicUDPPorts = [3478];
       writers = ["headscale" "nginx"];
@@ -94,14 +96,16 @@ in {
       enable = true;
       inherit (relay) hostname publicIPv4;
     };
-    # Static certificate from sops until ACME (G-12); the relay module's redirect on port 80 stays.
+    # The relay module's own ACME is never used. The certificate pair is the
+    # operator's (manual; the module's port-80 redirect stays) or this host's ACME
+    # certificate (tls.nix), loaded as systemd credentials either way.
     services.nginx.virtualHosts.${relay.hostname} = {
       enableACME = lib.mkForce false;
       sslCertificate = "/run/credentials/nginx.service/terrace-relay-cert";
       sslCertificateKey = "/run/credentials/nginx.service/terrace-relay-key";
     };
     systemd.services.nginx.serviceConfig = {
-      LoadCredential = ["terrace-relay-cert:${secret "tls/certificate"}" "terrace-relay-key:${secret "tls/key"}"];
+      LoadCredential = ["terrace-relay-cert:${cfg.tls.certificateFile}" "terrace-relay-key:${cfg.tls.keyFile}"];
       MemoryMax = "256M";
     };
     systemd.services.headscale.serviceConfig.MemoryMax = "512M";
