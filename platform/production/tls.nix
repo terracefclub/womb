@@ -425,9 +425,10 @@ in {
           # Blocking, so a failed reload fails the order unit (visible) instead of
           # being lost in the background; nothing to reload while nginx is stopped.
           # Upstream removes the `renewed` marker before this runs: on failure put it
-          # back, so the unit's retry reloads again instead of finding nothing to do.
+          # back (owned by acme, like the rest of the directory the acme user re-chmods),
+          # so the unit's retry reloads again instead of finding nothing to do.
           reloadServices = [];
-          postRun = "${pkgs.systemd}/bin/systemctl try-reload-or-restart nginx.service || { touch renewed; exit 1; }";
+          postRun = "${pkgs.systemd}/bin/systemctl try-reload-or-restart nginx.service || { ${pkgs.coreutils}/bin/install -o acme -g acme -m 0640 /dev/null renewed; exit 1; }";
         };
       };
       terrace.production = {
