@@ -93,6 +93,13 @@ The certificate already installed stays in place and nginx keeps serving it.
 On the first order there is no previous certificate: the placeholder stays, and
 the expiry check fails as well.
 
+**A first order that cannot reach the CA does not leave the host stuck.**
+lego 5 writes the account file and key before registering; when that
+registration fails, its later runs try to recover the never-registered account
+and fail for good. Before every run, the order unit removes an account whose
+file holds no registration, so the next run registers afresh (the VM proof
+reproduces this on the relay).
+
 **The placeholder is never presented as valid**: browsers and the expiry check
 reject it (self-signed, local CA). It is replaced by the first successful
 order and regenerated only until then.
@@ -126,7 +133,7 @@ that to a person is G-23 (alerting), not built.
 | --- | --- | --- |
 | `/var/lib/acme/<name>/` | `acme:nginx` 0750 | `fullchain.pem`, `key.pem`, `chain.pem`, `full.pem` 0640; `cert.pem` link |
 | `/var/lib/acme/.lego/<name>/<hash>/` | `acme:nginx` 0640 files | lego's own copy |
-| `/var/lib/acme/.lego/accounts/` | `acme` 0700, files 0600 | the ACME account key |
+| `/var/lib/acme/.lego/accounts/` | `acme`, directories writable only by `acme`; key files 0600 | the ACME account key (nginx cannot read it) |
 | `/var/lib/acme/acme-challenge/` | `acme` 0755 | challenge tokens while an order runs |
 
 Keys are generated on the host by lego; they never enter the Nix store, the

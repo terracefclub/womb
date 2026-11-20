@@ -558,4 +558,4 @@ in
   assert lib.assertMsg (positive.rehearsalAcme == []) "ACME rehearsal instance violations: ${toString positive.rehearsalAcme}";
   assert lib.assertMsg (relayAcmeDocumentation == relayDocumentation) "Production relay with ACME and a documentation address: ${toString relayAcmeDocumentation}";
   assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)." "toplevel does not evaluate: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)."]) "Production relay with a documentation address: ${toString relayDocumentation}";
-  assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance hold every invariant; ${toString (builtins.length negatives)} rejected variants"
+  assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance (app, relay and rehearsal also with ACME) hold every invariant; ${toString (builtins.length negatives)} rejected variants"

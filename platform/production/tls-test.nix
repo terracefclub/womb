@@ -237,7 +237,12 @@ in {
     def served(host, name, verify=True):
         # What a client sees: chain verified against the local CA's roots, name checked.
         flags = f"-verify_return_error -verify_hostname {name} -CAfile /root/roots.pem" if verify else ""
-        return operator.succeed(f"echo | openssl s_client -connect {host}:443 -servername {name} {flags} 2>/dev/null | openssl x509 -noout -fingerprint -sha256").strip()
+        command = f"echo | openssl s_client -connect {host}:443 -servername {name} {flags}"
+        if operator.execute(command + " >/dev/null 2>&1")[0] != 0:
+            # Diagnostics (names, issuers, verify result; no key material), then allow a reload to settle.
+            print(f"served {host} {name}: " + operator.execute(command + " 2>&1 | grep -a -i 'verif\\|error\\|subject=\\|issuer=\\|depth\\|connect' | head -n 20")[1])
+            operator.wait_until_succeeds(command + " >/dev/null 2>&1", timeout=60)
+        return operator.succeed(command + " 2>/dev/null | openssl x509 -noout -fingerprint -sha256").strip()
 
     def account_hash(machine):
         return machine.succeed("find /var/lib/acme/.lego/accounts -type f -name '*.key' -print0 | sort -z | xargs -0 cat | sha256sum").strip()
@@ -259,9 +264,10 @@ in {
         operator.succeed(f"rm -rf /tmp/shared/stage/{host}")
         op("terrace-secrets host unstage " + host)
 
-    def push(host, count):
+    def push(host, count, declared):
+        # The store also holds the escrow-only bootstrap password, which the host does not declare.
         out = op(f"terrace-secrets push {host} --address {host} --identity /root/.ssh/operator --rehearsal")
-        ok(f"PASS {count} secrets" in out and f"Installed {count} encrypted secrets." in out, f"{host}: push of {count} secrets (no tls/*)")
+        ok(f"PASS {declared} secrets" in out and f"Installed {count} encrypted secrets." in out and "tls/" not in out, f"{host}: push of {count} secrets, {declared} declared, no tls/* ({out.strip()})")
 
     def enrol_repository(host, directory):
         public = op(f"terrace-secrets public {host} backup/primary/sftp-key").strip()
@@ -316,7 +322,7 @@ in {
         app.start()
         app.wait_for_unit("multi-user.target")
         unstage("app")
-        push("app", 9)
+        push("app", 10, 9)
         ok(app.succeed("terrace-secrets verify").startswith("terrace-secrets verify: PASS 9 secrets"), "app secrets verify")
         app.fail("test -e /run/secrets/tls")
         harness(app)
@@ -374,7 +380,15 @@ in {
         ok(stored == ["640 acme nginx"], f"client copies 0640 acme:nginx {stored}")
         accounts = app.succeed("find /var/lib/acme/.lego/accounts -type f -printf '%m %u\\n' | sort -u").strip().splitlines()
         ok(accounts == ["600 acme"], f"account key 0600 acme {accounts}")
-        ok(app.succeed("stat -c '%a %U' /var/lib/acme/.lego/accounts").strip() == "700 acme", "accounts directory 0700 acme")
+        account_dirs = app.succeed("find /var/lib/acme/.lego/accounts -type d -printf '%m %u %g\\n' | sort -u").strip().splitlines()
+        # The upstream module sets these directory modes; the key files themselves are 0600 acme (above).
+        ok(all(re.fullmatch(r"7[0145][0145] acme (acme|nginx)", line) for line in account_dirs), f"account directories owned by acme, writable by nobody else {account_dirs}")
+        account_key = app.succeed("find /var/lib/acme/.lego/accounts -type f -name '*.key' | head -n 1").strip()
+        ok(account_key != "", "account key present")
+        app.succeed(f"cat {account_key} >/dev/null")
+        for user in ["nginx", "nobody"]:
+            app.fail(f"runuser -u {user} -- cat {account_key} >/dev/null 2>&1")
+        ok(True, "account key unreadable by nginx and others")
         for user in ["terrace_cms", "terrace_web", "keycloak", "nobody"]:
             app.fail(f"runuser -u {user} -- cat {directory}/key.pem >/dev/null 2>&1")
         ok(True, "service accounts cannot read the TLS key")
@@ -471,7 +485,7 @@ in {
         relay.start()
         relay.wait_for_unit("multi-user.target")
         unstage("relay")
-        push("relay", 2)
+        push("relay", 2, 2)
         harness(relay)
         acme.succeed(block)
         relay.succeed("terrace-production adopt --new")
@@ -486,7 +500,9 @@ in {
         ok("PLACEHOLDER" in relay.succeed("terrace-tls status"), "relay: status names the placeholder")
         ok(http("relay", RELAY, "/x") == f"301 https://{RELAY}/x", "relay: port 80 redirect")
         acme.succeed(unblock)
+        # The first run could not register; the retry must register afresh, not "recover" it.
         relay.succeed("systemctl start " + order(RELAY), timeout=300)
+        ok("never registered" in relay.succeed("journalctl -u " + order(RELAY) + " -o cat --no-pager"), "relay: the never-registered account is replaced, not recovered")
         issued(relay, RELAY)
         relay_cert = fingerprint(relay, live(RELAY) + "/cert.pem")
         relay.wait_until_succeeds(f"test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername {RELAY} 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(relay_cert), timeout=60)
@@ -516,7 +532,7 @@ in {
         app.start()
         app.wait_for_unit("multi-user.target")
         unstage("app")
-        push("app", 9)
+        push("app", 10, 9)
         harness(app)
         app.fail("test -e /var/lib/acme/.lego")
         app.succeed("umask 077; terrace-backup-restore --target primary --snapshot " + snapshot + " --dest " + RESTORE + " >/var/tmp/restore.log 2>&1", timeout=600)

@@ -93,7 +93,8 @@
       min_days=${toString tls.minDays}
       trust=${lib.escapeShellArg trust}
       failed=0
-      for name in ${lib.escapeShellArgs names}; do
+      names=(${lib.escapeShellArgs names})
+      for name in "''${names[@]}"; do
         if ! served=$(timeout 30 openssl s_client -connect 127.0.0.1:443 -servername "$name" \
             -verify_return_error -verify_hostname "$name" -CAfile "$trust" </dev/null 2>/dev/null); then
           echo "$name: FAIL: no verified TLS session (untrusted, self-signed or placeholder chain, wrong name, or nothing listening)"
@@ -119,9 +120,26 @@
       exit "$failed"
     '';
   };
+  # lego 5 writes the account file and key before it registers. If that first
+  # registration cannot reach the CA, every later run tries to "recover" the
+  # never-registered account, gets accountDoesNotExist and fails for good. Remove
+  # such an account (it exists nowhere but here) so the next run registers afresh.
+  unregistered = pkgs.writeShellApplication {
+    name = "terrace-acme-unregistered-account";
+    runtimeInputs = [pkgs.coreutils pkgs.jq];
+    text = ''
+      shopt -s nullglob
+      for account in /var/lib/acme/.lego/accounts/*/*/*/account.json; do
+        if jq -e '(.registration.status // "") == ""' "$account" >/dev/null; then
+          echo "Removing an ACME account that was never registered: $(dirname "$account")"
+          rm -f -- "$(dirname "$account")"/*
+        fi
+      done
+    '';
+  };
   tool = pkgs.writeShellApplication {
     name = "terrace-tls";
-    runtimeInputs = [pkgs.openssl pkgs.coreutils pkgs.gnused pkgs.systemd check];
+    runtimeInputs = [pkgs.openssl pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.systemd check];
     text = ''
       mode=${tls.mode}
       cert=${lib.escapeShellArg certName}
@@ -149,9 +167,11 @@
           [[ $(id -u) == 0 ]] || { echo 'terrace-tls: run as root' >&2; exit 1; }
           [[ $mode == acme ]] || { echo 'terrace-tls: manual mode: replace the certificate with terrace-secrets set, then push (docs/secrets.md)' >&2; exit 1; }
           if [[ ''${2:-} == --force ]]; then
-            # Without lego's stored certificate the order unit takes its full path and
-            # orders a new certificate; the served copy stays until the new one is installed.
-            rm -f /var/lib/acme/.lego/"$cert"/*/"$cert".crt
+            # Without lego's stored certificate resource (certificate, key, issuer and
+            # metadata together; a partial set makes lego fail every later run) the order
+            # unit takes its full path and orders a new certificate. The served copy in
+            # /var/lib/acme/<name> stays until the new one is installed.
+            find /var/lib/acme/.lego/"$cert" -mindepth 2 -maxdepth 2 -type f -name "$cert.*" -delete
           elif [[ -n ''${2:-} ]]; then
             usage
           fi
@@ -372,6 +392,7 @@ in {
         ${orderUnit}.serviceConfig = {
           Restart = lib.mkForce "no";
           LimitCORE = 0;
+          ExecStartPre = ["${unregistered}/bin/terrace-acme-unregistered-account"];
         };
         acme-setup.serviceConfig.LimitCORE = 0;
       };
