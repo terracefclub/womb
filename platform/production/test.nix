@@ -11,8 +11,12 @@
   names = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"];
   tool = pkgs.callPackage ./package.nix {};
   # Synthetic CA only. Its key signs a leaf at test time inside the operator
-  # guest; the leaf key exists only in the encrypted store and on ramfs.
-  ca = pkgs.runCommand "terrace-production-rehearsal-ca" {nativeBuildInputs = [pkgs.openssl];} ''
+  # guest; the leaf key exists only in the encrypted store and on ramfs. The key
+  # is random, so a rebuild makes a different CA under the same path: every
+  # consumer must reference this path (never copy it into another derivation,
+  # such as a security.pki bundle), or a partial garbage collection leaves a
+  # cached copy of an old CA that no longer matches the signing key.
+  ca = pkgs.runCommand "terrace-production-proof-ca" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
       -keyout $out/ca-key.pem -out $out/ca.pem -subj /CN=TerraceProductionRehearsalCA \
@@ -58,7 +62,6 @@ in {
         memorySize = 2048;
         cores = 1;
       };
-      security.pki.certificateFiles = ["${ca}/ca.pem"];
       environment.systemPackages = [tool pkgs.sops pkgs.age pkgs.ssh-to-age pkgs.openssl pkgs.bun pkgs.jq pkgs.curl pkgs.netcat-openbsd patterns];
       services.openssh = {
         enable = true;
@@ -173,8 +176,18 @@ in {
       def sql(query, database="terrace_cms"):
           return app.succeed("runuser -u postgres -- psql -XAt -d " + database + " -c " + shlex.quote(query) + " 2>/dev/null").strip()
 
+      def trust_consistent(label):
+          # Cheap guard before any sign-in: the chain nginx serves must verify against
+          # the anchor the clients use, and that anchor must be the signing CA.
+          anchor = app.succeed("${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256 -in " + CA).strip()
+          signer = operator.succeed("openssl x509 -noout -fingerprint -sha256 -in ${ca}/ca.pem").strip()
+          failed = [name for name in ${builtins.toJSON names} if app.execute("echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername " + name + " -verify_return_error -CAfile " + CA + " >/dev/null 2>&1")[0] != 0]
+          if anchor != signer or failed:
+              raise AssertionError(f"test CA and trust anchor disagree ({label}): anchor {anchor}, signer {signer}, unverified {failed}")
+          ok(True, label + ": served chain verifies against the clients' trust anchor")
+
       def protocol(action, expected):
-          output = app.succeed("python3 /etc/gateway-protocol.py " + action, timeout=240).strip()
+          output = app.succeed("SSL_CERT_FILE=" + CA + " python3 /etc/gateway-protocol.py " + action, timeout=240).strip()
           ok(output.startswith(expected), "protocol " + action)
           return output
 
@@ -312,7 +325,7 @@ in {
           return app.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -X POST -H @{header} -H 'Content-Type: application/json' --data '{{\"token\":\"x\"}}' http://127.0.0.1:13048/api/lifecycle/redeem").strip()
 
       def join_bogus():
-          body = app.succeed("curl -s -X POST -H 'Accept: application/json' -H 'x-sveltekit-action: true' -H 'Origin: https://web.terrace.invalid' --data 'token=" + "A" * 43 + "' https://web.terrace.invalid/join/")
+          body = app.succeed("curl -s --cacert " + CA + " -X POST -H 'Accept: application/json' -H 'x-sveltekit-action: true' -H 'Origin: https://web.terrace.invalid' --data 'token=" + "A" * 43 + "' https://web.terrace.invalid/join/")
           result = json.loads(body)
           return result.get("type"), result.get("status")
 
@@ -398,6 +411,7 @@ in {
           ok(app.succeed("terrace-production adopt --new").strip() == "Already adopted.", "adopt on an adopted host says so")
           app.wait_for_unit("keycloak.service", timeout=360)
           app.wait_for_unit("nginx.service")
+          trust_consistent("adopted host")
           for unit in ["terrace-cms", "terrace-web"]:
               ok((unit_state(unit + ".service", "ActiveState"), unit_state(unit + ".service", "ConditionResult")) == ("inactive", "no"), f"{unit} skipped until the first migration")
           protocol("seed", "Disposable identity enrollment passed; temporary administrator removed.")
@@ -440,7 +454,7 @@ in {
           ok(tcp == ["tcp 0.0.0.0:22", "tcp 0.0.0.0:443", "tcp [::]:22", "tcp [::]:443"], f"public TCP listeners {tcp}")
           # Only address-configuration clients may hold a non-loopback UDP socket.
           ok(all(re.search(r":(68|546)$", line) for line in udp), f"public UDP sockets {udp}")
-          operator.succeed("curl --fail --silent --max-time 10 --resolve identity.terrace.invalid:443:$(getent hosts app | cut -d' ' -f1) https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null")
+          operator.succeed("curl --cacert ${ca}/ca.pem --fail --silent --max-time 10 --resolve identity.terrace.invalid:443:$(getent hosts app | cut -d' ' -f1) https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null")
           ok(True, "trusted HTTPS from another host")
 
       with subtest("rotate the intake secret: both sides pick it up, the old value stops working, nothing else restarts"):
@@ -465,7 +479,7 @@ in {
           for unit in ["terrace-cms", "terrace-web"]:
               ok(env_matches(unit, "/run/secrets/website/lifecycle-intake") == "same", f"{unit} runs with the new value")
               ok(env_matches(unit, "/run/terrace-rotation/old") == "different", f"{unit} no longer has the old value")
-          app.wait_until_succeeds("curl --fail --silent --max-time 5 https://web.terrace.invalid/events/ >/dev/null", timeout=60)
+          app.wait_until_succeeds("curl --cacert " + CA + " --fail --silent --max-time 5 https://web.terrace.invalid/events/ >/dev/null", timeout=60)
           ok(join_bogus() == ("failure", 404), "website and CMS agree after rotation")
           rotated = app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip()
           app.succeed("rm -rf /run/terrace-rotation")
@@ -528,7 +542,7 @@ in {
           app.wait_for_unit("terrace-web.service", timeout=240)
           ok(unit_state("terrace-production-boot.service", "Result") == "success", "boot gate started the writers")
           ok(app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip() == rotated, "rotated value survives a reboot (from the host ciphertext)")
-          ok(app.succeed("python3 /etc/gateway-protocol.py content", timeout=120).strip().startswith("Imported-content checks passed"), "service after reboot")
+          ok(app.succeed("SSL_CERT_FILE=" + CA + " python3 /etc/gateway-protocol.py content", timeout=120).strip().startswith("Imported-content checks passed"), "service after reboot")
 
       with subtest("a crashing writer leaves no core dump"):
           app.succeed("touch /run/terrace-core-marker")
@@ -587,7 +601,7 @@ in {
           relay.wait_for_unit("nginx.service")
           relay.succeed("headscale users create rehearsal-operator >/dev/null && headscale users list -o json | ${pkgs.jq}/bin/jq -e 'length == 1' >/dev/null")
           address = operator.succeed("getent hosts relay | cut -d' ' -f1").strip()
-          ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --resolve relay.terrace.invalid:443:{address} https://relay.terrace.invalid/health").strip() == "200", "relay HTTPS with the delivered certificate")
+          ok(operator.succeed(f"curl --cacert ${ca}/ca.pem -s -o /dev/null -w '%{{http_code}}' --resolve relay.terrace.invalid:443:{address} https://relay.terrace.invalid/health").strip() == "200", "relay HTTPS with the delivered certificate")
           ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --resolve relay.terrace.invalid:80:{address} http://relay.terrace.invalid/").strip() == "301", "relay port 80 only redirects")
           relay_listeners = sorted({line for line in relay.succeed("ss -H -ltnu | awk '{print $1\" \"$5}'").split("\n") if line and not re.search(r" (127\.0\.0\.1|\[::1\])(%[a-z0-9]+)?:[0-9]+$", line)})
           relay_tcp = sorted(line for line in relay_listeners if line.startswith("tcp "))

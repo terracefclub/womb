@@ -12,9 +12,13 @@
 in {
   imports = [./rehearsal-stage.nix];
   terrace.production.rehearsalHarness = true;
-  # Synthetic CA for the .invalid names (the protocol client and the CMS/website
-  # server-to-server calls trust it); production uses public certificates.
-  security.pki.certificateFiles = [trust];
+  # Synthetic CA for the .invalid names; production uses public certificates.
+  # Every client trusts it by store-path reference, never through a copied
+  # bundle (security.pki): a rebuilt CA then reaches every consumer at once
+  # instead of leaving a cached bundle with the old one. The protocol and
+  # lifecycle clients get it as SSL_CERT_FILE from the test script, the CMS and
+  # website as NODE_EXTRA_CA_CERTS, the expiry check as its trust anchor.
+  terrace.production.tls.trustAnchorFile = trust;
   systemd.services = {
     terrace-cms.environment.NODE_EXTRA_CA_CERTS = trust;
     terrace-cms-migrate.environment.NODE_EXTRA_CA_CERTS = trust;
