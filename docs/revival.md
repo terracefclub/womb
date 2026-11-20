@@ -66,7 +66,7 @@ testing the actual Hetzner boot requirements.
 | --- | --- | --- |
 | Website/CMS | Payload + SvelteKit; first hosted workload | Editorial/security spike and complete WordPress inventory |
 | PostgreSQL | One instance, separate roles/databases | App compatibility and restore test |
-| Identity | Per-user OIDC and roles | CMS adapter; independent emergency access |
+| Identity | Per-user OIDC and roles | CMS adapter; independent emergency access designed and proven in a VM only ([identity administration](identity-admin.md): SSH key and root, no SSO); not exercised on a real host |
 | Documenso | Keep, after website platform | Existing endpoint; signing/storage/email requirements |
 | Windmill | Keep one bounded worker initially | Preserve membership flow; synthetic tests |
 | Home Assistant | Keep on premises | Device inventory and LAN access |

@@ -130,7 +130,7 @@ inventory and printed by `rotate`.
 | `identity/client/terrace-cms` | app | realm, `cms.env` `CMS_AUTH_CLIENT_SECRET` | manual |
 | `identity/client/terrace-editorial` | app | realm, `cms.env` `CMS_AUTH_INTROSPECTION_SECRET` | manual |
 | `identity/database-password` | app | Keycloak database role | `rotate --manual`, push, `apply` |
-| `identity/bootstrap-admin-password` | app | escrow only in production: not declared on a production host, so never in `/run/secrets` there; the rehearsal harness declares it, and any host whose build declares it can decrypt it (it is in that host's ciphertext) | single use (G-15) |
+| `identity/bootstrap-admin-password` | app | escrow only in production: not declared on a production host, so never in `/run/secrets` there (the evaluation check refuses it); handed over once by `apply` to `/run/terrace-identity-admin/` (tmpfs, root `0400`) for `terrace-identity-admin first-admin`, which removes it; the rehearsal harness declares it, and any host whose build declares it can decrypt it (it is in that host's ciphertext) | single use: `apply`, first-admin, then `rotate --manual` ([identity administration](identity-admin.md)) |
 | `tls/certificate`, `tls/key` | app, relay, not on an ACME host (feature `acme-tls`, [TLS](tls.md)) | nginx credentials | external: `set`, push |
 | `backup/primary/repository-password` | app, relay | restic `passwordFile` | `rotate --manual`, `apply`, push, `apply --finish` |
 | `backup/primary/sftp-key` | app, relay | restic SFTP identity | manual (below) |
@@ -275,16 +275,16 @@ changed values) and `verify`, and restores the previous file if either fails.
   new public key at the Storage Box (owner, alongside the old); `push`; run a
   backup; remove the old public key at the Storage Box.
 - **Keycloak client secrets** (`identity/client/*`): Keycloak keeps its own copy
-  from the first realm import, so the new value must be set in Keycloak first.
-  `rotate --manual`, then decrypt that one value on the operator machine
-  (`sops decrypt --extract '["identity"]["client"]["terrace-web"]'` piped into
-  the admin API call, never echoed) and set it as the client secret through the
-  private admin path (G-15); then `push`; the CMS and website restart on the
-  next template change and members or editors sign in again. Until G-15 exists
-  this is the one place where an operator handles a plaintext value outside the
-  tool: in the pipe and in the Keycloak admin request.
-- **Bootstrap administrator password**: single use for the first administrator
-  (G-15); `rotate --manual` after it was used.
+  from the first realm import. `rotate --manual`, then `push` (the consumer
+  restarts on the new value), then on the host `terrace-identity-admin
+  client-secret sync --client <id>`, which sets Keycloak to the delivered value
+  and checks that the old one is refused ([identity administration](identity-admin.md#5-rotate-a-client-secret)).
+  Sign-ins through that client fail between `push` and `sync`. No operator
+  handles the plaintext. Proven in the VM for `terrace-cms`.
+- **Bootstrap administrator password**: single use for the first administrator:
+  `apply` hands it to the host (stdin over the pinned channel, never declared on
+  the host), `terrace-identity-admin first-admin` uses and removes it; then
+  `rotate --manual` (store only; there is nothing to push).
 - **TLS and B2 credentials**: external; obtain the new value, `set`, `push`
   (nginx restarts for TLS), then revoke the old one at its issuer.
 
@@ -367,7 +367,10 @@ Which commands are proven where: in the VM, against real `sops`, `age` and
 `ssh-to-age`: `host create` (and `--replace`), `generate`, `set`, `check`,
 `push`, `install` (including its refusal of a foreign recipient), `verify`,
 `rotate`, `rotate --manual`, `rekey`, `apply` for the database password and the
-backup repository password, and `host unstage` for the app and the relay.
+backup repository password, and `host unstage` for the app and the relay. In the
+identity administration VM proof (`platform/production-identity-check`): `apply`
+of the bootstrap password and `rotate --manual` plus `push` of the `terrace-cms`
+client secret, completed by `terrace-identity-admin client-secret sync`.
 Against stand-in tools only (unit tests): `escrow replace` (including resume),
 `escrow adopt`, `reencrypt`, the store lock, `host-apply` argument and SQL
 handling, and every format rule. `infra/nixos/production-eval-check.nix` proves

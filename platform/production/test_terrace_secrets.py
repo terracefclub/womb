@@ -80,6 +80,8 @@ FAKES = {
         if "reencrypt" in sys.argv:
             sys.stdout.write(open(os.path.join(here, "reencrypt-output")).read())
         else:
+            with open(os.path.join(here, "ssh-stdin"), "w") as received:
+                received.write(sys.stdin.read())
             sys.stdout.write("remote ok\n")
             if os.path.exists(os.path.join(here, "host-adopted")):
                 sys.stdout.write("Host state: adopted\n")
@@ -468,6 +470,15 @@ class StoreTest(Fixture):
                 self.call("apply", "app", "backup/primary/repository-password", "--finish", "--keep", bad, "--address", "app")
         value = self.plaintext()["backup/primary/repository-password"]
         self.assertNotIn(value, self.argv_log())
+        # The escrow-only bootstrap password goes once to the host, on stdin, never as an argument.
+        self.ok("apply", "app", "identity/bootstrap-admin-password", "--address", "app")
+        ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
+        self.assertEqual(ssh[-3:], ["/run/current-system/sw/bin/terrace-secrets", "host-apply", "identity/bootstrap-admin-password"])
+        bootstrap = self.plaintext()["identity/bootstrap-admin-password"]
+        self.assertEqual((self.bin / "ssh-stdin").read_text(), bootstrap)
+        self.assertNotIn(bootstrap, self.argv_log())
+        self.refused("apply", "app", "identity/client/terrace-web", "--address", "app")
+        self.assertIn("no finish step", self.refused("apply", "app", "identity/bootstrap-admin-password", "--finish", "--address", "app"))
 
 
 class HostTest(Fixture):
@@ -575,6 +586,30 @@ class HostTest(Fixture):
         bad["website"]["payload-secret"] = bad["website"]["lifecycle-intake"].replace("data:", "data:AA")
         (self.bin / "reencrypt-output").write_text(json.dumps(bad))
         self.refused("escrow", "adopt", "app", "--address", "app")
+
+    def test_host_apply_identity_handoff_writes_a_root_only_file(self):
+        target = self.root / "identity-handoff"
+        with mock.patch.object(tool, "IDENTITY_HANDOFF", target), mock.patch.object(os, "chown", lambda *args: None):
+            value = "b" * 64
+            self.assertIn("Delivered identity/bootstrap-admin-password", self.ok("host-apply", "identity/bootstrap-admin-password", stdin=value.encode()))
+            path = target / "bootstrap-admin-password"
+            self.assertEqual(path.read_text(), value)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+            self.ok("host-apply", "identity/bootstrap-admin-password", stdin=("c" * 64).encode())
+            self.assertEqual(path.read_text(), "c" * 64)
+            self.refused("host-apply", "identity/bootstrap-admin-password", stdin=b"not-hex")
+            self.refused("host-apply", "identity/bootstrap-admin-password", "--finish", stdin=value.encode())
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ["bootstrap-admin-password"])
+            with mock.patch.object(tool, "memory_filesystem", lambda path: False):
+                self.refused("host-apply", "identity/bootstrap-admin-password", stdin=value.encode())
+            # A failed write leaves neither a temporary file nor a changed destination.
+            real_write = os.write
+            with mock.patch.object(os, "write", lambda fd, data: (_ for _ in ()).throw(OSError("disk"))):
+                self.assertEqual(self.call("host-apply", "identity/bootstrap-admin-password", stdin=("d" * 64).encode())[0], 1)
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ["bootstrap-admin-password"])
+            self.assertEqual(path.read_text(), "c" * 64)
+            self.assertIs(os.write, real_write)
 
     def test_host_apply_database_password_uses_a_verifier_and_quiet_logging(self):
         secrets = self.root / "run-secrets"

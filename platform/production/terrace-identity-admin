@@ -1,0 +1,1568 @@
+#!/usr/bin/env python3
+"""terrace-identity-admin: administer the production Keycloak over its loopback backend.
+
+Runs as root on the production app host only (installed as a root-only wrapper). It talks to
+Keycloak at 127.0.0.1:8088 and never through the public proxy, which keeps denying the
+administration and master-realm paths. No password, client secret or token is ever printed,
+logged or passed as a command argument: passwords come from the terminal or stdin, generated
+ones go to root-only files on tmpfs, tokens stay in this process's memory. Every state change
+writes one journal line (identifier terrace-identity-admin) naming the operator, the Keycloak
+administrator, the action and the target. See docs/identity-admin.md.
+"""
+import argparse
+import base64
+import fcntl
+import getpass
+import hashlib
+import http.client
+import json
+import os
+import pwd
+import re
+import resource
+import secrets as token
+import signal
+import stat
+import subprocess
+import sys
+import syslog
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path("/etc/terrace/identity-admin.json")
+RUN = Path("/run/terrace-identity-admin")
+DELIVERED = RUN / "bootstrap-admin-password"
+HANDOFF = RUN / "handoff"
+KC_BOOT = RUN / "kc-bootstrap"
+LOCK = RUN / "lock"
+BOOTSTRAP_USER = "terrace-bootstrap"
+RECOVERY_PREFIX = "terrace-recovery-"
+INITIAL_LABEL = "terrace-initial"
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,120}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+OAUTH_ERROR_RE = re.compile(r"^[a-z_]{1,40}$")
+# What Keycloak answers when it refuses credentials (as opposed to failing in some other way).
+GRANT_REFUSALS = ("invalid_grant", "unauthorized_client", "invalid_client")
+# A failed client authentication at the introspection endpoint (Keycloak 26.8 answers 401 invalid_client).
+CLIENT_REFUSALS = ("invalid_client", "unauthorized_client")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+CLIENT_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+MEMBER_ROLES = ("current-member", "alumni")
+EDITORIAL_ADMIN = "editorial-admin"
+MAX_BODY = 4 * 1024 * 1024
+EXIT_REFUSED = 1
+EXIT_PLAN_REFUSED = 3
+
+
+class Refused(Exception):
+    """A fixed, value-free message for the operator."""
+
+
+# ---- identity of the person at the keyboard and the audit line ------------
+
+def operator():
+    """The login account behind this root process (SSH login uid), else sudo's caller, else root."""
+    try:
+        uid = int(Path("/proc/self/loginuid").read_text().strip())
+        if uid != 4294967295:
+            return pwd.getpwuid(uid).pw_name
+    except (OSError, ValueError, KeyError):
+        pass
+    caller = os.environ.get("SUDO_USER", "")
+    return caller if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", caller) else "root"
+
+
+def field(value):
+    return re.sub(r"[^A-Za-z0-9._/@:+-]", "_", str(value))[:200] or "-"
+
+
+def audit(action, target, result, admin="-"):
+    """One journal line per state change (and per refusal or dry run): names and targets, never values."""
+    line = f"operator={field(operator())} admin={field(admin)} action={field(action)} target={field(target)} result={field(result)}"
+    syslog.openlog("terrace-identity-admin", 0, syslog.LOG_AUTH)
+    syslog.syslog(syslog.LOG_NOTICE, line)
+    syslog.closelog()
+
+
+# ---- private files on tmpfs -----------------------------------------------
+
+def memory_filesystem(path):
+    try:
+        mounts = Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        return False
+    target = os.path.realpath(path)
+    best, kind = "", None
+    for line in mounts:
+        left, right = line.split(" - ", 1)
+        point = left.split()[4].replace("\\040", " ")
+        if (target == point or target.startswith(point.rstrip("/") + "/")) and len(point) >= len(best):
+            best, kind = point, right.split()[0]
+    return kind in ("tmpfs", "ramfs")
+
+
+def private_dir(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chown(path, 0, 0)
+    os.chmod(path, 0o700)
+    if not memory_filesystem(path):
+        raise Refused(f"{path} is not on a memory filesystem; refusing to write a credential there")
+    return path
+
+
+def write_private(path, value):
+    """Root 0400 on tmpfs, replaced atomically; the value never reaches a disk or an argument."""
+    private_dir(path.parent)
+    tmp = path.with_name("." + path.name + ".new")
+    if tmp.exists():
+        tmp.unlink()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+    try:
+        os.write(fd, value.encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def read_private(path, pattern=None):
+    """A credential file root wrote: regular, root-owned, not readable by anyone else."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise Refused(f"{path} must be a regular root-only file")
+    value = Path(path).read_text().strip()
+    if pattern is not None and not pattern.fullmatch(value):
+        raise Refused(f"{path} does not hold a value of the expected format")
+    return value
+
+
+def remove(path):
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def handoff_path(realm, username):
+    return HANDOFF / f"{realm}-{username}.password"
+
+
+# ---- configuration --------------------------------------------------------
+
+def load_config(path=CONFIG):
+    info = os.stat(path)
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise Refused(f"{path} must be root-owned and not writable by others")
+    config = json.loads(Path(path).read_text())
+    base = urllib.parse.urlsplit(config["base"])
+    if base.scheme != "http" or base.hostname != "127.0.0.1" or config["realm"] != "terrace":
+        raise Refused("the configuration must point at the loopback Keycloak backend and the terrace realm")
+    return config
+
+
+# ---- HTTP to the loopback backend -----------------------------------------
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+
+def http(url, method="GET", body=None, headers=None, timeout=30):
+    """(status, raw body). Never raises with a response body or URL in the message."""
+    request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    try:
+        response = OPENER.open(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        response = error
+    except (urllib.error.URLError, OSError):
+        raise Refused("Keycloak is not answering on its loopback backend")
+    try:
+        with response:
+            data = response.read(MAX_BODY + 1)
+    except (http.client.HTTPException, OSError):
+        raise Refused("Keycloak's answer was cut off")
+    if len(data) > MAX_BODY:
+        raise Refused("Keycloak answered with an oversized body")
+    return response.status, data
+
+
+def oauth_error(data):
+    """The OAuth error code of a refusal body, or None; never any other text from the body."""
+    try:
+        error = json.loads(data).get("error")
+    except (ValueError, AttributeError):
+        return None
+    return error if isinstance(error, str) and OAUTH_ERROR_RE.match(error) else None
+
+
+def password_grant(base, username, password):
+    """True when Keycloak accepts the master admin-cli password grant, False when it refuses the
+    credentials (HTTP 400/401 with an OAuth refusal); anything else is an error, not a refusal."""
+    form = urllib.parse.urlencode({"client_id": "admin-cli", "grant_type": "password", "username": username, "password": password}).encode()
+    status, data = http(base + "/realms/master/protocol/openid-connect/token", "POST", form, {"Content-Type": "application/x-www-form-urlencoded"})
+    if status == 200:
+        # A verification only: end the session it opened.
+        try:
+            refresh = json.loads(data).get("refresh_token")
+            if refresh:
+                http(base + "/realms/master/protocol/openid-connect/logout", "POST",
+                     urllib.parse.urlencode({"client_id": "admin-cli", "refresh_token": refresh}).encode(),
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        except (Refused, ValueError, AttributeError):
+            pass
+        return True
+    error = oauth_error(data)
+    if status in (400, 401) and error in GRANT_REFUSALS:
+        return False
+    raise Refused(f"unexpected answer to a password grant for {username} (HTTP {status}, {error or 'no OAuth error'})")
+
+
+SESSIONS = []
+
+
+class Keycloak:
+    """Admin REST API as one named administrator. The token lives only in this object."""
+
+    def __init__(self, base, admin, password):
+        self.base = base.rstrip("/")
+        self.admin = admin
+        self._password = password
+        self._token = None
+        self._refresh = None
+        status, error = self.grant()
+        if status != 200:
+            if status in (400, 401) and error in GRANT_REFUSALS:
+                raise Refused(f"authentication as {admin} failed (wrong password, disabled, locked out or unknown account)")
+            raise Refused(f"authentication as {admin}: unexpected answer (HTTP {status}, {error or 'no OAuth error'})")
+        SESSIONS.append(self)
+
+    def grant(self, refresh=False):
+        form = {"client_id": "admin-cli"}
+        if refresh and self._refresh:
+            form.update(grant_type="refresh_token", refresh_token=self._refresh)
+        else:
+            form.update(grant_type="password", username=self.admin, password=self._password)
+        status, data = http(self.base + "/realms/master/protocol/openid-connect/token", "POST",
+                            urllib.parse.urlencode(form).encode(), {"Content-Type": "application/x-www-form-urlencoded"})
+        if status == 200:
+            body = json.loads(data)
+            self._token, self._refresh = body["access_token"], body.get("refresh_token")
+        return status, oauth_error(data)
+
+    def logout(self):
+        """End this administrator session (each run opens one with its password grant)."""
+        if self._refresh:
+            http(self.base + "/realms/master/protocol/openid-connect/logout", "POST",
+                 urllib.parse.urlencode({"client_id": "admin-cli", "refresh_token": self._refresh}).encode(),
+                 {"Content-Type": "application/x-www-form-urlencoded"})
+        self._token = self._refresh = self._password = None
+
+    def call(self, method, path, body=None, text=None, expect=(200, 201, 204)):
+        headers = {"Authorization": "Bearer " + self._token}
+        payload = None
+        if body is not None:
+            payload = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        elif text is not None:
+            payload = text.encode()
+            headers["Content-Type"] = "text/plain"
+        url = self.base + "/admin/realms/" + path
+        status, data = http(url, method, payload, headers)
+        if status == 401 and (self.grant(refresh=True)[0] == 200 or self.grant()[0] == 200):
+            headers["Authorization"] = "Bearer " + self._token
+            status, data = http(url, method, payload, headers)
+        if status not in expect:
+            # The path names realm objects only (ids, names), never a value.
+            raise Refused(f"Keycloak refused {method} {path.split('?')[0]} (HTTP {status})")
+        return json.loads(data) if data else None
+
+    def get(self, path):
+        return self.call("GET", path)
+
+    def paged(self, path):
+        items, first = [], 0
+        joiner = "&" if "?" in path else "?"
+        while True:
+            page = self.get(f"{path}{joiner}first={first}&max=200")
+            items += page
+            if len(page) < 200:
+                return items
+            first += 200
+
+    def user(self, realm, username):
+        found = self.get(f"{realm}/users?" + urllib.parse.urlencode({"username": username, "exact": "true"}))
+        found = [user for user in found if user["username"] == username]
+        return found[0] if found else None
+
+    def role(self, realm, name):
+        return self.call("GET", f"{realm}/roles/{urllib.parse.quote(name)}", expect=(200,))
+
+    def role_holders(self, realm, name):
+        return self.paged(f"{realm}/roles/{urllib.parse.quote(name)}/users")
+
+    def realm_roles(self, realm, user_id):
+        return sorted(role["name"] for role in self.get(f"{realm}/users/{user_id}/role-mappings/realm"))
+
+    def client(self, realm, client_id):
+        found = [c for c in self.get(f"{realm}/clients?" + urllib.parse.urlencode({"clientId": client_id})) if c["clientId"] == client_id]
+        return found[0] if found else None
+
+
+def client_accepts(base, realm, client_id, secret):
+    """True when Keycloak authenticates the client with SECRET (token introspection, Basic auth)."""
+    credentials = base64.b64encode(f"{urllib.parse.quote(client_id)}:{urllib.parse.quote(secret)}".encode()).decode()
+    status, data = http(f"{base}/realms/{realm}/protocol/openid-connect/token/introspect", "POST",
+                     urllib.parse.urlencode({"token": "terrace-identity-admin-probe"}).encode(),
+                     # The realm requires TLS; on loopback Keycloak trusts the proxy's scheme header (proxy-trusted-addresses).
+                     {"Content-Type": "application/x-www-form-urlencoded", "Authorization": "Basic " + credentials, "X-Forwarded-Proto": "https"})
+    if status == 200:
+        return True
+    error = oauth_error(data)
+    if status in (400, 401) and error in CLIENT_REFUSALS:
+        return False
+    raise Refused(f"client authentication probe for {client_id}: unexpected answer (HTTP {status}, {error or 'no OAuth error'})")
+
+
+# ---- reading passwords ----------------------------------------------------
+
+_STDIN = []
+
+
+def stdin_lines():
+    """stdin read once (bounded) and consumed line by line across prompts."""
+    if not _STDIN:
+        _STDIN.append(sys.stdin.read(8192).split("\n"))
+    return _STDIN[0]
+
+
+def read_passwords(args, prompts):
+    """Values from the terminal (no echo) or, with --password-stdin, one per stdin line."""
+    if getattr(args, "password_stdin", False):
+        lines = stdin_lines()
+        if len(lines) < len(prompts) or any(not line for line in lines[:len(prompts)]):
+            raise Refused(f"--password-stdin expects {len(prompts)} more non-empty line(s)")
+        values = lines[:len(prompts)]
+        del lines[:len(prompts)]
+    else:
+        if not sys.stdin.isatty():
+            raise Refused("no terminal to ask for a password; use --password-stdin")
+        try:
+            values = [getpass.getpass(prompt) for prompt in prompts]
+        except (EOFError, KeyboardInterrupt):
+            raise Refused("no password given")
+    for value in values:
+        if not 12 <= len(value) <= 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise Refused("a password must be 12 to 256 printable characters")
+    return values
+
+
+def new_password_value(args, label):
+    """(value, handoff file or None): typed twice, or generated into a root-only tmpfs file."""
+    if getattr(args, "set_password", False):
+        prompts = [f"New {label} password: "] if getattr(args, "password_stdin", False) else [f"New {label} password: ", "Again: "]
+        values = read_passwords(args, prompts)
+        if len(values) == 2 and values[0] != values[1]:
+            raise Refused("the two passwords differ")
+        if len(values[0]) < 16:
+            raise Refused("a new password must have at least 16 characters")
+        return values[0], None
+    return token.token_urlsafe(24), True
+
+
+def login(config, args, allow_initial=False):
+    """Authenticate as a named administrator; refuse one who still has an initial password."""
+    admin = args.admin
+    if not USERNAME_RE.match(admin):
+        raise Refused("--admin must be a Keycloak administrator username")
+    password = read_passwords(args, [f"Password for Keycloak administrator {admin}: "])[0]
+    api = Keycloak(config["base"], admin, password)
+    if not allow_initial:
+        me = api.user("master", admin)
+        if me is not None and initial_password(api, me["id"]):
+            raise Refused(f"{admin} still has an initial password; run `terrace-identity-admin password --admin {admin}` first")
+    if HARDEN:
+        # Converge the master realm's hardening whenever an administrator signs in for a state change
+        # (first-admin may have been interrupted before it applied it).
+        changed = secure_master(api)
+        if changed:
+            audit("master-secure", "master/brute-force+events", "done", admin)
+            print(f"Master realm hardening was incomplete; turned on: {', '.join(changed)}.")
+    return api
+
+
+def initial_password(api, user_id):
+    return any(cred.get("type") == "password" and cred.get("userLabel") == INITIAL_LABEL
+               for cred in api.get(f"master/users/{user_id}/credentials"))
+
+
+# ---- systemd, database and the bootstrap unit -----------------------------
+
+def systemctl(*argv, check=True, timeout=600):
+    result = subprocess.run(["systemctl", *argv], capture_output=True, timeout=timeout)
+    if check and result.returncode != 0:
+        raise Refused(f"systemctl {argv[0]} {argv[-1]} failed (exit {result.returncode})")
+    return result.returncode
+
+
+def master_users():
+    """[(username, enabled)] of the master realm, read from the database (no Keycloak login needed)."""
+    sql = ("select u.username, u.enabled from user_entity u join realm r on r.id = u.realm_id "
+           "where r.name = 'master' and u.service_account_client_link is null order by u.username")
+    result = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-d", "keycloak", "-c", sql],
+                            capture_output=True, timeout=60)
+    if result.returncode != 0:
+        raise Refused("could not read the master realm accounts from the keycloak database")
+    users = []
+    for line in result.stdout.decode().splitlines():
+        name, _, enabled = line.partition("|")
+        users.append((name, enabled == "t"))
+    return users
+
+
+def reserved(username):
+    return username == BOOTSTRAP_USER or username.startswith(RECOVERY_PREFIX)
+
+
+def keycloak_ready(config, deadline=360):
+    """Wait until Keycloak runs and reports database-aware readiness again."""
+    until = time.monotonic() + deadline
+    while time.monotonic() < until:
+        if subprocess.run(["systemctl", "is-active", "--quiet", "keycloak.service"]).returncode == 0:
+            try:
+                status, data = http(config["management"] + "/health/ready", timeout=5)
+                if status == 200 and json.loads(data).get("status") == "UP":
+                    return True
+            except (Refused, ValueError):
+                pass
+        time.sleep(2)
+    return False
+
+
+def unit_busy(unit):
+    """True while the unit has a queued job or is starting or stopping (or the question cannot be answered)."""
+    result = subprocess.run(["systemctl", "show", unit, "-p", "Job", "-p", "ActiveState"], capture_output=True, timeout=60)
+    if result.returncode != 0:
+        return True
+    values = dict(line.split("=", 1) for line in result.stdout.decode().splitlines() if "=" in line)
+    return values.get("Job", "") not in ("", "0") or values.get("ActiveState") in ("activating", "deactivating", "reloading")
+
+
+def run_unit(unit, deadline=600):
+    """Start the bootstrap unit and return 0 when THIS run succeeded. The unit's ExecStopPost writes
+    "<nonce> <result>" next to the nonce written here; neither the systemctl client (a hangup can kill it
+    while the job runs on) nor the unit's properties (an inactive oneshot unit may be unloaded) are trusted."""
+    nonce = token.token_hex(8)
+    remove(KC_BOOT / "result")
+    write_private(KC_BOOT / "nonce", nonce)
+    try:
+        started = any(subprocess.run(["systemctl", "start", "--no-block", unit], capture_output=True, timeout=60).returncode == 0 for _ in range(2))
+        if not started and not unit_busy(unit):
+            return 1  # never enqueued (a killed client may still have enqueued it: then it is busy)
+        until = time.monotonic() + deadline
+        idle = 0
+        while time.monotonic() < until:
+            try:
+                recorded, _, result = (KC_BOOT / "result").read_text().strip().partition(" ")
+            except FileNotFoundError:
+                recorded = result = ""
+            if recorded == nonce:
+                return 0 if result == "success" else 1
+            # A unit that never started (failed dependency, unmet condition, start limit) runs no
+            # ExecStopPost and writes no result: give up once it is idle with no job for 15 seconds.
+            busy = unit_busy(unit)
+            idle = 0 if busy else idle + 1
+            if idle >= 15:
+                return 1
+            time.sleep(1)
+        return 1
+    finally:
+        remove(KC_BOOT / "nonce")
+        remove(KC_BOOT / "result")
+
+
+def run_bootstrap(config, username, password):
+    """Create a temporary master administrator with Keycloak's own recovery command while Keycloak is
+    stopped (upstream requires every node stopped). The whole window runs inside systemd: the bootstrap
+    unit conflicts with Keycloak, so starting it stops Keycloak, and its ExecStopPost (run by systemd
+    whatever happens to this process) removes the credential files and starts Keycloak again. This
+    process (and the systemctl it runs) ignores hangups for every state-changing command and holds
+    interrupt and termination signals for the window. The password reaches the unit only as a credential file."""
+    private_dir(KC_BOOT)
+    write_private(KC_BOOT / "username", username)
+    write_private(KC_BOOT / "password", password)
+    unit = config["bootstrapUnit"]
+    window = {signal.SIGINT, signal.SIGTERM}
+    signal.pthread_sigmask(signal.SIG_BLOCK, window)
+    try:
+        code = run_unit(unit)
+        # After a failed run, do not wait for a Keycloak that maybe nobody is starting: restart it below.
+        ready = keycloak_ready(config) if code == 0 else False
+    finally:
+        remove(KC_BOOT / "password")
+        remove(KC_BOOT / "username")
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, window)
+    if code != 0 or not ready:
+        # If the unit never started, systemd ran no ExecStopPost: start Keycloak here too (idempotent).
+        systemctl("reset-failed", unit, check=False)
+        systemctl("reset-failed", "keycloak.service", check=False)
+        systemctl("start", "--no-block", "keycloak.service", check=False)
+        ready = keycloak_ready(config)
+        state = "Keycloak is running and ready again" if ready else "Keycloak is NOT ready: check `systemctl status keycloak` now"
+        raise Refused(("Keycloak's bootstrap-admin command did not succeed; " if code != 0 else "Keycloak did not become ready after the bootstrap command; ") + state)
+
+
+def label_initial(api, user_id):
+    for cred in api.get(f"master/users/{user_id}/credentials"):
+        if cred.get("type") == "password":
+            api.call("PUT", f"master/users/{user_id}/credentials/{cred['id']}/userLabel", text=INITIAL_LABEL)
+            return
+    raise Refused("the new administrator has no password credential")
+
+
+def set_initial_password(api, args, user_id):
+    """Set an initial password (labelled: it must be changed before use). A generated one is written to
+    its handoff file BEFORE Keycloak gets it, so a crash never leaves a password nobody has."""
+    value, generated = new_password_value(args, f"Keycloak administrator {args.username}")
+    if generated:
+        write_private(handoff_path("master", args.username), value + "\n")
+    api.call("PUT", f"master/users/{user_id}/reset-password", {"type": "password", "value": value, "temporary": False})
+    label_initial(api, user_id)
+    if generated:
+        return value, f"initial password in {handoff_path('master', args.username)} (root-only, tmpfs); hand it over privately, then delete the file"
+    return value, "initial password as typed"
+
+
+def ensure_master_admin(api, config, args):
+    """Create, or repair after an interrupted run, a named administrator, and PROVE it: it signs in with
+    the password we hold and has the admin role. Raises (keeping whatever bootstrap account exists) otherwise."""
+    user = api.user("master", args.username)
+    if user is None:
+        api.call("POST", "master/users", {
+            "username": args.username, "email": args.email, "firstName": args.first_name, "lastName": args.last_name,
+            "enabled": True, "emailVerified": True,
+        })
+        user = api.user("master", args.username)
+        if user is None:
+            raise Refused("Keycloak did not return the created administrator")
+    else:
+        # Repair only what this tool leaves half done: no password yet, or still its initial one.
+        passwords = [c for c in api.get(f"master/users/{user['id']}/credentials") if c.get("type") == "password"]
+        if passwords and not any(c.get("userLabel") == INITIAL_LABEL for c in passwords):
+            audit("admin-repair", f"master/user/{args.username}", "refused-own-password")
+            raise Refused(f"{args.username} already has a password of its own; it is not changed, enabled or granted anything here. "
+                          f"If it is your working administrator, finish with `terrace-identity-admin break-glass end --admin {args.username}` "
+                          f"(removes the bootstrap account); otherwise investigate the account. The bootstrap account is kept.")
+    if not user.get("enabled"):
+        user["enabled"] = True
+        api.call("PUT", f"master/users/{user['id']}", user)
+    held = read_private(handoff_path("master", args.username))
+    if held is not None and not getattr(args, "set_password", False) and password_grant(config["base"], args.username, held):
+        value, note = held, f"initial password kept in {handoff_path('master', args.username)}"
+        label_initial(api, user["id"])
+    else:
+        value, note = set_initial_password(api, args, user["id"])
+    if "admin" not in api.realm_roles("master", user["id"]):
+        api.call("POST", f"master/users/{user['id']}/role-mappings/realm", [api.role("master", "admin")])
+    if not password_grant(config["base"], args.username, value) or "admin" not in api.realm_roles("master", user["id"]):
+        raise Refused(f"{args.username} cannot sign in or lacks the admin role; the bootstrap account is kept")
+    return note
+
+
+MASTER_BRUTE_FORCE = {"bruteForceProtected": True, "permanentLockout": False, "failureFactor": 5, "waitIncrementSeconds": 60,
+                      "maxFailureWaitSeconds": 900, "maxDeltaTimeSeconds": 43200, "quickLoginCheckMilliSeconds": 1000,
+                      "minimumQuickLoginWaitSeconds": 60}
+MASTER_EVENTS = {"adminEventsEnabled": True, "adminEventsDetailsEnabled": False}
+
+
+def secure_master(api):
+    """Master realm: brute-force protection for administrator passwords (any local process can attempt
+    a password grant on the loopback backend) and admin events without representations. Idempotent;
+    returns what it changed (empty when already in place)."""
+    changed = []
+    realm = api.get("master")
+    if any(realm.get(key) != value for key, value in MASTER_BRUTE_FORCE.items()):
+        realm.update(MASTER_BRUTE_FORCE)
+        api.call("PUT", "master", realm)
+        changed.append("brute-force protection")
+    events = api.get("master/events/config")
+    if any(events.get(key) != value for key, value in MASTER_EVENTS.items()):
+        events.update(MASTER_EVENTS)
+        api.call("PUT", "master/events/config", events)
+        changed.append("admin events")
+    return changed
+
+
+def master_hardening():
+    """(brute-force protection on, admin events on) for the master realm, read from the database (no login)."""
+    sql = ("select coalesce((select a.value from realm_attribute a where a.realm_id = r.id and a.name = 'bruteForceProtected'), 'false'), "
+           "r.admin_events_enabled from realm r where r.name = 'master'")
+    result = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-d", "keycloak", "-c", sql],
+                            capture_output=True, timeout=60)
+    if result.returncode != 0:
+        raise Refused("could not read the master realm settings from the keycloak database")
+    brute, _, events = result.stdout.decode().strip().partition("|")
+    return brute == "true", events == "t"
+
+
+HARDEN = []
+
+
+def validate_person(args):
+    if not USERNAME_RE.match(args.username) or reserved(args.username):
+        raise Refused("--username must be 3-64 lowercase letters, digits, dot, dash or underscore (and not a reserved name)")
+    if not EMAIL_RE.match(args.email) or not NAME_RE.match(args.first_name) or not NAME_RE.match(args.last_name):
+        raise Refused("--email, --first-name and --last-name must be a plain address and names of up to 120 characters")
+
+
+# ---- commands: status, first administrator, administrators ----------------
+
+def cmd_status(config, args):
+    status, data = http(config["management"] + "/health/ready", timeout=10)
+    ready = status == 200 and json.loads(data).get("status") == "UP"
+    print(f"Keycloak ready: {'yes' if ready else 'no'}")
+    users = master_users()
+    named = [f"{name}{'' if enabled else ' (disabled)'}" for name, enabled in users if not reserved(name)]
+    temporary = [name for name, _ in users if reserved(name)]
+    print(f"Named administrators: {', '.join(named) or 'none'}")
+    print(f"Temporary administrators: {', '.join(temporary) or 'none'}")
+    print(f"Delivered bootstrap password: {'present' if DELIVERED.exists() else 'absent'}")
+    brute, events = master_hardening()
+    print(f"Master brute-force protection: {'on' if brute else 'OFF'}; master admin events: {'on' if events else 'OFF'}")
+    pending = sorted(p.name for p in HANDOFF.glob("*.password")) if HANDOFF.is_dir() else []
+    print(f"Handoff files waiting: {', '.join(pending) or 'none'}")
+
+
+def cmd_first_admin(config, args):
+    validate_person(args)
+    users = master_users()
+    named = [name for name, _ in users if not reserved(name)]
+    bootstrap_present = any(name == BOOTSTRAP_USER for name, _ in users)
+    if named and named != [args.username]:
+        raise Refused("named administrators already exist; use `admin create` (or `break-glass` if none can sign in)")
+    if named and not bootstrap_present:
+        remove(DELIVERED)
+        print(f"Already done: {args.username} exists and no bootstrap account is left. Nothing changed.")
+        if not all(master_hardening()):
+            print("WARNING: master realm hardening is incomplete; any state-changing command run as an administrator "
+                  "turns it on (for example `terrace-identity-admin admin enable --admin <you> --username <you>`).")
+        return
+    password = read_private(DELIVERED, HEX64_RE)
+    if password is None:
+        raise Refused("no delivered bootstrap password; on the operator machine run "
+                      "`terrace-secrets apply <host> identity/bootstrap-admin-password --address <host>` first")
+    steps = ([] if bootstrap_present else [f"stop Keycloak, create temporary administrator {BOOTSTRAP_USER} with the escrowed password, start Keycloak"]) + [
+        f"create or repair named administrator {args.username} (master realm role admin, initial password, change required before use) and prove it signs in with the role",
+        "enable master-realm brute-force protection and admin events (without representations)",
+        f"delete {BOOTSTRAP_USER} and verify it can no longer sign in",
+        f"remove {DELIVERED}"]
+    if args.dry_run:
+        for step in steps:
+            print("would " + step)
+        audit("first-admin", f"master/user/{args.username}", "dry-run")
+        return
+    if not bootstrap_present:
+        # Journaled before Keycloak stops, so even a run killed in the window leaves its trace.
+        audit("bootstrap-admin-create", f"master/user/{BOOTSTRAP_USER}", "started")
+        run_bootstrap(config, BOOTSTRAP_USER, password)
+        audit("bootstrap-admin-create", f"master/user/{BOOTSTRAP_USER}", "done")
+    api = Keycloak(config["base"], BOOTSTRAP_USER, password)
+    note = ensure_master_admin(api, config, args)
+    audit("admin-create", f"master/user/{args.username}", "done", BOOTSTRAP_USER)
+    secure_master(api)
+    audit("master-secure", "master/brute-force+events", "done", BOOTSTRAP_USER)
+    bootstrap = api.user("master", BOOTSTRAP_USER)
+    if bootstrap is not None:
+        api.call("DELETE", f"master/users/{bootstrap['id']}")
+    if password_grant(config["base"], BOOTSTRAP_USER, password):
+        raise Refused(f"{BOOTSTRAP_USER} can still sign in; investigate before continuing")
+    audit("bootstrap-admin-delete", f"master/user/{BOOTSTRAP_USER}", "done", BOOTSTRAP_USER)
+    remove(DELIVERED)
+    print(f"First administrator {args.username} ready ({note}); it signs in and holds the admin role.")
+    print(f"{BOOTSTRAP_USER} deleted and refused; the delivered bootstrap password file is removed.")
+    print("Next: `terrace-identity-admin password --admin " + args.username + "`, then rotate the escrowed value: "
+          "`terrace-secrets rotate <host> identity/bootstrap-admin-password --manual`.")
+
+
+def cmd_password(config, args):
+    if not USERNAME_RE.match(args.admin) or reserved(args.admin):
+        raise Refused("--admin must be a named administrator")
+    if args.password_stdin:
+        current, new = read_passwords(args, ["Current password: ", "New password: "])
+    else:
+        current = read_passwords(args, [f"Current password for {args.admin}: "])[0]
+        new, again = read_passwords(args, ["New password: ", "Again: "])
+        if new != again:
+            raise Refused("the two passwords differ")
+    if len(new) < 16 or new == current:
+        raise Refused("the new password must have at least 16 characters and differ from the current one")
+    api = Keycloak(config["base"], args.admin, current)
+    me = api.user("master", args.admin)
+    api.call("PUT", f"master/users/{me['id']}/reset-password", {"type": "password", "value": new, "temporary": False})
+    if password_grant(config["base"], args.admin, current) or not password_grant(config["base"], args.admin, new):
+        raise Refused("the password change did not take effect as expected")
+    remove(handoff_path("master", args.admin))
+    audit("admin-password", f"master/user/{args.admin}", "done", args.admin)
+    print(f"Password of {args.admin} changed; the old one is refused.")
+
+
+def enabled_admins(api):
+    return [user for user in api.role_holders("master", "admin") if user.get("enabled") and not reserved(user["username"])]
+
+
+def inheritance(api, realm, role):
+    """Why direct role holders may not be every holder (groups or composite roles), or None. The
+    last-administrator refusals count direct holders, so they refuse to act when this is not None."""
+    if api.get(f"{realm}/groups?max=1"):
+        return f"the {realm} realm has groups, which can carry {role}"
+    for item in api.get(f"{realm}/roles?briefRepresentation=false"):
+        if item.get("composite") and role in [c["name"] for c in api.get(f"{realm}/roles/{urllib.parse.quote(item['name'])}/composites/realm")]:
+            return f"composite role {item['name']} contains {role}"
+    return None
+
+
+def refuse_unreliable_count(api, realm, role, action, target, admin):
+    reason = inheritance(api, realm, role)
+    if reason:
+        audit(action, target, "refused-inherited-role", admin)
+        raise Refused(f"cannot count {role} holders reliably ({reason}); change it in Keycloak by hand after reviewing who inherits it")
+
+
+def cmd_admin(config, args):
+    if not USERNAME_RE.match(args.username) or reserved(args.username):
+        raise Refused("--username must be a named administrator")
+    api = login(config, args)
+    target = f"master/user/{args.username}"
+    user = api.user("master", args.username)
+    if args.action == "create":
+        validate_person(args)
+        if user is not None:
+            print(f"{args.username} already exists. Nothing changed.")
+            return
+        if args.dry_run:
+            print(f"would create administrator {args.username} with an initial password")
+            audit("admin-create", target, "dry-run", args.admin)
+            return
+        note = ensure_master_admin(api, config, args)
+        audit("admin-create", target, "done", args.admin)
+        print(f"Created administrator {args.username}; {note}.")
+        return
+    if user is None:
+        raise Refused(f"no administrator {args.username}")
+    want = args.action == "enable"
+    locked = want and bool(api.get(f"master/attack-detection/brute-force/users/{user['id']}").get("disabled"))
+    if bool(user.get("enabled")) == want and not locked:
+        print(f"{args.username} is already {'enabled' if want else 'disabled'}. Nothing changed.")
+        return
+    if not want:
+        refuse_unreliable_count(api, "master", "admin", "admin-disable", target, args.admin)
+        if [u["username"] for u in enabled_admins(api)] == [args.username]:
+            audit("admin-disable", target, "refused-last-admin", args.admin)
+            raise Refused(f"{args.username} is the last enabled named administrator; create or enable another first")
+    if args.dry_run:
+        print(f"would {args.action} {args.username}" + (" and clear its brute-force lockout" if locked else ""))
+        audit("admin-" + args.action, target, "dry-run", args.admin)
+        return
+    if bool(user.get("enabled")) != want:
+        user["enabled"] = want
+        api.call("PUT", f"master/users/{user['id']}", user)
+    if locked:
+        api.call("DELETE", f"master/attack-detection/brute-force/users/{user['id']}")
+        audit("admin-unlock", target, "done", args.admin)
+    if not want:
+        api.call("POST", f"master/users/{user['id']}/logout")
+    audit("admin-" + args.action, target, "done", args.admin)
+    print(f"{args.username} {'enabled' if want else 'disabled (sessions ended)'}" + (" and its brute-force lockout cleared." if locked else "."))
+
+
+# ---- commands: site accounts and roles -------------------------------------
+
+def definition_path(config, args):
+    path = Path(getattr(args, "definition", None) or config["definition"])
+    info = os.stat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise Refused("the realm definition must be a root-owned file nobody else can write")
+    return path
+
+
+def contract_roles(config):
+    definition = json.loads(Path(config["definition"]).read_text())
+    return [role["name"] for role in definition.get("roles", {}).get("realm", [])]
+
+
+def cmd_user(config, args):
+    realm = config["realm"]
+    roles = contract_roles(config)
+    if not USERNAME_RE.match(args.username):
+        raise Refused("--username must be 3-64 lowercase letters, digits, dot, dash or underscore")
+    api = login(config, args)
+    target = f"{realm}/user/{args.username}"
+    user = api.user(realm, args.username)
+    if args.action == "create":
+        validate_person(args)
+        wanted = args.role or []
+        for role in wanted:
+            if role not in roles or role in MEMBER_ROLES:
+                raise Refused(f"{role}: create site staff with editorial roles only ({', '.join(r for r in roles if r not in MEMBER_ROLES)}); "
+                              "member accounts follow the website's approval and provisioning")
+        if user is not None:
+            print(f"{args.username} already exists; password and roles unchanged (use grant/revoke). Nothing changed.")
+            return
+        if args.dry_run:
+            print(f"would create {args.username} in {realm} with a temporary password (change forced at first sign-in) and roles: {', '.join(wanted) or 'none'}")
+            audit("user-create", target, "dry-run", args.admin)
+            return
+        value, generated = new_password_value(args, f"{args.username} temporary")
+        api.call("POST", f"{realm}/users", {
+            "username": args.username, "email": args.email, "firstName": args.first_name, "lastName": args.last_name,
+            "enabled": True, "emailVerified": True, "credentials": [{"type": "password", "value": value, "temporary": True}],
+        })
+        user = api.user(realm, args.username)
+        if user is None:
+            raise Refused("Keycloak did not return the created user")
+        if wanted:
+            api.call("POST", f"{realm}/users/{user['id']}/role-mappings/realm", [api.role(realm, role) for role in wanted])
+        if generated:
+            write_private(handoff_path(realm, args.username), value + "\n")
+        audit("user-create", target, "done", args.admin)
+        print(f"Created {args.username} in {realm} with roles: {', '.join(wanted) or 'none'}; the password must be changed at first sign-in.")
+        if generated:
+            print(f"Temporary password in {handoff_path(realm, args.username)} (root-only, tmpfs): hand it over privately, then delete the file.")
+        return
+    if user is None:
+        raise Refused(f"no user {args.username} in {realm}")
+    have = api.realm_roles(realm, user["id"])
+    if args.action in ("grant", "revoke"):
+        if args.role not in roles:
+            raise Refused(f"{args.role} is not a role of the identity contract ({', '.join(roles)})")
+        if args.role in MEMBER_ROLES:
+            raise Refused(f"{args.role} is a member role: members are granted and offboarded through the website's approval flow, not here")
+        target += f"/role/{args.role}"
+        if (args.role in have) == (args.action == "grant"):
+            print(f"{args.username} {'already has' if args.action == 'grant' else 'does not have'} {args.role}. Nothing changed.")
+            return
+    if args.action in ("revoke", "disable") and EDITORIAL_ADMIN in have and (args.action == "disable" or args.role == EDITORIAL_ADMIN):
+        refuse_unreliable_count(api, realm, EDITORIAL_ADMIN, "user-" + args.action, target, args.admin)
+        holders = [u["username"] for u in api.role_holders(realm, EDITORIAL_ADMIN) if u.get("enabled")]
+        if holders == [args.username]:
+            audit("user-" + args.action, target, "refused-last-admin", args.admin)
+            raise Refused(f"{args.username} is the last enabled {EDITORIAL_ADMIN}; grant it to someone else first")
+    if args.action == "disable" and not user.get("enabled"):
+        print(f"{args.username} is already disabled. Nothing changed.")
+        return
+    end_sessions = args.action == "disable" or (args.action == "revoke" and not args.keep_sessions)
+    if args.dry_run:
+        print(f"would {args.action} {args.role or args.username}" + (" and end the user's sessions" if end_sessions else ""))
+        audit("user-" + args.action, target, "dry-run", args.admin)
+        return
+    if args.action == "grant":
+        api.call("POST", f"{realm}/users/{user['id']}/role-mappings/realm", [api.role(realm, args.role)])
+    elif args.action == "revoke":
+        api.call("DELETE", f"{realm}/users/{user['id']}/role-mappings/realm", [api.role(realm, args.role)])
+    else:
+        user["enabled"] = False
+        api.call("PUT", f"{realm}/users/{user['id']}", user)
+    if end_sessions:
+        api.call("POST", f"{realm}/users/{user['id']}/logout")
+    audit("user-" + args.action, target, "done", args.admin)
+    print(f"{args.action.capitalize()} done for {args.username}" + (" (sessions ended)." if end_sessions else "."))
+
+
+def cmd_list(config, args):
+    """Accounts with roles, realm roles and clients. Shown: username, first and last name, enabled,
+    direct realm roles (email only with --show-email). Never credentials, attributes, sessions or tokens."""
+    api = login(config, args)
+    out = {}
+    for realm in (["master", config["realm"]] if args.realm == "all" else [args.realm]):
+        users = []
+        for user in api.paged(f"{realm}/users?briefRepresentation=false"):
+            if user.get("serviceAccountClientId"):
+                continue
+            entry = {"username": user["username"], "name": f"{user.get('firstName', '')} {user.get('lastName', '')}".strip(),
+                     "enabled": bool(user.get("enabled")),
+                     "roles": [r for r in api.realm_roles(realm, user["id"]) if not r.startswith("default-roles-")]}
+            if args.show_email:
+                entry["email"] = user.get("email", "")
+            users.append(entry)
+        roles = sorted(r["name"] for r in api.get(f"{realm}/roles") if not r["name"].startswith("default-roles-"))
+        clients = [{"clientId": c["clientId"], "enabled": c.get("enabled"), "confidential": not c.get("publicClient", False),
+                    "redirectUris": sorted(c.get("redirectUris") or [])}
+                   for c in api.get(f"{realm}/clients") if realm != "master" or c["clientId"] == "admin-cli"]
+        out[realm] = {"users": sorted(users, key=lambda u: u["username"]), "roles": roles, "clients": sorted(clients, key=lambda c: c["clientId"])}
+    audit("list", args.realm, "done", args.admin)
+    if args.json:
+        print(json.dumps(out, indent=1, sort_keys=True))
+        return
+    for realm, data in out.items():
+        print(f"Realm {realm}")
+        print("  Users (username | name | enabled | roles):")
+        for user in data["users"]:
+            print(f"    {user['username']} | {user['name']} | {'yes' if user['enabled'] else 'NO'} | {', '.join(user['roles']) or '-'}"
+                  + (f" | {user['email']}" if args.show_email else ""))
+        print(f"  Realm roles: {', '.join(data['roles'])}")
+        print("  Clients (clientId | enabled | confidential | redirect URIs):")
+        for client in data["clients"]:
+            print(f"    {client['clientId']} | {client['enabled']} | {client['confidential']} | {' '.join(client['redirectUris']) or '-'}")
+
+
+# ---- client secrets --------------------------------------------------------
+
+def env_digest(pid, variable):
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    for item in environ:
+        if item.startswith(variable.encode() + b"="):
+            return hashlib.sha256(item).hexdigest()
+    return None
+
+
+def consumers_current(consumers, value):
+    stale = []
+    for consumer in consumers:
+        pid = subprocess.run(["systemctl", "show", consumer["unit"], "-p", "MainPID", "--value"], capture_output=True).stdout.decode().strip()
+        if not pid.isdigit() or pid == "0":
+            continue  # not running (for example before the first migration): it reads the file when it starts
+        if env_digest(pid, consumer["variable"]) != hashlib.sha256(f"{consumer['variable']}={value}".encode()).hexdigest():
+            stale.append(consumer["unit"])
+    return sorted(set(stale))
+
+
+def cmd_client_secret(config, args):
+    realm = config["realm"]
+    entry = config["clientSecrets"].get(args.client)
+    if entry is None:
+        raise Refused(f"{args.client} is not a confidential client with a delivered secret ({', '.join(sorted(config['clientSecrets']))})")
+    delivered = read_private(Path(entry["file"]).resolve(), HEX64_RE)
+    if delivered is None:
+        raise Refused(f"no delivered secret for {args.client}; run `terrace-secrets push` first")
+    api = login(config, args)
+    client = api.client(realm, args.client)
+    if client is None:
+        raise Refused(f"no client {args.client} in {realm}")
+    current = api.get(f"{realm}/clients/{client['id']}/client-secret").get("value", "")
+    target = f"{realm}/client/{args.client}/secret"
+    stale = consumers_current(entry["consumers"], delivered)
+    if current == delivered:
+        audit("client-secret-sync", target, "already-current", args.admin)
+        print(f"{args.client}: Keycloak already has the delivered secret. Nothing changed in Keycloak.")
+    elif args.dry_run:
+        print(f"would set the {args.client} secret in Keycloak to the delivered value, verify the old one is refused,"
+              f" and restart consumers not yet on it: {', '.join(stale) or 'none'}")
+        audit("client-secret-sync", target, "dry-run", args.admin)
+        return
+    else:
+        full = api.get(f"{realm}/clients/{client['id']}")
+        full["secret"] = delivered
+        api.call("PUT", f"{realm}/clients/{client['id']}", full)
+        if not client_accepts(config["base"], realm, args.client, delivered):
+            raise Refused(f"Keycloak does not accept the delivered {args.client} secret after the change")
+        if current and client_accepts(config["base"], realm, args.client, current):
+            raise Refused(f"Keycloak still accepts the previous {args.client} secret")
+        audit("client-secret-sync", target, "done", args.admin)
+        print(f"{args.client}: Keycloak now uses the delivered secret; the previous one is refused.")
+    if stale:
+        if args.dry_run:
+            print(f"would restart (not yet on the delivered value): {', '.join(stale)}")
+            return
+        for unit in stale:
+            systemctl("restart", unit)
+        audit("client-secret-consumers-restart", target, "done", args.admin)
+        print(f"Restarted {', '.join(stale)} onto the delivered value.")
+    still = consumers_current(entry["consumers"], delivered)
+    if still:
+        raise Refused(f"still not on the delivered value: {', '.join(still)}")
+    print(f"Consumers on the delivered value: {', '.join(c['unit'] for c in entry['consumers'])}.")
+
+
+# ---- realm reconciliation (G-39) --------------------------------------------
+
+REALM_SCALARS = ("displayName", "registrationAllowed", "resetPasswordAllowed", "loginWithEmailAllowed", "duplicateEmailsAllowed",
+                 "editUsernameAllowed", "bruteForceProtected", "sslRequired", "accessTokenLifespan", "ssoSessionIdleTimeout",
+                 "ssoSessionMaxLifespan", "revokeRefreshToken", "refreshTokenMaxReuse", "verifyEmail")
+REALM_KEYS = set(REALM_SCALARS) | {"realm", "enabled", "roles", "components", "clients", "scopeMappings"}
+CLIENT_UPDATABLE = ("enabled", "standardFlowEnabled", "directAccessGrantsEnabled", "implicitFlowEnabled", "consentRequired", "fullScopeAllowed")
+CLIENT_FIXED = ("publicClient", "protocol", "clientAuthenticatorType", "serviceAccountsEnabled")
+CLIENT_KEYS = set(CLIENT_UPDATABLE) | set(CLIENT_FIXED) | {"clientId", "secret", "redirectUris", "webOrigins", "attributes",
+                                                         "protocolMappers", "defaultClientScopes", "optionalClientScopes"}
+MAPPER_KEYS = {"name", "protocol", "protocolMapper", "config"}
+BUILTIN_ROLES = ("offline_access", "uma_authorization")
+PROFILE = "org.keycloak.userprofile.UserProfileProvider"
+
+
+def norm(value):
+    """Compare Keycloak's stored strings with the definition's JSON types; scalar lists as sets."""
+    if isinstance(value, dict):
+        return {key: norm(item) for key, item in value.items()}
+    if isinstance(value, list):
+        items = [norm(item) for item in value]
+        return sorted(items) if all(isinstance(item, str) for item in items) else items
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
+
+
+def subset_differs(declared, running):
+    return any(norm(value) != norm((running or {}).get(key)) for key, value in declared.items())
+
+
+class Plan:
+    def __init__(self):
+        self.changes, self.kept, self.refused = [], [], []
+
+    def change(self, kind, target, **detail):
+        self.changes.append({"kind": kind, "target": target, **detail})
+
+    def digest(self):
+        return hashlib.sha256(json.dumps(self.changes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def user_profile_plan(plan, api, realm, components):
+    if set(components) - {PROFILE}:
+        plan.refused.append(f"components {sorted(set(components) - {PROFILE})} are not understood by this reconciler")
+        return
+    entries = components.get(PROFILE) or []
+    if len(entries) != 1 or entries[0].get("providerId") != "declarative-user-profile" or \
+            set(entries[0].get("config", {})) != {"kc.user.profile.config"} or len(entries[0]["config"]["kc.user.profile.config"]) != 1:
+        plan.refused.append("the user profile component is not the single declarative profile this reconciler understands")
+        return
+    declared = json.loads(entries[0]["config"]["kc.user.profile.config"][0])
+    if set(declared) - {"attributes", "groups"}:
+        plan.refused.append(f"user profile keys {sorted(set(declared) - {'attributes', 'groups'})} are not understood")
+        return
+    running = api.get(f"{realm}/users/profile")
+    have = {attribute["name"]: attribute for attribute in running.get("attributes", [])}
+    want = {attribute["name"]: attribute for attribute in declared.get("attributes", [])}
+    dropped = sorted(set(have) - set(want))
+    if dropped:
+        plan.refused.append(f"user profile would drop attribute(s) {', '.join(dropped)}; the data in them would become unmanaged (destructive)")
+    changed = [name for name, attribute in want.items() if name not in have or subset_differs(attribute, have[name])]
+    groups_have = {group["name"]: group for group in running.get("groups", [])}
+    changed_groups = [group["name"] for group in declared.get("groups", []) if group["name"] not in groups_have or subset_differs(group, groups_have[group["name"]])]
+    if changed or changed_groups:
+        # The declared content itself is in the change: the plan hash binds it and apply uses exactly it.
+        groups_want = {group["name"]: group for group in declared.get("groups", [])}
+        plan.change("user-profile", f"{realm}/users/profile", attributes=sorted(changed), groups=sorted(changed_groups),
+                    content={"attributes": {name: want[name] for name in sorted(changed)}, "groups": {name: groups_want[name] for name in sorted(changed_groups)}})
+
+
+def client_plan(plan, api, realm, client, secrets_config, roles_known):
+    client_id = client.get("clientId", "")
+    unknown = set(client) - CLIENT_KEYS
+    if unknown or not CLIENT_RE.match(client_id):
+        plan.refused.append(f"client {client_id or '?'}: keys {sorted(unknown)} are not understood")
+        return None
+    for mapper in client.get("protocolMappers", []):
+        if set(mapper) - MAPPER_KEYS:
+            plan.refused.append(f"client {client_id}: protocol mapper keys {sorted(set(mapper) - MAPPER_KEYS)} are not understood")
+            return None
+    running = api.client(realm, client_id)
+    if running is None:
+        if client_id not in secrets_config:
+            plan.refused.append(f"new client {client_id} has no delivered secret; add it to the secrets inventory and the host first")
+            return None
+        plan.change("client-create", f"{realm}/client/{client_id}", definition={k: v for k, v in client.items() if k != "secret"})
+        return None
+    full = api.get(f"{realm}/clients/{running['id']}")
+    for key in CLIENT_FIXED:
+        if key in client and norm(client[key]) != norm(full.get(key)):
+            plan.refused.append(f"client {client_id}: changing {key} is not applied by reconciliation (it would change how the client authenticates)")
+    if client.get("enabled") is False and full.get("enabled"):
+        plan.refused.append(f"client {client_id}: disabling a client is not applied by reconciliation")
+    fields = {}
+    for key in CLIENT_UPDATABLE:
+        if key in client and norm(client[key]) != norm(full.get(key)):
+            fields[key] = {"from": full.get(key), "to": client[key]}
+    for key in ("redirectUris", "webOrigins"):
+        if key in client and sorted(client[key]) != sorted(full.get(key) or []):
+            fields[key] = {"add": sorted(set(client[key]) - set(full.get(key) or [])), "remove": sorted(set(full.get(key) or []) - set(client[key])), "to": sorted(client[key])}
+    attributes = {key: value for key, value in (client.get("attributes") or {}).items() if norm(value) != norm((full.get("attributes") or {}).get(key))}
+    if attributes:
+        fields["attributes"] = {key: {"from": (full.get("attributes") or {}).get(key), "to": value} for key, value in attributes.items()}
+    if fields:
+        plan.change("client-update", f"{realm}/client/{client_id}", fields=fields)
+    have = {mapper["name"]: mapper for mapper in full.get("protocolMappers") or []}
+    for mapper in client.get("protocolMappers", []):
+        if mapper["name"] not in have:
+            plan.change("mapper-create", f"{realm}/client/{client_id}/mapper/{mapper['name']}", definition=mapper)
+        elif any(norm(mapper.get(key)) != norm(have[mapper["name"]].get(key)) for key in ("protocol", "protocolMapper")) or \
+                subset_differs(mapper.get("config") or {}, have[mapper["name"]].get("config")):
+            plan.change("mapper-update", f"{realm}/client/{client_id}/mapper/{mapper['name']}", definition=mapper)
+    for name in sorted(set(have) - {mapper["name"] for mapper in client.get("protocolMappers", [])}):
+        if "protocolMappers" in client:
+            plan.kept.append(f"protocol mapper {name} on client {client_id} (not declared)")
+    scopes = {scope["name"]: scope["id"] for scope in api.get(f"{realm}/client-scopes")}
+    lists = {kind: [s["name"] for s in api.get(f"{realm}/clients/{running['id']}/{kind}-client-scopes")] for kind in ("default", "optional")}
+    for kind, key in (("default", "defaultClientScopes"), ("optional", "optionalClientScopes")):
+        if key not in client:
+            continue
+        other = lists["optional" if kind == "default" else "default"]
+        for name in client[key]:
+            if name not in scopes:
+                plan.refused.append(f"client {client_id}: {kind} scope {name} does not exist in the realm")
+            elif name in other:
+                plan.refused.append(f"client {client_id}: moving scope {name} between default and optional is not applied")
+            elif name not in lists[kind]:
+                plan.change("client-scope-add", f"{realm}/client/{client_id}/{kind}-scope/{name}", scope=name, list=kind)
+        for name in sorted(set(lists[kind]) - set(client[key])):
+            plan.kept.append(f"{kind} scope {name} on client {client_id} (not declared)")
+    return running
+
+
+def realm_plan(api, config, definition):
+    plan = Plan()
+    realm = config["realm"]
+    unknown = set(definition) - REALM_KEYS
+    if unknown:
+        plan.refused.append(f"declared keys {sorted(unknown)} are not understood by this reconciler; update the tool before applying this release")
+    if definition.get("realm") != realm:
+        plan.refused.append("the definition is for a different realm")
+        return plan
+    running = api.get(realm)
+    if definition.get("enabled") is not True:
+        plan.refused.append("disabling the realm is not applied by reconciliation")
+    for key in REALM_SCALARS:
+        if key in definition and norm(definition[key]) != norm(running.get(key)):
+            plan.change("realm-setting", f"{realm}/{key}", setting=key, **{"from": running.get(key), "to": definition[key]})
+    roles = definition.get("roles") or {}
+    if set(roles) - {"realm"} or any(set(role) - {"name", "description"} for role in roles.get("realm", [])):
+        plan.refused.append("only realm roles with a name and description are understood")
+    have_roles = {role["name"] for role in api.get(f"{realm}/roles")}
+    want_roles = [role["name"] for role in roles.get("realm", [])]
+    for name in want_roles:
+        if name not in have_roles:
+            plan.change("role-create", f"{realm}/role/{name}", role=name)
+    for name in sorted(have_roles - set(want_roles) - set(BUILTIN_ROLES) - {f"default-roles-{realm}"}):
+        plan.kept.append(f"realm role {name} (not declared; reconciliation never deletes roles)")
+    user_profile_plan(plan, api, realm, definition.get("components") or {})
+    running_clients = {}
+    for client in definition.get("clients") or []:
+        found = client_plan(plan, api, realm, client, config["clientSecrets"], have_roles | set(want_roles))
+        if found is not None:
+            running_clients[client["clientId"]] = found
+    declared_ids = {client.get("clientId") for client in definition.get("clients") or []}
+    for client in api.get(f"{realm}/clients"):
+        if client["clientId"] not in declared_ids and not client["clientId"].startswith(("account", "admin-cli", "broker", "realm-management", "security-admin-console")):
+            plan.kept.append(f"client {client['clientId']} (not declared; reconciliation never deletes clients)")
+    for mapping in definition.get("scopeMappings") or []:
+        if set(mapping) - {"client", "roles"}:
+            plan.refused.append(f"scope mapping keys {sorted(set(mapping) - {'client', 'roles'})} are not understood")
+            continue
+        client_id = mapping["client"]
+        if client_id not in declared_ids:
+            plan.refused.append(f"scope mapping for undeclared client {client_id}")
+            continue
+        found = running_clients.get(client_id)
+        have = set() if found is None else {role["name"] for role in api.get(f"{realm}/clients/{found['id']}/scope-mappings/realm")}
+        for name in mapping["roles"]:
+            if name not in have_roles and name not in want_roles:
+                plan.refused.append(f"scope mapping to unknown role {name}")
+            elif name not in have:
+                plan.change("scope-mapping-add", f"{realm}/client/{client_id}/scope/{name}", role=name, client=client_id)
+        for name in sorted(have - set(mapping["roles"])):
+            plan.change("scope-mapping-remove", f"{realm}/client/{client_id}/scope/{name}", role=name, client=client_id)
+    return plan
+
+
+def apply_change(api, config, definition, change):
+    realm = config["realm"]
+    kind = change["kind"]
+    if kind == "realm-setting":
+        current = api.get(realm)
+        current[change["setting"]] = change["to"]
+        api.call("PUT", realm, current)
+    elif kind == "role-create":
+        api.call("POST", f"{realm}/roles", {"name": change["role"]})
+    elif kind == "user-profile":
+        running = api.get(f"{realm}/users/profile")
+        for key in ("attributes", "groups"):
+            want = dict(change["content"][key])
+            merged = []
+            for item in running.get(key, []):
+                merged.append({**item, **want.pop(item["name"], {})})
+            merged += list(want.values())
+            running[key] = merged
+        api.call("PUT", f"{realm}/users/profile", running)
+    elif kind == "client-create":
+        client_id = change["definition"]["clientId"]
+        secret = read_private(Path(config["clientSecrets"][client_id]["file"]).resolve(), HEX64_RE)
+        if secret is None:
+            raise Refused(f"no delivered secret for new client {client_id}")
+        api.call("POST", f"{realm}/clients", {**change["definition"], "secret": secret})
+    elif kind == "client-update":
+        found = api.client(realm, change["target"].rsplit("/", 1)[1])
+        full = api.get(f"{realm}/clients/{found['id']}")
+        for key, value in change["fields"].items():
+            if key == "attributes":
+                full.setdefault("attributes", {}).update({name: item["to"] for name, item in value.items()})
+            else:
+                full[key] = value["to"]
+        api.call("PUT", f"{realm}/clients/{found['id']}", full)
+    elif kind in ("mapper-create", "mapper-update"):
+        client_id = change["target"].split("/")[2]
+        found = api.client(realm, client_id)
+        mapper = change["definition"]
+        if kind == "mapper-create":
+            api.call("POST", f"{realm}/clients/{found['id']}/protocol-mappers/models", mapper)
+        else:
+            existing = [m for m in api.get(f"{realm}/clients/{found['id']}/protocol-mappers/models") if m["name"] == mapper["name"]][0]
+            updated = {**existing, **{k: v for k, v in mapper.items() if k != "config"}, "config": {**existing.get("config", {}), **mapper.get("config", {})}}
+            api.call("PUT", f"{realm}/clients/{found['id']}/protocol-mappers/models/{existing['id']}", updated)
+    elif kind == "client-scope-add":
+        client_id = change["target"].split("/")[2]
+        found = api.client(realm, client_id)
+        scope = [s for s in api.get(f"{realm}/client-scopes") if s["name"] == change["scope"]][0]
+        api.call("PUT", f"{realm}/clients/{found['id']}/{change['list']}-client-scopes/{scope['id']}")
+    elif kind in ("scope-mapping-add", "scope-mapping-remove"):
+        found = api.client(realm, change["client"])
+        api.call("POST" if kind == "scope-mapping-add" else "DELETE", f"{realm}/clients/{found['id']}/scope-mappings/realm", [api.role(realm, change["role"])])
+    else:
+        raise Refused(f"unknown change kind {kind}")
+
+
+def describe(change):
+    kind = change["kind"]
+    if kind == "realm-setting":
+        return f"~ realm {change['setting']}: {json.dumps(change['from'])} -> {json.dumps(change['to'])}"
+    if kind == "client-update":
+        parts = []
+        for key, value in change["fields"].items():
+            if key in ("redirectUris", "webOrigins"):
+                parts.append(f"{key} +{value['add']} -{value['remove']}")
+            elif key == "attributes":
+                parts += [f"attribute {name}: {json.dumps(item['from'])} -> {json.dumps(item['to'])}" for name, item in value.items()]
+            else:
+                parts.append(f"{key}: {json.dumps(value['from'])} -> {json.dumps(value['to'])}")
+        return f"~ client {change['target'].split('/')[-1]}: " + "; ".join(parts)
+    if kind == "user-profile":
+        lines = [f"~ user profile: attributes {change['attributes']} groups {change['groups']}"]
+        lines += [f"      {key[:-1]} {name} := {json.dumps(item, sort_keys=True)}" for key in ("attributes", "groups") for name, item in change["content"][key].items()]
+        return "\n".join(lines)
+    if kind in ("mapper-create", "mapper-update"):
+        mapper = change["definition"]
+        return (f"{'+' if kind == 'mapper-create' else '~'} {kind} {change['target']}: type {mapper.get('protocolMapper')} "
+                f"protocol {mapper.get('protocol')} config {json.dumps(mapper.get('config') or {}, sort_keys=True)}")
+    if kind == "client-create":
+        # The secret is never in the plan; the delivered value is used at apply time.
+        return f"+ client-create {change['target']}: {json.dumps(change['definition'], sort_keys=True)} (secret: the delivered value)"
+    if kind == "client-scope-add":
+        return f"+ client-scope-add {change['target']}: scope {change['scope']} as {change['list']}"
+    symbol = "-" if kind.endswith("-remove") else "+" if kind.endswith(("-create", "-add")) else "~"
+    return f"{symbol} {kind} {change['target']}"
+
+
+def run_plan(config, args, api):
+    path = definition_path(config, args)
+    policy = subprocess.run(["jq", "-e", "-f", config["policy"], str(path)], capture_output=True, timeout=60)
+    if policy.returncode != 0:
+        raise Refused("the realm definition fails the hosting policy (realm-policy.jq); nothing planned")
+    definition = json.loads(path.read_text())
+    if path != Path(config["definition"]):
+        print("NOTE: planning against a definition that is not the pinned release's; review only, `realm apply` uses the pinned one.")
+    plan = realm_plan(api, config, definition)
+    print(f"Realm plan for {config['realm']}:")
+    for change in plan.changes:
+        print("  " + describe(change))
+    for item in plan.kept:
+        print("  kept: " + item)
+    for item in plan.refused:
+        print("  REFUSED: " + item)
+    return plan, definition
+
+
+def cmd_realm(config, args):
+    api = login(config, args)
+    plan, definition = run_plan(config, args, api)
+    target = f"{config['realm']}/realm"
+    if plan.refused:
+        audit("realm-" + args.action, target, "refused", args.admin)
+        print(f"Plan refused: {len(plan.refused)} item(s) destructive or not understood; nothing can be applied.")
+        return EXIT_PLAN_REFUSED
+    digest = plan.digest()
+    if not plan.changes:
+        print(f"Converged: the running realm matches the definition. Nothing to apply. (plan sha256 {digest})")
+        audit("realm-" + args.action, target, "converged", args.admin)
+        return 0
+    print(f"Plan: {len(plan.changes)} change(s). sha256 {digest}")
+    if args.action == "plan":
+        audit("realm-plan", target, f"{len(plan.changes)}-changes", args.admin)
+        print(f"Apply exactly this plan with: terrace-identity-admin realm apply --admin {args.admin} --plan-sha256 {digest}")
+        return 0
+    if args.plan_sha256 != digest:
+        audit("realm-apply", target, "refused-plan-mismatch", args.admin)
+        raise Refused("--plan-sha256 does not match the plan computed now; run `realm plan` again and review it")
+    for change in plan.changes:
+        apply_change(api, config, definition, change)
+        audit("realm-apply-" + change["kind"], change["target"], "done", args.admin)
+    after = realm_plan(api, config, definition)
+    if after.changes or after.refused:
+        raise Refused(f"the realm did not converge: {len(after.changes)} change(s) still planned")
+    audit("realm-apply", target, "converged", args.admin)
+    print(f"Applied {len(plan.changes)} change(s); the realm now matches the definition.")
+    return 0
+
+
+# ---- break-glass (G-40) -----------------------------------------------------
+
+def cmd_break_glass(config, args):
+    if args.action == "begin":
+        temporary = [name for name, _ in master_users() if reserved(name)]
+        usable = []
+        for name in temporary:
+            held = read_private(handoff_path("master", name))
+            try:
+                if held is not None and password_grant(config["base"], name, held):
+                    usable.append(name)
+            except Refused:
+                pass  # Keycloak not answering: the bootstrap below starts it again
+        if usable:
+            raise Refused(f"a working temporary administrator exists ({', '.join(usable)}); use it with its handoff file, "
+                          "or remove it with `break-glass end`")
+        # A random suffix: a local process cannot guess the name to lock the account out (master brute-force protection).
+        username = RECOVERY_PREFIX + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + token.token_hex(4)
+        if args.dry_run:
+            print(f"would stop Keycloak (sign-in is down for about a minute), create temporary administrator {username} with a random password, start Keycloak")
+            audit("break-glass-begin", f"master/user/{username}", "dry-run")
+            return
+        password = token.token_hex(32)
+        # The handoff comes first: if anything below dies, the account it creates is still usable.
+        write_private(handoff_path("master", username), password + "\n")
+        audit("break-glass-begin", f"master/user/{username}", "started")
+        try:
+            run_bootstrap(config, username, password)
+        except Refused:
+            if username not in [name for name, _ in master_users()]:
+                remove(handoff_path("master", username))  # no account was created: its password is useless
+            raise
+        if not password_grant(config["base"], username, password):
+            raise Refused(f"{username} was created but cannot sign in; Keycloak's state needs investigation")
+        audit("break-glass-begin", f"master/user/{username}", "done")
+        print(f"Recovery administrator {username} created. Its password is in {handoff_path('master', username)} (root-only, tmpfs).")
+        if temporary:
+            print(f"Unusable temporary administrators also present: {', '.join(temporary)}; `break-glass end` removes them.")
+        print(f"Use it with --admin {username} --password-stdin to repair named administrators (`admin enable` or `admin create`),")
+        print("then end it as a named administrator: `terrace-identity-admin break-glass end --admin NAME`.")
+        return
+    if reserved(args.admin):
+        raise Refused("end break-glass as a named administrator: that proves named access works again")
+    api = login(config, args)
+    removed = []
+    for user in api.paged("master/users?briefRepresentation=true"):
+        if reserved(user["username"]):
+            if args.dry_run:
+                removed.append(user["username"])
+                continue
+            api.call("DELETE", f"master/users/{user['id']}")
+            removed.append(user["username"])
+    if args.dry_run:
+        print(f"would delete: {', '.join(removed) or 'nothing'}")
+        audit("break-glass-end", "master/temporary-admins", "dry-run", args.admin)
+        return
+    for username in removed:
+        password = read_private(handoff_path("master", username))
+        if password is not None and password_grant(config["base"], username, password):
+            raise Refused(f"{username} can still sign in after deletion")
+        remove(handoff_path("master", username))
+        audit("break-glass-end", f"master/user/{username}", "done", args.admin)
+    left = [name for name, _ in master_users() if reserved(name)]
+    if left:
+        raise Refused(f"temporary administrators still in the database: {', '.join(left)}")
+    print(f"Break-glass ended: deleted {', '.join(removed) or 'no temporary administrator'}; none remains.")
+
+
+def cmd_check_temporary(config, args):
+    """Fail (and log at crit) while a temporary bootstrap or recovery administrator is older than the
+    configured age: a forgotten break-glass account must not stay unnoticed. Read-only."""
+    limit = config["temporaryMaxAgeMinutes"] if args.max_age_minutes is None else args.max_age_minutes
+    sql = ("select u.username, u.created_timestamp from user_entity u join realm r on r.id = u.realm_id where r.name = 'master' "
+           f"and (u.username = '{BOOTSTRAP_USER}' or u.username like '{RECOVERY_PREFIX}%') order by u.username")
+    result = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-d", "keycloak", "-c", sql],
+                            capture_output=True, timeout=60)
+    if result.returncode != 0:
+        raise Refused("could not read the master realm accounts from the keycloak database")
+    now = time.time() * 1000
+    old = []
+    for line in result.stdout.decode().splitlines():
+        name, _, created = line.partition("|")
+        if created.isdigit() and now - int(created) >= limit * 60000:
+            old.append(name)
+    problems = []
+    if old:
+        problems.append(f"temporary Keycloak administrator(s) older than {limit} minutes: {field(','.join(old))}; finish `first-admin` or run `break-glass end`")
+    # Once a named administrator exists, the master realm must be hardened (first-admin, or any administrator command, does it).
+    if any(not reserved(name) for name, _ in master_users()) and not all(master_hardening()):
+        problems.append("master realm brute-force protection or admin events are off; run a state-changing command as an administrator")
+    if problems:
+        syslog.openlog("terrace-identity-admin", 0, syslog.LOG_AUTH)
+        for problem in problems:
+            syslog.syslog(syslog.LOG_CRIT, problem)
+        syslog.closelog()
+        print("\n".join(problems))
+        return EXIT_REFUSED
+    print(f"No temporary administrator older than {limit} minutes; master realm hardened (or no administrator yet).")
+    return 0
+
+
+# ---- command line -----------------------------------------------------------
+
+def parser():
+    top = argparse.ArgumentParser(prog="terrace-identity-admin", description=__doc__.splitlines()[0],
+                                  epilog="Run as root on the production app host. Procedures: docs/identity-admin.md.")
+    sub = top.add_subparsers(dest="command", required=True)
+
+    def admin_options(command, dry_run=True):
+        command.add_argument("--admin", required=True, help="your named Keycloak administrator (master realm)")
+        command.add_argument("--password-stdin", action="store_true", help="read passwords from stdin lines instead of the terminal")
+        if dry_run:
+            command.add_argument("--dry-run", action="store_true", help="show what would change; change nothing")
+
+    def person_options(command):
+        command.add_argument("--username", required=True)
+        command.add_argument("--email", required=True)
+        command.add_argument("--first-name", required=True)
+        command.add_argument("--last-name", required=True)
+        command.add_argument("--set-password", action="store_true", help="type the initial password instead of a generated handoff file")
+
+    status = sub.add_parser("status", help="readiness and master-realm accounts (read-only, no login)")
+    status.set_defaults(func=cmd_status)
+    first = sub.add_parser("first-admin", help="bootstrap with the delivered escrowed password, create the first named administrator, delete the bootstrap account")
+    person_options(first)
+    first.add_argument("--password-stdin", action="store_true", help="with --set-password: read it from stdin")
+    first.add_argument("--dry-run", action="store_true")
+    first.set_defaults(func=cmd_first_admin)
+    password = sub.add_parser("password", help="change your own administrator password (required after an initial one)")
+    admin_options(password, dry_run=False)
+    password.set_defaults(func=cmd_password)
+    admin = sub.add_parser("admin", help="named Keycloak administrators (master realm)").add_subparsers(dest="action", required=True)
+    create = admin.add_parser("create")
+    admin_options(create)
+    person_options(create)
+    create.set_defaults(func=cmd_admin)
+    for action in ("enable", "disable"):
+        command = admin.add_parser(action)
+        admin_options(command)
+        command.add_argument("--username", required=True)
+        command.set_defaults(func=cmd_admin)
+    user = sub.add_parser("user", help="site accounts in the terrace realm").add_subparsers(dest="action", required=True)
+    ucreate = user.add_parser("create", help="an editor or administrator of the site, with a temporary password")
+    admin_options(ucreate)
+    person_options(ucreate)
+    ucreate.add_argument("--role", action="append", help="an editorial role of the identity contract; repeatable")
+    ucreate.set_defaults(func=cmd_user, role=None)
+    disable = user.add_parser("disable", help="disable an account and end its sessions")
+    admin_options(disable)
+    disable.add_argument("--username", required=True)
+    disable.set_defaults(func=cmd_user, role=None)
+    for action in ("grant", "revoke"):
+        command = sub.add_parser(action, help=f"{action} a role of the identity contract")
+        admin_options(command)
+        command.add_argument("--username", required=True)
+        command.add_argument("--role", required=True)
+        if action == "revoke":
+            command.add_argument("--keep-sessions", action="store_true", help="do not end the user's sessions (the role then lapses within the token lifetime)")
+        command.set_defaults(func=cmd_user, action=action)
+    listing = sub.add_parser("list", help="users with roles, realm roles and clients (read-only)")
+    admin_options(listing, dry_run=False)
+    listing.add_argument("--realm", choices=["terrace", "master", "all"], default="all")
+    listing.add_argument("--show-email", action="store_true")
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(func=cmd_list)
+    secret = sub.add_parser("client-secret", help="confidential client secrets").add_subparsers(dest="action", required=True)
+    sync = secret.add_parser("sync", help="set Keycloak to the delivered secret (after terrace-secrets rotate --manual and push)")
+    admin_options(sync)
+    sync.add_argument("--client", required=True)
+    sync.set_defaults(func=cmd_client_secret)
+    realm = sub.add_parser("realm", help="reconcile the running realm with the pinned release's definition").add_subparsers(dest="action", required=True)
+    plan = realm.add_parser("plan", help="print the plan and its sha256 (read-only)")
+    admin_options(plan, dry_run=False)
+    plan.add_argument("--definition", help="another root-owned definition (review only; default: the pinned release's)")
+    plan.set_defaults(func=cmd_realm)
+    apply = realm.add_parser("apply", help="apply exactly the reviewed plan")
+    admin_options(apply, dry_run=False)
+    apply.add_argument("--plan-sha256", required=True)
+    apply.set_defaults(func=cmd_realm)
+    check = sub.add_parser("check-temporary", help="fail while a temporary administrator is older than the configured age (read-only; run by a timer)")
+    check.add_argument("--max-age-minutes", type=int, help="override the configured age")
+    check.set_defaults(func=cmd_check_temporary)
+    glass = sub.add_parser("break-glass", help="recovery without any working administrator, SSO or proxy").add_subparsers(dest="action", required=True)
+    begin = glass.add_parser("begin", help="create a temporary recovery administrator (no login needed)")
+    begin.add_argument("--dry-run", action="store_true")
+    begin.set_defaults(func=cmd_break_glass)
+    end = glass.add_parser("end", help="delete every temporary administrator, as a named administrator")
+    admin_options(end)
+    end.set_defaults(func=cmd_break_glass)
+    return top
+
+
+def mutating(args):
+    """Every command that can change Keycloak (dry runs included) runs one at a time."""
+    return args.command not in ("status", "list", "check-temporary") and not (args.command == "realm" and args.action == "plan")
+
+
+def clean_stale_bootstrap_files(config):
+    """A tool killed before it started the bootstrap unit leaves its credential files (root-only, tmpfs);
+    remove them unless the unit is running right now."""
+    if KC_BOOT.exists() and not unit_busy(config["bootstrapUnit"]):
+        for name in ("username", "password", "nonce"):
+            remove(KC_BOOT / name)
+
+
+def take_lock():
+    private_dir(RUN)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise Refused("another terrace-identity-admin command is running; try again when it has finished")
+    return fd  # held until this process exits
+
+
+def main(argv=None, config_path=CONFIG):
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    args = parser().parse_args(argv)
+    try:
+        if os.geteuid() != 0:
+            raise Refused("run as root on the production app host (sudo terrace-identity-admin ...)")
+        if getattr(args, "plan_sha256", None) is not None and not SHA_RE.match(args.plan_sha256):
+            raise Refused("--plan-sha256 must be 64 lowercase hex digits")
+        if getattr(args, "client", None) is not None and not CLIENT_RE.match(args.client):
+            raise Refused("--client must be a client id")
+        os.umask(0o077)
+        config = load_config(config_path)
+        if mutating(args):
+            HARDEN.append(True)
+            # A dropped SSH session must not stop a command half way: finish it (output may be lost).
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            take_lock()
+            clean_stale_bootstrap_files(config)
+        try:
+            result = args.func(config, args)
+        finally:
+            for api in SESSIONS:
+                try:
+                    api.logout()
+                except Refused:
+                    pass
+        return result or 0
+    except Refused as error:
+        print(f"terrace-identity-admin: {error}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError) as error:
+        # Never echo exception text: a parser or HTTP error can quote input or response bytes.
+        print(f"terrace-identity-admin: {type(error).__name__} during {args.command}", file=sys.stderr)
+        return EXIT_REFUSED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

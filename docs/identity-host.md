@@ -60,9 +60,10 @@ approval/recovery procedure before any production activation.
 Keycloak's [startup import](https://www.keycloak.org/server/importExport)
 creates a missing realm and **skips an existing realm**. Changing the input is
 not realm reconciliation, client-secret rotation, account provisioning or a
-database restore. Do not delete a realm to force an update. Future changes need
-an authenticated, tested reconciliation procedure and a recoverable database
-copy. The VM check verifies existing realm state is preserved on restart.
+database restore. Do not delete a realm to force an update. On a production app
+host, `terrace-identity-admin realm plan` and `realm apply` reconcile declared
+changes into the existing realm ([identity administration](identity-admin.md#6-reconcile-the-realm-after-a-new-release-g-39));
+take a backup first. The VM check verifies existing realm state is preserved on restart.
 
 ## Network, resource and health bounds
 
@@ -72,15 +73,17 @@ return 404, as does dynamic client registration under the Terrace realm.
 Management/metrics are never proxied. The proxy overwrites forwarded
 host, scheme, port and client address. Keycloak's backend (8088), management
 interface (9000) and PostgreSQL bind to loopback. Port 80 is not opened by this
-module. Local root remains trusted; no remote admin route is provided yet.
-
-> **GAP (2026-11-18): no production procedure for Keycloak administration exists.**
-> Nothing documents how an operator reaches the administration console, creates or
-> removes the first administrator, creates editor or member accounts, grants roles or
-> lists users on a production host. The proxy denial above is intentional and stays.
-> The website `docs/member-lifecycle.md` tells a production operator to use the
-> Keycloak admin console, so this procedure is needed before real accounts exist.
-> It is tracked as G-15 in the [owner runbook](owner-runbook.md).
+module. Local root remains trusted; no remote admin route is provided, and none
+is needed: on a production app host an operator administers Keycloak as root over
+the loopback backend with `terrace-identity-admin` (first administrator from the
+escrowed bootstrap password, administrators, editor and administrator accounts,
+role grants, listing, client-secret rotation, realm reconciliation and
+break-glass), documented in [identity administration](identity-admin.md). The
+proxy denial above is intentional and stays; the production evaluation check
+rejects any administration route through the proxy. No web admin console is
+published, so the website `docs/member-lifecycle.md` advice to use the admin
+console reads, for production, as "use `terrace-identity-admin`" (G-15, closed
+in the VM proof on 2026-11-19).
 
 The Keycloak service has a 768 MiB Java heap, 1.5 GiB memory high threshold,
 2 GiB hard limit, two CPU quota, 256 tasks, 32 HTTP workers, ten database
