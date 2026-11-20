@@ -1,6 +1,6 @@
 # Delivery backlog
 
-Updated 2026-11-19. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
+Updated 2026-11-20. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
 GitLab issue, merge-request and milestone links below are the historical audit trail ([Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1),
 [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1), both historical). GitLab `!N` numbers are not
 GitHub PR numbers; see [migration and mirroring](github-migration.md). The step-by-step owner view, with proof status and open gaps,
