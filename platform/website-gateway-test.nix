@@ -8,16 +8,21 @@
 }: let
   directory = "/var/lib/terrace-gateway-test";
   media = "/var/lib/terrace-cms-media";
+  names = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
   # Public, disposable test certificates only. No production key or ACME account.
+  # The key is random and made at build time, so a rebuild makes a different
+  # certificate under the same path: every client references this path (the
+  # /etc/terrace-test-ca.pem symlink, NODE_EXTRA_CA_CERTS, the browser's NSS
+  # database) and nothing copies it into another derivation (no security.pki).
   certificate =
     if tlsFixture != null
     then tlsFixture
     else
-      pkgs.runCommand "terrace-gateway-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+      pkgs.runCommand "terrace-gateway-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
         mkdir -p $out
         openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
           -keyout $out/key.pem -out $out/cert.pem -subj '/CN=web.terrace.invalid' \
-          -addext ${pkgs.lib.escapeShellArg ("subjectAltName=" + pkgs.lib.concatStringsSep "," (map (name: "DNS:${name}") (["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames)))} 2>/dev/null
+          -addext ${pkgs.lib.escapeShellArg ("subjectAltName=" + pkgs.lib.concatStringsSep "," (map (name: "DNS:${name}") names))} 2>/dev/null
       '';
   trustedCertificate = "${certificate}/${
     if tlsFixture == null
@@ -33,8 +38,8 @@ in {
         memorySize = 6144;
         cores = 2;
       };
-      security.pki.certificateFiles = [trustedCertificate];
-      networking.hosts."127.0.0.1" = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
+      environment.etc."terrace-test-ca.pem".source = trustedCertificate;
+      networking.hosts."127.0.0.1" = names;
       terrace.website = {
         enable = true;
         webPackage = release.web;
@@ -93,8 +98,8 @@ in {
         memorySize = 2048;
         cores = 1;
       };
-      security.pki.certificateFiles = [trustedCertificate];
-      networking.hosts.${nodes.gateway.networking.primaryIPAddress} = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
+      environment.etc."terrace-test-ca.pem".source = trustedCertificate;
+      networking.hosts.${nodes.gateway.networking.primaryIPAddress} = names;
       environment.systemPackages = [pkgs.curl pkgs.jq pkgs.netcat-openbsd pkgs.nssTools (pkgs.python3.withPackages (ps: [ps.playwright]))];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
       environment.etc."gateway-browser.py".source = ./website-gateway/browser.py;
@@ -103,23 +108,31 @@ in {
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import json, re, shlex, tempfile
+    # Every HTTPS client trusts the test certificate by store-path reference only.
+    CA = "/etc/terrace-test-ca.pem"
+    CURL = "curl --cacert " + CA + " "
+    PROTOCOL = "SSL_CERT_FILE=" + CA + " python3 /etc/gateway-protocol.py "
     start_all()
     gateway.wait_for_unit("postgresql.target")
     gateway.wait_for_unit("keycloak.service", timeout=300)
     gateway.wait_for_unit("nginx.service")
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(gateway, CA, "127.0.0.1:443", ${builtins.toJSON names}, "gateway")
+    trust_consistent(client, CA, "web.terrace.invalid:443", ${builtins.toJSON names}, "client")
 
     with subtest("trusted public TLS and denied direct/private infrastructure"):
-        discovery = json.loads(client.succeed("curl --fail --silent --max-time 10 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration"))
+        discovery = json.loads(client.succeed(CURL + "--fail --silent --max-time 10 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration"))
         assert discovery["issuer"] == "https://identity.terrace.invalid/realms/terrace"
-        client.fail("curl --fail --silent --max-time 10 https://gateway/ >/dev/null 2>&1")
-        assert client.succeed("curl --silent --max-time 10 -H 'Host: attacker.invalid' -o /dev/null -w '%{http_code}' https://web.terrace.invalid/").strip() == "421"
-        assert client.succeed("curl --silent --max-time 10 -H 'Host: cms.terrace.invalid' -o /dev/null -w '%{http_code}' https://web.terrace.invalid/").strip() == "421"
+        client.fail(CURL + "--fail --silent --max-time 10 https://gateway/ >/dev/null 2>&1")
+        assert client.succeed(CURL + "--silent --max-time 10 -H 'Host: attacker.invalid' -o /dev/null -w '%{http_code}' https://web.terrace.invalid/").strip() == "421"
+        assert client.succeed(CURL + "--silent --max-time 10 -H 'Host: cms.terrace.invalid' -o /dev/null -w '%{http_code}' https://web.terrace.invalid/").strip() == "421"
         for route in ["/admin/", "/realms/master/", "/metrics", "/health/ready", "/realms/terrace/clients-registrations/default"]:
-            assert client.succeed("curl --silent --max-time 10 -o /dev/null -w '%{http_code}' " + shlex.quote("https://identity.terrace.invalid" + route)).strip() == "404"
+            assert client.succeed(CURL + "--silent --max-time 10 -o /dev/null -w '%{http_code}' " + shlex.quote("https://identity.terrace.invalid" + route)).strip() == "404"
         for port in [80, 5432, 8088, 9000, 13048, 14294]:
             client.fail(f"nc -z -w 2 gateway {port}")
-        gateway.succeed("python /etc/gateway-protocol.py seed")
+        gateway.succeed(PROTOCOL + "seed")
         assert gateway.succeed("runuser -u postgres -- psql -XAt -d keycloak -c \"select count(*) from user_entity where username='gateway-fixture-bootstrap'\" 2>/dev/null").strip() == "0"
 
     with subtest("public activation guards and explicit migrations"):
@@ -135,14 +148,14 @@ in {
                                   ("terrace-web", "CMS_PUBLIC_ORIGIN", "https://cms.terrace.invalid"), ("terrace-web", "ADDRESS_HEADER", "X-Forwarded-For"), ("terrace-web", "XFF_DEPTH", "1")]:
             gateway.succeed(f"pid=$(systemctl show {unit}.service -p MainPID --value) && tr '\\0' '\\n' </proc/$pid/environ | grep -qx {name}={value}")
         assert gateway.succeed("stat -c %U:%G:%a /var/lib/terrace-cms-outbox").strip() == "terrace_cms:terrace_cms:700"
-        headers = client.succeed("curl --fail --silent --max-time 10 -D - -o /dev/null https://web.terrace.invalid/events/").lower()
+        headers = client.succeed(CURL + "--fail --silent --max-time 10 -D - -o /dev/null https://web.terrace.invalid/events/").lower()
         assert "cache-control: private, no-store" in headers and "x-content-type-options: nosniff" in headers
         for route in ["/api/media/file/private.png", "/_next/image?url=%2Fapi%2Fmedia%2Ffile%2Fprivate.png&w=64&q=75", "/api/users/me"]:
-            headers = client.succeed("curl --silent --max-time 10 -D - -o /dev/null " + shlex.quote("https://cms.terrace.invalid" + route)).lower()
+            headers = client.succeed(CURL + "--silent --max-time 10 -D - -o /dev/null " + shlex.quote("https://cms.terrace.invalid" + route)).lower()
             assert "cache-control: private, no-store" in headers
 
     with subtest("normal HTTPS code/PKCE flows and cache separation through gateway"):
-        protocol = gateway.succeed("python /etc/gateway-protocol.py test").strip()
+        protocol = gateway.succeed(PROTOCOL + "test").strip()
         assert re.fullmatch(r"Native HTTPS protocol checks passed: [0-9]+ bounded assertions; SSO, roles, state, CSRF, cookies, publication, private cache and logout\.", protocol)
         print(protocol)
         gateway.succeed("test -n \"$(find /var/cache/terrace-cms/images -type f -print -quit)\"")
@@ -160,13 +173,13 @@ in {
         print(browser)
         client.succeed("rm /root/gateway-fixture.json")
         for route in ["/members/", "/auth/callback?state=invalid&code=invalid"]:
-            headers = client.succeed("curl --silent --max-time 10 -D - -o /dev/null " + shlex.quote("https://web.terrace.invalid" + route)).lower()
+            headers = client.succeed(CURL + "--silent --max-time 10 -D - -o /dev/null " + shlex.quote("https://web.terrace.invalid" + route)).lower()
             assert "cache-control: private, no-store" in headers
         peaks = {unit: gateway.succeed(f"systemctl show {unit}.service -p MemoryPeak --value").strip() for unit in ["keycloak", "terrace-cms", "terrace-web", "postgresql", "nginx"]}
 
     with subtest("imported content, application limit, invitation outbox, sweep timer and erasure through the gateway"):
         def lifecycle(machine, action, label):
-            output = machine.succeed("python3 /etc/gateway-protocol.py " + action, timeout=180).strip()
+            output = machine.succeed(PROTOCOL + action, timeout=180).strip()
             assert re.fullmatch(label + r"[^:]*: [0-9]+ bounded assertions(;.*)?\.", output), output
             print(output)
 

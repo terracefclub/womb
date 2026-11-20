@@ -1,4 +1,8 @@
 # Synthetic VM trust only. Never an ACME account or production certificate.
+# The keys are random and made at build time, so a rebuild makes a different CA
+# under the same store path: clients reference this output (/etc symlinks,
+# SSL_CERT_FILE, curl --cacert, NODE_EXTRA_CA_CERTS) and nothing may copy it into
+# another derivation, such as a security.pki trust bundle (see ../test-trust.nix).
 {
   pkgs,
   hostnames,
@@ -6,7 +10,7 @@
 assert hostnames != [] && builtins.length hostnames <= 16;
 assert builtins.all (name: builtins.isString name && builtins.stringLength name <= 253 && builtins.match "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+" name != null) hostnames;
 assert pkgs.lib.unique hostnames == hostnames;
-  pkgs.runCommand "terrace-rehearsal-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  pkgs.runCommand "terrace-rehearsal-proof-ca" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
       -keyout ca-key.pem -out $out/ca.pem -subj /CN=TerraceRehearsalSyntheticCA \
