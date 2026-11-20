@@ -52,7 +52,8 @@ is redeemed once, signed in and linked, both members are erased, the sweep timer
 runs, and the restored outbox must be owned, written and redacted by the CMS
 account. Each step fails with one fixed label (`website-lifecycle-<phase>-<step>`).
 These exact scripts are proven in the VM all-services rehearsal
-([full-rehearsal.md](full-rehearsal.md)); **they have not yet run on a provider**.
+([full-rehearsal.md](full-rehearsal.md)) and ran on Hetzner in lease 5
+([result](#lease-5-result-2026-11-20)).
 `infra/nixos/rehearsal_services.py` loads that module by a path relative to
 itself, so the lease runner must stage the whole repository tree, with both
 `infra/nixos/` and `platform/website-gateway/`, not `infra/nixos/` alone. If
@@ -134,3 +135,41 @@ native rehearsal or a later explicit cloud composition. The offline check
 uses stub releases and evaluates role wiring. Actual provider installation,
 private transport, application bootstrap, fresh recovery and resource
 absence require the leased run.
+
+## Lease 5 result (2026-11-20)
+
+Known-full lease 5 (run `efc9794a`, staged at Womb trunk `bb0d526`, armed 16:12:52
+UTC, final audit 17:43:20 UTC) passed end to end: all 46 steps finished with
+status 0, no guard failed, and everything was torn down. The orchestrator read the
+receipts on the builder. It is the first lease to run the service phase, the
+off-host backup, the retirement of the original pair and the restore onto a
+replacement pair on the provider; leases 1 to 4 had proven only create, install and
+boot from disk.
+
+- Both pairs (original and replacement app and relay) were installed from stock
+  to RAM to disk and booted from it. The service phase (`infra/nixos/rehearsal_services.py`)
+  authenticated both hosts, then on the gateway ran PostgreSQL, Keycloak, nginx,
+  the CMS and website (explicit migration), the sweep timer, K3s with a retained
+  volume probe, Documenso (migrated, bootstrapped, started, health check only) and
+  the Vaultwarden and Windmill migrations and role checks; on the relay it ran
+  Headscale and nginx with one synthetic user. Browser, signing, automation and
+  peer-topology checks are not part of this phase.
+- 198 protocol assertions passed before the backup and again after the restore, with
+  the website lifecycle steps in both phases (after the restore: the pending
+  invitation redeemed, sign-in, link, both members erased, the sweep, the outbox
+  redacted).
+- Both hosts backed up to an encrypted restic repository held on the builder; the
+  supervisor's check (`restic check --read-data` and a snapshot inventory) passed.
+  The originals were retired with scoped absence and baseline-preservation checks.
+  The replacement pair restored each role: native database and retained volume
+  adoption (read and write checked), and the relay's Headscale state and private
+  HTTPS identity unchanged.
+- Teardown: the final audit recorded all provider resources and scopes off, the
+  baseline preserved and the existing server still running; a later read-only
+  provider inventory showed only the pre-existing baseline.
+
+Scope: synthetic data on private, temporary hosts. No real members, public DNS,
+public certificate authority, mail, payments or public exposure. One run, on one
+day, on one choice of server types. Not proven by this lease: anything in production
+profile mode (`terrace.production`), ACME, the Keycloak administration tool, real
+data migration, cutover, alerting. Lease 6 has not been requested.

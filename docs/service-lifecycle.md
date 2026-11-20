@@ -18,7 +18,7 @@ reports are evidence of design/tests, not a fresh live homelab audit.
 NixOS VM tests boot **prebuilt closures** on the Linux builder. They do not prove
 blank provider-VM provisioning, initial NixOS installation/image delivery, secret
 bootstrap or a complete all-services deployment. Neither the evaluation-only
-`hetzner.nix` disk placeholder nor mocked Pulumi inputs proves those stages.
+`hetzner.nix` disk placeholder nor mocked Pulumi inputs proves those stages. A provider run does for the rehearsal profile: lease 5 (2026-11-20) installed, booted and ran it on Hetzner on synthetic data ([cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)); the production profile has not been installed on a provider.
 Native website/identity services deliberately coexist with the K3s foundation;
 they are not managed by that cluster. This reduces a small host's operational
 load, while leaving several homelab automations absent.

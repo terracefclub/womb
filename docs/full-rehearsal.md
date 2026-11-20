@@ -409,7 +409,7 @@ sweep 6.51 s, redaction 0.10 s. The run's synthetic state was purged afterwards
 (receipt kept). At the same commit the infrastructure, run-check and runner unit tests,
 the cloud rehearsal configuration check (now also failing closed on boot-enabled
 sockets and paths), and the website and gateway checks passed. These steps are proven
-in the VM rehearsal only; **they have not yet run on a provider**.
+in the VM rehearsal; they later ran on Hetzner in lease 5, for the two-host cloud rehearsal profile only ([cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)).
 
 ### Observed all-services acceptance with the website lifecycle — November 19, 2026 (Pacific)
 
