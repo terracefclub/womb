@@ -99,7 +99,7 @@ nothing else:
 - kernel modules or firmware the machine needs; no services and no ports.
 
 Hetzner Cloud uses the existing `infra/nixos` cloud disk module (GPT, ESP, ext4,
-systemd-boot fallback path), which leases 3 and 4 installed and booted. The
+systemd-boot fallback path), which leases 3 and 5 installed and booted (lease 4 stopped before the install plan; see [cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)). The
 on-prem server's hardware is unknown, so no layout is written for it; the
 profile refuses to evaluate as production without a root filesystem and a boot
 loader.

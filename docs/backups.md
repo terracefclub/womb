@@ -281,6 +281,8 @@ VM that offers SFTP only (no shell), then:
    and unchanged source data. Unprivileged users cannot read restored payloads.
 8. Requires a successful restore without `--keep-running` to stop its database.
 
+Lease 5 (run `efc9794a`, 2026-11-20) backed up both rehearsal hosts to an encrypted restic repository on the builder (a directory on the build machine, reached through a reverse SSH forward) and restored onto replacement Hetzner servers ([cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)); that used a REST repository on the builder, not a Storage Box or B2 target.
+
 Still unproven: a real Hetzner Storage Box (port, quotas, host key, sub-account
 restrictions), a real B2 bucket and the S3 code path (no S3 server was available
 in the pinned Nixpkgs, so the secondary target in the test is a second SFTP

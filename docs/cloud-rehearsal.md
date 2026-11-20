@@ -52,7 +52,8 @@ is redeemed once, signed in and linked, both members are erased, the sweep timer
 runs, and the restored outbox must be owned, written and redacted by the CMS
 account. Each step fails with one fixed label (`website-lifecycle-<phase>-<step>`).
 These exact scripts are proven in the VM all-services rehearsal
-([full-rehearsal.md](full-rehearsal.md)); **they have not yet run on a provider**.
+([full-rehearsal.md](full-rehearsal.md)) and ran on Hetzner in lease 5
+([result](#lease-5-result-2026-11-20)).
 `infra/nixos/rehearsal_services.py` loads that module by a path relative to
 itself, so the lease runner must stage the whole repository tree, with both
 `infra/nixos/` and `platform/website-gateway/`, not `infra/nixos/` alone. If
@@ -116,7 +117,7 @@ service health are measured provider steps.
   remain disabled.
 - Explicitly run `cloud-rehearsal-inputs.service` once on the original
   gateway, then use the [native rehearsal order](full-rehearsal.md) for
-  migration, bootstrap, bounded browser/worker checks and quiescence. Set
+  migration, bootstrap, bounded browser/worker checks (not part of lease 5) and quiescence. Set
   `SSL_CERT_FILE=/var/lib/terrace-rehearsal-trust/ca.pem` for the gateway's
   root-only Python protocol helper and use curl's explicit `--cacert`.
   After verifying the encrypted repository and escrow off both hosts, the
@@ -133,4 +134,54 @@ It leaves separate automation and peer-topology exercises to the full
 native rehearsal or a later explicit cloud composition. The offline check
 uses stub releases and evaluates role wiring. Actual provider installation,
 private transport, application bootstrap, fresh recovery and resource
-absence require the leased run.
+absence require the leased run (see the lease 5 result below).
+
+## Lease 5 result (2026-11-20)
+
+Known-full lease 5 (run `efc9794a`, staged at Womb trunk `bb0d526`, armed 16:12:52
+UTC, final audit 17:43:20 UTC, about 90 minutes) passed end to end: all 46 steps finished with
+status 0, no guard failed, and everything was torn down. The orchestrator read the
+receipts on the builder. It is the first lease to run the service phase, the
+backup to a repository on the build machine (off the leased hosts only: not a
+storage provider account and not off-site), the retirement of the original pair and the restore onto a
+replacement pair on the provider; leases 1 to 4 had proven only create, install and
+boot from disk.
+
+- Both pairs (original and replacement app and relay) were installed from stock
+  to RAM to disk and booted from it. The service phase (`infra/nixos/rehearsal_services.py`)
+  authenticated both hosts, then on the gateway ran PostgreSQL, Keycloak, nginx,
+  the CMS and website (explicit migration), the sweep timer, K3s with a retained
+  volume probe, Documenso (migrated, bootstrapped, started, health check only) and
+  Windmill (migrated, its database role boundary checked, then server and worker
+  started with the server's `/api/version` answering and the worker active) and
+  Vaultwarden (migrated, started, its bootstrap unit run, `/alive` answering), the
+  last two for liveness only; on the relay it ran
+  Headscale and nginx with one synthetic user. Browser, signing, automation and
+  peer-topology checks are not part of this phase.
+- 198 protocol assertions passed before the backup and again after the restore, with
+  the website lifecycle steps in both phases (after the restore: the pending
+  invitation redeemed, sign-in, link, both members erased, the sweep, the outbox
+  redacted).
+- Both hosts backed up through the native backup module to an encrypted restic
+  repository that was a directory on the build machine, reached by a reverse SSH
+  forward from each host (off the leased hosts only; no storage provider account,
+  no off-site copy, no drill of recovery after losing the builder); the
+  supervisor's check (`restic check --read-data` and a snapshot inventory) passed.
+  The originals were retired with scoped absence and baseline-preservation checks.
+  The replacement pair restored each role from its snapshot: native database
+  adoption, K3s retained volume (the local-retain persistent-volume data under the
+  host's own `/var/lib/rancher/k3s/storage`, carried through the backup and copied
+  back; the probe's marker was read back, a new write succeeded and the node and
+  volume identities matched; it is not a provider volume), and the relay's
+  Headscale state with its identity and private HTTPS unchanged. The run's
+  certificate authority, TLS files and repository password were not restored from
+  the backup: the operator tooling supplied them again, checked by digest.
+- Teardown: the final audit recorded all provider resources and scopes off, the
+  baseline preserved and the existing server still running; a later read-only
+  provider inventory showed only the pre-existing baseline.
+
+Scope: synthetic data on private, temporary hosts. No real members, public DNS,
+public certificate authority, mail, payments or public service exposure (the hosts had public addresses with operator SSH ingress only). One run, on one
+day, on one choice of server types. Not proven by this lease: anything in production
+profile mode (`terrace.production`), ACME, the Keycloak administration tool, real
+data migration, cutover, alerting. Lease 6 has not been requested.
