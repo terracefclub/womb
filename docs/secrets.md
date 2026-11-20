@@ -140,8 +140,10 @@ inventory and printed by `rotate`.
 That is 14 entries for the app (12 core, 2 optional secondary-backup) and 4 for
 the relay, each host with its own values. A host that gets its certificate by
 ACME (`host create ... --feature acme-tls`) has no `tls/*`: 12 and 2. `host tls
-HOST acme|manual` switches an existing host's store ([TLS](tls.md)); while it
-switches, a host still accepts and ignores `tls/*` it no longer needs. Rehearsal-only:
+HOST manual` and `host tls HOST acme --yes` switch an existing host's store
+([TLS](tls.md)); the second drops the manual pair and refuses without `--yes`.
+While it switches, a host still accepts `tls/*` it no longer needs, ignores
+them, and `verify` warns about them. Rehearsal-only:
 `rehearsal/users-json` (synthetic users for the shared protocol; refused by
 `install` on a production host).
 
@@ -207,7 +209,7 @@ terrace-secrets rotate app website/lifecycle-intake           # one generated va
 terrace-secrets rotate app identity/database-password --manual   # a secret whose service keeps a copy
 terrace-secrets apply app identity/database-password --address HOST  # hand it to that service
 terrace-secrets host create app --role app --replace && terrace-secrets rekey app
-terrace-secrets host tls app acme | manual                    # how the host gets its certificate (docs/tls.md)
+terrace-secrets host tls app manual | acme --yes             # how the host gets its certificate (docs/tls.md)
 terrace-secrets host reset-replacement app --confirm app      # only to redeploy a wiped host as NEW
 terrace-secrets escrow replace /offline/terrace-escrow-2.age  # new escrow; re-encrypts every host
 terrace-secrets public app backup/primary/sftp-key            # public half, for enrolment

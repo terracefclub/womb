@@ -3,6 +3,7 @@
 # expiry check, and client tools. The production profile refuses all of it.
 {
   config,
+  lib,
   pkgs,
   ...
 }: let
@@ -13,6 +14,8 @@ in {
   terrace.production.rehearsalHarness = true;
   # Written by the test from the local CA's management API; pebble makes new roots per start.
   terrace.production.tls.trustAnchorFile = "${state}/roots.pem";
-  systemd.services."acme-order-renew-${certificate}".environment.LEGO_CA_CERTIFICATES = "${state}/acme-server-ca.pem";
+  systemd.services = lib.mkIf (config.terrace.production.tls.mode == "acme") {
+    "acme-order-renew-${certificate}".environment.LEGO_CA_CERTIFICATES = "${state}/acme-server-ca.pem";
+  };
   environment.systemPackages = [pkgs.curl pkgs.openssl pkgs.jq pkgs.iproute2 pkgs.netcat-openbsd];
 }

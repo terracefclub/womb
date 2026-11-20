@@ -34,6 +34,9 @@
       directory = "https://acme.test:14000/dir";
       acceptTerms = true;
       contact = "tls-rehearsal@terrace.test";
+      # Short retries so the proof sees the bounded retry (production: at least 900 s).
+      retrySeconds = 20;
+      retries = 3;
     };
   };
   # Pebble's own HTTPS (directory) certificate is made at boot inside the acme
@@ -171,6 +174,9 @@ in {
         memorySize = 1536;
         cores = 1;
       };
+      # The same relay with the operator-delivered certificate, for the live
+      # switch from ACME to manual and back.
+      specialisation.manual.configuration.terrace.production.tls.mode = lib.mkForce "manual";
       terrace.production = {
         instance = "rehearsal";
         memoryMiB = 2048;
@@ -234,15 +240,26 @@ in {
     def fingerprint(machine, path):
         return machine.succeed(f"openssl x509 -noout -fingerprint -sha256 -in {path}").strip()
 
+    retries = []
+
     def served(host, name, verify=True):
         # What a client sees: chain verified against the local CA's roots, name checked.
-        flags = f"-verify_return_error -verify_hostname {name} -CAfile /root/roots.pem" if verify else ""
-        command = f"echo | openssl s_client -connect {host}:443 -servername {name} {flags}"
-        if operator.execute(command + " >/dev/null 2>&1")[0] != 0:
-            # Diagnostics (names, issuers, verify result; no key material), then allow a reload to settle.
-            print(f"served {host} {name}: " + operator.execute(command + " 2>&1 | grep -a -i 'verif\\|error\\|subject=\\|issuer=\\|depth\\|connect' | head -n 20")[1])
-            operator.wait_until_succeeds(command + " >/dev/null 2>&1", timeout=60)
-        return operator.succeed(command + " 2>/dev/null | openssl x509 -noout -fingerprint -sha256").strip()
+        base = f"echo | openssl s_client -connect {host}:443 -servername {name}"
+        if verify:
+            command = base + f" -verify_return_error -verify_hostname {name} -CAfile /root/roots.pem"
+            for attempt in range(6):
+                status, output = operator.execute(command + " 2>&1")
+                if status == 0:
+                    break
+                diagnosis = [line for line in output.splitlines() if re.search(r"verif|error|depth|connect", line, re.I)][:12]
+                # The only tolerated miss: pebble's notBefore is the issue time (no backdating),
+                # which can be a moment ahead of this guest's clock. Anything else fails at once.
+                if "certificate is not yet valid" not in output or attempt == 5:
+                    journal = {"app": app, "relay": relay}[host].execute("journalctl -u nginx.service -o cat --no-pager -n 15")[1]
+                    raise AssertionError(f"{host} {name}: no verified TLS session: {diagnosis} nginx: {journal}")
+                retries.append(f"{host} {name}: not yet valid")
+                time.sleep(2)
+        return operator.succeed(base + " 2>/dev/null | openssl x509 -noout -fingerprint -sha256").strip()
 
     def account_hash(machine):
         return machine.succeed("find /var/lib/acme/.lego/accounts -type f -name '*.key' -print0 | sort -z | xargs -0 cat | sha256sum").strip()
@@ -273,6 +290,21 @@ in {
         public = op(f"terrace-secrets public {host} backup/primary/sftp-key").strip()
         operator.succeed(f"install -d -o restic -g users -m 0700 /home/restic/.ssh /home/restic/{directory} && echo {shlex.quote(public)} >>/home/restic/.ssh/authorized_keys && chown restic:users /home/restic/.ssh/authorized_keys && chmod 0600 /home/restic/.ssh/authorized_keys")
 
+    def leaf(label, sans, days):
+        # Test leaves signed at test time by the local CA's intermediate (management API).
+        acme.succeed(f"cd /root/leaf && openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -subj /CN={sans[0]} -keyout {label}-key.pem -out {label}.csr 2>/dev/null && "
+                     f"printf 'basicConstraints=critical,CA:FALSE\\nkeyUsage=critical,digitalSignature\\nextendedKeyUsage=serverAuth\\nsubjectAltName=%s\\n' {','.join('DNS:' + s for s in sans)} >{label}.ext && "
+                     f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) -days {days} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
+        return acme.succeed(f"cat /root/leaf/{label}.pem"), acme.succeed(f"cat /root/leaf/{label}-key.pem"), fingerprint(acme, f"/root/leaf/{label}.pem")
+
+    def served_locally(machine, name, fp):
+        machine.wait_until_succeeds(f"test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername {name} 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(fp), timeout=120)
+
+    def issued_by_acme(machine, cert):
+        # lego's own copy exists only after a real order (not for the placeholder or a staged manual certificate).
+        machine.wait_until_succeeds(f"test -e /var/lib/acme/.lego/{cert}/*/{cert}.crt && test \"$(systemctl show {order(cert)} -p ActiveState --value)\" = inactive", timeout=600)
+        ok(state(machine, order(cert), "Result") == "success", f"{machine.name}: ACME order succeeded")
+
     def issued(machine, cert):
         machine.wait_until_succeeds(f"test -e {live(cert)}/acme-success && test \"$(systemctl show {order(cert)} -p ActiveState --value)\" = inactive", timeout=300)
         ok(state(machine, order(cert), "Result") == "success", f"{machine.name}: order unit succeeded")
@@ -302,6 +334,7 @@ in {
         acme.succeed("curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:14000/dir >/dev/null")
         roots = acme.wait_until_succeeds("curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:15000/roots/0")
         ok("BEGIN CERTIFICATE" in roots, "local CA root fetched at test time")
+        acme.succeed("install -d -m 0700 /root/leaf && cd /root/leaf && curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:15000/intermediates/0 >int.pem && curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:15000/intermediate-keys/0 >int-key.pem")
 
     with subtest("operator: an ACME host receives no tls/* secrets"):
         operator.start()
@@ -373,11 +406,19 @@ in {
 
     with subtest("owners and modes; keys never leave /var/lib/acme"):
         directory = live("web.terrace.test")
-        ok(app.succeed(f"stat -c '%a %U %G' {directory}").strip() == "750 acme nginx", "certificate directory 0750 acme:nginx")
+        ok(app.succeed(f"stat -c '%a %U %G' {directory}").strip() == "750 acme acme", "certificate directory 0750 acme:acme")
         modes = app.succeed(f"find {directory} -type f -printf '%m %u %g %f\\n' | sort").strip().splitlines()
-        ok(all(line.startswith("640 acme nginx ") for line in modes) and any(line.endswith(" key.pem") for line in modes), f"certificate files 0640 acme:nginx {modes}")
+        ok(all(line.startswith("640 acme acme ") for line in modes) and any(line.endswith(" key.pem") for line in modes), f"certificate files 0640 acme:acme {modes}")
         stored = app.succeed("find /var/lib/acme/.lego/web.terrace.test -type f -printf '%m %u %g\\n' | sort -u").strip().splitlines()
-        ok(stored == ["640 acme nginx"], f"client copies 0640 acme:nginx {stored}")
+        ok(stored == ["640 acme acme"], f"client copies 0640 acme:acme {stored}")
+        ok(app.succeed("id -nG nginx").split() == ["nginx"], "the nginx user is in no other group")
+        for path in [f"{directory}/key.pem", f"{directory}/full.pem", "/var/lib/acme/.lego/web.terrace.test/*/web.terrace.test.key"]:
+            app.succeed(f"cat {path} >/dev/null")
+            app.fail(f"runuser -u nginx -- sh -c 'cat {path}' >/dev/null 2>&1")
+        ok(True, "the nginx user cannot read the TLS key (ACME directory and lego copy)")
+        credentials = app.succeed("systemctl show nginx.service -p LoadCredential --value")
+        ok(f"{directory}/key.pem" in credentials and f"{directory}/fullchain.pem" in credentials and state(app, "nginx.service", "RefreshOnReload") == "credentials", f"nginx gets the pair as credentials refreshed on reload ({credentials.strip()})")
+        ok(app.succeed("cmp -s /run/credentials/nginx.service/terrace-website-key " + directory + "/key.pem && echo same").strip() == "same", "nginx's credential copy is the ACME key")
         accounts = app.succeed("find /var/lib/acme/.lego/accounts -type f -printf '%m %u\\n' | sort -u").strip().splitlines()
         ok(accounts == ["600 acme"], f"account key 0600 acme {accounts}")
         account_dirs = app.succeed("find /var/lib/acme/.lego/accounts -type d -printf '%m %u %g\\n' | sort -u").strip().splitlines()
@@ -389,7 +430,7 @@ in {
         for user in ["nginx", "nobody"]:
             app.fail(f"runuser -u {user} -- cat {account_key} >/dev/null 2>&1")
         ok(True, "account key unreadable by nginx and others")
-        for user in ["terrace_cms", "terrace_web", "keycloak", "nobody"]:
+        for user in ["nginx", "terrace_cms", "terrace_web", "keycloak", "nobody"]:
             app.fail(f"runuser -u {user} -- cat {directory}/key.pem >/dev/null 2>&1")
         ok(True, "service accounts cannot read the TLS key")
 
@@ -399,6 +440,9 @@ in {
         status = app.succeed("terrace-tls status")
         ok("mode: acme" in status and "Pebble Intermediate" in status and "PLACEHOLDER" not in status, "terrace-tls status")
         ok(state(app, "acme-renew-web.terrace.test.timer", "ActiveState") == "active" and state(app, "terrace-tls-check.timer", "ActiveState") == "active", "renewal and expiry timers armed by adoption")
+        for timer in ["acme-renew-web.terrace.test.timer", "terrace-tls-check.timer"]:
+            ok(state(app, timer, "NextElapseUSecRealtime") not in ["", "0", "n/a"], f"{timer} has a next run")
+        ok("run as root" in app.fail("runuser -u nobody -- terrace-tls status 2>&1"), "terrace-tls status says to run as root")
 
     with subtest("a routine renewal run is a no-op; a forced renewal reloads nginx without dropping connections"):
         before = fingerprint(app, live("web.terrace.test") + "/cert.pem")
@@ -406,17 +450,22 @@ in {
         app.succeed("systemctl start " + order("web.terrace.test"), timeout=300)
         ok(fingerprint(app, live("web.terrace.test") + "/cert.pem") == before, "renewal not yet due: certificate unchanged")
         pid, restarts = state(app, "nginx.service", "MainPID"), state(app, "nginx.service", "NRestarts")
-        probe = f"for i in $(seq 1 80); do curl -s -o /dev/null -w '%{{http_code}}\\n' --max-time 3 --cacert /root/roots.pem --resolve identity.terrace.test:443:{address('app')} {OIDC} >>/root/probe.log; sleep 0.25; done"
+        probe = f"for i in $(seq 1 80); do printf '%s ' $(date +%s.%N) >>/root/probe.log; curl -s -o /dev/null -w '%{{http_code}}\\n' --max-time 3 --cacert /root/roots.pem --resolve identity.terrace.test:443:{address('app')} {OIDC} >>/root/probe.log; sleep 0.25; done"
         operator.succeed("rm -f /root/probe.log && systemd-run --unit=tls-probe-loop ${pkgs.bash}/bin/bash -c " + shlex.quote("PATH=${lib.makeBinPath [pkgs.curl pkgs.coreutils]}; " + probe))
         operator.wait_until_succeeds("test $(wc -l </root/probe.log) -ge 8", timeout=60)
-        out = app.succeed("terrace-tls renew --force", timeout=300)
-        ok("succeeded" in out, "terrace-tls renew --force")
+        ok("repeat with --force --yes" in app.fail("terrace-tls renew --force 2>&1"), "a forced renewal needs --yes")
+        out = app.succeed("terrace-tls renew --force --yes", timeout=300)
+        ok("succeeded" in out, "terrace-tls renew --force --yes")
         after = fingerprint(app, live("web.terrace.test") + "/cert.pem")
         ok(after != before, "a new certificate was issued")
         app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(after), timeout=60)
         operator.wait_until_succeeds("test \"$(systemctl show tls-probe-loop.service -p ActiveState --value)\" != active", timeout=120)
-        codes = operator.succeed("cat /root/probe.log").split()
-        ok(len(codes) == 80 and set(codes) == {"200"}, f"80 HTTPS requests across the renewal, all 200 ({sorted(set(codes))})")
+        lines = [line.split() for line in operator.succeed("cat /root/probe.log").splitlines()]
+        codes = [line[1] for line in lines if len(line) == 2]
+        ok(len(codes) == 80 and set(codes) == {"200"}, f"80 new HTTPS connections across the renewal, all 200 ({sorted(set(codes))})")
+        reloaded = float(app.succeed("journalctl -u nginx.service -o short-unix --no-pager | grep 'Reloaded' | tail -n 1 | cut -d' ' -f1").strip())
+        stamps = [float(line[0]) for line in lines]
+        ok(min(stamps) < reloaded < max(stamps), f"the probe window ({min(stamps):.1f} to {max(stamps):.1f}) straddles the reload ({reloaded:.1f})")
         ok((state(app, "nginx.service", "MainPID"), state(app, "nginx.service", "NRestarts")) == (pid, restarts), "same nginx process: reloaded, not restarted")
         for name in NAMES:
             ok(served("app", name) == after, f"{name}: renewed chain served")
@@ -424,44 +473,39 @@ in {
         no_failed_units(app, "after the forced renewal")
 
     with subtest("expiry check fails on a short-lived or wrong-name certificate"):
-        # Test leaves signed at test time by the local CA's intermediate (management API).
-        acme.succeed("install -d -m 0700 /root/leaf && cd /root/leaf && curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:15000/intermediates/0 >int.pem && curl -fsS --cacert /run/pebble-tls/ca.pem https://acme.test:15000/intermediate-keys/0 >int-key.pem")
-        def leaf(label, sans, days):
-            acme.succeed(f"cd /root/leaf && openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -subj /CN={sans[0]} -keyout {label}-key.pem -out {label}.csr 2>/dev/null && "
-                         f"printf 'basicConstraints=critical,CA:FALSE\\nkeyUsage=critical,digitalSignature\\nextendedKeyUsage=serverAuth\\nsubjectAltName=%s\\n' {','.join('DNS:' + s for s in sans)} >{label}.ext && "
-                         f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) -days {days} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
-            return acme.succeed(f"cat /root/leaf/{label}.pem"), acme.succeed(f"cat /root/leaf/{label}-key.pem"), fingerprint(acme, f"/root/leaf/{label}.pem")
         directory = live("web.terrace.test")
         app.succeed(f"install -d -m 0700 /run/tls-held && cp -p {directory}/fullchain.pem {directory}/key.pem /run/tls-held/")
-        for label, sans, days, expected in [("short", NAMES, 3, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, "FAIL: no verified TLS session")]:
+        for label, sans, days, expected in [("short", NAMES, 3, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, "the served certificate does not name")]:
             chain, key, test_leaf = leaf(label, sans, days)
             put(app, directory + "/fullchain.pem", chain, "0640")
             put(app, directory + "/key.pem", key, "0640")
-            app.succeed(f"chown acme:nginx {directory}/fullchain.pem {directory}/key.pem && systemctl reload nginx.service")
+            app.succeed(f"chown acme:acme {directory}/fullchain.pem {directory}/key.pem && systemctl reload nginx.service")
             app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(test_leaf), timeout=60)
             output = tls_check(app, False, f"expiry check fails visibly on the {label} certificate")
-            ok(expected in output, f"{label}: {expected}")
+            ok(expected in output and (label == "short" or "no verified TLS session" not in output), f"{label}: {expected}")
         app.succeed(f"cp -p /run/tls-held/fullchain.pem /run/tls-held/key.pem {directory}/ && rm -rf /run/tls-held && systemctl reload nginx.service")
-        acme.succeed("rm -rf /root/leaf")
         app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(after), timeout=60)
         tls_check(app, True, "expiry check passes again on the real certificate")
         no_failed_units(app, "after restoring the certificate")
 
-    with subtest("CA unreachable: the order fails as a unit, the site keeps the previous certificate"):
+    with subtest("CA unreachable: the previous certificate stays; the order retries on its own and recovers"):
         block = "iptables -I INPUT -p tcp --dport 14000 -j REJECT && ip6tables -I INPUT -p tcp --dport 14000 -j REJECT"
         unblock = "iptables -D INPUT -p tcp --dport 14000 -j REJECT && ip6tables -D INPUT -p tcp --dport 14000 -j REJECT"
         previous = fingerprint(app, live("web.terrace.test") + "/cert.pem")
         acme.succeed(block)
-        refused = app.fail("terrace-tls renew --force 2>&1", timeout=600)
-        ok("FAILED; the previous certificate is still served" in refused, "terrace-tls reports the failed order")
-        ok(state(app, order("web.terrace.test"), "ActiveState") == "failed" and order("web.terrace.test") in failed_units(app), "failed issuance is a failed unit (systemctl --failed)")
+        # The client may return when the first attempt fails or wait longer; the unit's own retries continue either way.
+        status, out = app.execute("timeout 60 terrace-tls renew --force --yes 2>&1", timeout=90)
+        print(f"renew with the CA unreachable: exit {status}: {out.strip()}")
+        ok(status != 0, "the forced renewal does not succeed while the CA is unreachable")
+        ok(state(app, order("web.terrace.test"), "ActiveState") == "activating" and state(app, order("web.terrace.test"), "Result") != "success", f"the order unit is retrying ({state(app, order('web.terrace.test'), 'SubState')})")
         ok(fingerprint(app, live("web.terrace.test") + "/cert.pem") == previous and all(served("app", name) == previous for name in NAMES), "previous certificate still served and valid")
-        tls_check(app, True, "expiry check still passes on the previous certificate")
         acme.succeed(unblock)
-        app.succeed("systemctl start " + order("web.terrace.test"), timeout=300)
+        issued_by_acme(app, "web.terrace.test")
+        ok(int(state(app, order("web.terrace.test"), "NRestarts")) >= 1, "recovered by the unit's own retry, no operator action")
         recovered = fingerprint(app, live("web.terrace.test") + "/cert.pem")
-        ok(recovered != previous, "the next order run issued a new certificate")
-        app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(recovered), timeout=60)
+        ok(recovered != previous, "the retry issued a new certificate")
+        served_locally(app, "web.terrace.test", recovered)
+        tls_check(app, True, "expiry check passes after the recovery")
         no_failed_units(app, "after the CA came back")
 
     with subtest("reboot keeps the certificate and the account key"):
@@ -490,8 +534,8 @@ in {
         acme.succeed(block)
         relay.succeed("terrace-production adopt --new")
         relay.wait_for_unit("nginx.service")
-        relay.wait_until_succeeds(f"systemctl is-failed {order(RELAY)}", timeout=600)
-        ok(order(RELAY) in failed_units(relay), "relay: failed first issuance is a failed unit")
+        relay.wait_until_succeeds(f"systemctl is-failed {order(RELAY)}", timeout=900)
+        ok(order(RELAY) in failed_units(relay) and state(relay, order(RELAY), "Result") == "start-limit-hit", f"relay: after its bounded retries the first issuance is a failed unit ({state(relay, order(RELAY), 'Result')})")
         placeholder = operator.succeed(f"echo | openssl s_client -connect relay:443 -servername {RELAY} 2>/dev/null | openssl x509 -noout -issuer")
         ok("minica" in placeholder, f"relay: nginx up with the placeholder {placeholder.strip()}")
         operator.fail(f"echo | openssl s_client -connect relay:443 -servername {RELAY} -verify_return_error -verify_hostname {RELAY} -CAfile /root/roots.pem >/dev/null 2>&1")
@@ -501,7 +545,7 @@ in {
         ok(http("relay", RELAY, "/x") == f"301 https://{RELAY}/x", "relay: port 80 redirect")
         acme.succeed(unblock)
         # The first run could not register; the retry must register afresh, not "recover" it.
-        relay.succeed("systemctl start " + order(RELAY), timeout=300)
+        relay.succeed("terrace-tls renew", timeout=300)
         ok("never registered" in relay.succeed("journalctl -u " + order(RELAY) + " -o cat --no-pager"), "relay: the never-registered account is replaced, not recovered")
         issued(relay, RELAY)
         relay_cert = fingerprint(relay, live(RELAY) + "/cert.pem")
@@ -510,6 +554,53 @@ in {
         ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert /root/roots.pem --resolve {RELAY}:443:{address('relay')} https://{RELAY}/health").strip() == "200", "relay: Headscale over the issued certificate")
         tls_check(relay, True, "relay: expiry check passes after issuance")
         no_failed_units(relay, "relay after issuance")
+        relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
+        relay_listing = relay.succeed("terrace-backup restic primary ls latest 2>/dev/null").splitlines()
+        ok(len(relay_listing) > 1 and not [path for path in relay_listing if "/acme" in path], f"relay: snapshot of {len(relay_listing)} paths holds no ACME state")
+
+    with subtest("relay: live switch from ACME to the manual certificate and back, never the placeholder"):
+        system = relay.succeed("readlink -f /run/current-system").strip()
+        short_chain, short_key, short_fp = leaf("relay-short", [RELAY], 3)
+        good_chain, good_key, good_fp = leaf("relay-manual", [RELAY], 60)
+        op("terrace-secrets host tls relay manual")
+        put(operator, "/dev/shm/relay-cert.pem", short_chain, "0600")
+        put(operator, "/dev/shm/relay-key.pem", short_key, "0600")
+        op("terrace-secrets set relay tls/certificate </dev/shm/relay-cert.pem && terrace-secrets set relay tls/key </dev/shm/relay-key.pem")
+        out = op("terrace-secrets push relay --address relay --identity /root/.ssh/operator --rehearsal")
+        ok("Installed 4 encrypted secrets." in out and "WARNING: this host gets its certificate by ACME but its ciphertext still holds tls/certificate, tls/key" in out, "the ACME relay accepts the manual pair and reports it")
+        relay.succeed(f"{system}/specialisation/manual/bin/switch-to-configuration test", timeout=300)
+        served_locally(relay, RELAY, short_fp)
+        ok(served("relay", RELAY) == short_fp, "manual mode: the delivered certificate is served")
+        ok(http("relay", RELAY, "/x") == f"301 https://{RELAY}/x", "manual mode: port 80 still redirects")
+        output = tls_check(relay, False, "manual mode: expiry check fails on a 3-day certificate")
+        ok("fewer than 14 days left" in output, "manual mode: the check names the expiry")
+        put(operator, "/dev/shm/relay-cert.pem", good_chain, "0600")
+        put(operator, "/dev/shm/relay-key.pem", good_key, "0600")
+        op("terrace-secrets set relay tls/certificate </dev/shm/relay-cert.pem && terrace-secrets set relay tls/key </dev/shm/relay-key.pem && rm /dev/shm/relay-cert.pem /dev/shm/relay-key.pem")
+        push("relay", 4, 4)
+        served_locally(relay, RELAY, good_fp)
+        tls_check(relay, True, "manual mode: expiry check passes on the delivered certificate")
+        # Back to ACME on a host that never ran it: no lego state, no account.
+        relay.succeed("rm -rf /var/lib/acme")
+        ok("staged" in relay.succeed("terrace-tls prepare-acme"), "the served certificate is staged before the switch")
+        watch = f"for i in $(seq 1 150); do echo | timeout 3 openssl s_client -connect relay:443 -servername {RELAY} 2>/dev/null | openssl x509 -noout -fingerprint -sha256 -issuer >>/root/switch.log 2>/dev/null; sleep 0.3; done"
+        operator.succeed("rm -f /root/switch.log && systemd-run --unit=tls-switch-watch ${pkgs.bash}/bin/bash -c " + shlex.quote("PATH=${lib.makeBinPath [pkgs.openssl pkgs.coreutils]}; " + watch))
+        relay.succeed(f"{system}/bin/switch-to-configuration test", timeout=300)
+        issued_by_acme(relay, RELAY)
+        switched = fingerprint(relay, live(RELAY) + "/cert.pem")
+        ok(switched not in [good_fp, short_fp, relay_cert], "a new ACME certificate after the switch")
+        served_locally(relay, RELAY, switched)
+        ok(served("relay", RELAY) == switched, "ACME certificate served and verified after the switch")
+        operator.wait_until_succeeds("test \"$(systemctl show tls-switch-watch.service -p ActiveState --value)\" != active", timeout=180)
+        seen = operator.succeed("cat /root/switch.log")
+        fingerprints = set(line.strip() for line in seen.splitlines() if "Fingerprint" in line)
+        ok("minica" not in seen and fingerprints <= {good_fp, switched} and good_fp in fingerprints and switched in fingerprints, f"clients saw only the manual certificate, then the ACME one, never the placeholder ({len(fingerprints)} distinct)")
+        refused = operator.fail(ENV + "terrace-secrets host tls relay acme 2>&1")
+        ok("this removes tls/certificate, tls/key from the store" in refused, "dropping the manual pair needs --yes")
+        op("terrace-secrets host tls relay acme --yes")
+        push("relay", 2, 2)
+        tls_check(relay, True, "after the switch: expiry check passes")
+        no_failed_units(relay, "relay after the switches")
         relay.shutdown()
 
     with subtest("backup leaves ACME state out; a replacement host re-issues with a new account"):
@@ -559,6 +650,6 @@ in {
         acme.shutdown()
     # Labels carry names and counts only, never key material.
     print("TLS-CHECKS " + json.dumps(checks))
-    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "seconds": round(time.monotonic() - started_at, 2)}))
+    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "servedRetries": retries, "seconds": round(time.monotonic() - started_at, 2)}))
   '';
 }

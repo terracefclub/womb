@@ -95,7 +95,7 @@ let
     acme = {
       directory = "https://acme-v02.api.letsencrypt.org/directory";
       acceptTerms = true;
-      contact = "certificates@terracefclub.org";
+      contact = "tls-eval@mail-provider.net";
     };
   };
   appAcme = extra:
@@ -350,8 +350,9 @@ let
         && vhost.listenAddresses == []) (lib.attrNames vhosts))
     ++ lib.optionals acmeMode (
       check "port 80 serves only the ACME challenge and the HTTPS redirect" portEighty
-      ++ check "ACME account: accepted terms, contact, CA directory" (cfg.security.acme.acceptTerms && acmeCert.email == p.tls.acme.contact && acmeCert.server == p.tls.acme.directory && acmeCert.webroot == "/var/lib/acme/acme-challenge" && acmeCert.dnsProvider == null && (p.instance != "production" || !(lib.any (word: lib.hasInfix word acmeCert.server) ["staging" "test" "pebble" "localhost"])))
-      ++ check "ACME order failures stay visible" ((services.${orderUnit}.serviceConfig.Restart or "no") == "no")
+      ++ check "ACME account: accepted terms, contact, CA directory" (cfg.security.acme.acceptTerms && acmeCert.email == p.tls.acme.contact && acmeCert.server == p.tls.acme.directory && acmeCert.webroot == "/var/lib/acme/acme-challenge" && acmeCert.dnsProvider == null && (p.instance != "production" || acmeCert.server == "https://acme-v02.api.letsencrypt.org/directory" || p.tls.acme.otherAuthority))
+      ++ check "ACME order failures stay visible" ((services.${orderUnit}.serviceConfig.Restart or "no") == "on-failure" && services.${orderUnit}.unitConfig.StartLimitBurst <= 5)
+      ++ check "ACME key unreadable by nginx" (acmeCert.group == "acme" && !(builtins.elem "acme" cfg.users.users.nginx.extraGroups) && (services.nginx.serviceConfig.RefreshOnReload or "") == "credentials")
       ++ check "ACME renewal gated by adoption" (builtins.elem "acme-renew-${p.tls.certificateName}" (gatedUnits cfg "timers") && services."acme-${p.tls.certificateName}".wantedBy == [])
     )
     ++ check "TLS expiry check gated by adoption" (builtins.elem "terrace-tls-check" (gatedUnits cfg "timers") && (services.terrace-tls-check.serviceConfig.Type or "") == "oneshot")
@@ -389,6 +390,13 @@ let
     relayRehearsal = violations "relay" (relayAs "rehearsal" {});
     rehearsal = violations "app" (rehearsal {});
     appAcme = violations "app" (appAcme {});
+    # The owner's documented override for another CA's production directory.
+    appOtherAuthority = violations "app" (appAcme {
+      terrace.production.tls.acme = {
+        otherAuthority = true;
+        directory = lib.mkForce "https://acme.zerossl.com/v2/DV90";
+      };
+    });
     relayAcmeRehearsal = violations "relay" (relayAcme "rehearsal" {});
     rehearsalAcme = violations "app" rehearsalAcme;
   };
@@ -529,9 +537,23 @@ let
       };
     }))
     (rejectsRelay "serves every public hostname over HTTPS only" (relayAcme "production" {services.nginx.virtualHosts."headscale.terracefclub.org".forceSSL = lib.mkOverride 10 true;}))
-    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme-staging-v02.api.letsencrypt.org/directory";}))
-    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme.test:14000/dir";}))
-    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "http://acme-v02.api.letsencrypt.org/directory";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme-staging-v02.api.letsencrypt.org/directory";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme.test:14000/dir";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "http://acme-v02.api.letsencrypt.org/directory";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme.zerossl.com/v2/DV90";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {
+      terrace.production.tls.acme = {
+        otherAuthority = true;
+        directory = lib.mkForce "https://dv.acme-v02.test-api.pki.goog/directory";
+      };
+    }))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".extraLegoFlags = ["--tls-skip-verify"];}))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".environmentFile = "/run/lego.env";}))
+    (rejects "nginx user cannot read the key itself" (appAcme {users.users.nginx.extraGroups = ["acme"];}))
+    (rejects "nginx user cannot read the key itself" (appAcme {security.acme.certs."www.terracefclub.org".group = lib.mkForce "nginx";}))
+    (rejects "nginx user cannot read the key itself" (appAcme {systemd.services.nginx.serviceConfig.RefreshOnReload = lib.mkForce "extensions";}))
+    (rejects "nginx user cannot read the key itself" (appAcme {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkOverride 10 ["terrace-website-cert:/var/lib/acme/.minica/cert.pem" "terrace-website-key:/var/lib/acme/.minica/key.pem"];}))
+    (rejects "retries a failed certificate order at most" (appAcme {terrace.production.tls.acme.retrySeconds = 60;}))
     (rejects "acceptTerms = true" (appAcme {terrace.production.tls.acme.acceptTerms = lib.mkForce false;}))
     (failsMissing ["terrace" "production" "tls" "acme" "contact"] (acmeMissing "contact"))
     (failsMissing ["terrace" "production" "tls" "acme" "directory"] (acmeMissing "directory"))
@@ -542,8 +564,8 @@ let
     (rejects "port 80 serves only the ACME challenge" (appAcme {services.nginx.virtualHosts.terrace-plain.locations."/".return = "200";}))
     (rejects "refuses test-only ACME client trust" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".environment.LEGO_CA_CERTIFICATES = "/etc/rehearsal-ca.pem";}))
     (rejects "refuses a TLS trust anchor override" (appAcme {terrace.production.tls.trustAnchorFile = "/etc/rehearsal-ca.pem";}))
-    (rejects "keeps a failed certificate order a failed unit" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".serviceConfig.Restart = lib.mkOverride 10 "on-failure";}))
-    (rejects "reads the ACME certificate in place" (appAcme {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkOverride 10 ["terrace-website-key:/run/secrets/tls/key"];}))
+    (rejects "retries a failed certificate order at most" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".serviceConfig.Restart = lib.mkOverride 10 "always";}))
+    (rejects "retries a failed certificate order at most" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".unitConfig.StartLimitBurst = lib.mkForce 100;}))
     (rejects "boot timers: " (appAcme {systemd.timers."acme-renew-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["timers.target"];}))
     (rejects "boot services: acme-www.terracefclub.org" (appAcme {systemd.services."acme-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["multi-user.target"];}))
     (rejects "boot timers: " (app {systemd.timers.terrace-tls-check.wantedBy = lib.mkOverride 10 ["timers.target"];}))
@@ -554,6 +576,7 @@ in
   assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";
   assert lib.assertMsg (positive.rehearsal == []) "Rehearsal instance violations: ${toString positive.rehearsal}";
   assert lib.assertMsg (positive.appAcme == []) "Production app with ACME violations: ${toString positive.appAcme}";
+  assert lib.assertMsg (positive.appOtherAuthority == []) "Production app with another CA violations: ${toString positive.appOtherAuthority}";
   assert lib.assertMsg (positive.relayAcmeRehearsal == []) "Relay with ACME (rehearsal addressing) violations: ${toString positive.relayAcmeRehearsal}";
   assert lib.assertMsg (positive.rehearsalAcme == []) "ACME rehearsal instance violations: ${toString positive.rehearsalAcme}";
   assert lib.assertMsg (relayAcmeDocumentation == relayDocumentation) "Production relay with ACME and a documentation address: ${toString relayAcmeDocumentation}";

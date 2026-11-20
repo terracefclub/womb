@@ -254,7 +254,10 @@ class StoreTest(Fixture):
         self.assertTrue(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "tls/key", False, tolerate_omitted=True))
         self.assertFalse(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "tls/key", False))
         self.assertFalse(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "backup/secondary/environment", False, tolerate_omitted=True))
-        out = self.ok("host", "tls", "app", "acme")
+        refused = self.refused("host", "tls", "app", "acme")
+        self.assertIn("this removes tls/certificate, tls/key from the store", refused)
+        self.assertIn("app: 12 secrets encrypted to exactly", self.ok("check", "app"))
+        out = self.ok("host", "tls", "app", "acme", "--yes")
         self.assertIn("removed from the store: tls/certificate, tls/key.", out)
         self.assertIn("app: 10 secrets encrypted to exactly", self.ok("check", "app"))
         self.assertFalse([name for name in self.plaintext() if name.startswith("tls/")])
@@ -650,6 +653,20 @@ class VerifyTest(unittest.TestCase):
         passed, out = self.verify()
         self.assertTrue(passed, out)
         self.assertIn("PASS 1 secrets, 1 templates", out)
+
+    def test_stale_tls_on_an_acme_host_is_reported(self):
+        names = {"tls": {"key": "ENC[x]", "certificate": "ENC[x]"}, "website": {"payload-secret": "ENC[x]"}, "sops": {}}
+        context = (tool.inventory(), "app", ["acme-tls"], False, "pinned", "own")
+        with tempfile.TemporaryDirectory() as directory:
+            host_file = Path(directory) / "secrets.sops.json"
+            host_file.write_text(json.dumps(names))
+            with mock.patch.object(tool, "HOST_FILE", host_file), mock.patch.object(tool, "host_context", lambda: context):
+                self.assertEqual(tool.stale_tls_names(), ["tls/certificate", "tls/key"])
+                passed, out = self.verify()
+                self.assertTrue(passed, out)
+                self.assertIn("WARNING: this host gets its certificate by ACME but its ciphertext still holds tls/certificate, tls/key", out)
+            with mock.patch.object(tool, "HOST_FILE", host_file), mock.patch.object(tool, "host_context", lambda: context[:2] + ([],) + context[3:]):
+                self.assertEqual(tool.stale_tls_names(), [])
 
     def test_missing_pin_fails_closed(self):
         self.patches[3].stop()  # the real ciphertext_problems: no pin file in this fixture

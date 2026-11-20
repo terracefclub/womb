@@ -42,8 +42,15 @@
     if directoryParts == null
     then null
     else builtins.elemAt directoryParts 1;
-  # Staging and test endpoints of the known CAs, and anything that looks like a local test server.
-  testDirectory = lib.any (word: lib.hasInfix word (lib.toLower tls.acme.directory)) ["staging" "stg" "test" "sandbox" "pebble" "localhost" "boulder"];
+  # Production directories accepted without the owner's explicit other-CA override.
+  knownDirectories = ["https://acme-v02.api.letsencrypt.org/directory"];
+  # Staging and test endpoints of the known CAs and local test servers, matched on
+  # whole host and path tokens (so `attestation` is not `test`).
+  directoryTokens = lib.splitString "." (builtins.replaceStrings ["-" "/" ":" "_"] ["." "." "." "."] (lib.removePrefix "https://" tls.acme.directory));
+  testDirectory = lib.any (token: builtins.elem token ["staging" "stg" "test" "testing" "sandbox" "pebble" "localhost" "boulder" "dev"]) directoryTokens;
+  certificate = config.security.acme.certs.${certName};
+  credentialSources = map (entry: lib.last (lib.splitString ":" entry)) (lib.toList (config.systemd.services.nginx.serviceConfig.LoadCredential or []));
+  nginxUser = config.services.nginx.user;
   contactOk = builtins.match "[A-Za-z0-9._%+-]+@([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z][a-z0-9-]*[a-z0-9]" tls.acme.contact != null;
   contactDomain = lib.last (lib.splitString "@" tls.acme.contact);
   http = vhosts.terrace-http or {};
@@ -95,9 +102,10 @@
       failed=0
       names=(${lib.escapeShellArgs names})
       for name in "''${names[@]}"; do
+        # The chain is verified here, the name separately below: each cause has its own message.
         if ! served=$(timeout 30 openssl s_client -connect 127.0.0.1:443 -servername "$name" \
-            -verify_return_error -verify_hostname "$name" -CAfile "$trust" </dev/null 2>/dev/null); then
-          echo "$name: FAIL: no verified TLS session (untrusted, self-signed or placeholder chain, wrong name, or nothing listening)"
+            -verify_return_error -CAfile "$trust" </dev/null 2>/dev/null); then
+          echo "$name: FAIL: no verified TLS session (untrusted, self-signed or placeholder chain, or nothing listening)"
           failed=1
           continue
         fi
@@ -120,20 +128,29 @@
       exit "$failed"
     '';
   };
-  # lego 5 writes the account file and key before it registers. If that first
-  # registration cannot reach the CA, every later run tries to "recover" the
+  # lego 5 (5.5.1, cmd/internal/storage/storage_accounts.go) writes the account
+  # file with `"registration": null` and the key before it registers. If that
+  # first registration cannot reach the CA, every later run tries to "recover" the
   # never-registered account, gets accountDoesNotExist and fails for good. Remove
-  # such an account (it exists nowhere but here) so the next run registers afresh.
+  # exactly such an account (it exists nowhere but here) so the next run registers
+  # afresh. Any other shape is left alone and reported: re-check this step (and run
+  # platform/production-tls-check) on every lego or nixpkgs update.
   unregistered = pkgs.writeShellApplication {
     name = "terrace-acme-unregistered-account";
     runtimeInputs = [pkgs.coreutils pkgs.jq];
     text = ''
       shopt -s nullglob
       for account in /var/lib/acme/.lego/accounts/*/*/*/account.json; do
-        if jq -e '(.registration.status // "") == ""' "$account" >/dev/null; then
-          echo "Removing an ACME account that was never registered: $(dirname "$account")"
-          rm -f -- "$(dirname "$account")"/*
-        fi
+        dir=$(dirname "$account")
+        state=$(jq -r 'if .registration == null then "unregistered" elif (.registration | type) == "object" then "registered" else "unknown" end' "$account" 2>/dev/null) || state=unknown
+        case $state in
+          registered) ;;
+          unregistered)
+            echo "Removing an ACME account that was never registered: $dir"
+            rm -f -- "$account" "''${dir:?}"/*.key
+            ;;
+          *) echo "WARNING: unrecognised ACME account file $account left in place; review tls.nix after a lego update" >&2 ;;
+        esac
       done
     '';
   };
@@ -143,19 +160,24 @@
     text = ''
       mode=${tls.mode}
       cert=${lib.escapeShellArg certName}
-      usage() { echo 'usage: terrace-tls status | check | renew [--force]' >&2; exit 2; }
+      dir=${lib.escapeShellArg directory}
+      usage() { echo 'usage: terrace-tls status | check | renew [--force --yes] | prepare-acme' >&2; exit 2; }
+      root() { [[ $(id -u) == 0 ]] || { echo 'terrace-tls: run as root (sudo terrace-tls ...)' >&2; exit 1; }; }
       case "''${1:-}" in
         status)
+          root
           echo "mode: $mode; names: ${toString names}; alert below ${toString tls.minDays} days"
           if [[ $mode == acme ]]; then
             echo "certificate authority: ${lib.optionalString acme tls.acme.directory}"
-            if [[ -r ${directory}/cert.pem ]]; then
-              openssl x509 -noout -subject -issuer -enddate -ext subjectAltName -in ${directory}/cert.pem
-              [[ -e ${directory}/acme-success ]] || echo 'PLACEHOLDER: no certificate has been issued yet (self-signed stand-in)'
+            if [[ -r $dir/cert.pem ]]; then
+              openssl x509 -noout -subject -issuer -enddate -ext subjectAltName -in "$dir/cert.pem"
+              issued=(/var/lib/acme/.lego/"$cert"/*/"$cert".crt)
+              [[ -e ''${issued[0]} ]] || echo 'NOT YET ISSUED BY ACME: nginx serves the placeholder or the carried-over manual certificate'
+              [[ -e $dir/acme-success ]] || echo 'PLACEHOLDER: self-signed stand-in, not trusted by anyone'
             else
               echo 'no certificate yet (the host is not adopted, or nginx has not started)'
             fi
-            systemctl show ${orderUnit}.service -p ActiveState -p Result -p ExecMainExitTimestamp --no-pager
+            systemctl show ${orderUnit}.service -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainExitTimestamp --no-pager
             systemctl list-timers --all --no-pager ${lib.escapeShellArg "acme-renew-${certName}.timer"} terrace-tls-check.timer
           else
             systemctl list-timers --all --no-pager terrace-tls-check.timer
@@ -164,23 +186,46 @@
           ;;
         check) terrace-tls-check ;;
         renew)
-          [[ $(id -u) == 0 ]] || { echo 'terrace-tls: run as root' >&2; exit 1; }
+          root
           [[ $mode == acme ]] || { echo 'terrace-tls: manual mode: replace the certificate with terrace-secrets set, then push (docs/secrets.md)' >&2; exit 1; }
-          if [[ ''${2:-} == --force ]]; then
-            # Without lego's stored certificate resource (certificate, key, issuer and
-            # metadata together; a partial set makes lego fail every later run) the order
-            # unit takes its full path and orders a new certificate. The served copy in
-            # /var/lib/acme/<name> stays until the new one is installed.
-            find /var/lib/acme/.lego/"$cert" -mindepth 2 -maxdepth 2 -type f -name "$cert.*" -delete
-          elif [[ -n ''${2:-} ]]; then
-            usage
-          fi
+          case "''${2:-}" in
+            "") ;;
+            --force)
+              [[ ''${3:-} == --yes ]] || { echo 'terrace-tls: --force orders a new certificate now and counts against the CA rate limits (5 a week for the same names at Lets Encrypt); repeat with --force --yes' >&2; exit 2; }
+              # Without lego's stored certificate resource (certificate, key, issuer and
+              # metadata together; a partial set makes lego fail every later run) the order
+              # unit takes its full path and orders a new certificate. The served copy in
+              # /var/lib/acme/<name> stays until the new one is installed.
+              find /var/lib/acme/.lego/"$cert" -mindepth 2 -maxdepth 2 -type f -name "$cert.*" -delete
+              ;;
+            *) usage ;;
+          esac
+          # A manual run starts a fresh retry budget.
+          systemctl reset-failed ${orderUnit}.service 2>/dev/null || true
           if systemctl start ${orderUnit}.service; then
             echo "terrace-tls: ${orderUnit}.service succeeded"
           else
-            echo "terrace-tls: ${orderUnit}.service FAILED; the previous certificate is still served. journalctl -u ${orderUnit}.service" >&2
+            echo "terrace-tls: ${orderUnit}.service FAILED; the previous certificate is still served and the unit retries on its own${lib.optionalString acme " (${toString tls.acme.retries} attempts a day, ${toString tls.acme.retrySeconds} s apart)"}. journalctl -u ${orderUnit}.service" >&2
             exit 1
           fi
+          ;;
+        prepare-acme)
+          # Before switching a live manual host to ACME: stage the certificate it serves
+          # now as the first ACME certificate, so the switch never serves the placeholder.
+          root
+          [[ $mode == manual ]] || { echo 'terrace-tls: this host already gets its certificate by ACME' >&2; exit 1; }
+          [[ -r /run/secrets/tls/certificate && -r /run/secrets/tls/key ]] || { echo 'terrace-tls: no delivered certificate in /run/secrets/tls' >&2; exit 1; }
+          umask 077
+          install -d -m 0750 "$dir"
+          install -m 0640 /run/secrets/tls/certificate "$dir/fullchain.pem"
+          install -m 0640 /run/secrets/tls/certificate "$dir/chain.pem"
+          install -m 0640 /run/secrets/tls/key "$dir/key.pem"
+          cat "$dir/key.pem" "$dir/fullchain.pem" >"$dir/full.pem"
+          chmod 0640 "$dir/full.pem"
+          ln -sf fullchain.pem "$dir/cert.pem"
+          # Tells the NixOS placeholder step that a usable certificate is already in place.
+          touch "$dir/acme-success"
+          echo "terrace-tls: the served certificate is staged in $dir; deploy the ACME configuration now (docs/tls.md)."
           ;;
         *) usage ;;
       esac
@@ -206,6 +251,21 @@ in {
       contact = lib.mkOption {
         type = lib.types.str;
         description = "Required with `acme`: the address registered with the CA account (expiry and policy notices).";
+      };
+      otherAuthority = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Owner decision: use a CA other than Let's Encrypt. Production then accepts any public https directory URL that does not look like a staging or test endpoint.";
+      };
+      retrySeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = "Wait before the order unit retries a failed order on its own (production: at least 900).";
+      };
+      retries = lib.mkOption {
+        type = lib.types.ints.between 1 5;
+        default = 3;
+        description = "Attempts a day before a failed order stays a failed unit (systemctl --failed) until the renewal timer or an operator starts it again.";
       };
     };
     minDays = lib.mkOption {
@@ -297,24 +357,46 @@ in {
           message = "Terrace production ACME needs a real contact address (terrace.production.tls.acme.contact).";
         }
         {
-          assertion = directoryHost != null && (!production || (publicName directoryHost && directoryPort == null && !testDirectory));
-          message = "Terrace production refuses a staging or test ACME directory (${tls.acme.directory}); use the CA's production https:// directory URL.";
+          assertion = directoryHost != null && (!production || builtins.elem tls.acme.directory knownDirectories || (tls.acme.otherAuthority && publicName directoryHost && directoryPort == null && !testDirectory));
+          message = "Terrace production refuses a staging, test or unlisted ACME directory (${tls.acme.directory}); use Let's Encrypt's production directory, or set tls.acme.otherAuthority for another CA's production directory.";
         }
         {
           assertion = !production || lib.all (name: !(config.systemd.services.${name}.environment ? LEGO_CA_CERTIFICATES) && !(config.systemd.services.${name}.environment ? LEGO_TLS_SKIP_VERIFY)) [orderUnit "acme-${certName}"];
           message = "Terrace production refuses test-only ACME client trust (LEGO_CA_CERTIFICATES, LEGO_TLS_SKIP_VERIFY).";
         }
         {
-          assertion = (config.systemd.services.${orderUnit}.serviceConfig.Restart or "no") == "no";
-          message = "Terrace production keeps a failed certificate order a failed unit (no automatic restart hiding it).";
+          assertion = !production || (certificate.extraLegoFlags == [] && certificate.extraLegoRunFlags == [] && certificate.extraLegoRenewFlags == [] && certificate.environmentFile == null && certificate.credentialFiles == {} && certificate.dnsProvider == null && certificate.csr == null && certificate.s3Bucket == null && certificate.listenHTTP == null);
+          message = "Terrace production runs the ACME client for HTTP-01 only: no extra lego flags, environment, credentials, CSR or other challenge.";
+        }
+        {
+          assertion = lib.versions.major pkgs.lego.version == "5";
+          message = "lego is no longer major version 5: review the unregistered-account step in platform/production/tls.nix and re-run platform/production-tls-check.";
+        }
+        {
+          # Retries on its own, bounded, then stays visibly failed.
+          assertion = let
+            unit = config.systemd.services.${orderUnit};
+          in
+            (unit.serviceConfig.Restart or "no") == "on-failure" && unit.serviceConfig.RestartSec == toString tls.acme.retrySeconds && unit.unitConfig.StartLimitBurst == tls.acme.retries && unit.unitConfig.StartLimitIntervalSec == "1d" && (!production || tls.acme.retrySeconds >= 900);
+          message = "Terrace production retries a failed certificate order at most ${toString tls.acme.retries} times a day, at least 15 minutes apart, then keeps it a failed unit.";
         }
         {
           assertion = lib.sort lib.lessThan (lib.attrNames vhosts) == lib.sort lib.lessThan (tlsVhosts ++ httpVhosts) && portEightyOk;
           message = "Terrace production port 80 serves only the ACME challenge and a redirect to HTTPS for its own names (421 for any other host).";
         }
         {
-          assertion = lib.all (name: vhosts.${name}.sslCertificate == "${directory}/fullchain.pem" && vhosts.${name}.sslCertificateKey == "${directory}/key.pem") tlsVhosts && config.systemd.services.nginx.serviceConfig.LoadCredential == [];
-          message = "Terrace production ACME: nginx reads the ACME certificate in place (reloaded on renewal), no stale credential copy.";
+          assertion =
+            credentialSources
+            != []
+            && lib.all (source: builtins.elem source ["${directory}/fullchain.pem" "${directory}/key.pem"]) credentialSources
+            && builtins.elem "${directory}/key.pem" credentialSources
+            && builtins.elem "credentials" (lib.splitString " " (toString (config.systemd.services.nginx.serviceConfig.RefreshOnReload or "")))
+            && lib.all (name: lib.hasPrefix "/run/credentials/nginx.service/" vhosts.${name}.sslCertificate && lib.hasPrefix "/run/credentials/nginx.service/" vhosts.${name}.sslCertificateKey) tlsVhosts
+            && certificate.group == "acme"
+            && !(builtins.elem nginxUser (config.users.groups.acme.members or []))
+            && !(builtins.elem "acme" (config.users.users.${nginxUser}.extraGroups or []))
+            && config.users.users.${nginxUser}.group != "acme";
+          message = "Terrace production ACME: nginx gets the certificate as systemd credentials from the ACME directory, refreshed on reload, and the nginx user cannot read the key itself.";
         }
       ];
       security.acme = {
@@ -325,8 +407,13 @@ in {
           server = tls.acme.directory;
           email = tls.acme.contact;
           inherit webroot;
-          group = config.services.nginx.group;
-          reloadServices = ["nginx.service"];
+          # Not nginx: the key stays unreadable to the nginx user; systemd (root)
+          # hands nginx a copy as a credential and refreshes it on reload.
+          group = "acme";
+          # Blocking, so a failed reload fails the order unit (visible) instead of
+          # being lost in the background; nothing to reload while nginx is stopped.
+          reloadServices = [];
+          postRun = "${pkgs.systemd}/bin/systemctl try-reload-or-restart nginx.service";
         };
       };
       terrace.production = {
@@ -337,17 +424,11 @@ in {
       };
       networking.firewall.allowedTCPPorts = lib.optional app 80;
       services.nginx.virtualHosts =
-        lib.genAttrs tlsVhosts (_: {
-          sslCertificate = lib.mkForce "${directory}/fullchain.pem";
-          sslCertificateKey = lib.mkForce "${directory}/key.pem";
-        })
-        // lib.optionalAttrs (!app) {
+        lib.optionalAttrs (!app) {
           # The relay module's own port-80 redirect is replaced by terrace-http below.
           ${certName} = {
             forceSSL = lib.mkForce false;
             onlySSL = true;
-            sslCertificate = lib.mkForce "${directory}/fullchain.pem";
-            sslCertificateKey = lib.mkForce "${directory}/key.pem";
           };
         }
         // {
@@ -380,19 +461,29 @@ in {
           wants = ["acme-${certName}.service"];
           after = ["acme-${certName}.service"];
           before = ["${orderUnit}.service"];
-          # Read in place: a reload (SIGHUP) picks up a renewal without a restart.
-          serviceConfig.LoadCredential = lib.mkForce [];
+          # The role modules load tls.certificateFile/keyFile (the ACME directory) as
+          # credentials; systemd re-reads them on `systemctl reload`, so a renewal
+          # needs no restart and nginx never reads the key file itself.
+          serviceConfig.RefreshOnReload = "credentials";
         };
         # Pulled in by nginx only, so nothing ACME runs before adoption.
         "acme-${certName}" = {
           wantedBy = lib.mkForce [];
           serviceConfig.LimitCORE = 0;
         };
-        # A failed order stays failed (visible); the renewal timer tries again.
-        ${orderUnit}.serviceConfig = {
-          Restart = lib.mkForce "no";
-          LimitCORE = 0;
-          ExecStartPre = ["${unregistered}/bin/terrace-acme-unregistered-account"];
+        # A failed order retries on its own a few times a day, then stays a failed
+        # unit (start limit) until the renewal timer or an operator starts it again.
+        ${orderUnit} = {
+          unitConfig = {
+            StartLimitIntervalSec = "1d";
+            StartLimitBurst = tls.acme.retries;
+          };
+          serviceConfig = {
+            Restart = lib.mkForce "on-failure";
+            RestartSec = lib.mkForce (toString tls.acme.retrySeconds);
+            LimitCORE = 0;
+            ExecStartPre = ["${unregistered}/bin/terrace-acme-unregistered-account"];
+          };
         };
         acme-setup.serviceConfig.LimitCORE = 0;
       };

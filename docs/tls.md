@@ -52,19 +52,29 @@ to `/var/lib/acme/acme-challenge`, served by nginx on port 80.
 | `tls.acme.directory` | required with `acme` | the CA's ACME directory URL |
 | `tls.acme.acceptTerms` | `false` | must be `true`: the owner accepted the CA's subscriber agreement |
 | `tls.acme.contact` | required with `acme` | the address registered with the CA account |
+| `tls.acme.otherAuthority` | `false` | owner decision: a CA other than Let's Encrypt (see below) |
+| `tls.acme.retrySeconds` | `3600` | wait before the order unit retries a failed order itself (production: at least 900) |
+| `tls.acme.retries` | `3` | attempts a day before a failed order stays a failed unit (1 to 5) |
 | `tls.minDays` | `14` | the expiry check fails below this many days left (1 to 60) |
 | `tls.trustAnchorFile` | `null` | rehearsal only (the VM proof's CA); production refuses it |
 
-A production host does not evaluate with: a staging or test directory (any URL
-containing `staging`, `stg`, `test`, `sandbox`, `pebble`, `localhost` or
-`boulder`, a port, plain `http://` or a reserved host name), `acceptTerms`
-false, a missing or reserved contact address, a missing directory, anything on
-port 80 besides the challenge and the redirect, a public name served over plain
-HTTP, a certificate read from anywhere but the ACME directory, an order unit that
-restarts itself, ACME units or timers that start before adoption, a trust anchor
-override, or test-only ACME client trust (`LEGO_CA_CERTIFICATES`,
-`LEGO_TLS_SKIP_VERIFY`). `infra/nixos/production-eval-check.nix` has a rejected
-variant for each.
+A production host does not evaluate with: a directory other than Let's
+Encrypt's production directory (`https://acme-v02.api.letsencrypt.org/directory`)
+unless `otherAuthority` is set, and then any directory whose host or path has a
+token `staging`, `stg`, `test`, `testing`, `sandbox`, `pebble`, `localhost`,
+`boulder` or `dev`, a port, plain `http://` or a reserved host name;
+`acceptTerms` false; a missing or reserved contact address; a missing
+directory; extra lego flags, an environment file, credential files, a CSR or a
+challenge other than HTTP-01; anything on port 80 besides the challenge and the
+redirect; a public name served over plain HTTP; a certificate loaded from
+anywhere but the ACME directory, not refreshed on reload, or readable by the
+nginx user; an order unit without its bounded retry (or retrying more often
+than every 15 minutes or more than 5 times a day); ACME units or timers that
+start before adoption; a trust anchor override; or test-only ACME client trust
+(`LEGO_CA_CERTIFICATES`, `LEGO_TLS_SKIP_VERIFY`).
+`infra/nixos/production-eval-check.nix` has a rejected variant for each. The
+module also refuses to evaluate when nixpkgs moves lego off major version 5
+(see the account workaround below).
 
 ## What runs, and when
 
@@ -77,32 +87,46 @@ replacement host makes no request to the CA until its operator adopts it.
    (`/var/lib/acme/.minica`), so nginx always has something to start with.
 2. `acme-order-renew-<name>.service` runs after nginx is up, so the challenge
    location answers. It registers the account (first run), orders the
-   certificate by HTTP-01, installs it in `/var/lib/acme/<name>/` and reloads
-   nginx (`systemctl try-reload-or-restart`, which is a SIGHUP: same process, no
-   dropped listener or connection).
-3. `acme-renew-<name>.timer` (daily, with up to 24 h of random delay) runs the
+   certificate by HTTP-01, installs it in `/var/lib/acme/<name>/` and then runs
+   `systemctl try-reload-or-restart nginx.service` and waits for it.
+3. nginx never reads the key file: systemd (as root) hands nginx the
+   certificate and key as credentials (`LoadCredential`, the same mechanism as
+   the manual mode) and, with `RefreshOnReload=credentials`, copies the new pair
+   in on every `systemctl reload`. The reload is a SIGHUP: same master process,
+   listeners kept; new connections get the new certificate, requests in
+   progress finish on the old workers, idle keep-alive connections are closed
+   (clients reconnect). A failed reload fails the order unit.
+4. `acme-renew-<name>.timer` (daily, with up to 24 h of random delay) runs the
    same unit again. lego renews when a third of the lifetime is left (half for
    certificates shorter than ten days), so a 90-day certificate renews at about
    30 days left. A run that is not due changes nothing.
-4. At every boot of an adopted host the same unit runs once (not due: no
-   change).
+5. At every boot of an adopted host the same unit runs once (not due: no
+   change). While no certificate has been issued yet, every boot runs a full
+   order.
 
-**A failed order is a failed unit**: the module turns off the upstream
-automatic restart, so `systemctl --failed` lists it until a later run succeeds.
-The certificate already installed stays in place and nginx keeps serving it.
-On the first order there is no previous certificate: the placeholder stays, and
-the expiry check fails as well.
+**A failed order retries on its own, then stays a failed unit.** The unit
+retries `retries` times a day, `retrySeconds` apart (default 3 attempts, an hour
+apart: well inside Let's Encrypt's 5 failed validations per name per hour).
+While it waits it shows as `activating (auto-restart)`; once the attempts are
+used up it is `failed` (`start-limit-hit`) and `systemctl --failed` lists it
+until the next timer run (after the day's start limit) or `terrace-tls renew`
+(which resets it). The certificate already installed stays in place and nginx
+keeps serving it. On the first order there is no previous certificate: the
+placeholder stays, and the expiry check fails as well.
 
 **A first order that cannot reach the CA does not leave the host stuck.**
-lego 5 writes the account file and key before registering; when that
-registration fails, its later runs try to recover the never-registered account
-and fail for good. Before every run, the order unit removes an account whose
-file holds no registration, so the next run registers afresh (the VM proof
-reproduces this on the relay).
+lego 5 (5.5.1) writes the account file (`"registration": null`) and key before
+registering; when that registration fails, its later runs try to recover the
+never-registered account and fail for good. Before every run, the order unit
+removes exactly such an account (its `account.json` and key) so the next run
+registers afresh; an account file of any other shape is left alone and logged.
+The VM proof reproduces the failure on the relay. Re-check this step and re-run
+the VM proof on every lego or nixpkgs update.
 
 **The placeholder is never presented as valid**: browsers and the expiry check
 reject it (self-signed, local CA). It is replaced by the first successful
-order and regenerated only until then.
+order and regenerated only until then. A live switch from the manual mode
+stages the served certificate first, so it never appears there (below).
 
 ## Port 80
 
@@ -121,8 +145,9 @@ mismatched SNI get 421).
 
 `terrace-tls-check.service` connects to the host's own port 443 once per public
 name, with that name as SNI, and fails when the served chain does not verify
-against the system trust store, does not name the host, or has fewer than
-`tls.minDays` days left. It prints one line per name (expiry date and issuer,
+against the system trust store ("no verified TLS session"), does not name the
+host ("does not name"), or has fewer than `tls.minDays` days left. It is the
+safety net for everything above, including a reload that did not take. It prints one line per name (expiry date and issuer,
 no key material). `terrace-tls-check.timer` runs it an hour after adoption or
 boot and daily after that. A failure shows in `systemctl --failed`. Delivering
 that to a person is G-23 (alerting), not built.
@@ -131,14 +156,16 @@ that to a person is G-23 (alerting), not built.
 
 | Path | Owner, mode | Content |
 | --- | --- | --- |
-| `/var/lib/acme/<name>/` | `acme:nginx` 0750 | `fullchain.pem`, `key.pem`, `chain.pem`, `full.pem` 0640; `cert.pem` link |
-| `/var/lib/acme/.lego/<name>/<hash>/` | `acme:nginx` 0640 files | lego's own copy |
-| `/var/lib/acme/.lego/accounts/` | `acme`, directories writable only by `acme`; key files 0600 | the ACME account key (nginx cannot read it) |
+| `/var/lib/acme/<name>/` | `acme:acme` 0750 | `fullchain.pem`, `key.pem`, `chain.pem`, `full.pem` 0640; `cert.pem` link |
+| `/var/lib/acme/.lego/<name>/<hash>/` | `acme:acme`, files 0640 | lego's own copy |
+| `/var/lib/acme/.lego/accounts/` | `acme`, directories writable only by `acme`; key files 0600 | the ACME account key |
 | `/var/lib/acme/acme-challenge/` | `acme` 0755 | challenge tokens while an order runs |
+| `/run/credentials/nginx.service/` | systemd, readable by the nginx service | the copy nginx serves (refreshed on reload) |
 
 Keys are generated on the host by lego; they never enter the Nix store, the
-repository or the secrets store. Service accounts (CMS, website, Keycloak)
-cannot read them.
+repository or the secrets store. The nginx user and the service accounts (CMS,
+website, Keycloak) cannot read the files in `/var/lib/acme`; nginx only sees
+its credential copy, as in the manual mode.
 
 ## Backup: deliberately excluded
 
@@ -177,6 +204,14 @@ as it is adopted.
 
 ## Enable ACME on a host
 
+Before anything: every name resolves to the host that serves it, and port 80
+answers there. Check from outside the host, for each name:
+
+```sh
+dig +short A www.example.org        # the host's address, and AAAA if it has IPv6
+curl -sI http://www.example.org/    # once the host runs: 301 to https (manual mode on the app: no answer on 80)
+```
+
 For a new host (the mode is part of its first deployment):
 
 ```nix
@@ -201,15 +236,28 @@ Then install, push and adopt as in the [cold start](production-profile.md#cold-s
 Adoption starts the first order. Check it within a few minutes (below). A
 replacement host is created with the same `--feature acme-tls` and `--replace`.
 
-To switch an existing manual host to ACME: deploy the ACME configuration first
-(the host still accepts the old `tls/*` in its ciphertext and ignores them), then
-`terrace-secrets host tls app acme` (drops `tls/*` from the store) and push.
+### Switching a live manual host to ACME
+
+**The switch restarts nginx (a few seconds without HTTPS).** Without the first
+step below it would also serve the self-signed placeholder until the first
+order succeeds. Run the DNS and port 80 checks above first.
+
+1. On the host: `sudo terrace-tls prepare-acme`. It copies the certificate the
+   host serves now into `/var/lib/acme/<name>/` as the first ACME certificate.
+2. Deploy the ACME configuration (`tls.mode = "acme"`). nginx restarts on the
+   same certificate; the first order replaces it as soon as it succeeds. If it
+   fails, the manual certificate stays served and the unit retries (above).
+3. When `sudo terrace-tls status` no longer says `NOT YET ISSUED BY ACME`:
+   `terrace-secrets host tls app acme --yes` (it refuses without `--yes`, because
+   it drops the manual certificate and key from the store; keep your own copy if
+   you may fall back), then push. Until then the host accepts the old `tls/*` in
+   its ciphertext and `terrace-secrets verify` prints a warning naming them.
 
 ## Check status
 
 ```sh
-sudo terrace-tls status       # mode, names, issuer, expiry, PLACEHOLDER if not issued yet,
-                              # order unit result, next renewal and check runs
+sudo terrace-tls status       # mode, names, issuer, expiry, PLACEHOLDER or NOT YET ISSUED BY ACME,
+                              # order unit state and retries, next renewal and check runs (root only)
 sudo terrace-tls check        # the expiry check, printed to the terminal
 systemctl --failed            # acme-order-renew-<name> or terrace-tls-check if anything failed
 journalctl -u acme-order-renew-<name>.service
@@ -218,14 +266,15 @@ journalctl -u acme-order-renew-<name>.service
 ## Force a renewal
 
 ```sh
-sudo terrace-tls renew           # runs the order unit; renews only if due
-sudo terrace-tls renew --force   # orders a new certificate now (counts against the rate limits above)
+sudo terrace-tls renew                 # runs the order unit; renews only if due
+sudo terrace-tls renew --force --yes   # orders a new certificate now (counts against the rate limits above)
 ```
 
-`--force` removes lego's stored copy so the unit orders afresh; the served
-certificate stays until the new one is installed, and nginx is reloaded, not
-restarted. If the order fails, the command says so, the unit is failed and the
-previous certificate is still served.
+Both reset the unit's retry budget first. `--force` removes lego's stored
+copy so the unit orders afresh; the served certificate stays until the new one
+is installed, and nginx is reloaded, not restarted. If the order fails, the
+command says so, the previous certificate is still served and the unit retries
+on its own.
 
 ## Fall back to the manual path
 
@@ -241,8 +290,9 @@ terrace-secrets push app          # the ACME host accepts and ignores the pair
 ```
 
 Then set `terrace.production.tls.mode = "manual"` (or remove the block) and
-deploy. nginx restarts onto the delivered pair; on the app host port 80 closes.
-`/var/lib/acme` stays on disk, unused, until the host goes back to ACME.
+deploy. nginx restarts onto the delivered pair (a few seconds without HTTPS); on
+the app host port 80 closes. `/var/lib/acme` stays on disk, unused, until the
+host goes back to ACME. The VM proof does this switch and back on the relay.
 
 ## Verification
 
@@ -265,27 +315,43 @@ It proves: nothing ACME and no port 80 before adoption; an ACME host needs and
 accepts no `tls/*`; placeholder, then issuance by HTTP-01 for the three names
 on adoption, served and verified, nginx reloaded not restarted; port 80 only
 redirects (also POSTs) and serves challenge files, 421 for other hosts; owners
-and modes; the expiry check passing on a fresh certificate and failing (a failed
-unit) on a 3-day and on a wrong-name certificate; a not-due renewal changes
-nothing; a forced renewal with 80 HTTPS requests during it all answered and the
-same nginx process; with the CA unreachable a failed order unit while the
-previous certificate keeps being served, then recovery; a reboot keeping the
-certificate and the account key; the relay's first boot with the CA unreachable
-(placeholder served, failed order, failing check), then issuance; a backup
-snapshot without ACME state, and a replacement host restored from it that
-registers a new account and gets a new certificate.
+and modes, and that the nginx user cannot read the key (ACME directory and
+lego copy) while nginx serves it as a credential; the expiry check passing on a
+fresh certificate and failing (a failed unit), with its own message, on a
+3-day and on a wrong-name certificate; a not-due renewal changes nothing; a
+forced renewal needs `--yes`, keeps the same nginx process and answers 80 new
+HTTPS connections spread across the reload; with the CA unreachable the
+previous certificate keeps being served and the unit recovers by its own retry
+once the CA is back; a reboot keeping the certificate and the account key; the
+relay's first boot with the CA unreachable (placeholder served, failing check,
+a failed unit after its retries), then issuance with a fresh account; backup
+snapshots of both roles without ACME state, and an app replacement restored
+from one that registers a new account and gets a new certificate; a live switch
+of the relay to the manual mode (expiry check failing on a 3-day delivered
+certificate, passing on a good one) and back to ACME on a host without ACME
+state, with clients seeing only the manual and then the ACME certificate,
+never the placeholder.
 
-Evidence (2026-11-19): see the pull request and the progress record; the
-results are copied here when the proof has run.
+Evidence: see the pull request and the owner runbook (step 6.16) for the
+recorded runs, commit and receipts.
 
 ## Not proven
 
 - Any public CA: no Let's Encrypt (or other) account, order, terms or rate
   limit has been exercised; the rate-limit figures above are the CA's published
   numbers, not measured.
-- Real DNS, a real public address, port 80 reachability through a provider
-  firewall, IPv6 validation, a CDN in front of the names.
-- A full real-time renewal cycle (the proof forces renewals; the daily timer and
-  its jitter are configuration, not observed firing).
+- Real DNS, CAA records, a real public address, port 80 reachability through a
+  provider firewall, validation over IPv6 from a public CA, a CDN in front of
+  the names.
+- Clock skew against a real CA (the local CA does not backdate certificates;
+  the proof tolerates a guest a moment behind it and counts those retries).
+- A timer actually firing (the proof starts every unit itself; the daily timer,
+  its jitter and the start-limit window are configuration).
+- A change of the hostname list on a running host (a new order is needed; the
+  expiry check should then fail for the new name until it succeeds), a
+  replacement of the relay, and the live switch on the app role (proven on the
+  relay only).
+- lego or nixpkgs updates: the account workaround depends on lego 5's account
+  file; re-run the proof after any update.
 - Alert delivery for a failing check or order (G-23).
 - DNS-01 and wildcard certificates (not built).
