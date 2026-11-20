@@ -11,6 +11,7 @@ Updated 2026-11-18 (rows below marked historical were last checked 2026-10-28). 
 | WordPress access | Protected complete DB/files backup and restore; plugin inventory | Preservation/import. The WXR export and Gravity Forms definitions were supplied 2026-11-03; the Kinsta ZIP and Kinsta-held settings are still outstanding |
 | Automation access | Windmill/Documenso endpoints and operator access verified | Consumer map, rotation, tests |
 | Identity ownership and public origins | Owner names the primary/backup identity administrator, enrollment approver and exact public HTTPS origins, and approves data retention | Resume the [identity host](identity-host.md) release gates: production artifact, secret delivery, per-user enrollment/recovery and an isolated database restore; no live activation is configured |
+| TLS certificates by ACME | Owner chose the CA and accepted its subscriber agreement, named a contact address, and published DNS records for every public name pointing at its host before adoption; first issuance seen with `terrace-tls status` | [TLS](tls.md); until then the manual mode (`tls/*` delivered with `terrace-secrets`) applies |
 | On-premises access | Hardware/disks/network and camera/device inventory | Host and HA/Frigate integration |
 
 Use project-local CLI state and protected secret-manager references. Never paste

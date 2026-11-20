@@ -29,6 +29,7 @@ in {
   imports = [
     ./base.nix
     ./secrets.nix
+    ./tls.nix
     ../relay.nix
     ../backup.nix
   ];
@@ -83,7 +84,7 @@ in {
       enable = true;
       role = "relay";
       publicHostnames = [relay.hostname];
-      # Port 80 is the relay module's own HTTPS redirect (and ACME HTTP-01 later).
+      # Port 80: the relay module's HTTPS redirect, or with ACME the challenge and redirect (tls.nix).
       publicTCPPorts = [22 80 443];
       publicUDPPorts = [3478];
       writers = ["headscale" "nginx"];
@@ -94,14 +95,15 @@ in {
       enable = true;
       inherit (relay) hostname publicIPv4;
     };
-    # Static certificate from sops until ACME (G-12); the relay module's redirect on port 80 stays.
+    # The relay module's own ACME is never used: tls.nix selects the operator's
+    # certificate (manual, below; the module's port-80 redirect stays) or its ACME wiring.
     services.nginx.virtualHosts.${relay.hostname} = {
       enableACME = lib.mkForce false;
-      sslCertificate = "/run/credentials/nginx.service/terrace-relay-cert";
-      sslCertificateKey = "/run/credentials/nginx.service/terrace-relay-key";
+      sslCertificate = lib.mkIf (cfg.tls.mode == "manual") "/run/credentials/nginx.service/terrace-relay-cert";
+      sslCertificateKey = lib.mkIf (cfg.tls.mode == "manual") "/run/credentials/nginx.service/terrace-relay-key";
     };
     systemd.services.nginx.serviceConfig = {
-      LoadCredential = ["terrace-relay-cert:${secret "tls/certificate"}" "terrace-relay-key:${secret "tls/key"}"];
+      LoadCredential = lib.mkIf (cfg.tls.mode == "manual") ["terrace-relay-cert:${secret "tls/certificate"}" "terrace-relay-key:${secret "tls/key"}"];
       MemoryMax = "256M";
     };
     systemd.services.headscale.serviceConfig.MemoryMax = "512M";

@@ -89,6 +89,43 @@ let
         identityHostname = lib.mkForce "identity.terrace.invalid";
       };
     };
+  # TLS by ACME (docs/tls.md): the production CA directory, accepted terms and a contact.
+  acmeTLS = {
+    mode = "acme";
+    acme = {
+      directory = "https://acme-v02.api.letsencrypt.org/directory";
+      acceptTerms = true;
+      contact = "certificates@terracefclub.org";
+    };
+  };
+  appAcme = extra:
+    app {
+      imports = [extra];
+      terrace.production.tls = acmeTLS;
+    };
+  relayAcme = instance: extra:
+    relayAs instance {
+      imports = [extra];
+      terrace.production.tls = acmeTLS;
+    };
+  # The ACME VM proof's instance: synthetic names, the local test CA and its harness.
+  rehearsalAcme = app {
+    imports = [../../platform/production/tls-rehearsal.nix];
+    terrace.production.instance = lib.mkForce "rehearsal";
+    terrace.production.app = {
+      webHostname = lib.mkForce "web.terrace.test";
+      cmsHostname = lib.mkForce "cms.terrace.test";
+      identityHostname = lib.mkForce "identity.terrace.test";
+    };
+    terrace.production.tls = {
+      mode = "acme";
+      acme = {
+        directory = "https://acme.test:14000/dir";
+        acceptTerms = true;
+        contact = "tls-rehearsal@terrace.test";
+      };
+    };
+  };
   # An on-prem-style host with static addressing instead of DHCP.
   staticNetwork = {
     networking.useDHCP = false;
@@ -102,7 +139,7 @@ let
   };
 
   inventory = (builtins.fromJSON (builtins.readFile ../../platform/production/inventory.json)).secrets;
-  delivered = role: lib.sort lib.lessThan (map (entry: entry.name) (lib.filter (entry: builtins.elem role entry.roles && entry.delivered && entry.feature == "core") inventory));
+  delivered = role: features: lib.sort lib.lessThan (map (entry: entry.name) (lib.filter (entry: builtins.elem role entry.roles && entry.delivered && entry.feature == "core" && !(builtins.elem (entry.omittedBy or "") features)) inventory));
   # Units allowed to start at boot, each for the stated reason; everything that
   # writes application state is wanted by terrace-production.target instead.
   allowedBoot = {
@@ -222,7 +259,9 @@ let
     profileUnits = map (name: name + ".service") (allowedServices ++ p.writers ++ p.writerHelpers);
     pullsOf = service: (service.wants or []) ++ (service.requires or []) ++ (service.bindsTo or []) ++ (service.upholds or []);
     interfaceDevices = map (name: "sys-subsystem-net-devices-${name}.device") (lib.attrNames cfg.networking.interfaces);
-    strayPulls = lib.unique (lib.subtractLists (profileUnits ++ allowedPulls role ++ interfaceDevices) (lib.concatMap (name: pullsOf (cfg.systemd.services.${name} or {})) (allowedServices ++ p.writers ++ p.writerHelpers)));
+    # With ACME, nginx pulls in only the placeholder-certificate unit (which orders after nginx).
+    acmePulls = lib.optional acmeMode "acme-${p.tls.certificateName}.service";
+    strayPulls = lib.unique (lib.subtractLists (profileUnits ++ allowedPulls role ++ interfaceDevices ++ acmePulls) (lib.concatMap (name: pullsOf (cfg.systemd.services.${name} or {})) (allowedServices ++ p.writers ++ p.writerHelpers)));
     etcUnits = lib.filter (name: lib.hasPrefix "systemd/system/" name || lib.hasPrefix "systemd/user/" name) (lib.attrNames cfg.environment.etc);
     socketUnits = lib.filter (name: (cfg.systemd.sockets.${name}.listenStreams or []) != [] || (cfg.systemd.sockets.${name}.listenDatagrams or []) != []) (lib.attrNames cfg.systemd.sockets);
     unitFiles = lib.concatLists (lib.mapAttrsToList (unit: service: let
@@ -232,10 +271,33 @@ let
       map (path: "${unit}:${toString path}") (lib.filter storePath (env ++ credentials)))
     services);
     vhosts = cfg.services.nginx.virtualHosts;
+    acmeMode = p.tls.mode == "acme";
+    # With ACME, port 80 is exactly these two plain-HTTP server blocks.
+    httpVhosts = ["terrace-http" "terrace-http-reject"];
     expectedVhosts =
-      if role == "app"
-      then p.publicHostnames ++ ["terrace-reject-unknown"]
-      else p.publicHostnames;
+      (
+        if role == "app"
+        then p.publicHostnames ++ ["terrace-reject-unknown"]
+        else p.publicHostnames
+      )
+      ++ lib.optionals acmeMode httpVhosts;
+    plainHttp = vhost: !vhost.onlySSL && !vhost.forceSSL && !vhost.addSSL && !vhost.rejectSSL && vhost.root == null && vhost.globalRedirect == null && lib.all (location: location.proxyPass == null && location.alias == null && location.tryFiles == null && location.uwsgiPass == null) (lib.attrValues vhost.locations);
+    portEighty = let
+      http = vhosts.terrace-http;
+      reject = vhosts.terrace-http-reject;
+    in
+      plainHttp http
+      && plainHttp reject
+      && lib.attrNames http.locations == ["/" "^~ /.well-known/acme-challenge/"]
+      && http.locations."/".return == "301 https://$host$request_uri"
+      && http.locations."^~ /.well-known/acme-challenge/".root == "/var/lib/acme/acme-challenge"
+      && http.locations."^~ /.well-known/acme-challenge/".return == null
+      && sorted ([http.serverName] ++ http.serverAliases) == sorted p.publicHostnames
+      && lib.attrNames reject.locations == ["/"]
+      && reject.locations."/".return == "421"
+      && reject.default;
+    acmeCert = cfg.security.acme.certs.${p.tls.certificateName};
+    orderUnit = "acme-order-renew-${p.tls.certificateName}";
   in
     map (a: "assertion: " + a.message) (lib.filter (a: !a.assertion) cfg.assertions)
     ++ check "boot services: ${toString (lib.subtractLists allowedServices bootServices)}" (subset bootServices allowedServices && subset allowedBoot.required bootServices)
@@ -250,6 +312,8 @@ let
       && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts)
       == (
         if role == "relay"
+        then [22 80 443]
+        else if acmeMode
         then [22 80 443]
         else [22 443]
       )
@@ -269,21 +333,33 @@ let
     ++ check "kernel debug or emergency access" (!cfg.systemd.enableEmergencyMode && !(lib.any (param: builtins.elem param ["debug" "single" "emergency" "rd.debug" "systemd.debug-shell" "systemd.debug_shell"] || lib.hasPrefix "init=" param || lib.hasPrefix "systemd.unit=" param || lib.hasPrefix "rd.systemd.unit=" param) cfg.boot.kernelParams))
     ++ check "nginx vhosts: ${toString (lib.attrNames vhosts)}" (sorted (lib.attrNames vhosts)
       == sorted expectedVhosts
-      && lib.all (vhost:
+      && lib.all (name: let
+        vhost = vhosts.${name};
+      in
         (
-          if role == "relay"
+          if builtins.elem name httpVhosts
+          then plainHttp vhost
+          else if role == "relay" && !acmeMode
           then vhost.forceSSL && !vhost.onlySSL
           else vhost.onlySSL && !vhost.forceSSL
         )
         && !vhost.addSSL
         && !vhost.enableACME
+        && vhost.useACMEHost == null
         && vhost.listen == []
-        && vhost.listenAddresses == []) (lib.attrValues vhosts))
+        && vhost.listenAddresses == []) (lib.attrNames vhosts))
+    ++ lib.optionals acmeMode (
+      check "port 80 serves only the ACME challenge and the HTTPS redirect" portEighty
+      ++ check "ACME account: accepted terms, contact, CA directory" (cfg.security.acme.acceptTerms && acmeCert.email == p.tls.acme.contact && acmeCert.server == p.tls.acme.directory && acmeCert.webroot == "/var/lib/acme/acme-challenge" && acmeCert.dnsProvider == null && (p.instance != "production" || !(lib.any (word: lib.hasInfix word acmeCert.server) ["staging" "test" "pebble" "localhost"])))
+      ++ check "ACME order failures stay visible" ((services.${orderUnit}.serviceConfig.Restart or "no") == "no")
+      ++ check "ACME renewal gated by adoption" (builtins.elem "acme-renew-${p.tls.certificateName}" (gatedUnits cfg "timers") && services."acme-${p.tls.certificateName}".wantedBy == [])
+    )
+    ++ check "TLS expiry check gated by adoption" (builtins.elem "terrace-tls-check" (gatedUnits cfg "timers") && (services.terrace-tls-check.serviceConfig.Type or "") == "oneshot")
     ++ check "core dumps" (!cfg.systemd.coredump.enable && lib.hasSuffix "/bin/false" cfg.boot.kernel.sysctl."kernel.core_pattern")
-    ++ check "secret inventory: ${toString (lib.attrNames cfg.sops.secrets)}" (p.instance != "production" || sorted (lib.attrNames cfg.sops.secrets) == delivered role)
+    ++ check "secret inventory: ${toString (lib.attrNames cfg.sops.secrets)}" (p.instance != "production" || sorted (lib.attrNames cfg.sops.secrets) == delivered role p.secrets.features)
     ++ check "world-readable or non-root secret" (lib.all (item: item.mode == "0400" && item.owner == null && item.group == null) sops)
     ++ check "ciphertext outside the store" (cfg.sops.defaultSopsFile == "/var/lib/terrace-secrets/secrets.sops.json" && !cfg.sops.validateSopsFiles && cfg.environment.etc."terrace/escrow-recipient".text == escrowRecipient + "\n")
-    ++ check "test-only override: extra trust or CA variables" (p.instance != "production" || (cfg.security.pki.certificateFiles == [] && lib.all (service: !(service.environment ? NODE_EXTRA_CA_CERTS)) (lib.attrValues services)))
+    ++ check "test-only override: extra trust or CA variables" (p.instance != "production" || (cfg.security.pki.certificateFiles == [] && p.tls.trustAnchorFile == null && lib.all (service: !(service.environment ? NODE_EXTRA_CA_CERTS) && !(service.environment ? LEGO_CA_CERTIFICATES)) (lib.attrValues services)))
     ++ check "bootstrap administrator" (p.instance != "production" || role != "app" || !(services.keycloak.serviceConfig ? EnvironmentFile))
     ++ check "K3s" (!cfg.services.k3s.enable)
     ++ check "toplevel does not evaluate: ${firstError}" ((builtins.tryEval cfg.system.build.toplevel.drvPath).success)
@@ -312,10 +388,15 @@ let
     static = violations "app" (app staticNetwork);
     relayRehearsal = violations "relay" (relayAs "rehearsal" {});
     rehearsal = violations "app" (rehearsal {});
+    appAcme = violations "app" (appAcme {});
+    relayAcmeRehearsal = violations "relay" (relayAcme "rehearsal" {});
+    rehearsalAcme = violations "app" rehearsalAcme;
   };
   # The production relay with a documentation address must fail for that reason alone,
   # which proves every other relay invariant in production mode without a real address.
   relayDocumentation = violations "relay" (relayAs "production" {});
+  relayAcmeDocumentation = violations "relay" (relayAcme "production" {});
+  acmeMissing = name: evaluateApp (appParameters // {tls = acmeTLS // {acme = removeAttrs acmeTLS.acme [name];};}) {};
   negatives = [
     # Secrets.
     (rejects "secret(s) not declared: website/lifecycle-intake" (app ({config, ...}: {
@@ -439,11 +520,42 @@ let
     (rejects "with 25 percent headroom the host needs 9216 MiB" (app {terrace.production.memoryMiB = lib.mkForce 8192;}))
     (rejects "does not yet enable K3s" (app {services.k3s.enable = true;}))
     (rejects "per-host hardware module" (app {boot.loader.systemd-boot.enable = lib.mkForce false;}))
+    # TLS (docs/tls.md): no plain-HTTP application, no test CA or test trust, port 80 only for the challenge and the redirect.
+    (rejects "serves every public hostname over HTTPS only" (app {services.nginx.virtualHosts."www.terracefclub.org".onlySSL = lib.mkForce false;}))
+    (rejects "serves every public hostname over HTTPS only" (appAcme {
+      services.nginx.virtualHosts."cms.terracefclub.org" = {
+        onlySSL = lib.mkForce false;
+        addSSL = true;
+      };
+    }))
+    (rejectsRelay "serves every public hostname over HTTPS only" (relayAcme "production" {services.nginx.virtualHosts."headscale.terracefclub.org".forceSSL = lib.mkOverride 10 true;}))
+    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme-staging-v02.api.letsencrypt.org/directory";}))
+    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "https://acme.test:14000/dir";}))
+    (rejects "refuses a staging or test ACME directory" (appAcme {terrace.production.tls.acme.directory = lib.mkForce "http://acme-v02.api.letsencrypt.org/directory";}))
+    (rejects "acceptTerms = true" (appAcme {terrace.production.tls.acme.acceptTerms = lib.mkForce false;}))
+    (failsMissing ["terrace" "production" "tls" "acme" "contact"] (acmeMissing "contact"))
+    (failsMissing ["terrace" "production" "tls" "acme" "directory"] (acmeMissing "directory"))
+    (rejects "needs a real contact address" (appAcme {terrace.production.tls.acme.contact = lib.mkForce "certificates@example.com";}))
+    (rejects "port 80 serves only the ACME challenge" (appAcme {services.nginx.virtualHosts.terrace-http.locations."/cms/".proxyPass = "http://127.0.0.1:13048";}))
+    (rejects "port 80 serves only the ACME challenge" (appAcme {services.nginx.virtualHosts.terrace-http.locations."/".return = lib.mkForce "200 ok";}))
+    (rejects "port 80 serves only the ACME challenge" (appAcme {services.nginx.virtualHosts.terrace-http-reject.root = "/var/lib/terrace-cms-media";}))
+    (rejects "port 80 serves only the ACME challenge" (appAcme {services.nginx.virtualHosts.terrace-plain.locations."/".return = "200";}))
+    (rejects "refuses test-only ACME client trust" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".environment.LEGO_CA_CERTIFICATES = "/etc/rehearsal-ca.pem";}))
+    (rejects "refuses a TLS trust anchor override" (appAcme {terrace.production.tls.trustAnchorFile = "/etc/rehearsal-ca.pem";}))
+    (rejects "keeps a failed certificate order a failed unit" (appAcme {systemd.services."acme-order-renew-www.terracefclub.org".serviceConfig.Restart = lib.mkOverride 10 "on-failure";}))
+    (rejects "reads the ACME certificate in place" (appAcme {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkOverride 10 ["terrace-website-key:/run/secrets/tls/key"];}))
+    (rejects "boot timers: " (appAcme {systemd.timers."acme-renew-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["timers.target"];}))
+    (rejects "boot services: acme-www.terracefclub.org" (appAcme {systemd.services."acme-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["multi-user.target"];}))
+    (rejects "boot timers: " (app {systemd.timers.terrace-tls-check.wantedBy = lib.mkOverride 10 ["timers.target"];}))
   ];
 in
   assert lib.assertMsg (positive.app == []) "Production app violations: ${toString positive.app}";
   assert lib.assertMsg (positive.static == []) "Static-network app violations: ${toString positive.static}";
   assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";
   assert lib.assertMsg (positive.rehearsal == []) "Rehearsal instance violations: ${toString positive.rehearsal}";
+  assert lib.assertMsg (positive.appAcme == []) "Production app with ACME violations: ${toString positive.appAcme}";
+  assert lib.assertMsg (positive.relayAcmeRehearsal == []) "Relay with ACME (rehearsal addressing) violations: ${toString positive.relayAcmeRehearsal}";
+  assert lib.assertMsg (positive.rehearsalAcme == []) "ACME rehearsal instance violations: ${toString positive.rehearsalAcme}";
+  assert lib.assertMsg (relayAcmeDocumentation == relayDocumentation) "Production relay with ACME and a documentation address: ${toString relayAcmeDocumentation}";
   assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)." "toplevel does not evaluate: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)."]) "Production relay with a documentation address: ${toString relayDocumentation}";
   assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance hold every invariant; ${toString (builtins.length negatives)} rejected variants"

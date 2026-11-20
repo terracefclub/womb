@@ -14,8 +14,8 @@ their contents never enter Nix evaluation or the store. When native identity is
 co-enabled, its hostname must differ from both application names.
 
 Only HTTPS443 is opened. The immutable app launchers keep binding loopback.
-HTTP80 is closed; HTTP-to-HTTPS redirection and certificate renewal are separate
-activation work.
+HTTP80 is closed in this module; the production app role adds, with ACME, the
+challenge, the HTTP-to-HTTPS redirect and renewal ([TLS](tls.md)).
 Unknown hosts and mismatched application SNI/Host receive421. The gateway fixes
 upstream Host, forwarded host/protocol/port and client address, and removes
 untrusted Forwarded/prefix fields. It preserves Origin for application CSRF

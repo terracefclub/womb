@@ -14,8 +14,8 @@ already prove ([access relay](access-relay.md), [cloud rehearsal](cloud-rehearsa
 
 | Role | Module | Runs | Public ports |
 | --- | --- | --- | --- |
-| `app` | `platform/production/app.nix` | PostgreSQL 18, Keycloak (identity), CMS and website, the HTTPS gateway (nginx), backup | TCP 22, 443 |
-| `relay` | `platform/production/relay.nix` | Headscale with embedded DERP behind nginx, backup | TCP 22, 80 (the relay module's HTTPS redirect; ACME later), 443; UDP 3478 |
+| `app` | `platform/production/app.nix` | PostgreSQL 18, Keycloak (identity), CMS and website, the HTTPS gateway (nginx), backup | TCP 22, 443; 80 only with ACME (challenge and redirect, [TLS](tls.md)) |
+| `relay` | `platform/production/relay.nix` | Headscale with embedded DERP behind nginx, backup | TCP 22, 80 (HTTPS redirect; with ACME also the challenge), 443; UDP 3478 |
 
 Alternatives considered:
 
@@ -134,7 +134,9 @@ for the stated reason:
   PostgreSQL, Keycloak (HTTP and management), Headscale (API, metrics, gRPC),
   the CMS and the website listen on loopback; nginx has exactly the role's
   virtual hosts, TLS only on the app and HTTPS with the module's redirect on the
-  relay, no extra listeners.
+  relay, no extra listeners; with ACME, port 80 is only the challenge and the
+  redirect, and no staging or test CA, unaccepted terms or missing contact
+  ([TLS](tls.md)).
 - **Accounts and access**: immutable users; no password on any account (only
   locked markers); `wheel` (users and group members) is exactly `operator`;
   sudo rules only for root and `wheel`, and no `sudo-rs` or `doas`;
@@ -319,6 +321,7 @@ Build on the Linux builder under the shared lock, never on a Mac.
 - VM proof (builder; the wrapper takes the shared lock itself):
   `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`
+- Certificates by ACME against a local CA (builder): `platform/production-tls-check`, see [TLS](tls.md#verification)
 
 The VM proof boots the **same** app role and, briefly, the **same** relay role
 (secrets pushed, adopted, Headscale and HTTPS answering, redirect on port 80,
@@ -350,7 +353,7 @@ the owner.
 
 | Follow-up | Gap | What it needs |
 | --- | --- | --- |
-| TLS issuance and renewal (ACME) | G-12 | Certificates are a static secret pair here. ACME needs port 80 (HTTP-01) or DNS-01 credentials, a renewal path that bypasses sops, expiry alerting, and a test against a local ACME server (pebble) |
+| TLS against a public CA | G-12 | Built and VM-proven against a local ACME server ([TLS](tls.md), `tls.mode = "acme"`; manual stays the default). Needs the owner's CA choice and terms acceptance, a contact address, real DNS, and a first real issuance; DNS-01 is not built |
 | Mail transport | G-20 | Owner's provider choice; SMTP credentials become sops secrets; outbox delivery job; a test against a local sink |
 | Alerting and log retention | G-23 | Delivery channel, external probe, certificate and backup-age alerts that reach a person, a tested failing check |
 | Keycloak production administration | G-15, G-39 | First administrator via `kc.sh bootstrap-admin` with the escrowed `identity/bootstrap-admin-password`, its removal, role grants, OIDC client-secret rotation through the admin API, realm reconciliation |

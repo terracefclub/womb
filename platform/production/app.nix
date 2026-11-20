@@ -31,6 +31,7 @@ in {
   imports = [
     ./base.nix
     ./secrets.nix
+    ./tls.nix
     ../website-gateway.nix
     ../identity.nix
     ../backup.nix
@@ -105,12 +106,15 @@ in {
             [
               config.terrace.identity.databasePasswordFile
               config.terrace.identity.realmFile
+              config.terrace.website.inputFiles.cms
+              config.terrace.website.inputFiles.web
+            ]
+            # ACME certificates live in /var/lib/acme (tls.nix checks nginx reads exactly those).
+            ++ lib.optionals (cfg.tls.mode == "manual") [
               config.terrace.identity.certificateFile
               config.terrace.identity.certificateKeyFile
               config.terrace.websiteGateway.certificateFile
               config.terrace.websiteGateway.certificateKeyFile
-              config.terrace.website.inputFiles.cms
-              config.terrace.website.inputFiles.web
             ]
             ++ lib.concatMap (target: [target.passwordFile] ++ lib.optional (target.environmentFile != null) target.environmentFile ++ lib.optional (target.sftp.identityFile != null) target.sftp.identityFile)
             (lib.attrValues (lib.filterAttrs (_: target: target.enable) config.terrace.backup.targets));
@@ -188,16 +192,16 @@ in {
       enable = true;
       webHostname = app.webHostname;
       cmsHostname = app.cmsHostname;
-      certificateFile = secret "tls/certificate";
-      certificateKeyFile = secret "tls/key";
+      certificateFile = cfg.tls.certificateFile;
+      certificateKeyFile = cfg.tls.keyFile;
     };
     terrace.identity = {
       enable = true;
       hostname = app.identityHostname;
       realmFile = config.sops.templates."identity/terrace-realm.json".path;
       databasePasswordFile = secret "identity/database-password";
-      certificateFile = secret "tls/certificate";
-      certificateKeyFile = secret "tls/key";
+      certificateFile = cfg.tls.certificateFile;
+      certificateKeyFile = cfg.tls.keyFile;
     };
     # One explicit major version: restores need the same PostgreSQL major.
     services.postgresql.package = pkgs.postgresql_18;

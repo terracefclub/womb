@@ -131,14 +131,17 @@ inventory and printed by `rotate`.
 | `identity/client/terrace-editorial` | app | realm, `cms.env` `CMS_AUTH_INTROSPECTION_SECRET` | manual |
 | `identity/database-password` | app | Keycloak database role | `rotate --manual`, push, `apply` |
 | `identity/bootstrap-admin-password` | app | escrow only in production: not declared on a production host, so never in `/run/secrets` there; the rehearsal harness declares it, and any host whose build declares it can decrypt it (it is in that host's ciphertext) | single use (G-15) |
-| `tls/certificate`, `tls/key` | app, relay | nginx credentials | external: `set`, push |
+| `tls/certificate`, `tls/key` | app, relay, not on an ACME host (feature `acme-tls`, [TLS](tls.md)) | nginx credentials | external: `set`, push |
 | `backup/primary/repository-password` | app, relay | restic `passwordFile` | `rotate --manual`, `apply`, push, `apply --finish` |
 | `backup/primary/sftp-key` | app, relay | restic SFTP identity | manual (below) |
 | `backup/secondary/repository-password` | app (optional) | second restic target | as primary |
 | `backup/secondary/environment` | app (optional) | B2 S3 key id and key | external: `set`, push |
 
 That is 14 entries for the app (12 core, 2 optional secondary-backup) and 4 for
-the relay, each host with its own values. Rehearsal-only:
+the relay, each host with its own values. A host that gets its certificate by
+ACME (`host create ... --feature acme-tls`) has no `tls/*`: 12 and 2. `host tls
+HOST acme|manual` switches an existing host's store ([TLS](tls.md)); while it
+switches, a host still accepts and ignores `tls/*` it no longer needs. Rehearsal-only:
 `rehearsal/users-json` (synthetic users for the shared protocol; refused by
 `install` on a production host).
 
@@ -204,6 +207,7 @@ terrace-secrets rotate app website/lifecycle-intake           # one generated va
 terrace-secrets rotate app identity/database-password --manual   # a secret whose service keeps a copy
 terrace-secrets apply app identity/database-password --address HOST  # hand it to that service
 terrace-secrets host create app --role app --replace && terrace-secrets rekey app
+terrace-secrets host tls app acme | manual                    # how the host gets its certificate (docs/tls.md)
 terrace-secrets host reset-replacement app --confirm app      # only to redeploy a wiped host as NEW
 terrace-secrets escrow replace /offline/terrace-escrow-2.age  # new escrow; re-encrypts every host
 terrace-secrets public app backup/primary/sftp-key            # public half, for enrolment

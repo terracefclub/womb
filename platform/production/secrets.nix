@@ -12,7 +12,9 @@
   wanted = entry:
     builtins.elem cfg.role entry.roles
     && entry.delivered
-    && (entry.feature == "core" || builtins.elem entry.feature cfg.secrets.features);
+    && (entry.feature == "core" || builtins.elem entry.feature cfg.secrets.features)
+    # tls/* are not delivered to a host that obtains its certificate by ACME.
+    && !(builtins.elem (entry.omittedBy or "") cfg.secrets.features);
   declared = builtins.filter wanted inventory;
   hostKey = "/etc/ssh/ssh_host_ed25519_key";
 in {
@@ -24,9 +26,9 @@ in {
       description = "Host copy of the encrypted store (never the Nix store); written by `terrace-secrets install`.";
     };
     features = lib.mkOption {
-      type = lib.types.listOf (lib.types.enum ["secondary-backup"]);
+      type = lib.types.listOf (lib.types.enum ["secondary-backup" "acme-tls"]);
       default = [];
-      description = "Optional inventory features whose secrets this host receives (set by the role modules).";
+      description = "Inventory features of this host (set by the role modules): `secondary-backup` adds its secrets, `acme-tls` omits tls/*.";
     };
     required = lib.mkOption {
       type = lib.types.listOf lib.types.str;

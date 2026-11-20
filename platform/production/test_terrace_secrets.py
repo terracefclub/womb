@@ -233,6 +233,33 @@ class StoreTest(Fixture):
         (self.store / "escrow.recipient").write_text("age1" + "q" * 58 + "\n")
         self.assertIn("may have been altered", self.refused("check", "app"))
 
+    def test_acme_host_receives_no_tls_secrets(self):
+        self.ok("escrow", "create", str(self.escrow))
+        self.ok("host", "create", "app", "--role", "app", "--feature", "acme-tls", "--stage", str(self.root / "stage-1"))
+        self.assertIn("Supply with `set`: none.", self.ok("generate", "app"))
+        self.pin()
+        self.assertIn("app: 10 secrets encrypted to exactly", self.ok("check", "app"))
+        self.assertNotIn("tls/", " ".join(self.plaintext()))
+        self.refused("set", "app", "tls/certificate", stdin=TLS_CERT.encode())
+        self.refused("set", "app", "tls/key", stdin=TLS_KEY.encode())
+        self.assertEqual(tool.expected(tool.inventory(), "relay", ["acme-tls"]), ["backup/primary/repository-password", "backup/primary/sftp-key"])
+        self.assertIn("tls/key", tool.expected(tool.inventory(), "relay", []))
+        # Fallback to the manual path: the store needs the pair again, then drops it on the way back.
+        self.assertIn("Supply tls/certificate and tls/key", self.ok("host", "tls", "app", "manual"))
+        self.assertIn("missing tls/certificate", self.call("check", "app")[1])
+        self.ok("set", "app", "tls/certificate", stdin=TLS_CERT.encode())
+        self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode())
+        self.assertIn("app: 12 secrets encrypted to exactly", self.ok("check", "app"))
+        # An ACME host still accepts the pair while it switches (sops-nix ignores it); the store check does not.
+        self.assertTrue(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "tls/key", False, tolerate_omitted=True))
+        self.assertFalse(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "tls/key", False))
+        self.assertFalse(tool.allowed_name(tool.inventory(), "app", ["acme-tls"], "backup/secondary/environment", False, tolerate_omitted=True))
+        out = self.ok("host", "tls", "app", "acme")
+        self.assertIn("removed from the store: tls/certificate, tls/key.", out)
+        self.assertIn("app: 10 secrets encrypted to exactly", self.ok("check", "app"))
+        self.assertFalse([name for name in self.plaintext() if name.startswith("tls/")])
+        self.assertEqual((self.store / "hosts" / "app" / "features").read_text(), "acme-tls\n")
+
     def test_formats(self):
         entries = tool.inventory()
         good = {"website/lifecycle-intake": "0" * 64, "tls/key": TLS_KEY, "tls/certificate": TLS_CERT + TLS_CERT,
