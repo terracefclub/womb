@@ -71,6 +71,15 @@ its own passing source-matched native receipt; signing restart acceptance alone
 does not prove this replacement-host recovery. No production transport,
 certificate authority, signature trust or actual profile is enabled.
 
+The synthetic gateway CA and relay certificate are built with random keys, so
+every guest client trusts them by store path only: `/etc/terrace-test-ca.pem`
+and `/etc/terrace-relay-ca.pem` symlinks used through `curl --cacert`,
+`SSL_CERT_FILE` (protocol client, lifecycle steps, `tailscaled`),
+`NODE_EXTRA_CA_CERTS` and Vaultwarden's and Windmill's `identityCaFile`; nothing
+copies them into a system trust bundle. Each gateway and relay start first checks
+that the served chain verifies against that anchor, failing with "test CA and
+trust anchor disagree" otherwise.
+
 The separate optional `--relay-peers` switch adds three disposable Tailscale
 clients to the existing application, automation and browser guests. Private
 single-use tagged enrollment keys are expired before capture. The allow rule
