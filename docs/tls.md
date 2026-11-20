@@ -52,7 +52,7 @@ to `/var/lib/acme/acme-challenge`, served by nginx on port 80.
 | `tls.acme.directory` | required with `acme` | the CA's ACME directory URL |
 | `tls.acme.acceptTerms` | `false` | must be `true`: the owner accepted the CA's subscriber agreement |
 | `tls.acme.contact` | required with `acme` | the address registered with the CA account |
-| `tls.acme.otherAuthority` | `false` | owner decision: a CA other than Let's Encrypt (see below) |
+| `tls.acme.otherAuthority` | `false` | owner decision: a CA other than Let's Encrypt (see Owner decisions) |
 | `tls.acme.retrySeconds` | `3600` | wait before the order unit retries a failed order itself (production: at least 900) |
 | `tls.acme.retries` | `3` | attempts a day before a failed order stays a failed unit (1 to 5) |
 | `tls.minDays` | `14` | the expiry check fails below this many days left (1 to 60) |
@@ -95,7 +95,10 @@ replacement host makes no request to the CA until its operator adopts it.
    in on every `systemctl reload`. The reload is a SIGHUP: same master process,
    listeners kept; new connections get the new certificate, requests in
    progress finish on the old workers, idle keep-alive connections are closed
-   (clients reconnect). A failed reload fails the order unit.
+   (clients reconnect). A failed reload fails the order unit and keeps the
+   `renewed` marker, so the unit's retry reloads again (the VM proof makes a
+   reload fail once and sees the retry serve the new chain); until then the
+   expiry check still sees the previous, valid certificate.
 4. `acme-renew-<name>.timer` (daily, with up to 24 h of random delay) runs the
    same unit again. lego renews when a third of the lifetime is left (half for
    certificates shorter than ten days), so a 90-day certificate renews at about
@@ -110,7 +113,14 @@ apart: well inside Let's Encrypt's 5 failed validations per name per hour).
 While it waits it shows as `activating (auto-restart)`; once the attempts are
 used up it is `failed` (`start-limit-hit`) and `systemctl --failed` lists it
 until the next timer run (after the day's start limit) or `terrace-tls renew`
-(which resets it). The certificate already installed stays in place and nginx
+(which resets it).
+
+The start budget (`retries` starts a day) counts every start of the order
+unit: boots, configuration switches, the renewal timer, manual starts and the
+unit's own retries. A further start that day is refused with
+`start-limit-hit` even when nothing else is wrong, until the day is over,
+`systemctl reset-failed` or `terrace-tls renew`; `terrace-tls status` says so
+in words. The certificate already installed stays in place and nginx
 keeps serving it. On the first order there is no previous certificate: the
 placeholder stays, and the expiry check fails as well.
 
@@ -164,8 +174,11 @@ that to a person is G-23 (alerting), not built.
 
 Keys are generated on the host by lego; they never enter the Nix store, the
 repository or the secrets store. The nginx user and the service accounts (CMS,
-website, Keycloak) cannot read the files in `/var/lib/acme`; nginx only sees
-its credential copy, as in the manual mode.
+website, Keycloak) cannot read the files in `/var/lib/acme`. That protects
+the files on disk only: nginx still holds its credential copy and the key in
+memory, so a compromised nginx can read the key, exactly as in the manual
+mode. Unlike the manual mode (key on ramfs, from the encrypted store), the ACME
+key sits unencrypted on the persistent disk, like any ACME client's.
 
 ## Backup: deliberately excluded
 
@@ -185,8 +198,8 @@ as it is adopted.
   forced renewals of the same host in one week are safe. Beyond that, use the
   manual mode for the rest of the week.
 - Failed validations: a replacement whose DNS does not yet point at it fails
-  once (a failed unit, nothing retried automatically until the next timer run),
-  well inside the hourly limit.
+  and retries on its own `retries` times a day, `retrySeconds` apart (default 3,
+  an hour apart), then stays a failed unit: well inside the hourly limit.
 
 ## Owner decisions and inputs (before enabling ACME)
 
@@ -196,9 +209,13 @@ as it is adopted.
    that the owner accepted it. This is an owner decision.
 2. **A contact address** the club reads (account and policy notices). Not a
    personal address that may lapse.
-3. **The hostnames**, the same as `app.webHostname`, `cmsHostname`,
+3. **Optional: another CA.** `tls.acme.otherAuthority = true` lets production
+   use a CA other than Let's Encrypt (any public `https://` directory that does
+   not look like a staging or test endpoint). Choosing it, and accepting that
+   CA's agreement, is an owner decision.
+4. **The hostnames**, the same as `app.webHostname`, `cmsHostname`,
    `identityHostname` and `relay.hostname` (runbook 1.19).
-4. **DNS**: A (and AAAA if the host has IPv6) records for every name pointing
+5. **DNS**: A (and AAAA if the host has IPv6) records for every name pointing
    at the host that serves it, published **before** the host is adopted (or
    before switching it to ACME). Port 80 and 443 reachable from the internet.
 
@@ -292,7 +309,12 @@ terrace-secrets push app          # the ACME host accepts and ignores the pair
 Then set `terrace.production.tls.mode = "manual"` (or remove the block) and
 deploy. nginx restarts onto the delivered pair (a few seconds without HTTPS); on
 the app host port 80 closes. `/var/lib/acme` stays on disk, unused, until the
-host goes back to ACME. The VM proof does this switch and back on the relay.
+host goes back to ACME: it still holds the ACME key and account key (and, after
+an earlier `prepare-acme`, a copy of a manual key), unencrypted. Remove it with
+`sudo rm -rf /var/lib/acme` once the host stays on the manual mode. Going back
+to ACME later: if it still holds a valid ACME certificate, deploying ACME serves
+that one and `prepare-acme` refuses to overwrite it unless given
+`--overwrite`. The VM proof does this switch and back on the relay.
 
 ## Verification
 
@@ -330,7 +352,10 @@ from one that registers a new account and gets a new certificate; a live switch
 of the relay to the manual mode (expiry check failing on a 3-day delivered
 certificate, passing on a good one) and back to ACME on a host without ACME
 state, with clients seeing only the manual and then the ACME certificate,
-never the placeholder.
+never the placeholder, and `prepare-acme` refusing to overwrite a valid ACME
+certificate; a renewal whose nginx reload fails is a failed run that keeps the
+previous certificate served, and the unit's own retry reloads and serves the
+new one.
 
 Evidence: see the pull request and the owner runbook (step 6.16) for the
 recorded runs, commit and receipts.

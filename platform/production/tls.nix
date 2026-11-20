@@ -142,7 +142,7 @@
       shopt -s nullglob
       for account in /var/lib/acme/.lego/accounts/*/*/*/account.json; do
         dir=$(dirname "$account")
-        state=$(jq -r 'if .registration == null then "unregistered" elif (.registration | type) == "object" then "registered" else "unknown" end' "$account" 2>/dev/null) || state=unknown
+        state=$(jq -r 'if has("registration") and .registration == null then "unregistered" elif (.registration | type) == "object" then "registered" else "unknown" end' "$account" 2>/dev/null) || state=unknown
         case $state in
           registered) ;;
           unregistered)
@@ -161,7 +161,7 @@
       mode=${tls.mode}
       cert=${lib.escapeShellArg certName}
       dir=${lib.escapeShellArg directory}
-      usage() { echo 'usage: terrace-tls status | check | renew [--force --yes] | prepare-acme' >&2; exit 2; }
+      usage() { echo 'usage: terrace-tls status | check | renew [--force --yes] | prepare-acme [--overwrite]' >&2; exit 2; }
       root() { [[ $(id -u) == 0 ]] || { echo 'terrace-tls: run as root (sudo terrace-tls ...)' >&2; exit 1; }; }
       case "''${1:-}" in
         status)
@@ -178,6 +178,9 @@
               echo 'no certificate yet (the host is not adopted, or nginx has not started)'
             fi
             systemctl show ${orderUnit}.service -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainExitTimestamp --no-pager
+            if [[ $(systemctl show ${orderUnit}.service -p Result --value) == start-limit-hit ]]; then
+              echo 'START LIMIT: the order unit used its ${lib.optionalString acme (toString tls.acme.retries)} starts for today (boots, switches, the timer and manual starts all count). It is refused until the day is over or terrace-tls renew resets it; read its journal first.'
+            fi
             systemctl list-timers --all --no-pager ${lib.escapeShellArg "acme-renew-${certName}.timer"} terrace-tls-check.timer
           else
             systemctl list-timers --all --no-pager terrace-tls-check.timer
@@ -215,6 +218,11 @@
           root
           [[ $mode == manual ]] || { echo 'terrace-tls: this host already gets its certificate by ACME' >&2; exit 1; }
           [[ -r /run/secrets/tls/certificate && -r /run/secrets/tls/key ]] || { echo 'terrace-tls: no delivered certificate in /run/secrets/tls' >&2; exit 1; }
+          issued=(/var/lib/acme/.lego/"$cert"/*/"$cert".crt)
+          if [[ -e ''${issued[0]} && ''${2:-} != --overwrite ]] && openssl x509 -noout -checkend 0 -in "''${issued[0]}" >/dev/null; then
+            echo "terrace-tls: $dir already holds a valid ACME certificate from earlier; switching back serves it. Repeat with --overwrite to stage the manual certificate instead." >&2
+            exit 1
+          fi
           umask 077
           install -d -m 0750 "$dir"
           install -m 0640 /run/secrets/tls/certificate "$dir/fullchain.pem"
@@ -369,6 +377,10 @@ in {
           message = "Terrace production runs the ACME client for HTTP-01 only: no extra lego flags, environment, credentials, CSR or other challenge.";
         }
         {
+          assertion = lib.versionAtLeast config.systemd.package.version "260";
+          message = "Terrace production ACME needs systemd 260 or later (RefreshOnReload=credentials re-reads the certificate on reload).";
+        }
+        {
           assertion = lib.versions.major pkgs.lego.version == "5";
           message = "lego is no longer major version 5: review the unregistered-account step in platform/production/tls.nix and re-run platform/production-tls-check.";
         }
@@ -396,7 +408,7 @@ in {
             && !(builtins.elem nginxUser (config.users.groups.acme.members or []))
             && !(builtins.elem "acme" (config.users.users.${nginxUser}.extraGroups or []))
             && config.users.users.${nginxUser}.group != "acme";
-          message = "Terrace production ACME: nginx gets the certificate as systemd credentials from the ACME directory, refreshed on reload, and the nginx user cannot read the key itself.";
+          message = "Terrace production ACME: nginx gets the certificate as systemd credentials from the ACME directory, refreshed on reload, and the nginx user cannot read the ACME files on disk.";
         }
       ];
       security.acme = {
@@ -412,8 +424,10 @@ in {
           group = "acme";
           # Blocking, so a failed reload fails the order unit (visible) instead of
           # being lost in the background; nothing to reload while nginx is stopped.
+          # Upstream removes the `renewed` marker before this runs: on failure put it
+          # back, so the unit's retry reloads again instead of finding nothing to do.
           reloadServices = [];
-          postRun = "${pkgs.systemd}/bin/systemctl try-reload-or-restart nginx.service";
+          postRun = "${pkgs.systemd}/bin/systemctl try-reload-or-restart nginx.service || { touch renewed; exit 1; }";
         };
       };
       terrace.production = {

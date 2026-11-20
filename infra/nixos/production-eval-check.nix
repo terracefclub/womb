@@ -352,7 +352,7 @@ let
       check "port 80 serves only the ACME challenge and the HTTPS redirect" portEighty
       ++ check "ACME account: accepted terms, contact, CA directory" (cfg.security.acme.acceptTerms && acmeCert.email == p.tls.acme.contact && acmeCert.server == p.tls.acme.directory && acmeCert.webroot == "/var/lib/acme/acme-challenge" && acmeCert.dnsProvider == null && (p.instance != "production" || acmeCert.server == "https://acme-v02.api.letsencrypt.org/directory" || p.tls.acme.otherAuthority))
       ++ check "ACME order failures stay visible" ((services.${orderUnit}.serviceConfig.Restart or "no") == "on-failure" && services.${orderUnit}.unitConfig.StartLimitBurst <= 5)
-      ++ check "ACME key unreadable by nginx" (acmeCert.group == "acme" && !(builtins.elem "acme" cfg.users.users.nginx.extraGroups) && (services.nginx.serviceConfig.RefreshOnReload or "") == "credentials")
+      ++ check "ACME files on disk unreadable by the nginx user" (acmeCert.group == "acme" && !(builtins.elem "acme" cfg.users.users.nginx.extraGroups) && (services.nginx.serviceConfig.RefreshOnReload or "") == "credentials")
       ++ check "ACME renewal gated by adoption" (builtins.elem "acme-renew-${p.tls.certificateName}" (gatedUnits cfg "timers") && services."acme-${p.tls.certificateName}".wantedBy == [])
     )
     ++ check "TLS expiry check gated by adoption" (builtins.elem "terrace-tls-check" (gatedUnits cfg "timers") && (services.terrace-tls-check.serviceConfig.Type or "") == "oneshot")
@@ -549,10 +549,25 @@ let
     }))
     (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".extraLegoFlags = ["--tls-skip-verify"];}))
     (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".environmentFile = "/run/lego.env";}))
-    (rejects "nginx user cannot read the key itself" (appAcme {users.users.nginx.extraGroups = ["acme"];}))
-    (rejects "nginx user cannot read the key itself" (appAcme {security.acme.certs."www.terracefclub.org".group = lib.mkForce "nginx";}))
-    (rejects "nginx user cannot read the key itself" (appAcme {systemd.services.nginx.serviceConfig.RefreshOnReload = lib.mkForce "extensions";}))
-    (rejects "nginx user cannot read the key itself" (appAcme {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkOverride 10 ["terrace-website-cert:/var/lib/acme/.minica/cert.pem" "terrace-website-key:/var/lib/acme/.minica/key.pem"];}))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {
+      security.acme.certs."www.terracefclub.org" = {
+        csr = "/var/lib/terrace-tls/request.csr";
+        csrKey = "/var/lib/terrace-tls/request.key";
+      };
+    }))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".dnsProvider = "route53";}))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".credentialFiles = {"AWS_SECRET_ACCESS_KEY_FILE" = "/run/aws-key";};}))
+    (rejects "runs the ACME client for HTTP-01 only" (appAcme {security.acme.certs."www.terracefclub.org".listenHTTP = ":1360";}))
+    (rejects "refuses a staging, test or unlisted ACME directory" (appAcme {
+      terrace.production.tls.acme = {
+        otherAuthority = true;
+        directory = lib.mkForce "http://acme.zerossl.com/v2/DV90";
+      };
+    }))
+    (rejects "nginx user cannot read the ACME files on disk" (appAcme {users.users.nginx.extraGroups = ["acme"];}))
+    (rejects "nginx user cannot read the ACME files on disk" (appAcme {security.acme.certs."www.terracefclub.org".group = lib.mkForce "nginx";}))
+    (rejects "nginx user cannot read the ACME files on disk" (appAcme {systemd.services.nginx.serviceConfig.RefreshOnReload = lib.mkForce "extensions";}))
+    (rejects "nginx user cannot read the ACME files on disk" (appAcme {systemd.services.nginx.serviceConfig.LoadCredential = lib.mkOverride 10 ["terrace-website-cert:/var/lib/acme/.minica/cert.pem" "terrace-website-key:/var/lib/acme/.minica/key.pem"];}))
     (rejects "retries a failed certificate order at most" (appAcme {terrace.production.tls.acme.retrySeconds = 60;}))
     (rejects "acceptTerms = true" (appAcme {terrace.production.tls.acme.acceptTerms = lib.mkForce false;}))
     (failsMissing ["terrace" "production" "tls" "acme" "contact"] (acmeMissing "contact"))

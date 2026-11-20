@@ -509,6 +509,24 @@ in {
         tls_check(app, True, "expiry check passes after the recovery")
         no_failed_units(app, "after the CA came back")
 
+    with subtest("a failed nginx reload after a renewal is retried by the next run"):
+        previous = fingerprint(app, live("web.terrace.test") + "/cert.pem")
+        dropin = "/run/systemd/system/nginx.service.d/terrace-test-reload-fails.conf"
+        app.succeed(f"install -d /run/systemd/system/nginx.service.d && printf '[Service]\\nExecReload=\\nExecReload=${pkgs.coreutils}/bin/false\\n' >{dropin} && systemctl daemon-reload")
+        status, out = app.execute("terrace-tls renew --force --yes 2>&1", timeout=300)
+        ok(status != 0, f"a renewal whose nginx reload fails is a failed run (exit {status})")
+        renewed = fingerprint(app, live("web.terrace.test") + "/cert.pem")
+        ok(renewed != previous, "the new certificate is installed on disk")
+        ok(app.succeed("test -e " + live("web.terrace.test") + "/renewed && echo kept").strip() == "kept", "the renewed marker is kept for the retry")
+        ok(all(served("app", name) == previous for name in NAMES), "nginx still serves the previous certificate")
+        app.succeed(f"rm {dropin} && systemctl daemon-reload")
+        app.wait_until_succeeds(f"test \"$(systemctl show {order('web.terrace.test')} -p ActiveState --value)\" = inactive", timeout=180)
+        ok(state(app, order("web.terrace.test"), "Result") == "success" and int(state(app, order("web.terrace.test"), "NRestarts")) >= 1, "the unit's own retry succeeded")
+        served_locally(app, "web.terrace.test", renewed)
+        ok(all(served("app", name) == renewed for name in NAMES), "the retry reloaded nginx: the new chain is served")
+        app.fail("test -e " + live("web.terrace.test") + "/renewed")
+        no_failed_units(app, "after the reload retry")
+
     with subtest("reboot keeps the certificate and the account key"):
         certificate, account = fingerprint(app, live("web.terrace.test") + "/cert.pem"), account_hash(app)
         app.shutdown()
@@ -581,6 +599,8 @@ in {
         push("relay", 4, 4)
         served_locally(relay, RELAY, good_fp)
         tls_check(relay, True, "manual mode: expiry check passes on the delivered certificate")
+        refused = relay.fail("terrace-tls prepare-acme 2>&1")
+        ok("already holds a valid ACME certificate" in refused, "prepare-acme does not overwrite a valid ACME certificate without --overwrite")
         # Back to ACME on a host that never ran it: no lego state, no account.
         relay.succeed("rm -rf /var/lib/acme")
         ok("staged" in relay.succeed("terrace-tls prepare-acme"), "the served certificate is staged before the switch")
