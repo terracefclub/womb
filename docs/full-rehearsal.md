@@ -72,13 +72,22 @@ does not prove this replacement-host recovery. No production transport,
 certificate authority, signature trust or actual profile is enabled.
 
 The synthetic gateway CA and relay certificate are built with random keys, so
-every guest client trusts them by store path only: `/etc/terrace-test-ca.pem`
-and `/etc/terrace-relay-ca.pem` symlinks used through `curl --cacert`,
-`SSL_CERT_FILE` (protocol client, lifecycle steps, `tailscaled`),
-`NODE_EXTRA_CA_CERTS` and Vaultwarden's and Windmill's `identityCaFile`; nothing
-copies them into a system trust bundle. Each gateway and relay start first checks
-that the served chain verifies against that anchor, failing with "test CA and
-trust anchor disagree" otherwise.
+no cached derivation holds a copy of them (no `security.pki` system trust
+bundle). Guest clients reference the CA's store path through the
+`/etc/terrace-test-ca.pem` and `/etc/terrace-relay-ca.pem` symlinks: `curl
+--cacert`, `SSL_CERT_FILE` (protocol client, lifecycle steps, `tailscaled`),
+`NODE_EXTRA_CA_CERTS` and Vaultwarden's and Windmill's `identityCaFile`. Two
+consumers use run-time copies instead: the browser's NSS database imports the CA
+when the client boots, and Documenso's `identityCaFile` is a copy that the
+gateway's input service makes at boot from the CA's store path into
+`/var/lib/terrace-gateway-test` (restored from backup only within the same
+run). Those copies are not the hazardous kind: they are made in the same run
+from the current store path on a disposable disk and never cached across builds.
+Each gateway and relay start first checks that the served chain verifies against
+the symlinked anchor, failing with "test CA and trust anchor disagree" otherwise.
+Because the rehearsal sets Vaultwarden's and Windmill's `identityCaFile` to that
+anchor, their default trust path (the system trust bundle) is exercised only by
+their standalone checks, not by this rehearsal.
 
 The separate optional `--relay-peers` switch adds three disposable Tailscale
 clients to the existing application, automation and browser guests. Private

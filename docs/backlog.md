@@ -84,18 +84,27 @@ known to affect a deployed host (none exists).
 - The all-services rehearsal's concurrent Documenso browser check (`verify
   --signing`) failed twice in a row on 2026-11-20 at the stage then named
   "retained document and encryption keys" (original download, recovery codes
-  with a TOTP code, signed download), after a successful sign-in, then passed in
-  six later runs (one at trunk, five on the store-path-trust branch). Cause not
-  found: the failure output did not say which request failed. The browser now
-  reports the sub-step, HTTP status, elapsed time, server clock skew and the
-  second within the TOTP step of each request on failure, so the next failure
-  names its cause. Candidates: the 5 s timeout on the original download, or a
-  TOTP step boundary between the client and server clocks.
+  with a TOTP code, signed download), after a successful sign-in. Both failures
+  were on the first commit of the store-path-trust change (PR 58), before the
+  diagnostics below existed. Of eight runs that day it failed 2 and passed 6:
+  that first commit 2 failures and 1 pass; the same code plus a stage-split
+  diagnostic 1 pass; trunk 1 pass (the only trunk run); the final commit 3
+  passes. Cause not found; too few runs to say whether the change made it
+  likelier. On failure the browser now records which of the three requests
+  failed and, for each recent request, its HTTP status, elapsed time, the
+  server's clock minus the client's in seconds, the second within the 30-second
+  TOTP step and the exception class. That separates the candidates (the 5 s
+  timeout on the original download, a TOTP step boundary, a wrong status) but
+  may not by itself explain them. In the rehearsal's concurrent phase these
+  lines go to the browser's private stderr file, retained only on failure as
+  `evidence/concurrent-failure-original/documents.stderr` (or `-restored`) in the
+  run directory, not to the driver log.
 - The TLS VM proof (`platform/production/tls-test.nix`) failed once on
   2026-11-20 at "relay: first boot with the CA unreachable is safe and visible;
   issuance once it is back": the expiry check right after `terrace-tls renew`
-  found no verified TLS session. The identical derivation passed before and on
-  an immediate rerun (133 assertions), so the check is nondeterministic; one
+  found no verified TLS session. Its derivation is not changed by PR 58 and is
+  the one PR 53 proved; it passed then and on an immediate rerun (133
+  assertions), so the check is nondeterministic; one
   unconfirmed possibility is the check running before nginx serves the new
   certificate.
 - The all-services rehearsal now sets Vaultwarden's and Windmill's
@@ -103,6 +112,13 @@ known to affect a deployed host (none exists).
   modules' default (the system trust bundle); only the standalone Vaultwarden and
   Windmill checks still do, through the copied bundle named above. Fixing them
   removes the last VM proof of that default.
+- The shared trust guard (`platform/test-trust.nix`), for the PR that moves the
+  remaining eight tests off `security.pki` (it must re-run the gateway, relay and
+  all-services proofs anyway): pass `-no-CApath -no-CAstore` (after checking the
+  flags exist in the pinned OpenSSL) so the guard cannot pass through the system
+  store if `security.pki` is ever re-added; keep OpenSSL's verify reason in the
+  failure message; and exercise the guard's failing path inside at least one VM
+  proof (so far only against a local server).
 - The website repository's realm contract should enable admin events for the
   `terrace` realm (`adminEventsEnabled`); the realm reconciliation then applies
   it. Until then the journal lines are the record of site-account changes.

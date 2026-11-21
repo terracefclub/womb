@@ -69,12 +69,13 @@ at runtime. Test-only temporary master bootstrap credentials seed the shared
 contract's synthetic users through the private loopback admin API, then remove
 that administrator. This fixture setup is absent from module defaults and
 production enrollment. No registration, external mail or real account is used.
-The disposable public test CA is trusted explicitly, by its store path only
-(`curl --cacert`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, the browser's NSS
-database), never through a copied system trust bundle, and an early guard checks
-that the served chain verifies against that anchor (`platform/test-trust.nix`).
-TLS checks never use an insecure override. All real deployment certificates/keys must be delivered
-separately.
+The disposable public test CA is trusted explicitly and never through a
+cached copy such as a `security.pki` system trust bundle: clients reference its
+store path (`curl --cacert`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`), and the
+browser's NSS database imports it at test run time. An early guard checks that
+the served chain verifies against that anchor (`platform/test-trust.nix`). TLS
+checks never use an insecure override. All real deployment certificates/keys
+must be delivered separately.
 
 The guest HTTP protocol client follows real authorization-code/PKCE login forms
 through HTTPS nginx to Keycloak and back to the applications. It checks approved
