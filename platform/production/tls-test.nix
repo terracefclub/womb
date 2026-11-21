@@ -240,25 +240,37 @@ in {
     def fingerprint(machine, path):
         return machine.succeed(f"openssl x509 -noout -fingerprint -sha256 -in {path}").strip()
 
-    retries = []
+    # The local CA (pebble) sets notBefore to the moment of issue; a public CA backdates it
+    # (Let's Encrypt by an hour). Guest clocks start from the RTC (whole seconds), so they can
+    # trail the CA's guest by a second or two. Each guest is set to the host clock when it
+    # boots, and every verifying client first waits, bounded, until its own clock has reached
+    # the served certificate's notBefore: the real condition, never a blind retry.
+    clock_offsets = {}
+    clock_waits = []
+
+    def sync_clock(machine):
+        offset = float(machine.succeed("date +%s.%N").strip()) - time.time()
+        clock_offsets.setdefault(machine.name, []).append(round(offset, 3))
+        machine.succeed(f"date -u -s @{time.time():.3f} >/dev/null")
+
+    def wait_valid(machine, target, name):
+        started = f"echo | openssl s_client -connect {target}:443 -servername {name} 2>/dev/null | openssl x509 -noout -startdate | cut -d= -f2"
+        condition = f"nb=$({started}) && test -n \"$nb\" && test \"$(date +%s)\" -ge \"$(date -d \"$nb\" +%s)\""
+        if machine.execute(condition)[0] != 0:
+            begun = time.monotonic()
+            machine.wait_until_succeeds(condition, timeout=30)
+            clock_waits.append(f"{machine.name} {name}: {time.monotonic() - begun:.1f} s until notBefore")
 
     def served(host, name, verify=True):
         # What a client sees: chain verified against the local CA's roots, name checked.
         base = f"echo | openssl s_client -connect {host}:443 -servername {name}"
         if verify:
-            command = base + f" -verify_return_error -verify_hostname {name} -CAfile /root/roots.pem"
-            for attempt in range(6):
-                status, output = operator.execute(command + " 2>&1")
-                if status == 0:
-                    break
+            wait_valid(operator, host, name)
+            status, output = operator.execute(base + f" -verify_return_error -verify_hostname {name} -CAfile /root/roots.pem 2>&1")
+            if status != 0:
                 diagnosis = [line for line in output.splitlines() if re.search(r"verif|error|depth|connect", line, re.I)][:12]
-                # The only tolerated miss: pebble's notBefore is the issue time (no backdating),
-                # which can be a moment ahead of this guest's clock. Anything else fails at once.
-                if "certificate is not yet valid" not in output or attempt == 5:
-                    journal = {"app": app, "relay": relay}[host].execute("journalctl -u nginx.service -o cat --no-pager -n 15")[1]
-                    raise AssertionError(f"{host} {name}: no verified TLS session: {diagnosis} nginx: {journal}")
-                retries.append(f"{host} {name}: not yet valid")
-                time.sleep(2)
+                journal = {"app": app, "relay": relay}[host].execute("journalctl -u nginx.service -o cat --no-pager -n 15")[1]
+                raise AssertionError(f"{host} {name}: no verified TLS session: {diagnosis} nginx: {journal}")
         return operator.succeed(base + " 2>/dev/null | openssl x509 -noout -fingerprint -sha256").strip()
 
     def account_hash(machine):
@@ -311,6 +323,8 @@ in {
 
     def tls_check(machine, expect_ok, label):
         if expect_ok:
+            for name in (NAMES if machine.name == "app" else [RELAY]):
+                wait_valid(machine, "127.0.0.1", name)
             machine.succeed("systemctl start terrace-tls-check.service", timeout=120)
         else:
             machine.fail("systemctl start terrace-tls-check.service", timeout=120)
@@ -328,6 +342,7 @@ in {
     with subtest("local ACME server on the test network"):
         acme.start()
         acme.wait_for_unit("pebble.service")
+        sync_clock(acme)
         acme.wait_for_open_port(14000)
         acme.wait_for_open_port(15000)
         server_ca = acme.succeed("cat /run/pebble-tls/ca.pem")
@@ -339,6 +354,7 @@ in {
     with subtest("operator: an ACME host receives no tls/* secrets"):
         operator.start()
         operator.wait_for_unit("sshd.service")
+        sync_clock(operator)
         operator.succeed("install -d -m 0700 /root/escrow /root/.ssh " + STORE + " && install -m 0600 ${keys}/operator /root/.ssh/operator")
         operator.succeed("install -m 0600 ${escrow}/escrow.age " + ESCROW + " && install -m 0644 ${escrow}/escrow.pub " + STORE + "/escrow.recipient")
         put(operator, "/root/roots.pem", roots)
@@ -354,6 +370,7 @@ in {
     with subtest("first boot: nothing of ACME runs and port 80 is closed before adoption"):
         app.start()
         app.wait_for_unit("multi-user.target")
+        sync_clock(app)
         unstage("app")
         push("app", 10, 9)
         ok(app.succeed("terrace-secrets verify").startswith("terrace-secrets verify: PASS 9 secrets"), "app secrets verify")
@@ -532,6 +549,7 @@ in {
         app.shutdown()
         app.start()
         app.wait_for_unit("multi-user.target")
+        sync_clock(app)
         app.wait_for_unit("nginx.service")
         app.wait_until_succeeds(f"test \"$(systemctl show {order('web.terrace.test')} -p ExecMainStartTimestampMonotonic --value)\" != 0 && test \"$(systemctl show {order('web.terrace.test')} -p ActiveState --value)\" = inactive", timeout=300)
         ok(state(app, order("web.terrace.test"), "Result") == "success", "order unit ran at boot and succeeded (not due)")
@@ -547,6 +565,7 @@ in {
         stage("relay")
         relay.start()
         relay.wait_for_unit("multi-user.target")
+        sync_clock(relay)
         unstage("relay")
         push("relay", 2, 2)
         harness(relay)
@@ -643,6 +662,7 @@ in {
         stage("app")
         app.start()
         app.wait_for_unit("multi-user.target")
+        sync_clock(app)
         unstage("app")
         push("app", 10, 9)
         harness(app)
@@ -671,6 +691,6 @@ in {
         acme.shutdown()
     # Labels carry names and counts only, never key material.
     print("TLS-CHECKS " + json.dumps(checks))
-    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "servedRetries": retries, "seconds": round(time.monotonic() - started_at, 2)}))
+    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "clockOffsetsBeforeSync": clock_offsets, "clockWaits": clock_waits, "seconds": round(time.monotonic() - started_at, 2)}))
   '';
 }
