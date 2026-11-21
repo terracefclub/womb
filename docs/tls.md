@@ -371,8 +371,12 @@ recorded runs, commit and receipts.
 - Real DNS, CAA records, a real public address, port 80 reachability through a
   provider firewall, validation over IPv6 from a public CA, a CDN in front of
   the names.
-- Clock skew against a real CA (the local CA does not backdate certificates;
-  the proof tolerates a guest a moment behind it and counts those retries).
+- Clock skew against a real CA. The local CA does not backdate notBefore (a
+  public CA does), and test guests start from a whole-second clock, so the proof
+  sets each guest to the host clock at boot and, before every verifying check,
+  waits (at most 30 s) until that guest's clock has reached the served
+  certificate's notBefore. A host whose clock trails a real CA by more than its
+  backdating would fail the expiry check, which is the intended signal.
 - A timer actually firing (the proof starts every unit itself; the daily timer,
   its jitter and the start-limit window are configuration).
 - A change of the hostname list on a running host (a new order is needed; the
