@@ -11,9 +11,13 @@
   documensoFixture = import ../documenso/fixture-package.nix {inherit pkgs contract;};
   applicationFixture = import ./fixture-package.nix {inherit pkgs contract;};
   windmillRoster = import ../windmill-functional/roster-package.nix {inherit pkgs;};
+  extraDnsNames = pkgs.lib.optional withDocumenso "documents.terrace.invalid" ++ pkgs.lib.optionals withApplications ["windmill.terrace.invalid" "vault.terrace.invalid"];
+  # Synthetic test CAs are built with random keys; clients reference them by store
+  # path only (see ../test-trust.nix): /etc/terrace-test-ca.pem for the gateway's
+  # names and /etc/terrace-relay-ca.pem for the relay, never a security.pki bundle.
+  gatewayNames = ["web.terrace.invalid" "cms.terrace.invalid" "identity.terrace.invalid"] ++ extraDnsNames;
   gateway = import ../website-gateway-test.nix {
-    inherit pkgs release contract;
-    extraDnsNames = pkgs.lib.optional withDocumenso "documents.terrace.invalid" ++ pkgs.lib.optionals withApplications ["windmill.terrace.invalid" "vault.terrace.invalid"];
+    inherit pkgs release contract extraDnsNames;
     tlsFixture =
       if withApplications
       then
@@ -37,15 +41,19 @@
     exec ${(pkgs.python3.withPackages (ps: [ps.aiohttp]))}/bin/python3 ${../demos-ha-test.py} "$@"
   '';
   browserTest = pkgs.writeShellScriptBin "rehearsal-browser" ''
+    export SSL_CERT_FILE=/etc/terrace-test-ca.pem NODE_EXTRA_CA_CERTS=/etc/terrace-test-ca.pem
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../website-gateway/browser.py}
   '';
   documensoBrowser = pkgs.writeShellScriptBin "rehearsal-documenso-browser" ''
+    export SSL_CERT_FILE=/etc/terrace-test-ca.pem NODE_EXTRA_CA_CERTS=/etc/terrace-test-ca.pem
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../documenso/functional-browser.py} "$@"
   '';
   windmillBrowser = pkgs.writeShellScriptBin "rehearsal-windmill-browser" ''
+    export SSL_CERT_FILE=/etc/terrace-test-ca.pem NODE_EXTRA_CA_CERTS=/etc/terrace-test-ca.pem
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../windmill-functional/functional-browser.py} "$@"
   '';
   vaultwardenBrowser = pkgs.writeShellScriptBin "rehearsal-vaultwarden-browser" ''
+    export SSL_CERT_FILE=/etc/terrace-test-ca.pem NODE_EXTRA_CA_CERTS=/etc/terrace-test-ca.pem
     exec ${(pkgs.python3.withPackages (ps: [ps.playwright]))}/bin/python3 ${../vaultwarden/browser.py} "$@"
   '';
   cgroupCheck = pkgs.writeShellApplication {
@@ -262,7 +270,7 @@ in {
       # Upstream's target independently pulls in the service even when its own
       # wantedBy is empty. Neither initial nor replacement boot may start HA.
       systemd.targets.home-assistant.wantedBy = lib.mkForce [];
-      security.pki.certificateFiles = lib.optional withDocumenso (builtins.head nodes.gateway.security.pki.certificateFiles);
+      environment.etc = lib.optionalAttrs withDocumenso {"terrace-test-ca.pem".source = nodes.gateway.environment.etc."terrace-test-ca.pem".source;};
       networking.hosts = lib.optionalAttrs withDocumenso {${nodes.gateway.networking.primaryIPAddress} = ["documents.terrace.invalid"];};
     };
     relay = {
@@ -315,9 +323,8 @@ in {
         '';
       };
       users.users.restic.isNormalUser = true;
-      security.pki.certificateFiles = [nodes.relay.services.nginx.virtualHosts.relay.sslCertificate];
       environment.etc =
-        {"rehearsal-browser-ca.pem".source = builtins.head nodes.gateway.security.pki.certificateFiles;}
+        {"terrace-relay-ca.pem".source = lib.mkDefault nodes.relay.services.nginx.virtualHosts.relay.sslCertificate;}
         // lib.optionalAttrs withDocumensoSigning {"documenso-signing-proof.py".source = ../documenso/signing-proof.py;}
         // lib.optionalAttrs withApplications {"windmill-roster".source = windmillRoster;};
       systemd.services.rehearsal-concurrent = lib.mkIf withApplications {
@@ -364,6 +371,8 @@ in {
       then "True"
       else "False"
     }\n"
+    + "GATEWAY_NAMES = ${builtins.toJSON gatewayNames}\n"
+    + import ../test-trust.nix {inherit pkgs;}
     + builtins.readFile ../website-gateway/lifecycle_steps.py
     + builtins.readFile ./scenario.py;
 }

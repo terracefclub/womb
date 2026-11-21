@@ -2,7 +2,10 @@
   pkgs,
   module,
 }: let
-  certificate = pkgs.runCommand "terrace-relay-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key: a rebuild makes a different certificate
+  # under the same path, so clients reference this path (curl --cacert, the full
+  # rehearsal's /etc/terrace-relay-ca.pem) and nothing copies it (no security.pki).
+  certificate = pkgs.runCommand "terrace-relay-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem \
@@ -28,14 +31,17 @@ in {
     };
     client = {...}: {
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
+    CURL = "curl --cacert ${certificate}/cert.pem "
     start_all()
     relay.wait_for_unit("headscale.service")
     relay.wait_for_unit("nginx.service")
-    client.wait_until_succeeds("curl --fail --max-time 5 https://relay/health")
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(client, "${certificate}/cert.pem", "relay:443", ["relay"], "relay")
+    client.wait_until_succeeds(CURL + "--fail --max-time 5 https://relay/health")
     assert client.succeed("curl -s -o /dev/null -w '%{http_code}' http://relay/health").strip() == "301"
     client.succeed("nc -z -w 3 relay 443")
     for port in [8080, 9090, 50443, 6443]:
@@ -45,7 +51,7 @@ in {
     relay.succeed("test -s /var/lib/headscale/noise_private.key && test -s /var/lib/headscale/derp_server_private.key")
     relay.succeed("headscale policy get | jq -e '.acls == []' >/dev/null")
     relay.succeed("systemctl restart headscale.service")
-    client.wait_until_succeeds("curl --fail --max-time 5 https://relay/health")
+    client.wait_until_succeeds(CURL + "--fail --max-time 5 https://relay/health")
     relay.succeed("headscale users list -o json | jq -e 'any(.[]; .name == \"persistence-test\")' >/dev/null")
     relay.succeed("sqlite3 /var/lib/headscale/db.sqlite 'PRAGMA integrity_check' | grep -qx ok")
     relay.fail("systemctl is-active k3s.service")

@@ -13,9 +13,13 @@
     disableTaildrop = true;
     disableUpstreamLogging = true;
   };
-  security.pki.certificateFiles = lib.mkAfter [nodes.relay.services.nginx.virtualHosts.relay.sslCertificate];
+  # The relay's synthetic certificate has a random build-time key: trust it by
+  # store-path reference only (never security.pki, which copies it into a cached
+  # bundle). tailscaled is a Go program and reads its roots from SSL_CERT_FILE.
+  environment.etc."terrace-relay-ca.pem".source = nodes.relay.services.nginx.virtualHosts.relay.sslCertificate;
   systemd.services.tailscaled = {
     wantedBy = lib.mkForce [];
+    environment.SSL_CERT_FILE = "/etc/terrace-relay-ca.pem";
     serviceConfig = {
       StateDirectory = "tailscale";
       StateDirectoryMode = "0700";

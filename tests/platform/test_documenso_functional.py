@@ -25,6 +25,20 @@ class FunctionalFixtureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fixture.mode_options(args)
 
+    def test_request_facts_are_bounded_labels_without_values(self):
+        fixture.request_diagnostics.clear()
+        response = SimpleNamespace(status=200, headers={"date": "Thu, 01 Jan 1970 00:01:30 GMT", "set-cookie": "secret=value"})
+        with patch.object(fixture.time, "time", return_value=89.5), patch.object(fixture.time, "monotonic", return_value=12.25):
+            fixture.request_fact("download original", 12.0, response)
+            timeout = type("TimeoutError", (Exception,), {"__module__": "playwright._impl._errors"})
+            fixture.request_fact("two-factor view-recovery-codes", 12.0, error=timeout())
+        self.assertEqual(fixture.request_diagnostics[0], {"request": "download original", "ms": 250, "status": 200, "totpStepSecond": 29, "serverClockSkewSeconds": 0})
+        self.assertEqual(fixture.request_diagnostics[1]["exceptionClass"], "PlaywrightTimeout")
+        self.assertNotIn("secret", json.dumps(fixture.request_diagnostics))
+        for index in range(20):
+            fixture.request_fact("download signed", 12.0, response)
+        self.assertEqual(len(fixture.request_diagnostics), 12)
+
     def test_totp_rfc6238_six_digit_vector(self):
         with patch.object(fixture.time, "time", return_value=59):
             self.assertEqual(fixture.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"), "287082")

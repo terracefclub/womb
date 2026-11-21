@@ -4,6 +4,7 @@ create/verify are also reusable across an old-node-off restore. No response body
 callback URL, cookie, password, TOTP secret or recovery code is printed.
 """
 import base64
+import email.utils
 import hashlib
 import hmac
 import json
@@ -50,6 +51,24 @@ def login_counter(facts, name):
 
 
 login_diagnostics = None
+# Bounded facts about the last API requests (fixed labels, HTTP status, elapsed milliseconds, the server's Date
+# header minus the local clock in whole seconds, exception class): never URLs, bodies, headers or values.
+request_diagnostics = []
+
+
+def request_fact(label, started, response=None, error=None):
+    # The second within the 30-second TOTP step at which the request ended, to expose a step-boundary race.
+    fact = {"request": label, "ms": int((time.monotonic() - started) * 1000),
+            "status": 0 if response is None else response.status, "totpStepSecond": int(time.time()) % 30}
+    if response is not None and response.headers.get("date"):
+        try:
+            fact["serverClockSkewSeconds"] = int(email.utils.parsedate_to_datetime(response.headers["date"]).timestamp() - time.time())
+        except (TypeError, ValueError):
+            fact["serverClockSkewSeconds"] = None
+    if error is not None:
+        fact["exceptionClass"] = login_exception_class(error)
+    request_diagnostics.append(fact)
+    del request_diagnostics[:-12]
 
 
 def private_read(path):
@@ -195,8 +214,15 @@ def main():
                 return ctx, page
 
             def post(ctx, suffix, value):
-                response = ctx.request.post(DOC + "/api/auth/two-factor/" + suffix, data=value,
-                                            headers={"Origin": DOC})
+                assert suffix in ["setup", "enable", "view-recovery-codes"]
+                started = time.monotonic()
+                try:
+                    response = ctx.request.post(DOC + "/api/auth/two-factor/" + suffix, data=value,
+                                                headers={"Origin": DOC})
+                except BaseException as error:
+                    request_fact("two-factor " + suffix, started, error=error)
+                    raise
+                request_fact("two-factor " + suffix, started, response)
                 assert response.status == 200 and len(response.body()) <= 65536
                 result = response.json()
                 assert result["success"] is True
@@ -204,8 +230,15 @@ def main():
 
             def download(ctx, path, save=False):
                 assert re.fullmatch(r"/api/files/envelope/[A-Za-z0-9_-]+/envelopeItem/[A-Za-z0-9_-]+/download/(original|signed)", path)
+                label = "download " + path.rsplit("/", 1)[-1]
                 for attempt in range(30):
-                    response = ctx.request.get(DOC + path, timeout=5000)
+                    started = time.monotonic()
+                    try:
+                        response = ctx.request.get(DOC + path, timeout=5000)
+                    except BaseException as error:
+                        request_fact(label, started, error=error)
+                        raise
+                    request_fact(label, started, response)
                     if response.status != 404 or not save:
                         break
                     time.sleep(0.5)
@@ -411,12 +444,14 @@ def main():
                     private_write(ROOT / "alumni-session.json", alumni.storage_state())
                     alumni.close()
                 else:
-                    stage = "retained document and encryption keys"
+                    stage = "retained document: original download"
                     receipt = private_read(ROOT / "receipt.json")
                     path = receipt["path"]
                     assert download(member, path) == receipt["sha256"]
+                    stage = "retained document: encryption keys (recovery codes)"
                     assert digest(post(member, "view-recovery-codes", {"token": totp(receipt["totpSecret"])})["backupCodes"]) == receipt["backupCodesHash"]
                     if signing:
+                        stage = "retained document: signed download"
                         signed = private_read(ROOT / "signed-receipt.json")
                         assert download(member, signed["path"], save=True) == signed["sha256"]
                         stage = "independent retained PDF signature verification"
@@ -481,6 +516,8 @@ def entrypoint():
             print("Documenso bounded login facts: " + json.dumps(login_diagnostics, sort_keys=True), file=sys.stderr)
         print("Documenso functional check failed at " + stage + "; private diagnostics suppressed.", file=sys.stderr)
         if stage != "private fixture validation":
+            print("Documenso bounded failure facts: " + json.dumps({"exceptionClass": login_exception_class(error), "requests": request_diagnostics},
+                                                                  sort_keys=True), file=sys.stderr)
             # Only fixed keys and integer counts/status; never page text/URLs/errors.
             print("Documenso UI diagnostic counts: " + json.dumps(ui_diagnostics, sort_keys=True), file=sys.stderr)
         sys.exit(1)

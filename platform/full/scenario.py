@@ -42,6 +42,13 @@ WIND_BROWSER = '/root/windmill-functional'
 TAILNET_INPUTS = '/var/lib/rehearsal-tailnet'
 TAILNET_STATE = '/var/lib/tailscale'
 TAILNET_PEERS = [(gateway, 'application'), (automation, 'private'), (client, 'denied')]
+# Synthetic CAs with random build-time keys reach every client by store-path
+# reference only (/etc symlinks, SSL_CERT_FILE, curl --cacert), never a copied
+# system bundle; trust_consistent (test-trust.nix) checks the served chains early.
+CA = '/etc/terrace-test-ca.pem'
+RELAY_CA = '/etc/terrace-relay-ca.pem'
+CURL = 'curl --cacert ' + CA + ' '
+PROTOCOL = 'SSL_CERT_FILE=' + CA + ' python3 /etc/gateway-protocol.py '
 BLANK_WRITERS = {
     'gateway': ['postgresql.service', 'keycloak.service', 'nginx.service', 'terrace-cms.service', 'terrace-web.service', 'terrace-cms-sweep.service', 'terrace-cms-sweep.timer', 'k3s.service'],
     'automation': ['home-assistant.target', 'home-assistant.service', 'terrace-demo-ha.socket', 'terrace-demo-ha.service', 'terrace-demo-ha-network.service', 'frigate.service', 'go2rtc.service', 'nginx.service'],
@@ -97,9 +104,11 @@ def transfer(source, source_path, target, target_path):
 
 def bootstrap_app():
     gateway.succeed('systemctl start postgresql.target keycloak.service nginx.service', timeout=360)
+    trust_consistent(gateway, CA, '127.0.0.1:443', GATEWAY_NAMES, 'gateway')
+    trust_consistent(client, CA, 'web.terrace.invalid:443', GATEWAY_NAMES, 'client')
     fixture_count = int(sql("select count(*) from user_entity where realm_id=(select id from realm where name='terrace')", 'keycloak'))
     if fixture_count == 0:
-        gateway.succeed('python /etc/gateway-protocol.py seed', timeout=120)
+        gateway.succeed(PROTOCOL + 'seed', timeout=120)
     else:
         assert fixture_count == 5
     assert sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", 'keycloak') == '0'
@@ -341,19 +350,19 @@ def documenso_recovery_access():
     assert health == {'MainPID': '0', 'ControlPID': '0'}
     gateway.succeed('listeners=$(ss -H -ltn \'( sport = :8088 or sport = :9000 )\') && test -z "$listeners"', timeout=10)
     assert gateway.succeed('python /etc/documenso-recovery.py', timeout=60).strip() == 'Native loopback recovery administrator authenticated without identity.'
-    assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize", timeout=10).strip() == '403'
+    assert client.succeed(CURL + "--silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize", timeout=10).strip() == '403'
     if APPLICATIONS_ENABLED:
         recovery_sessions = sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill')
         assert gateway.succeed('terrace-windmill-inspect', timeout=55).strip() == 'Native Windmill private admin readback passed.'
         assert sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'", 'terrace_windmill') == recovery_sessions
-        assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == '403'
+        assert client.succeed(CURL + "--silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == '403'
         results['checks']['windmillRestoredIdentityIndependentAdminRecovery'] = True
         assert gateway.succeed('terrace-vaultwarden-inspect', timeout=120).strip() == 'Native Vaultwarden private admin readback passed.'
-        assert client.succeed("curl --silent --max-time 5 -o /dev/null -w '%{http_code}' https://vault.terrace.invalid/admin", timeout=10).strip() == '403'
+        assert client.succeed(CURL + "--silent --max-time 5 -o /dev/null -w '%{http_code}' https://vault.terrace.invalid/admin", timeout=10).strip() == '403'
         vault_attachments('verify')
         results['checks']['vaultwardenRestoredIdentityIndependentAdminRecovery'] = True
     gateway.succeed('test ! -s ' + GATEWAY_INPUTS + '/keycloak.env && systemctl start keycloak.service', timeout=300)
-    gateway.wait_until_succeeds('curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e \' .issuer == "https://identity.terrace.invalid/realms/terrace" \' >/dev/null', timeout=90)
+    gateway.wait_until_succeeds(CURL + '--fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e \' .issuer == "https://identity.terrace.invalid/realms/terrace" \' >/dev/null', timeout=90)
     assert sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", 'keycloak') == '0'
     return True
 
@@ -373,6 +382,7 @@ def bootstrap_automation():
 
 def bootstrap_relay():
     relay.succeed('systemctl start headscale.service nginx.service')
+    trust_consistent(client, RELAY_CA, 'relay:443', ['relay'], 'relay')
     users = json.loads(relay.succeed('headscale users list -o json'))
     if not users:
         relay.succeed('headscale users create rehearsal-synthetic >/dev/null 2>&1')
@@ -412,7 +422,7 @@ def bootstrap_tailnet_peers():
         state = machine.succeed('tailscale status --json --peers=false 2>/dev/null | jq -er .BackendState').strip()
         if state == 'NeedsLogin':
             transfer(relay, stem + '.key', machine, TAILNET_INPUTS + '/auth-key')
-            machine.succeed('umask 077; tailscale up --login-server https://relay --auth-key=file:' + TAILNET_INPUTS + '/auth-key --accept-dns=false --accept-routes=false --ssh=false --hostname=rehearsal-' + machine.name + ' >' + TAILNET_INPUTS + '/enrollment.log 2>&1', timeout=60)
+            machine.succeed('umask 077; SSL_CERT_FILE=' + RELAY_CA + ' tailscale up --login-server https://relay --auth-key=file:' + TAILNET_INPUTS + '/auth-key --accept-dns=false --accept-routes=false --ssh=false --hostname=rehearsal-' + machine.name + ' >' + TAILNET_INPUTS + '/enrollment.log 2>&1', timeout=60)
         machine.wait_until_succeeds('tailscale status --json --peers=false 2>/dev/null | jq -e \x27.BackendState == "Running"\x27 >/dev/null', timeout=60)
     # These single-use fixture keys are expired before recovery. Replacement
     # peers must reconnect using their retained machine/node identities.
@@ -462,12 +472,12 @@ def check_automation():
     assert list(settings['cameras']) == ['synthetic_black']
     automation.succeed('curl --fail --silent --max-time 10 http://127.0.0.1:5000/api/synthetic_black/latest.jpg >/var/tmp/synthetic-frame.jpg && test -s /var/tmp/synthetic-frame.jpg')
     if DOCUMENSO_ENABLED:
-        automation.succeed('curl --fail --silent --max-time 10 https://documents.terrace.invalid/api/health | jq -e \x27.checks.database.status == "ok"\x27 >/dev/null')
+        automation.succeed(CURL + '--fail --silent --max-time 10 https://documents.terrace.invalid/api/health | jq -e \x27.checks.database.status == "ok"\x27 >/dev/null')
     return True
 
 
 def check_app(phase='', browser_enabled=True):
-    output = gateway.succeed('TERRACE_SYNTHETIC_PHASE=' + shlex.quote(phase) + ' python /etc/gateway-protocol.py test', timeout=180).strip()
+    output = gateway.succeed('TERRACE_SYNTHETIC_PHASE=' + shlex.quote(phase) + ' ' + PROTOCOL + 'test', timeout=180).strip()
     assert re.fullmatch(r'Native HTTPS protocol checks passed: [0-9]+ bounded assertions; SSO, roles, state, CSRF, cookies, publication, private cache and logout\.', output)
     if browser_enabled:
         transfer(gateway, GATEWAY_INPUTS + '/credentials.json', client, '/root/gateway-fixture.json')
@@ -646,7 +656,7 @@ def simultaneous_functional_checks(phase):
 
 
 def lifecycle(machine, action, label):
-    output = machine.succeed('python3 /etc/gateway-protocol.py ' + action, timeout=180).strip()
+    output = machine.succeed(PROTOCOL + action, timeout=180).strip()
     assert re.fullmatch(label + r'[^:]*: [0-9]+ bounded assertions(;.*)?\.', output)
     print(output)
     found = re.search(r': ([0-9]+) ', output)
@@ -665,7 +675,7 @@ def lifecycle_steps(phase, steps):
     for label, seconds, script in steps:
         before = time.monotonic()
         status, _ = gateway.execute('bash -ceu ' + shlex.quote('set -o pipefail\n' + LIFECYCLE_PROLOGUE + script)
-                                    + ' terrace /etc/ssl/certs/ca-certificates.crt', timeout=seconds)
+                                    + ' terrace ' + CA, timeout=seconds)
         if status != 0:
             raise AssertionError('website lifecycle ' + phase + ' step ' + label + ' failed')
         timings[label] = round(time.monotonic() - before, 2)
@@ -810,7 +820,7 @@ for machine in nodes:
     machine.wait_for_unit('multi-user.target')
 client.wait_for_unit('sshd.service')
 client.succeed('install -d -m 0700 /root/.pki/nssdb && certutil -N -d sql:/root/.pki/nssdb --empty-password')
-client.succeed('certutil -A -d sql:/root/.pki/nssdb -n TerraceGatewayTest -t C,, -i /etc/rehearsal-browser-ca.pem')
+client.succeed('certutil -A -d sql:/root/.pki/nssdb -n TerraceGatewayTest -t C,, -i ' + CA)
 
 with subtest('empty state and two explicit bootstrap passes'):
     for machine in nodes:
@@ -916,7 +926,7 @@ with subtest('simultaneous real native SSO, public/private HTTP and synthetic au
         relay.succeed("headscale policy get | jq -e '.acls == [{action:\"accept\",src:[\"tag:rehearsal-application\"],dst:[\"tag:rehearsal-private:18444\"]}] and (.tagOwners | length == 3)' >/dev/null")
     else:
         relay.succeed("headscale policy get | jq -e '.acls == []' >/dev/null")
-    client.succeed('curl --fail --silent --max-time 10 https://relay/health >/dev/null')
+    client.succeed('curl --cacert ' + RELAY_CA + ' --fail --silent --max-time 10 https://relay/health >/dev/null')
     results['checks']['relayControlPlane' if RELAY_PEERS_ENABLED else 'relayControlPlaneOnly'] = True
     results['services'] = json.loads(gateway.succeed('cat /etc/rehearsal-versions.json')) | {'web': json.loads(gateway.succeed('cat $(systemctl show terrace-web.service -p WorkingDirectory --value)/release.json'))['revision'],
                            'cms': json.loads(gateway.succeed('cat $(systemctl show terrace-cms.service -p WorkingDirectory --value)/release.json'))['revision'],
@@ -1104,9 +1114,10 @@ with subtest('fresh empty disks restore the exact node identity and functional s
     relay.succeed('install -m 0600 -o headscale -g headscale ' + RESTORE + '/files/var/lib/terrace-backup/dumps/sqlite/headscale.sqlite /var/lib/headscale/db.sqlite')
     assert relay.succeed('cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key').strip() == relay_keys
     relay.succeed('systemctl start headscale.service nginx.service')
+    trust_consistent(client, RELAY_CA, 'relay:443', ['relay'], 'restored relay')
     assert json.loads(relay.succeed('headscale users list -o json')) == relay_identity
     relay.succeed('sqlite3 /var/lib/headscale/db.sqlite "PRAGMA integrity_check" | grep -qx ok')
-    client.succeed('curl --fail --silent --max-time 10 https://relay/health >/dev/null')
+    client.succeed('curl --cacert ' + RELAY_CA + ' --fail --silent --max-time 10 https://relay/health >/dev/null')
     results['checks']['restoredRelayControlPlane' if RELAY_PEERS_ENABLED else 'restoredRelayControlPlaneOnly'] = True
     if RELAY_PEERS_ENABLED:
         for machine, _role in TAILNET_PEERS:

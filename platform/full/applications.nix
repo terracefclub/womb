@@ -7,6 +7,8 @@
     hostname = "windmill.terrace.invalid";
     certificateFile = "/var/lib/terrace-gateway-test/cert.pem";
     certificateKeyFile = "/var/lib/terrace-gateway-test/key.pem";
+    # The synthetic CA by store-path reference (an /etc symlink), mounted read-only.
+    identityCaFile = "/etc/terrace-test-ca.pem";
   };
   terrace.vaultwarden = {
     enable = true;
@@ -14,9 +16,10 @@
     identityHostname = "identity.terrace.invalid";
     certificateFile = "/var/lib/terrace-gateway-test/cert.pem";
     certificateKeyFile = "/var/lib/terrace-gateway-test/key.pem";
-    # The public synthetic CA is in the system bundle. The runtime input
-    # directory remains root-private rather than making it readable to the app.
-    identityCaFile = "/etc/ssl/certs/ca-certificates.crt";
+    # The synthetic CA by store-path reference (a world-readable /etc symlink),
+    # never a copied system bundle. The runtime input directory remains
+    # root-private rather than making it readable to the app.
+    identityCaFile = "/etc/terrace-test-ca.pem";
   };
   # Never let a blank replacement create app data before the restore step.
   systemd.services = lib.genAttrs ["podman-terrace-windmill-server" "podman-terrace-windmill-worker" "vaultwarden"] (_: {
