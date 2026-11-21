@@ -81,6 +81,23 @@ known to affect a deployed host (none exists).
   `platform/documenso-functional-test.nix`. The website gateway check, the relay
   check and the all-services rehearsal now trust their CAs by store path with the
   shared early guard in `platform/test-trust.nix`. Real hosts are unaffected.
+- The all-services rehearsal's concurrent Documenso browser check (`verify
+  --signing`) failed twice in a row on 2026-11-20 at the stage then named
+  "retained document and encryption keys" (original download, recovery codes
+  with a TOTP code, signed download), after a successful sign-in, then passed in
+  six later runs (one at trunk, five on the store-path-trust branch). Cause not
+  found: the failure output did not say which request failed. The browser now
+  reports the sub-step, HTTP status, elapsed time, server clock skew and the
+  second within the TOTP step of each request on failure, so the next failure
+  names its cause. Candidates: the 5 s timeout on the original download, or a
+  TOTP step boundary between the client and server clocks.
+- The TLS VM proof (`platform/production/tls-test.nix`) failed once on
+  2026-11-20 at "relay: first boot with the CA unreachable is safe and visible;
+  issuance once it is back": the expiry check right after `terrace-tls renew`
+  found no verified TLS session. The identical derivation passed before and on
+  an immediate rerun (133 assertions), so the check is nondeterministic; one
+  unconfirmed possibility is the check running before nginx serves the new
+  certificate.
 - The all-services rehearsal now sets Vaultwarden's and Windmill's
   `identityCaFile` to the synthetic CA itself, so it no longer exercises those
   modules' default (the system trust bundle); only the standalone Vaultwarden and
