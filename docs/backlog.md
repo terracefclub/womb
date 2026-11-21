@@ -99,14 +99,16 @@ known to affect a deployed host (none exists).
   lines go to the browser's private stderr file, retained only on failure as
   `evidence/concurrent-failure-original/documents.stderr` (or `-restored`) in the
   run directory, not to the driver log.
-- The TLS VM proof (`platform/production/tls-test.nix`) failed once on
+- Fixed: the TLS VM proof (`platform/production/tls-test.nix`) failed once on
   2026-11-20 at "relay: first boot with the CA unreachable is safe and visible;
-  issuance once it is back": the expiry check right after `terrace-tls renew`
-  found no verified TLS session. Its derivation is not changed by PR 58 and is
-  the one PR 53 proved; it passed then and on an immediate rerun (133
-  assertions), so the check is nondeterministic; one
-  unconfirmed possibility is the check running before nginx serves the new
-  certificate.
+  issuance once it is back": the expiry check 0.8 s after `terrace-tls renew`
+  found no verified TLS session. nginx already served the new certificate; the
+  relay guest's clock trailed the local CA's guest by about 1.5 s, and the local
+  CA (pebble) sets notBefore to the issue time without backdating, so the
+  certificate was not yet valid on the relay. Test-only (a public CA backdates
+  notBefore). The proof now sets each guest to the host clock at boot and waits,
+  at most 30 s, for the served certificate's notBefore before every verifying
+  check ([TLS](tls.md#not-proven)).
 - The all-services rehearsal now sets Vaultwarden's and Windmill's
   `identityCaFile` to the synthetic CA itself, so it no longer exercises those
   modules' default (the system trust bundle); only the standalone Vaultwarden and
