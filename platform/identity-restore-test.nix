@@ -7,7 +7,10 @@
   secrets = "/var/lib/identity-backup-secrets";
   restored = "/var/tmp/identity-recovery";
   repository = "/home/restic/identity-repository";
-  certificate = pkgs.runCommand "identity-recovery-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key: clients reference this store path (curl
+  # --cacert) and nothing copies it into another derivation (no security.pki). The
+  # recovered guest serves the copy restored from backup, made in the same run.
+  certificate = pkgs.runCommand "terrace-identity-recovery-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem \
@@ -58,7 +61,6 @@
     systemd.timers = lib.genAttrs ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness" "terrace-identity-health"] (_: {
       wantedBy = lib.mkForce [];
     });
-    security.pki.certificateFiles = ["${certificate}/cert.pem"];
     environment.systemPackages = [pkgs.curl pkgs.jq pkgs.openssh pkgs.netcat-openbsd pkgs.postgresql_18];
   };
 in {
@@ -129,11 +131,14 @@ in {
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import json, shlex, time
+    CA = "${certificate}/cert.pem"
 
     start_all()
     source.wait_for_unit("keycloak.service", timeout=300)
     source.wait_for_unit("nginx.service")
+    trust_consistent(source, CA, "127.0.0.1:443", ["identity"], "source")
     recovery.wait_for_unit("sshd.service")
     recovery.wait_for_open_port(22)
     source_pid = source.succeed("systemctl show keycloak.service -p MainPID --value").strip()
@@ -144,7 +149,7 @@ in {
         return time.monotonic() - start
 
     def public(machine, path):
-        return json.loads(machine.succeed(f"curl --fail --silent --max-time 10 --resolve identity:443:127.0.0.1 https://identity/realms/terrace/{path}"))
+        return json.loads(machine.succeed(f"curl --cacert {CA} --fail --silent --max-time 10 --resolve identity:443:127.0.0.1 https://identity/realms/terrace/{path}"))
 
     def sql(machine, query, isolated=False):
         prefix = "runuser -u terrace-restore -- psql -h ${restored}/pgsock -U postgres" if isolated else "runuser -u postgres -- psql"
@@ -205,6 +210,7 @@ in {
     with subtest("serve recovered issuer and signing keys without changing source"):
         verify_start = time.monotonic()
         recovery.succeed("systemctl start keycloak.service nginx.service && systemctl start terrace-identity-health.service")
+        trust_consistent(recovery, CA, "127.0.0.1:443", ["identity"], "recovered")
         assert public(recovery, ".well-known/openid-configuration")["issuer"] == issuer
         recovered_keys = public(recovery, "protocol/openid-connect/certs")["keys"]
         assert sorted(keys, key=lambda key: key["kid"]) == sorted(recovered_keys, key=lambda key: key["kid"])

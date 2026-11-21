@@ -11,7 +11,7 @@ establish a live deployment. Link each small MR to its issue.
 | Order | Work item | Acceptance criteria | State |
 | --- | --- | --- | --- |
 | 1 | [Contributor workflow](https://gitlab.com/terrace/tech/womb/-/issues/1) (historical GitLab issue; no GitHub equivalent) | Credential-free devenv, local CLI state, installed hooks, shell contract | Merged in Womb !1 |
-| 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in historical Womb !2; optional [identity substrate](identity-host.md), disabled by default; production realm, enrollment, capacity and recovery follow-up remain. Production host profiles (`app`, `relay`) with sops-nix secrets delivery are proven in a VM check on synthetic data (Womb PR 50, [production profile](production-profile.md), [secrets](secrets.md)); certificate issuance, renewal, the port-80 redirect and an expiry check by ACME are proven in a VM check against a local ACME server, not against a public CA or real DNS ([TLS](tls.md)); nothing is deployed and the Hetzner leases have not installed them. Keycloak production administration (first administrator from the escrowed bootstrap password, administrators, editor accounts and role grants, listing, client-secret rotation, realm reconciliation and break-glass) is a root-only host tool proven in its own VM check ([identity administration](identity-admin.md)). Follow-up: the identity, identity-restore, Vaultwarden, Documenso and Windmill VM checks still copy a build-time random test CA into a `security.pki` bundle, which a partial garbage collection can split from the signing key (fixed for the production, identity-administration, website gateway, relay and all-services rehearsal proofs by trusting the CA by store path) |
+| 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in historical Womb !2; optional [identity substrate](identity-host.md), disabled by default; production realm, enrollment, capacity and recovery follow-up remain. Production host profiles (`app`, `relay`) with sops-nix secrets delivery are proven in a VM check on synthetic data (Womb PR 50, [production profile](production-profile.md), [secrets](secrets.md)); certificate issuance, renewal, the port-80 redirect and an expiry check by ACME are proven in a VM check against a local ACME server, not against a public CA or real DNS ([TLS](tls.md)); nothing is deployed and the Hetzner leases have not installed them. Keycloak production administration (first administrator from the escrowed bootstrap password, administrators, editor accounts and role grants, listing, client-secret rotation, realm reconciliation and break-glass) is a root-only host tool proven in its own VM check ([identity administration](identity-admin.md)). Every VM proof with a build-time random test CA now trusts it by store path or through a bundle assembled at run time, never a cached `security.pki` copy that a partial garbage collection could split from the signing key (PR 55, PR 53, PR 58 and the follow-up for the identity, identity-restore, Vaultwarden, Documenso and Windmill checks) |
 | 3 | [Website design](https://gitlab.com/terrace/tech/tfc-website/-/issues/1) (historical; GitHub [tfc-website #5](https://github.com/terracefclub/tfc-website/issues/5)) | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | Preview merged in historical website !1; [frontend !2](https://gitlab.com/terrace/tech/tfc-website/-/merge_requests/2) (historical) merged for published Payload content. Website `dev` `dad0a20` (2026-11-18) also serves imported news and pages (`/news/`, `/pages/<slug>/`) and the active-redirect consumer (website PR 10); proven with the synthetic fixture and in a local rehearsal on the owner's real export (local database only); nothing is imported to any real target. Design review remains |
 | 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) (historical; GitHub [tfc-website #5](https://github.com/terracefclub/tfc-website/issues/5)) | Publish/revise/preview; roles; export/import; memory measurement | Linux bundles of website `dev` `680ad56` (eleven-migration ledger, packaged `bin/sweep`) are pinned and pass the [native host/recovery check](website-host.md), the [HTTPS gateway check](website-gateway.md) with the member lifecycle, and the [all-services rehearsal](full-rehearsal.md) (2026-11-19). Actual public activation and combined capacity remain gated |
 | 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Dedicated Terrace credential, protected existing data, targeted plan, tested bootstrap/health/teardown | [Womb !5](https://gitlab.com/terrace/tech/womb/-/merge_requests/5) (historical) merged; install/boot VM passed. Earlier October31 price estimates are historical; November4 owner direction removes unanswered budget questions as a code/rehearsal gate. The owner authorised a dedicated Terrace project token on 2026-11-07 (read-only inventory first; the existing server is outside every write target). Disposable, lease-bound Hetzner probes and known-full leases 1 to 5 have run since. Proven on Hetzner by lease 3 (run `90e965da`, 2026-11-13): host-key pinning, RAM installer, install plan, FORMAT and install, reboot from the installed disk and networking. Lease 4 (run `7d217921`, 2026-11-18) was stopped by builder-lock contention before the plan step and proved nothing beyond lease 3. Lease 5 (run `efc9794a`, 2026-11-20, staged at trunk `bb0d526`) passed end to end and was torn down: services launch from installed disks, a backup to a restic repository that was a directory on the build machine, reached through a reverse SSH forward (not a storage provider account, not off-site), retiring the original pair and restore onto a replacement pair, for the rehearsal profile on synthetic data on private temporary hosts, one run on one day ([cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)); not proven by it: the production profile, ACME, the Keycloak administration tool, real data migration, cutover, alerting. Lease 6 has not been requested. No production host exists and no production provider apply was made; access recovery for and a protected copy of the existing server remain open. See [relay plan](access-relay.md), [cloud rescue install](cloud-rescue-install.md) and the [owner runbook](owner-runbook.md) Part 6 |
@@ -71,16 +71,6 @@ known to affect a deployed host (none exists).
   app only, not the relay, and its fingerprint comparison is nearly
   tautological. The proof also no longer exercises the expiry check's default
   system trust store.
-- The same latent weakness PR 55 fixed in the production proof (a test CA with a
-  random key trusted through `security.pki`, which copies it into a separately
-  cached bundle that a rebuild can leave stale) remains in the tests that still
-  use `security.pki`: `platform/windmill-test.nix` (also used by the Windmill
-  functional check), `platform/identity-test.nix`,
-  `platform/identity-restore-test.nix`, `platform/vaultwarden-test.nix`,
-  `platform/vaultwarden-functional-test.nix`, `platform/documenso-test.nix` and
-  `platform/documenso-functional-test.nix`. The website gateway check, the relay
-  check and the all-services rehearsal now trust their CAs by store path with the
-  shared early guard in `platform/test-trust.nix`. Real hosts are unaffected.
 - The all-services rehearsal's concurrent Documenso browser check (`verify
   --signing`) failed twice in a row on 2026-11-20 at the stage then named
   "retained document and encryption keys" (original download, recovery codes
@@ -123,18 +113,12 @@ known to affect a deployed host (none exists).
 - Follow-up (test): the TLS proof should fail, or assert a small bound, if any
   notBefore wait is needed after the boot sync, so a broken clock sync cannot
   hide behind 30 s waits.
-- The all-services rehearsal now sets Vaultwarden's and Windmill's
-  `identityCaFile` to the synthetic CA itself, so it no longer exercises those
-  modules' default (the system trust bundle); only the standalone Vaultwarden and
-  Windmill checks still do, through the copied bundle named above. Fixing them
-  removes the last VM proof of that default.
-- The shared trust guard (`platform/test-trust.nix`), for the PR that moves the
-  remaining eight tests off `security.pki` (it must re-run the gateway, relay and
-  all-services proofs anyway): pass `-no-CApath -no-CAstore` (after checking the
-  flags exist in the pinned OpenSSL) so the guard cannot pass through the system
-  store if `security.pki` is ever re-added; keep OpenSSL's verify reason in the
-  failure message; and exercise the guard's failing path inside at least one VM
-  proof (so far only against a local server).
+- The all-services rehearsal sets Vaultwarden's and Windmill's `identityCaFile`
+  to the synthetic CA itself, so only the standalone Vaultwarden functional and
+  Windmill checks exercise those modules' default (the system trust bundle). They
+  keep doing so with a bundle assembled at boot inside the guest from the public
+  roots and the CA's store path (`platform/test-system-trust.nix`), not a cached
+  `security.pki` copy.
 - The website repository's realm contract should enable admin events for the
   `terrace` realm (`adminEventsEnabled`); the realm reconciliation then applies
   it. Until then the journal lines are the record of site-account changes.

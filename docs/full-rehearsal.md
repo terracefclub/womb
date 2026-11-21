@@ -77,8 +77,8 @@ bundle). Guest clients reference the CA's store path through the
 `/etc/terrace-test-ca.pem` and `/etc/terrace-relay-ca.pem` symlinks: `curl
 --cacert`, `SSL_CERT_FILE` (protocol client, lifecycle steps, `tailscaled`),
 `NODE_EXTRA_CA_CERTS` and Vaultwarden's and Windmill's `identityCaFile`. Two
-consumers use run-time copies instead: the browser's NSS database imports the CA
-when the client boots, and Documenso's `identityCaFile` is a copy that the
+consumers use run-time copies instead: the test script imports the CA into the
+browser's NSS database at start, and Documenso's `identityCaFile` is a copy that the
 gateway's input service makes at boot from the CA's store path into
 `/var/lib/terrace-gateway-test` (restored from backup only within the same
 run). Those copies are not the hazardous kind: they are made in the same run

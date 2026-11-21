@@ -1,6 +1,9 @@
 {pkgs}: let
   ownershipTag = "name=opt/terrace-vaultwarden-test,string=${builtins.hashFile "sha256" ./vaultwarden/scenario.py}";
-  certificate = pkgs.runCommand "vaultwarden-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key: the client references this store path
+  # (curl --cacert) and nothing copies it into another derivation (no security.pki);
+  # the server copies it into its runtime paths at test time (../test-trust.nix).
+  certificate = pkgs.runCommand "terrace-vaultwarden-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -keyout $out/key.pem -out $out/cert.pem -days 3650 \
       -subj /CN=vault.terrace.invalid -addext subjectAltName=DNS:vault.terrace.invalid >/dev/null 2>&1
@@ -44,9 +47,11 @@ in {
       virtualisation.memorySize = 384;
       virtualisation.qemu.options = ["-fw_cfg" ownershipTag];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
       networking.hosts.${nodes.server.networking.primaryIPAddress} = ["vault.terrace.invalid"];
     };
   };
-  testScript = builtins.readFile ./vaultwarden/scenario.py;
+  testScript =
+    import ./test-trust.nix {inherit pkgs;}
+    + "CA = \"${certificate}/cert.pem\"\n"
+    + builtins.readFile ./vaultwarden/scenario.py;
 }

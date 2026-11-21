@@ -3,7 +3,10 @@
   module,
 }: let
   inputs = "/var/lib/terrace-documenso-inputs";
-  certificate = pkgs.runCommand "documenso-synthetic-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key: the client references this store path
+  # (curl --cacert) and nothing copies it into another derivation (no security.pki).
+  # Documenso's identityCaFile is the copy the input service makes at boot in this run.
+  certificate = pkgs.runCommand "terrace-documenso-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem -subj '/CN=documents.terrace.invalid' \
@@ -79,14 +82,19 @@ in {
       networking.hosts.${nodes.documents.networking.primaryIPAddress} = ["documents.terrace.invalid"];
       imports = [module];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import shlex
+    CA = "${certificate}/cert.pem"
+    CURL = "curl --cacert " + CA + " "
     start_all()
     documents.wait_for_unit("postgresql.service")
     documents.wait_for_unit("nginx.service", timeout=30)
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(client, CA, "documents.terrace.invalid:443", ["documents.terrace.invalid"], "client")
+    trust_consistent(documents, "${inputs}/cert.pem", "127.0.0.1:443", ["documents.terrace.invalid"], "Documenso run-time copy")
     def sql(query):
         return documents.succeed("runuser -u postgres -- psql -X -A -t -d terrace_documenso -c " + shlex.quote(query)).strip()
     def start():
@@ -159,10 +167,10 @@ in {
         documents.succeed("systemctl restart terrace-documenso-inputs.service && systemctl reset-failed terrace-documenso-bootstrap.service && systemctl start terrace-documenso-bootstrap.service", timeout=180)
         start()
     with subtest("public password routes and unauthenticated admin loader are denied"):
-        assert client.succeed("curl --silent --max-time 5 -H 'Host: other.terrace.invalid' -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/health").strip() == "404"
+        assert client.succeed(CURL + "--silent --max-time 5 -H 'Host: other.terrace.invalid' -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/health").strip() == "404"
         for path in ["/api/auth/email-password", "/api/auth/email-password/authorize", "/api/auth/email-password/forgot-password", "/api/auth/email-password;ignored/authorize", "/forgot-password", "/forgot-password.data", "/forgot-password;ignored", "/reset-password", "/reset-password.data", "/signup", "/signup.data"]:
             for method in ["GET", "POST"]:
-                assert client.succeed("curl --silent --max-time 5 -X " + method + " -o /dev/null -w '%{http_code}' " + shlex.quote("https://documents.terrace.invalid" + path)).strip() == "403"
+                assert client.succeed(CURL + "--silent --max-time 5 -X " + method + " -o /dev/null -w '%{http_code}' " + shlex.quote("https://documents.terrace.invalid" + path)).strip() == "403"
         assert documents.succeed("podman exec terrace-documenso node /run/admin-loader-test.cjs").strip() == "Admin page and selected data loader denied access without user data."
         for port in [13050, 5432]:
             client.fail(f"nc -z -w 2 documents {port}")

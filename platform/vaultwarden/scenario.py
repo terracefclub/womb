@@ -5,11 +5,15 @@ try:
     server.wait_for_unit("postgresql.service")
     server.succeed("install -d -m 0700 /var/lib/vaultwarden-test && cp /etc/vaultwarden-test-certificate/* /var/lib/vaultwarden-test/ && bun --no-env-file /etc/vaultwarden-test-fixture.ts")
     server.succeed("systemctl start nginx.service")
+    # The client trusts the synthetic certificate by its store path only (CA, set by vaultwarden-test.nix).
+    CURL = "curl --cacert " + CA + " "
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(client, CA, "vault.terrace.invalid:443", ["vault.terrace.invalid"], "client")
     def sql(query):
         import shlex
         return server.succeed("runuser -u postgres -- psql -XAtw -v ON_ERROR_STOP=1 -d terrace_vaultwarden -c " + shlex.quote(query)).strip()
     def status():
-        return client.succeed("curl --silent --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/alive").strip()
+        return client.succeed(CURL + "--silent --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/alive").strip()
     with subtest("closed before explicit native migrations and private bootstrap"):
         assert status() == "503"
         server.fail("systemctl start vaultwarden.service")
@@ -42,8 +46,8 @@ try:
             assert server.succeed('systemctl show vaultwarden.service -p ' + property + ' --value').strip() == 'yes'
         assert server.succeed('systemctl show vaultwarden.service -p ProtectSystem --value').strip() == 'strict'
         assert server.succeed('systemctl show vaultwarden.service -p User --value').strip() == 'terrace_vaultwarden'
-        assert client.succeed("curl --silent --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/admin/").strip() == "403"
-        client.succeed("curl --fail --silent --head https://vault.terrace.invalid/ | grep -qi 'cache-control: private, no-store'")
+        assert client.succeed(CURL + "--silent --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/admin/").strip() == "403"
+        client.succeed(CURL + "--fail --silent --head https://vault.terrace.invalid/ | grep -qi 'cache-control: private, no-store'")
         server.fail("runuser -u nobody -- cat /var/lib/terrace-vaultwarden-inputs/input.json")
         server.fail("runuser -u terrace_vaultwarden -- touch /run/terrace-vaultwarden-state/ready")
         server.fail("runuser -u terrace_vaultwarden -- curl --silent --connect-timeout 1 --max-time 2 https://192.0.2.1/")
