@@ -59,7 +59,7 @@ kernel failure is outside this host-level mechanism.
 
 `stop_unit` stops the transient unit when it is not already off. On
 2026-11-21 an all-services rehearsal passed its whole scenario and was still
-rejected with no receipt written: the guardian wrote its result and exited, and
+rejected with no complete receipt: the guardian wrote its result and exited, and
 systemd deactivated and collected the transient unit (`--collect`) between the
 check that saw it active and `systemctl stop`, which then failed with
 "Unit … not loaded". Since PR 61 a failed stop command is re-checked, and only a
