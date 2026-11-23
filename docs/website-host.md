@@ -109,7 +109,10 @@ runtime input cannot redirect them (as with `DATABASE_URI` and `CMS_MEDIA_DIR`):
 
 Optional retention placeholders (`LIFECYCLE_APPLICATION_DAYS`,
 `LIFECYCLE_INVITATION_DAYS`, `LIFECYCLE_GRACE_DAYS`) may be added to `cms.env`;
-their defaults apply otherwise. Everything else in the website's production
+their defaults apply otherwise. Since website `eab4189` the CMS also reads an
+optional `LIFECYCLE_LOCK_TIMEOUT_MS` (how long the public apply form and the bulk
+roster tool wait for the per-address lock, 100 to 10000, default 3000); Womb does
+not set it and no VM proof uses another value. Everything else in the website's production
 configuration table (`docs/member-lifecycle.md` in the website repository)
 is unchanged and delivered through the same protected files.
 
@@ -118,6 +121,16 @@ writes its mirror files `0600`. It holds live one-time invitation links, so it i
 included in backups with the database (`extraPaths.website-outbox`) and is not
 readable by the website account. Read it as root on the host; there is no mail
 transport yet.
+
+Website `eab4189` adds an opt-in bulk roster tool (`roster:invite`, website
+`docs/member-lifecycle.md`, "Bulk roster onboarding"). It is not in the release
+bundle: running it needs a source checkout with Bun and the host's real CMS
+environment, which this module does not provide, so Womb has no supported way to
+run it yet. What it writes is ordinary CMS state: its journal (`roster_runs`,
+`roster_run_items`, from migration `20261119_165021_roster_journal`) is in the
+database, and its invitation files are the same outbox mirror files an approval
+writes, so both are covered by the existing backup and restore. It needs no
+setting, timer or gateway rule.
 
 `terrace-cms-sweep.service` runs the bundle's `bin/sweep` (without
 `--purge-moderated`) as the CMS account with the same environment file, guards

@@ -125,8 +125,17 @@ known to affect a deployed host (none exists).
   had already been garbage-collected before the scan. The identity proof itself
   passed, including once with the certificate rebuilt under a new key. Redo the
   scan right after an identity run while its outputs are still in the store.
-- The website's realm contract now declares admin events for the `terrace`
-  realm (`adminEventsEnabled: true`, details off) and the realm reconciliation
-  applies them. Remaining: re-pin the website release to one that carries them,
-  then run `realm plan` and `realm apply`. Until then the journal lines are the
-  record of site-account changes.
+- The pinned website release (`eab4189`) declares admin events for the
+  `terrace` realm (`adminEventsEnabled: true`, details off); first import and
+  reconciliation of an older realm are proven in the VM. Remaining on a real
+  host: run `realm plan` and `realm apply` once after deploying the re-pinned
+  build. The identity administration proof rebuilds the previous release's
+  realm producer from the current one and checks it against the old pinned
+  hash; the next re-pin that changes `identity/tools/realm-config.ts` must
+  replace that reconstruction (the build fails until it does).
+- The website's bulk roster tool (`roster:invite`, website `docs/member-lifecycle.md`)
+  is not in the release bundle and needs a source checkout with Bun on the host;
+  Womb has no packaged way to run it (G-45). Its journal tables are ordinary CMS
+  rows and are covered by the database backup (the website check restores a
+  synthetic journal row). The optional `LIFECYCLE_LOCK_TIMEOUT_MS` (per-address
+  lock wait, default 3000 ms) is not set by Womb and is untested at other values.

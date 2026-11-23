@@ -334,11 +334,19 @@ attributes or other personal data.
   either direction is planned and applied like any other realm setting (an
   ordinary realm update, the same path as the other scalar settings). If the
   artifact does not declare them, reconciliation neither changes nor refuses
-  anything about them. The website's realm contract declares them
-  (`adminEventsEnabled: true`, `adminEventsDetailsEnabled: false`), but the
-  website release pinned today predates that, so the `terrace` realm's admin
-  events stay as they are until Womb re-pins to a release that carries them.
-  Until then the journal lines are the record of changes to site accounts.
+  anything about them. The pinned website release (`eab4189`) declares them
+  (`adminEventsEnabled: true`, `adminEventsDetailsEnabled: false`), so a new
+  realm is imported with admin events on and details off, and a realm created
+  from an earlier release (which did not declare them) gets them at the next
+  `realm plan` and `realm apply`: one change, `~ realm adminEventsEnabled:
+  false -> true`. On an existing host run that pair once after deploying the
+  re-pinned build; until then that realm's admin events stay off and the
+  journal lines are the record of changes to site accounts. Both paths are
+  proven in the VM with read-back from Keycloak's database: the production
+  proof checks the first import, and the identity administration proof imports
+  the previous release's realm (its producer reconstructed byte for byte and
+  checked against the hash Womb pinned for it) and reconciles it to this
+  release's artifact.
 - **Both values are checked strictly.** When present, `adminEventsEnabled`
   must be a boolean and `adminEventsDetailsEnabled` must be exactly `false`;
   absent is accepted. `adminEventsDetailsEnabled: true` is refused by hosting

@@ -167,7 +167,7 @@ in {
 
     def data_signature(machine, isolated=False):
         return {table: sql(machine, f"select md5(string_agg(to_jsonb(t)::text, chr(10) order by to_jsonb(t)::text)) from {table} t", isolated)
-                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox"]}
+                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox", "roster_runs", "roster_run_items"]}
 
     def assert_content(machine):
         docs = api(machine, "/api/events?limit=10&draft=true")["docs"]
@@ -218,6 +218,11 @@ in {
         sql(source, "insert into media(alt,public,filename,mime_type,filesize,width,height) values ('Synthetic public',true,'public.png','image/png',70,1,1),('Synthetic private',false,'private.png','image/png',70,1,1)")
         sql(source, "insert into events(slug,title,summary,starts_at,category,location_name,cover_image_id,_status) values ('synthetic-host-event','Synthetic hosted event','User-free host recovery fixture',now(),'community','Synthetic room',1,'published'),('synthetic-secret-draft','Synthetic private draft','Unpublished fixture',now(),'community','Synthetic room',null,'draft')")
         sql(source, "insert into _events_v(parent_id,version_slug,version_title,version_summary,version_starts_at,version_category,version_location_name,version_cover_image_id,version_updated_at,version_created_at,version__status,latest) select id,slug,title,summary,starts_at,category::text::enum__events_v_version_category,location_name,cover_image_id,updated_at,created_at,_status::text::enum__events_v_version_status,true from events")
+        # A synthetic bulk-roster journal entry (website migration 20261119_165021_roster_journal): ids, hashes and counts
+        # only, as the tool writes; it must come back from the backup like any other CMS row.
+        sql(source, "insert into roster_runs(run_id,operator_label,status,file_sha256,plan_sha256,run_limit,database_identity,counts,started_at,finished_at) values ('roster-synthetic-1','Synthetic operator','completed',repeat('a',64),repeat('b',64),50,'terrace_cms:synthetic','{\"created\":1}',now(),now())")
+        sql(source, "insert into roster_run_items(run_id,row_number,state) select id,2,'applied' from roster_runs where run_id='roster-synthetic-1'")
+        assert sql(source, "select count(*) from roster_run_items i join roster_runs r on r.id = i.run_id where r.status = 'completed'") == "1"
         assert sql(source, "select count(*) from users") == "0"
         assert sql(source, "select count(*) from members") == "0"
         assert_content(source)
