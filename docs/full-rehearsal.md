@@ -412,6 +412,23 @@ into the restored outbox; the invitation files still name the applicants),
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
 
+### Observed all-services rehearsal with website `eab4189` — November 23, 2026 (Pacific)
+
+The first `--all-services` run at the re-pin (Womb `1356603`, run `9d18e784`, 07:23 to
+07:51) failed in the restored phase's concurrent Documenso browser check:
+`two-factor view-recovery-codes` answered 500 to a TOTP code made at second 29 of
+its step. Documenso accepts only the server's current step and returns 500 for a
+rejected code, so the browser helper now never makes a code within 3 seconds of
+either edge of a step ([backlog](backlog.md)). Its disks were removed by hand
+(the purge command refuses failed runs). The second run, Womb `78188ce` with that
+fix, run `798369c9`, passed from 08:19 to 08:49 (scenario 1722.43 seconds) with its
+output on the build machine's non-snapshotted scratch dataset: 198 HTTPS protocol
+assertions, all four concurrent native browser helpers, and every receipt check true.
+Lifecycle steps before backup: apply 14.97 s, approve 1.56 s, redeem 0.47 s, sign-in
+0.59 s, link 0.66 s; on the replacement: ownership 0.08 s, redeem 0.52 s, sign-in
+0.74 s, link 0.63 s, erase 2.55 s, sweep 6.44 s, redaction 0.10 s. Its synthetic
+state was purged with the documented command (receipt kept).
+
 ### Observed review-nit closure with restored lifecycle checks — November 19, 2026 (Pacific)
 
 Womb `4348d0b` (PR 49, code-identical to the later head) re-ran the `--all-services`
