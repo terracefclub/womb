@@ -170,3 +170,24 @@ The platform lock pins Nixpkgs revision
 `31ecbaca1bdefa45dffc409f0250bd8039ea0010`. Result:
 `/nix/store/brl901fwca1kv90qdl2s9958cwc5m0a6-vm-test-run-terrace-identity`.
 This is hosting-fixture evidence, not production authentication or recovery evidence.
+
+### Test certificate: no copy
+
+The check's certificate is made at build time with a random key and trusted by
+store path (`platform/test-trust.nix`). `platform/test-trust-scan.py` shows that
+every output built from it references it at run time, so none holds a copy that
+a partial garbage collection could split from the key:
+
+```sh
+drv=$(nix eval --raw path:./platform#checks.x86_64-linux.identity.drvPath)
+flock "$HOME/.falcon-heavy.lock" python3 -B platform/test-trust-scan.py --build "$drv" terrace-identity-proof-certificate
+```
+
+`--build` realises the certificate and everything built from it except the VM
+run itself, so no output is left unchecked; the scan exits 0 only when every
+such output is built and references the certificate. It works for any proof
+and CA name, for example `identity-restore` with
+`terrace-identity-recovery-proof-certificate`. It checks store references, not
+file contents: an output that references the certificate could in principle
+also hold a copy of its bytes; that rests on reading the sources (only store path
+strings, never `security.pki`).
