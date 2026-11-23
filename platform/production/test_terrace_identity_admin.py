@@ -502,7 +502,11 @@ class FirstAdminAndBreakGlassTest(unittest.TestCase):
         return out.getvalue()
 
     def test_first_admin_creates_proves_and_removes_the_bootstrap_account(self):
+        self.assertEqual(self.master.hardening(), (False, False))
         self.assertIn("ready", self.first_admin())
+        # The success path itself turns the master realm's hardening on (not only a later login).
+        self.assertEqual(self.master.hardening(), (True, True))
+        self.assertEqual(self.master.realm["failureFactor"], 5)
         self.assertEqual(sorted(self.master.users), ["ops-a"])
         admin = self.master.users["ops-a"]
         self.assertEqual((admin["roles"], admin["label"]), (["admin"], tool.INITIAL_LABEL))
