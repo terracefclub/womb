@@ -399,8 +399,11 @@ recorded runs, commit and receipts.
   backdating is a common practice of public CAs, and Let's Encrypt documents it,
   but it was not exercised here. Test guests start from a whole-second clock, so
   the proof sets each guest to the host clock at boot and, before every verifying
-  check, waits (at most 30 s) until that guest's clock has reached the served
-  certificate's notBefore. A host whose clock trails the CA by more than its
+  check, asserts that the verifying guest's clock has already reached the
+  served certificate's notBefore: after the sync the proof fails rather than
+  waits, so a broken sync or a wrong issuance time cannot hide behind a wait
+  (the failure path is exercised with a certificate whose notBefore is a day
+  ahead). A host whose clock trails the CA by more than its
   backdating would fail the expiry check: a host clock fault, not a certificate
   fault, which the check names (`certificate is not yet valid`).
 - A timer actually firing (the proof starts every unit itself; the daily timer,

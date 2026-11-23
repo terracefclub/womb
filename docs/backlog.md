@@ -130,19 +130,22 @@ known to affect a deployed host (none exists).
   log timestamps of two guests, not measured directly; corroborating, an earlier
   run counted a "certificate is not yet valid" retry of the operator's handshake
   in the same subtest, and later runs measured boot offsets of -1.44 to +0.45 s.
-  The proof now sets each guest to the host clock at boot and waits, at most
-  30 s, for the served certificate's notBefore before every verifying check
-  ([TLS](tls.md#not-proven)). Not observed: that wait's timeout path, and a public
-  CA's backdating. Test-only, given that inference.
+  The proof now sets each guest to the host clock at boot and, before every
+  verifying check, asserts that the client's clock has reached the served
+  certificate's notBefore ([TLS](tls.md#not-proven)). Not observed: a public CA's
+  backdating. Test-only, given that inference.
 - Done (product): `terrace-tls check` and `status` print OpenSSL's verification
   reason after "no verified TLS session" (for example `verify error 9:
   certificate is not yet valid`), so a clock problem is not misread as an
   untrusted chain. Unit tests `tests/platform/test_tls_check.py`; the TLS VM
   proof asserts the reason for a certificate whose notBefore is a day ahead
   (check and status) and for the relay's placeholder ([TLS](tls.md)).
-- Follow-up (test): the TLS proof should fail, or assert a small bound, if any
-  notBefore wait is needed after the boot sync, so a broken clock sync cannot
-  hide behind 30 s waits.
+- Done (test): the TLS proof fails, instead of waiting up to 30 s, when a
+  verifying client's clock is still before the served certificate's notBefore
+  after the boot sync (only fetching the served certificate is retried). No
+  earlier run needed a wait (`clockWaits` was empty in all ten recorded passes
+  since the sync was added); the failure path is asserted with a certificate
+  whose notBefore is a day ahead.
 - Known flake (test, wall clock): the TLS proof's "reboot keeps the certificate
   and the account key" subtest fails when the app guest's reboot crosses a full
   hour. `terrace-backup-freshness.timer` is hourly and `Persistent`, so it fires
