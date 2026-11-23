@@ -62,7 +62,11 @@ def request_fact(label, started, response=None, error=None):
             "status": 0 if response is None else response.status, "totpStepSecond": int(time.time()) % 30}
     if response is not None and response.headers.get("date"):
         try:
-            fact["serverClockSkewSeconds"] = int(email.utils.parsedate_to_datetime(response.headers["date"]).timestamp() - time.time())
+            served = email.utils.parsedate_to_datetime(response.headers["date"]).timestamp()
+            fact["serverClockSkewSeconds"] = int(served - time.time())
+            # The server's own second within the step (Date has whole-second resolution): with totpStepSecond it shows
+            # whether client and server were in the same step.
+            fact["serverStepSecond"] = int(served) % TOTP_PERIOD
         except (TypeError, ValueError):
             fact["serverClockSkewSeconds"] = None
     if error is not None:
@@ -86,9 +90,20 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+# Documenso v2.21.1 accepts a code only in the server's own current 30-second step (packages/lib/server-only/2fa/
+# verify-2fa-token.ts: window = 1, no look-back) and answers a rejected code with HTTP 500 (an AppError without a
+# status). Guest clocks differ by up to about a second and the request takes time, so a code made near either edge
+# of a step can reach the server in the neighbouring step. Never generate one within TOTP_GUARD seconds of an edge.
+TOTP_PERIOD = 30
+TOTP_GUARD = 3
+
+
 def totp(secret):
+    into = time.time() % TOTP_PERIOD
+    if into < TOTP_GUARD or into > TOTP_PERIOD - TOTP_GUARD:
+        time.sleep((TOTP_GUARD - into) % TOTP_PERIOD)
     key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
-    value = hmac.new(key, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
+    value = hmac.new(key, struct.pack(">Q", int(time.time()) // TOTP_PERIOD), hashlib.sha1).digest()
     offset = value[-1] & 15
     return str((struct.unpack(">I", value[offset:offset + 4])[0] & 0x7fffffff) % 1000000).zfill(6)
 

@@ -1,5 +1,7 @@
 # Optional HTTPS origin gateway
 
+> **Note, 2026-11-23.** Re-pinned to website `dev` `eab4189` (website PRs #19 to #22). The gateway's runtime realm now comes from a producer that declares admin events on with details off, which the hosting policy accepts. No gateway rule changed.
+
 > **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18: lifecycle linking, packaged `bin/sweep`, release-proof fixes and no-script form status). The gateway now supplies the lifecycle origins and the client-address pairing below, and the check exercises the member lifecycle end to end.
 
 `platform/website-gateway.nix` adds an opt-in nginx gateway to the accepted native
@@ -47,7 +49,7 @@ of their native modules.
 
 ## Disposable actual-bundle proof
 
-The check consumes the pinned `680ad56` web/CMS archives and **only three
+The check consumes the pinned `eab4189` web/CMS archives and **only three
 hash-pinned, secret-free source files** from that TFC revision: the realm
 generator, shared client/role contract and pure production-input validator.
 Their hashes are checked before Nix-store copying; the source checkout and its
@@ -58,9 +60,9 @@ On the x86-64 Linux builder, under the shared heavy-job queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-gateway-check \
-  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  /source/tfc-at-680ad567f553449280664cafad2d200011b6abac
+  /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  /source/tfc-at-eab41891f6d68ea000f86148d086daf737f1216e
 ```
 
 Two guests contain the actual immutable app pair and native PostgreSQL/Keycloak.
@@ -131,6 +133,10 @@ guest teardown. Every test-owned job/guest/process must be verified stopped
 before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
+
+Verified 2026-11-23 on the shared Linux builder with the `eab4189` bundles
+(05:52 to 05:55 Pacific, fresh result): 198 HTTPS protocol assertions and the same
+lifecycle stage counts as below (18, 83, 49, 40, 15, 24, 28 and 63) passed.
 
 Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
 `680ad56` bundles (06:10 to 06:13 Pacific, prebuilt closure): 198 HTTPS protocol

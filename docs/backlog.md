@@ -13,7 +13,7 @@ establish a live deployment. Link each small MR to its issue.
 | 1 | [Contributor workflow](https://gitlab.com/terrace/tech/womb/-/issues/1) (historical GitLab issue; no GitHub equivalent) | Credential-free devenv, local CLI state, installed hooks, shell contract | Merged in Womb !1 |
 | 2 | [Single-node platform](https://gitlab.com/terrace/tech/womb/-/issues/2) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Pinned NixOS/K3s, private API, retained storage, VM test | Foundation merged in historical Womb !2; optional [identity substrate](identity-host.md), disabled by default; production realm, enrollment, capacity and recovery follow-up remain. Production host profiles (`app`, `relay`) with sops-nix secrets delivery are proven in a VM check on synthetic data (Womb PR 50, [production profile](production-profile.md), [secrets](secrets.md)); certificate issuance, renewal, the port-80 redirect and an expiry check by ACME are proven in a VM check against a local ACME server, not against a public CA or real DNS ([TLS](tls.md)); nothing is deployed and the Hetzner leases have not installed them. Keycloak production administration (first administrator from the escrowed bootstrap password, administrators, editor accounts and role grants, listing, client-secret rotation, realm reconciliation and break-glass) is a root-only host tool proven in its own VM check ([identity administration](identity-admin.md)). These VM proofs with a build-time random test CA trust it by store path or through a bundle assembled at run time, never a cached `security.pki` copy that a partial garbage collection could split from the signing key: the production proof (PR 55), the identity-administration proof (PR 53), the website gateway check, the relay check and the all-services rehearsal (PR 58), and the identity, identity-restore, Vaultwarden runtime and functional, Documenso runtime and functional, and Windmill runtime, functional and roster checks (PR 61). The TLS proof makes its CA at run time; the backup check's certificate is served by store path and trusted by no client |
 | 3 | [Website design](https://gitlab.com/terrace/tech/tfc-website/-/issues/1) (historical; GitHub [tfc-website #5](https://github.com/terracefclub/tfc-website/issues/5)) | SvelteKit preview/hot reload, events/newsletters, keyboard/mobile checks | Preview merged in historical website !1; [frontend !2](https://gitlab.com/terrace/tech/tfc-website/-/merge_requests/2) (historical) merged for published Payload content. Website `dev` `dad0a20` (2026-11-18) also serves imported news and pages (`/news/`, `/pages/<slug>/`) and the active-redirect consumer (website PR 10); proven with the synthetic fixture and in a local rehearsal on the owner's real export (local database only); nothing is imported to any real target. Design review remains |
-| 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) (historical; GitHub [tfc-website #5](https://github.com/terracefclub/tfc-website/issues/5)) | Publish/revise/preview; roles; export/import; memory measurement | Linux bundles of website `dev` `680ad56` (eleven-migration ledger, packaged `bin/sweep`) are pinned and pass the [native host/recovery check](website-host.md), the [HTTPS gateway check](website-gateway.md) with the member lifecycle, and the [all-services rehearsal](full-rehearsal.md) (2026-11-19). Actual public activation and combined capacity remain gated |
+| 4 | [CMS spike](https://gitlab.com/terrace/tech/tfc-website/-/issues/2) (historical; GitHub [tfc-website #5](https://github.com/terracefclub/tfc-website/issues/5)) | Publish/revise/preview; roles; export/import; memory measurement | Linux bundles of website `dev` `eab4189` (twelve-migration ledger including the bulk-roster journal, packaged `bin/sweep`, realm admin events) are pinned and pass the [native host/recovery check](website-host.md) and the [HTTPS gateway check](website-gateway.md) with the member lifecycle (2026-11-23). The [all-services rehearsal](full-rehearsal.md) passed on its second run at this pin; the first failed in the concurrent Documenso check; its most likely cause is mitigated in the test client, not shown (see below). Actual public activation and combined capacity remain gated |
 | 5 | [Hetzner bootstrap](https://gitlab.com/terrace/tech/womb/-/issues/3) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Dedicated Terrace credential, protected existing data, targeted plan, tested bootstrap/health/teardown | [Womb !5](https://gitlab.com/terrace/tech/womb/-/merge_requests/5) (historical) merged; install/boot VM passed. Earlier October31 price estimates are historical; November4 owner direction removes unanswered budget questions as a code/rehearsal gate. The owner authorised a dedicated Terrace project token on 2026-11-07 (read-only inventory first; the existing server is outside every write target). Disposable, lease-bound Hetzner probes and known-full leases 1 to 5 have run since. Proven on Hetzner by lease 3 (run `90e965da`, 2026-11-13): host-key pinning, RAM installer, install plan, FORMAT and install, reboot from the installed disk and networking. Lease 4 (run `7d217921`, 2026-11-18) was stopped by builder-lock contention before the plan step and proved nothing beyond lease 3. Lease 5 (run `efc9794a`, 2026-11-20, staged at trunk `bb0d526`) passed end to end and was torn down: services launch from installed disks, a backup to a restic repository that was a directory on the build machine, reached through a reverse SSH forward (not a storage provider account, not off-site), retiring the original pair and restore onto a replacement pair, for the rehearsal profile on synthetic data on private temporary hosts, one run on one day ([cloud rehearsal](cloud-rehearsal.md#lease-5-result-2026-11-20)); not proven by it: the production profile, ACME, the Keycloak administration tool, real data migration, cutover, alerting. Lease 6 has not been requested. No production host exists and no production provider apply was made; access recovery for and a protected copy of the existing server remain open. See [relay plan](access-relay.md), [cloud rescue install](cloud-rescue-install.md) and the [owner runbook](owner-runbook.md) Part 6 |
 | 6 | [Backup and restore](https://gitlab.com/terrace/tech/womb/-/issues/4) (historical; GitHub [womb #11](https://github.com/terracefclub/womb/issues/11)) | Encrypted DB/media backup; quiescent capture; isolated restore; reconciliation; teardown | Module and two-VM restore test in `platform/backup.nix` ([docs](backups.md)); no real Storage Box/B2 or off-site drill yet; secrets delivery (sops-nix, offline escrow key, rotation and re-keying) is proven in the production VM check on synthetic data, with no real secret and no escrow retrieval drill. Current existing-server backup state and real recoverable copies remain unverified by this builder work |
 | 7 | [WordPress preservation](https://gitlab.com/terrace/tech/tfc-website/-/issues/3) (historical; GitHub [tfc-website #3](https://github.com/terracefclub/tfc-website/issues/3)) | Full protected DB/files backup, plugin/table inventory, restore | Full protected WXR export and Gravity Forms definitions supplied 2026-11-03; the Kinsta full backup ZIP and Kinsta settings are still outstanding (access pending) |
@@ -71,24 +71,52 @@ known to affect a deployed host (none exists).
   app only, not the relay, and its fingerprint comparison is nearly
   tautological. The proof also no longer exercises the expiry check's default
   system trust store.
-- The all-services rehearsal's concurrent Documenso browser check (`verify
-  --signing`) failed twice in a row on 2026-11-20 at the stage then named
-  "retained document and encryption keys" (original download, recovery codes
-  with a TOTP code, signed download), after a successful sign-in. Both failures
-  were on the first commit of the store-path-trust change (PR 58), before the
-  diagnostics below existed. Of eight runs that day it failed 2 and passed 6:
-  that first commit 2 failures and 1 pass; the same code plus a stage-split
-  diagnostic 1 pass; trunk 1 pass (the only trunk run); the final commit 3
-  passes. Cause not found; too few runs to say whether the change made it
-  likelier. On failure the browser now records which of the three requests
-  failed and, for each recent request, its HTTP status, elapsed time, the
-  server's clock minus the client's in seconds, the second within the 30-second
-  TOTP step and the exception class. That separates the candidates (the 5 s
-  timeout on the original download, a TOTP step boundary, a wrong status) but
-  may not by itself explain them. In the rehearsal's concurrent phase these
-  lines go to the browser's private stderr file, retained only on failure as
-  `evidence/concurrent-failure-original/documents.stderr` (or `-restored`) in the
-  run directory, not to the driver log.
+- Most likely cause found, not shown; mitigated in the test client: the
+  all-services rehearsal's concurrent Documenso browser check (`verify
+  --signing`) failed intermittently at "retained document: encryption keys
+  (recovery codes)": twice on 2026-11-20 (PR 58's first commit, before
+  diagnostics; 2 of 8 runs that day) and once on 2026-11-23 in the website
+  `eab4189` re-pin's first all-services rehearsal (run `9d18e784`, restored phase;
+  evidence on the build machine in
+  `website-repin-evidence-eab4189/rehearsal-run-9d18e784/evidence/concurrent-failure-restored/documents.stderr`).
+  What the pinned Documenso v2.21.1 source shows: the server accepts a TOTP code
+  only in its own current 30-second step (`verify-2fa-token.ts`, `window = 1`, no
+  look-back, no replay store), and a rejected code is an `AppError` without a
+  status, which the auth error handler returns as HTTP 500. What the evidence
+  shows: the 2026-11-23 failure was a 500 on `two-factor view-recovery-codes`
+  whose request ended at second 29 of the client's step, 69 ms after it started;
+  the same restored data had passed the same call in the run's sequential verify
+  minutes earlier (so not a key or data fault); and a reused code or the
+  concurrent browsers cannot make a code wrong (no replay store; they use other
+  services). A code made at the end of a step and checked by a server already in
+  the next step fits all of this, and is the most likely cause, but it is not
+  shown: `totpStepSecond` is read when the request ends, not when the code is
+  made; the skew figure is whole seconds from the `Date` header, so 0 only means
+  the clocks were within about a second and cannot show that client and server
+  were in different steps; and the server's step at that instant was not
+  recorded (the client now records it as `serverStepSecond`). Guest clock
+  differences of about a second were measured in a different VM test (the TLS
+  proof, before its clock sync), not in this rehearsal. Mitigation: the browser
+  helper never generates a code within 3 seconds of either edge of a step
+  (`platform/documenso/functional-browser.py`, `totp`), with unit tests that drive
+  both edges on a fake clock. It is the only TOTP generator in Womb (two-factor
+  `enable` and both `view-recovery-codes` calls use it). With it the next
+  all-services rehearsal (run `798369c9`, 2026-11-23) passed, but that run keeps
+  no per-request record of whether the guard fired, and one pass does not show
+  that the failure rate (3 failures in about 10 runs) has dropped.
+  Open robustness points (left as they are so the passing rehearsal still covers
+  the merged code): `totp()` checks the clock once, sleeps once and then generates
+  without checking again, so a clock step during the sleep could still land the
+  code near an edge; and the 3-second margin only covers a request that returns
+  within 3 seconds, while the request uses the default timeout. A follow-up would
+  check again after the sleep with a bounded number of tries, and fail with a
+  clear message when a request outlasts the margin instead of surfacing the
+  server's 500.
+- The rehearsal's `purge` refuses a failed run by design, but the disk budget
+  requires purging a run's disks pass or fail; a failed run's directory currently
+  has to be removed by hand after copying its small evidence (done for run
+  `9d18e784` on 2026-11-23). Give `purge` an explicit failed-run mode that keeps the
+  logs and receipt and removes the disks, repository and escrow.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
   (`platform/production/tls-test.nix`) failed once on 2026-11-20 at "relay:
   first boot with the CA unreachable is safe and visible; issuance once it is
@@ -113,6 +141,15 @@ known to affect a deployed host (none exists).
 - Follow-up (test): the TLS proof should fail, or assert a small bound, if any
   notBefore wait is needed after the boot sync, so a broken clock sync cannot
   hide behind 30 s waits.
+- Known flake (test, wall clock): the TLS proof's "reboot keeps the certificate
+  and the account key" subtest fails when the app guest's reboot crosses a full
+  hour. `terrace-backup-freshness.timer` is hourly and `Persistent`, so it fires
+  at boot; the proof's host has no backup yet, the unit fails ("target primary:
+  no successful backup recorded") and the proof's no-failed-units check trips.
+  Seen once on 2026-11-23 (reboot at 13:59:58 UTC) during the website `eab4189`
+  re-pin; the rerun passed. Not a product defect: a host with a recorded backup
+  passes the check. Fix: stop or mask the freshness timer before the reboot in
+  that subtest, or exclude it from that one check.
 - The all-services rehearsal sets Vaultwarden's and Windmill's `identityCaFile`
   to the synthetic CA itself, so only the standalone Vaultwarden functional and
   Windmill checks exercise those modules' default (the system trust bundle). They
@@ -125,8 +162,17 @@ known to affect a deployed host (none exists).
   had already been garbage-collected before the scan. The identity proof itself
   passed, including once with the certificate rebuilt under a new key. Redo the
   scan right after an identity run while its outputs are still in the store.
-- The website's realm contract now declares admin events for the `terrace`
-  realm (`adminEventsEnabled: true`, details off) and the realm reconciliation
-  applies them. Remaining: re-pin the website release to one that carries them,
-  then run `realm plan` and `realm apply`. Until then the journal lines are the
-  record of site-account changes.
+- The pinned website release (`eab4189`) declares admin events for the
+  `terrace` realm (`adminEventsEnabled: true`, details off); first import and
+  reconciliation of an older realm are proven in the VM. Remaining on a real
+  host: run `realm plan` and `realm apply` once after deploying the re-pinned
+  build. The identity administration proof rebuilds the previous release's
+  realm producer from the current one and checks it against the old pinned
+  hash; the next re-pin that changes `identity/tools/realm-config.ts` must
+  replace that reconstruction (the build fails until it does).
+- The website's bulk roster tool (`roster:invite`, website `docs/member-lifecycle.md`)
+  is not in the release bundle and needs a source checkout with Bun on the host;
+  Womb has no packaged way to run it (G-45). Its journal tables are ordinary CMS
+  rows and are covered by the database backup (the website check restores a
+  synthetic journal row). The optional `LIFECYCLE_LOCK_TIMEOUT_MS` (per-address
+  lock wait, default 3000 ms) is not set by Womb and is untested at other values.

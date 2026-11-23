@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -357,9 +357,9 @@ install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
 direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
   --output $HOME/terrace-work/full-rehearsal-output \
-  --webArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  --cmsArchive $HOME/terrace-work/website-bundle-680ad56-output/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  --tfcSource $HOME/terrace-work/website-bundle-680ad56
+  --webArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-eab4189
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted
@@ -411,6 +411,24 @@ into the restored outbox; the invitation files still name the applicants),
 `sweep` by the real timer, and `redaction` (both invitations redacted, two
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
+
+### Observed all-services rehearsal with website `eab4189` — November 23, 2026 (Pacific)
+
+The first `--all-services` run at the re-pin (Womb `1356603`, run `9d18e784`, 07:23 to
+07:51) failed in the restored phase's concurrent Documenso browser check:
+`two-factor view-recovery-codes` answered 500 to a request that ended at second 29
+of the client's TOTP step. Documenso accepts only the server's current step and
+returns 500 for a rejected code, so a code checked in the next step is the most
+likely cause; it is not shown ([backlog](backlog.md) says why). As a mitigation the
+browser helper now never makes a code within 3 seconds of either edge of a step. Its disks were removed by hand
+(the purge command refuses failed runs). The second run, Womb `78188ce` with that
+fix, run `798369c9`, passed from 08:19 to 08:49 (scenario 1722.43 seconds) with its
+output on the build machine's non-snapshotted scratch dataset: 198 HTTPS protocol
+assertions, all four concurrent native browser helpers, and every receipt check true.
+Lifecycle steps before backup: apply 14.97 s, approve 1.56 s, redeem 0.47 s, sign-in
+0.59 s, link 0.66 s; on the replacement: ownership 0.08 s, redeem 0.52 s, sign-in
+0.74 s, link 0.63 s, erase 2.55 s, sweep 6.44 s, redaction 0.10 s. Its synthetic
+state was purged with the documented command (receipt kept).
 
 ### Observed review-nit closure with restored lifecycle checks — November 19, 2026 (Pacific)
 

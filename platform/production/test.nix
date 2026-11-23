@@ -173,6 +173,8 @@ in {
           timings[label] = round(time.monotonic() - started, 2)
           return value
 
+      EVENTS_SQL = "select admin_events_enabled::text || ',' || admin_events_details_enabled::text from realm where name='terrace'"
+
       def sql(query, database="terrace_cms"):
           return app.succeed("runuser -u postgres -- psql -XAt -d " + database + " -c " + shlex.quote(query) + " 2>/dev/null").strip()
 
@@ -273,6 +275,7 @@ in {
       def signature():
           return {
               "realm": sql("select id from realm where name='terrace'", "keycloak"),
+              "realm events": sql(EVENTS_SQL, "keycloak"),
               "users": sql("select md5(string_agg(id||username,chr(10) order by id)) from user_entity", "keycloak"),
               "migrations": sql("select name||batch from payload_migrations order by id"),
               "outbox": app.succeed("cd " + OUTBOX + " && stat -c '%U %a' . && find . -type f -printf '%P %U %m\\n' | LC_ALL=C sort && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum").strip(),
@@ -417,6 +420,8 @@ in {
           protocol("seed", "Disposable identity enrollment passed; temporary administrator removed.")
           app.succeed("rm -rf /run/terrace-rehearsal")
           ok(sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", "keycloak") == "0", "bootstrap administrator removed")
+          # First import of the release's realm artifact (it declares admin events on, details off) through the hosting policy.
+          ok(sql(EVENTS_SQL, "keycloak") == "true,false", "first realm import: admin events on, details off, read back from Keycloak's database")
           app.succeed("systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service", timeout=300)
           app.succeed("install -m 0600 /dev/null " + MEDIA + "/private.png && echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgUbL4DwACCgFmeGgpMwAAAABJRU5ErkJggg==' | base64 -d >" + MEDIA + "/private.png && cp " + MEDIA + "/private.png " + MEDIA + "/public.png && chown terrace_cms:terrace_cms " + MEDIA + "/*.png")
           sql("insert into media(alt,public,filename,mime_type,filesize,width,height) values ('Synthetic private',false,'private.png','image/png',70,1,1),('Synthetic public',true,'public.png','image/png',70,1,1)")
