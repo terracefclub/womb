@@ -5,7 +5,11 @@
   directory = "/var/lib/terrace-gateway-test";
   inputs = "/var/lib/terrace-documenso-inputs";
   fixture = import ./documenso/fixture-package.nix {inherit pkgs contract;};
-  certificate = pkgs.runCommand "documenso-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key. Clients reference this store path (curl
+  # --cacert, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, the browser's NSS database) and nothing
+  # cached copies it (no security.pki). Documenso's identityCaFile is the copy the input
+  # service makes at boot in this run (../test-trust.nix).
+  certificate = pkgs.runCommand "terrace-documenso-functional-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem -subj '/CN=documents.terrace.invalid' \
@@ -21,7 +25,6 @@ in {
         cores = 2;
         diskSize = 12288;
       };
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
       networking.hosts."127.0.0.1" = ["documents.terrace.invalid" "identity.terrace.invalid"];
       terrace.documenso = {
         enable = true;
@@ -82,7 +85,6 @@ in {
         memorySize = 2048;
         cores = 1;
       };
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
       networking.hosts.${nodes.documents.networking.primaryIPAddress} = ["documents.terrace.invalid" "identity.terrace.invalid"];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd pkgs.nssTools pkgs.openssl (pkgs.python3.withPackages (ps: [ps.playwright]))];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
@@ -91,11 +93,18 @@ in {
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import shlex, tempfile
     from pathlib import Path
+    CA = "${certificate}/cert.pem"
+    CURL = "curl --cacert " + CA + " "
     start_all()
     documents.wait_for_unit("keycloak.service", timeout=300)
     documents.wait_for_unit("nginx.service")
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(client, CA, "documents.terrace.invalid:443", ["documents.terrace.invalid", "identity.terrace.invalid"], "client")
+    trust_consistent(documents, CA, "127.0.0.1:443", ["documents.terrace.invalid", "identity.terrace.invalid"], "documents")
+    trust_consistent(documents, "${directory}/cert.pem", "127.0.0.1:443", ["identity.terrace.invalid"], "Documenso run-time copy")
     def sql(query):
         return documents.succeed("runuser -u postgres -- psql -w -XAt -d terrace_documenso -c " + shlex.quote(query) + " 2>/dev/null", timeout=10).strip()
     def server_failure_evidence():
@@ -129,7 +138,7 @@ in {
         assert documents.succeed("systemctl show terrace-documenso.service -p ActiveState --value").strip() == "inactive"
     def browser(phase):
         try:
-            assert client.succeed("python /etc/documenso-functional-browser.py " + phase + (" --signing" if phase in ["create", "verify"] else ""), timeout=240).strip() == "Documenso functional browser phase " + phase + " passed."
+            assert client.succeed("SSL_CERT_FILE=" + CA + " NODE_EXTRA_CA_CERTS=" + CA + " python /etc/documenso-functional-browser.py " + phase + (" --signing" if phase in ["create", "verify"] else ""), timeout=240).strip() == "Documenso functional browser phase " + phase + " passed."
         except Exception:
             try:
                 for label, query in [("all team rows", 'SELECT count(*) FROM "Team"'), ("expected team rows", 'SELECT count(*) FROM "Team" WHERE url=\'rehearsal-team\' ')]:
@@ -153,7 +162,7 @@ in {
                 print("Private Documenso failure evidence unavailable; original failure preserved.")
             raise
     with subtest("reviewed user-free realm, explicit provisioning and real HTTPS"):
-        documents.succeed("python /etc/gateway-protocol.py seed", timeout=120)
+        documents.succeed("SSL_CERT_FILE=" + CA + " python /etc/gateway-protocol.py seed", timeout=120)
         assert documents.succeed("runuser -u postgres -- psql -XAt -d keycloak -c \"select count(*) from user_entity where username='gateway-fixture-bootstrap'\" 2>/dev/null").strip() == "0"
         assert documents.succeed("runuser -u postgres -- psql -XAt -d keycloak -c \"select count(*) from user_entity where email='recovery@terrace.invalid'\" 2>/dev/null").strip() == "0"
         documents.succeed("chmod 0600 ${directory}/keycloak.env && truncate -s 0 ${directory}/keycloak.env && chmod 0400 ${directory}/keycloak.env")
@@ -214,7 +223,7 @@ in {
         documents.succeed("systemctl stop terrace-identity-health.timer terrace-identity-health.service keycloak.service")
         documents.fail("systemctl is-active --quiet keycloak.service")
         assert documents.succeed("python /etc/documenso-recovery.py").strip() == "Native loopback recovery administrator authenticated without identity."
-        assert client.succeed("curl --silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize").strip() == "403"
+        assert client.succeed(CURL + "--silent --max-time 5 -X POST -o /dev/null -w '%{http_code}' https://documents.terrace.invalid/api/auth/email-password/authorize").strip() == "403"
     stop()
     documents.succeed("systemctl stop documenso-test-mailpit.service nginx.service postgresql.target postgresql.service")
     assert documents.succeed("podman ps -q").strip() == ""

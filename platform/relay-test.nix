@@ -30,6 +30,10 @@ in {
       environment.etc."headscale/server-test.yaml".source = config.services.headscale.configFile;
     };
     client = {...}: {
+      # The client's system bundle also trusts the relay certificate (assembled at boot from
+      # its store path, never a cached copy), so the guard's failing path below shows that
+      # the guard checks only the anchor it is given and cannot pass through the system store.
+      imports = [(import ./test-system-trust.nix {ca = "${certificate}/cert.pem";})];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
     };
   };
@@ -41,6 +45,17 @@ in {
     relay.wait_for_unit("nginx.service")
     client.wait_for_unit("multi-user.target")
     trust_consistent(client, "${certificate}/cert.pem", "relay:443", ["relay"], "relay")
+    # The guard's failing path inside a VM: a certificate for the same name with a different key, made now.
+    client.wait_for_unit("terrace-test-system-trust.service")
+    client.succeed("curl --fail --max-time 5 https://relay/health")  # the system bundle alone trusts the served chain
+    client.succeed("${pkgs.openssl.bin}/bin/openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes -keyout /tmp/other-key.pem -out /tmp/other.pem -subj /CN=relay -addext subjectAltName=DNS:relay 2>/dev/null")
+    try:
+        trust_consistent(client, "/tmp/other.pem", "relay:443", ["relay"], "deliberately wrong anchor")
+    except AssertionError as error:
+        assert "test CA and trust anchor disagree" in str(error) and "self-signed certificate" in str(error), str(error)
+        print("trust guard failing path: " + str(error))
+    else:
+        raise AssertionError("trust guard accepted an anchor that did not sign the served chain")
     client.wait_until_succeeds(CURL + "--fail --max-time 5 https://relay/health")
     assert client.succeed("curl -s -o /dev/null -w '%{http_code}' http://relay/health").strip() == "301"
     client.succeed("nc -z -w 3 relay 443")

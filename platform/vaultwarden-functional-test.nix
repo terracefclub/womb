@@ -5,7 +5,12 @@
   directory = "/var/lib/terrace-gateway-test";
   browserPython = pkgs.python3.withPackages (ps: [ps.playwright]);
   fixture = import ./vaultwarden/fixture-package.nix {inherit pkgs contract;};
-  certificate = pkgs.runCommand "vaultwarden-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic CA, random build-time keys. Clients reference this store path (curl
+  # --cacert, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, the browser's NSS database) and nothing
+  # cached copies it (no security.pki). The server keeps Vaultwarden's product default
+  # (identityCaFile = the system bundle) under test: ../test-system-trust.nix assembles
+  # that bundle at boot inside the guest from the public roots and this store path.
+  certificate = pkgs.runCommand "terrace-vaultwarden-functional-proof-ca" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -keyout $out/ca-key.pem -out $out/ca.pem -days 3650 \
       -subj /CN=TerraceVaultSyntheticCA -addext basicConstraints=critical,CA:TRUE \
@@ -34,14 +39,20 @@ in {
   name = "terrace-vaultwarden-functional";
   nodes = {
     server = {lib, ...}: {
-      imports = [./vaultwarden.nix ./identity.nix];
+      imports = [
+        ./vaultwarden.nix
+        ./identity.nix
+        (import ./test-system-trust.nix {
+          ca = "${certificate}/ca.pem";
+          units = ["vaultwarden.service" "terrace-vaultwarden-bootstrap.service"];
+        })
+      ];
       virtualisation = {
         memorySize = 4096;
         cores = 2;
         diskSize = 6144;
         qemu.options = ["-fw_cfg" tag];
       };
-      security.pki.certificateFiles = ["${certificate}/ca.pem"];
       networking.hosts."127.0.0.1" = ["vault.terrace.invalid" "identity.terrace.invalid"];
       services.postgresql.package = pkgs.postgresql_18;
       terrace.vaultwarden = {
@@ -90,7 +101,6 @@ in {
         cores = 2;
         qemu.options = ["-fw_cfg" tag];
       };
-      security.pki.certificateFiles = ["${certificate}/ca.pem"];
       networking.hosts.${nodes.server.networking.primaryIPAddress} = ["vault.terrace.invalid" "identity.terrace.invalid"];
       environment.systemPackages = [browserPython pkgs.chromium pkgs.nssTools pkgs.curl];
       environment.variables.TERRACE_BROWSER_BINARY = "${pkgs.chromium}/bin/chromium";
@@ -98,17 +108,28 @@ in {
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import tempfile
     from pathlib import Path
+    CA = "${certificate}/ca.pem"
+    CURL = "curl --cacert " + CA + " "
+    BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
     start_all()
     server.wait_for_unit("keycloak.service")
     server.wait_for_unit("nginx.service")
+    client.wait_for_unit("multi-user.target")
+    server.wait_for_unit("terrace-test-system-trust.service")
+    trust_consistent(client, CA, "vault.terrace.invalid:443", ["vault.terrace.invalid", "identity.terrace.invalid"], "client")
+    # Vaultwarden's default identityCaFile is the system bundle, assembled at boot from the CA's store path.
+    server.succeed("test ! -L " + BUNDLE + " && test -f " + BUNDLE)
+    trust_consistent(server, BUNDLE, "127.0.0.1:443", ["identity.terrace.invalid", "vault.terrace.invalid"], "server system bundle")
     with subtest("user-free initial realm, private synthetic enrollment, trusted discovery"):
         assert server.succeed("runuser -u postgres -- psql -XAtw -d keycloak -c \"select count(*) from user_entity where realm_id=(select id from realm where name='terrace')\" 2>/dev/null").strip() == "0"
-        server.succeed("python3 /etc/gateway-protocol.py seed", timeout=120)
+        server.succeed("SSL_CERT_FILE=" + CA + " python3 /etc/gateway-protocol.py seed", timeout=120)
         assert server.succeed("runuser -u postgres -- psql -XAtw -d keycloak -c \"select count(*) from user_entity where username='gateway-fixture-bootstrap'\" 2>/dev/null").strip()=="0"
         server.succeed("chmod 0600 ${directory}/keycloak.env && truncate -s 0 ${directory}/keycloak.env && chmod 0400 ${directory}/keycloak.env")
         server.succeed("systemctl start terrace-vaultwarden-migrate.service && systemctl start vaultwarden.service && systemctl start terrace-vaultwarden-bootstrap.service",timeout=180)
+        # Deliberately no --cacert: the service user verifies through the system bundle, Vaultwarden's default trust path.
         server.succeed("runuser -u terrace_vaultwarden -- curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null")
         client.succeed("install -d -m 0700 /root/vaultwarden-functional /root/.pki/nssdb && certutil -N -d sql:/root/.pki/nssdb --empty-password && certutil -A -d sql:/root/.pki/nssdb -n TerraceVaultTest -t 'C,,' -i ${certificate}/ca.pem")
         with tempfile.TemporaryDirectory(prefix="vaultwarden-browser-",dir=server.shared_dir) as temporary:
@@ -117,7 +138,7 @@ in {
             client.succeed("cp /tmp/shared/"+name+"/credentials.json /root/vaultwarden-functional/credentials.json && chmod 0600 /root/vaultwarden-functional/credentials.json")
     def browser(mode):
         try:
-            assert client.succeed("${browserPython}/bin/python3 /etc/vaultwarden-browser.py "+mode,timeout=420 if mode=="renew" else 240).strip()=="Vaultwarden browser phase "+mode+" passed."
+            assert client.succeed("SSL_CERT_FILE=" + CA + " NODE_EXTRA_CA_CERTS=" + CA + " ${browserPython}/bin/python3 /etc/vaultwarden-browser.py "+mode,timeout=420 if mode=="renew" else 240).strip()=="Vaultwarden browser phase "+mode+" passed."
             print("Vaultwarden browser phase "+mode+" passed.")
         except Exception:
             try:
@@ -181,7 +202,7 @@ in {
         import re
         assert not re.search(r':(?:8088|9000)(?:\s|$)',listeners)
         assert server.succeed("terrace-vaultwarden-inspect",timeout=120).strip()=="Native Vaultwarden private admin readback passed."
-        assert client.succeed("curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/admin").strip()=="403"
+        assert client.succeed(CURL + "--silent --max-time 5 --output /dev/null --write-out '%{http_code}' https://vault.terrace.invalid/admin").strip()=="403"
         assert server.succeed("python3 /etc/vaultwarden-attachments.py verify").strip()=="Vaultwarden encrypted attachment inventory verify passed."
         server.succeed("systemctl start keycloak.service",timeout=180)
         server.wait_until_succeeds("curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null",timeout=90)

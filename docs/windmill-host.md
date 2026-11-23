@@ -300,8 +300,12 @@ the network/error evidence.
 The functional check trusts a separate synthetic CA and serves a signed
 CA:false/serverAuth leaf for both exact fixture hostnames; OpenSSL verifies
 purpose and hostnames before the fixture can build. System and browser trust
-only the CA. This corrects the CA-as-leaf test pattern without asserting that
-it caused any earlier frontend loading failure. The baseline runtime check's
+only the CA. The system bundle that holds it (Windmill's default
+`identityCaFile`) is assembled at boot inside the guest from the public roots
+and the CA's store path (`platform/test-system-trust.nix`), never a cached
+`security.pki` copy; other test clients reference the store path directly.
+This corrects the CA-as-leaf test pattern without asserting that it caused any
+earlier frontend loading failure. The baseline runtime check's
 default certificate fixture remains unchanged.
 
 The check wrapper uses Nix `--keep-failed`. Before a failed guest is torn down,

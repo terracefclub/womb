@@ -2,7 +2,10 @@
   pkgs,
   module,
 }: let
-  certificate = pkgs.runCommand "terrace-identity-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic, with a random build-time key: clients reference this store path (curl
+  # --cacert) and nothing copies it into another derivation (no security.pki), so a
+  # certificate rebuilt with a new key reaches every client at once (../test-trust.nix).
+  certificate = pkgs.runCommand "terrace-identity-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p $out
     openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
       -keyout $out/key.pem -out $out/cert.pem \
@@ -72,11 +75,13 @@ in {
     client = {...}: {
       imports = [module]; # Importing the optional module must enable nothing.
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
-      security.pki.certificateFiles = ["${certificate}/cert.pem"];
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
     import json, shlex
+    CA = "${certificate}/cert.pem"
+    CURL = "curl --cacert " + CA + " "
 
     start_all()
     identity.wait_for_unit("postgresql.service")
@@ -94,17 +99,20 @@ in {
     def sql(query):
         return identity.succeed(PG + shlex.quote(query)).strip()
 
+    client.wait_for_unit("multi-user.target")
+    trust_consistent(client, CA, "identity:443", ["identity"], "client")
+
     with subtest("trusted HTTPS issuer and public-path boundary"):
-        discovery = json.loads(client.succeed("curl --fail --silent --max-time 10 https://identity/realms/terrace/.well-known/openid-configuration"))
+        discovery = json.loads(client.succeed(CURL + "--fail --silent --max-time 10 https://identity/realms/terrace/.well-known/openid-configuration"))
         assert discovery["issuer"] == "https://identity/realms/terrace"
         assert discovery["authorization_endpoint"].startswith("https://identity/")
         assert discovery["token_endpoint"].startswith("https://identity/")
         for path in ["/", "/admin/", "/admin/master/console/", "/realms/master/", "/.well-known/oauth-authorization-server/realms/master", "/health/ready", "/metrics"]:
-            assert client.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' https://identity{path}").strip() == "404"
+            assert client.succeed(CURL + f"-s -o /dev/null -w '%{{http_code}}' https://identity{path}").strip() == "404"
         for path in ["/realms/terrace/clients-registrations", "/realms/terrace/clients-registrations/default", "/realms/terrace/clients-registrations;ignored/default"]:
             endpoint = shlex.quote(f"https://identity{path}")
-            assert client.succeed(f"curl -s -X POST -H 'Content-Type: application/json' -d '{{}}' -o /dev/null -w '%{{http_code}}' {endpoint}").strip() == "404"
-        spoofed = json.loads(client.succeed("curl --fail --silent https://identity/realms/terrace/.well-known/openid-configuration -H 'X-Forwarded-Host: attacker.invalid' -H 'X-Forwarded-Proto: http' -H 'X-Forwarded-Port: 81' -H 'Forwarded: host=attacker.invalid;proto=http'"))
+            assert client.succeed(CURL + f"-s -X POST -H 'Content-Type: application/json' -d '{{}}' -o /dev/null -w '%{{http_code}}' {endpoint}").strip() == "404"
+        spoofed = json.loads(client.succeed(CURL + "--fail --silent https://identity/realms/terrace/.well-known/openid-configuration -H 'X-Forwarded-Host: attacker.invalid' -H 'X-Forwarded-Proto: http' -H 'X-Forwarded-Port: 81' -H 'Forwarded: host=attacker.invalid;proto=http'"))
         assert spoofed["issuer"] == discovery["issuer"]
         client.fail("nc -z -w 2 identity 80")
         for port in [5432, 8088, 9000]:

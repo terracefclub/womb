@@ -16,10 +16,16 @@ module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(module)
 
 
+def test_script(source):
+    # The Python text of a Nix testScript. A line that is only a Nix interpolation (the shared
+    # trust guard, ${import ./test-trust.nix ...}) is Nix, not Python: it is dropped here.
+    script = source.split('testScript =',1)[1].split("''",1)[1].rsplit("'';",1)[0]
+    return textwrap.dedent('\n'.join(line for line in script.split('\n') if not re.fullmatch(r'\s*\$\{import \./test-trust\.nix \{inherit pkgs;\}\}\s*', line)))
+
 class FunctionalReceipt(unittest.TestCase):
     def test_old_layout_observations_accept_numeric_facts_without_denial_assumptions(self):
         source=(Path(__file__).parents[2]/'platform/windmill-test.nix').read_text()
-        tree=ast.parse(textwrap.dedent(source.split('testScript =',1)[1].split("''",1)[1].rsplit("'';",1)[0]))
+        tree=ast.parse(test_script(source))
         loops=[node for node in ast.walk(tree) if isinstance(node,ast.For) and ast.unparse(node.target)=='(label, row)']
         lengths=[node for node in ast.walk(tree) if isinstance(node,ast.Assert) and ast.unparse(node.test)=='len(old_parents) == 2']
         self.assertEqual(len(loops),1);self.assertEqual(len(lengths),1)
@@ -81,7 +87,7 @@ class FunctionalReceipt(unittest.TestCase):
 
     def test_final_listener_gate_rejects_inspection_errors(self):
         source=(Path(__file__).parents[2]/'platform/windmill-functional-test.nix').read_text()
-        tree=ast.parse(textwrap.dedent(source.split('testScript =',1)[1].split("''",1)[1].rsplit("'';",1)[0]))
+        tree=ast.parse(test_script(source))
         commands=[node.args[0].value for node in ast.walk(tree) if isinstance(node,ast.Call)
                   and isinstance(node.func,ast.Attribute) and node.func.attr=='succeed' and node.args
                   and isinstance(node.args[0],ast.Constant) and isinstance(node.args[0].value,str)

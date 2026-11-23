@@ -46,6 +46,12 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 host.stop_unit("terrace-rehearsal-" + "a" * 32 + ".service", None)
 
+    def test_stop_of_a_unit_that_finished_meanwhile_is_not_an_error(self):
+        # The unit was still active when checked, then finished and was collected before the stop.
+        with patch.object(host, "unit_off", side_effect=[False] + [True] * 5), \
+                patch.object(host, "command", side_effect=subprocess.CalledProcessError(5, ["synthetic"])):
+            host.stop_unit("terrace-rehearsal-" + "a" * 32 + ".service", None)
+
     def runtime(self, run, run_id, directory):
         host.write_json(run / "runtime.json", {"scope": "terrace-disposable-synthetic", "runId": run_id, "directory": str(directory)})
 

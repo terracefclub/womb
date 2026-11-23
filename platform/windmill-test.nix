@@ -20,11 +20,16 @@
     if tlsFixture != null
     then tlsFixture
     else
-      pkgs.runCommand "windmill-public-test-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+      pkgs.runCommand "terrace-windmill-proof-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
         mkdir -p $out
         openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes -keyout $out/key.pem -out $out/cert.pem \
           -subj '/CN=windmill.terrace.invalid' -addext 'subjectAltName=DNS:windmill.terrace.invalid,DNS:identity.terrace.invalid' 2>/dev/null
       '';
+  # Synthetic, random build-time keys. Clients reference this store path (curl --cacert)
+  # and nothing cached copies it (no security.pki). The host keeps Windmill's product
+  # default (identityCaFile = the system bundle, mounted into the containers) under test:
+  # ../test-system-trust.nix assembles that bundle at boot from the public roots and this
+  # store path, inside the guest.
   trustedCertificate = "${certificate}/${
     if tlsFixture == null
     then "cert.pem"
@@ -40,14 +45,20 @@ in {
   name = "terrace-windmill-runtime";
   nodes = {
     host = {lib, ...}: {
-      imports = [./windmill.nix ./identity.nix];
+      imports = [
+        ./windmill.nix
+        ./identity.nix
+        (import ./test-system-trust.nix {
+          ca = trustedCertificate;
+          units = ["podman-terrace-windmill-server.service" "podman-terrace-windmill-worker.service"];
+        })
+      ];
       virtualisation = {
         memorySize = 6144;
         cores = 2;
         diskSize = 16384;
         qemu.options = ["-fw_cfg" "name=opt/terrace-workload,string=windmill-runtime"];
       };
-      security.pki.certificateFiles = [trustedCertificate];
       networking.hosts."127.0.0.1" = ["windmill.terrace.invalid" "identity.terrace.invalid"];
       terrace.identity = {
         enable = true;
@@ -136,7 +147,6 @@ in {
     };
     client = {nodes, ...}: {
       networking.hosts.${nodes.host.networking.primaryIPAddress} = ["windmill.terrace.invalid" "identity.terrace.invalid"];
-      security.pki.certificateFiles = [trustedCertificate];
       environment.systemPackages = [pkgs.curl pkgs.netcat-openbsd];
       networking.firewall.allowedTCPPorts = [18080];
       systemd.services.synthetic-peer = {
@@ -153,6 +163,11 @@ in {
     };
   };
   testScript = ''
+    ${import ./test-trust.nix {inherit pkgs;}}
+    CA = "${trustedCertificate}"
+    CURL = "curl --cacert " + CA + " "
+    BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
     def stop_test_blocker(unit):
         assert unit in ["windmill-test-positive.service", "windmill-test-db-block.service", "windmill-test-cancel-block.service"]
         status, _ = host.execute("systemctl stop " + unit + " >/dev/null 2>&1", timeout=10)
@@ -192,8 +207,15 @@ in {
         host.wait_for_unit("nginx.service")
         host.wait_for_unit("postgresql.target")
         host.wait_for_unit("keycloak.service", timeout=300)
+        client.wait_for_unit("multi-user.target")
+        host.wait_for_unit("terrace-test-system-trust.service")
+        trust_consistent(client, CA, "windmill.terrace.invalid:443", ["windmill.terrace.invalid", "identity.terrace.invalid"], "client")
+        # Windmill's default identityCaFile is the system bundle, assembled at boot from the CA's store path.
+        host.succeed("test ! -L " + BUNDLE + " && test -f " + BUNDLE)
+        trust_consistent(host, BUNDLE, "127.0.0.1:443", ["identity.terrace.invalid", "windmill.terrace.invalid"], "host system bundle")
         with subtest("real user-free identity issuer and trusted loopback discovery"):
-            host.succeed("curl --fail --silent --max-time 10 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e '.issuer == \"https://identity.terrace.invalid/realms/terrace\"' >/dev/null")
+            host.succeed(CURL + "--fail --silent --max-time 10 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration | jq -e '.issuer == \"https://identity.terrace.invalid/realms/terrace\"' >/dev/null")
+            # Deliberately no --cacert: the service user verifies through the system bundle, Windmill's default trust path.
             host.succeed("runuser -u terrace_windmill -- curl --fail --silent --max-time 10 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null")
             host.succeed("runuser -u postgres -- psql -XAt -d keycloak -c 'SELECT count(*) FROM user_entity' | grep -qx 0")
         status, _ = host.execute("umask 077; ${pkgs.bun}/bin/bun --no-env-file --eval 'console.log(1)' >/var/lib/windmill-test-bun.log 2>&1")
@@ -201,7 +223,7 @@ in {
         assert status == 0
         host.fail("runuser -u nobody -- test -r /var/lib/windmill-test-launcher.log")
         with subtest("closed before explicit migration and bootstrap"):
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             host.fail("systemctl start podman-terrace-windmill-server.service")
             host.succeed("systemctl reset-failed podman-terrace-windmill-server.service")
         with subtest("actual unchanged image migrations and closed delayed bootstrap"):
@@ -210,7 +232,7 @@ in {
                 raise Exception("Windmill migration failed; filtered diagnostic classifications above.")
             host.succeed("systemctl start --no-block podman-terrace-windmill-server.service")
             host.wait_for_open_port(18001, timeout=120)
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             host.succeed("touch /run/windmill-test-release")
             host.wait_until_succeeds("grep -Fxq 'Windmill launcher stage: waiting for ownership' /var/lib/windmill-test-launcher.log", timeout=30)
             print(host.succeed("python /etc/windmill-lock-probe.py"))
@@ -236,8 +258,8 @@ in {
             assert host.succeed("podman exec terrace-windmill-worker stat -c '%u %a' /tmp/windmill /tmp/windmill/cache", timeout=10).strip().splitlines() == ["44123 700", "44123 700"]
             host.succeed("systemctl start terrace-windmill-bootstrap.service")
             assert host.succeed("runuser -u postgres -- psql -XAtw -d terrace_windmill -c \"SELECT value->'keycloak'->>'pkce' FROM global_settings WHERE name='oauths'\" 2>/dev/null").strip() == "true"
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
-            assert client.succeed("curl -s -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login").strip() == "403"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
+            assert client.succeed(CURL + "-s -X POST -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/api/auth/login").strip() == "403"
             client.fail("nc -z -w 2 host 18001")
             client.fail("nc -z -w 2 host 5432")
         with subtest("factory rejected and actual bounded worker execution"):
@@ -258,7 +280,7 @@ in {
             host.succeed("chmod 0600 /var/lib/terrace-windmill-inputs/bootstrap.json && systemctl start --no-block terrace-windmill-bootstrap.service")
             host.wait_until_succeeds("systemctl is-failed --quiet windmill-test-positive.service")
             host.wait_until_succeeds("systemctl is-failed --quiet terrace-windmill-bootstrap.service")
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             stop_test_blocker("windmill-test-positive.service")
             stop_test_blocker("windmill-test-db-block.service")
             host.succeed("chmod 0400 /var/lib/terrace-windmill-inputs/bootstrap.json && systemctl reset-failed terrace-windmill-bootstrap.service && systemctl start terrace-windmill-bootstrap.service")
@@ -269,18 +291,18 @@ in {
             host.wait_until_succeeds("test \"$(systemctl show terrace-windmill-bootstrap.service -p ActiveState --value)\" = activating && test ! -e /run/terrace-windmill-ready")
             host.succeed("systemctl kill --kill-whom=main --signal=SIGTERM terrace-windmill-bootstrap.service")
             host.wait_until_succeeds("systemctl is-failed --quiet terrace-windmill-bootstrap.service")
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             stop_test_blocker("windmill-test-cancel-block.service")
             host.succeed("systemctl reset-failed terrace-windmill-bootstrap.service && systemctl start terrace-windmill-bootstrap.service")
         with subtest("failed rebootstrap closes previously ready ingress"):
             host.succeed("chmod 0600 /var/lib/terrace-windmill-inputs/bootstrap.json")
             host.fail("systemctl start terrace-windmill-bootstrap.service")
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             host.succeed("chmod 0400 /var/lib/terrace-windmill-inputs/bootstrap.json && systemctl reset-failed terrace-windmill-bootstrap.service && systemctl start terrace-windmill-bootstrap.service")
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "200"
         with subtest("explicit service stop leaves persistent schema and runtime inputs"):
             host.succeed("systemctl stop podman-terrace-windmill-worker.service podman-terrace-windmill-server.service")
-            assert client.succeed("curl -s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
+            assert client.succeed(CURL + "-s -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid/").strip() == "503"
             host.succeed("runuser -u postgres -- psql -XAt -d terrace_windmill -c 'select count(*) from password' >/dev/null && test -s /var/lib/terrace-windmill-inputs/bootstrap.json")
             host.succeed("test -z \"$(podman ps -q)\"")
             host.succeed("systemctl stop keycloak.service nginx.service postgresql.target postgresql.service")

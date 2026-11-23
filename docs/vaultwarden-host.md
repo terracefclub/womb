@@ -186,7 +186,11 @@ with output `/nix/store/7c4p99h50qra2avyrg9k9mq4jkadmfxk-vm-test-run-terrace-vau
 All15 recorded host process fingerprints were absent afterward; the test also
 requires exact application/identity/PostgreSQL units and listeners stopped.
 The fixture serves a separate signed SAN/server-auth leaf and trusts only its
-synthetic CA; certificate verification stays enabled.
+synthetic CA; certificate verification stays enabled. Test clients reference the
+CA's store path; the server keeps the module default (`identityCaFile` is the
+system bundle), and that bundle is assembled at boot inside the guest from the
+public roots and the CA's store path (`platform/test-system-trust.nix`), never a
+cached `security.pki` copy of a CA whose key is random at build time.
 It exercises real trusted HTTPS/Keycloak code/S256 browser sign-in, individual
 master-password creation and fresh-browser unlock, actual web-vault encryption
 and clipboard decryption of two separate users' items, reciprocal private-item

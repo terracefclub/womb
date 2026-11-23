@@ -54,3 +54,17 @@ This protects the standalone driver lifetime; it does not prove service backup
 consistency, full-stack bootstrap, restore or scoped data deletion. Those are
 separate checks built on this containment boundary. A physical host failure or
 kernel failure is outside this host-level mechanism.
+
+## Stopping a unit that has just finished
+
+`stop_unit` stops the transient unit when it is not already off. On
+2026-11-21 an all-services rehearsal passed its whole scenario and was still
+rejected with no complete receipt: the guardian wrote its result and exited, and
+systemd deactivated and collected the transient unit (`--collect`) between the
+check that saw it active and `systemctl stop`, which then failed with
+"Unit … not loaded". Since PR 61 a failed stop command is re-checked, and only a
+unit that is still not off counts as a stop failure. A unit test covers the
+check-then-collected case, and the containment check above runs real transient
+units and guests through the same stop path. No complete rehearsal has hit the
+race since the fix: the two complete all-services runs since then did not
+trigger it, so that path is covered only by the unit test.

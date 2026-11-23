@@ -9,7 +9,9 @@
     else "0";
   rosterBundle = import ./windmill-functional/roster-package.nix {inherit pkgs;};
   fixture = import ./windmill-functional/functional-fixture-package.nix {inherit pkgs contract;};
-  certificate = pkgs.runCommand "windmill-functional-certificate" {nativeBuildInputs = [pkgs.openssl];} ''
+  # Synthetic CA, random build-time keys: referenced by store path only (see
+  # ./windmill-test.nix and ../test-trust.nix), never copied into a cached bundle.
+  certificate = pkgs.runCommand "terrace-windmill-functional-proof-ca" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir $out
     openssl req -x509 -nodes -newkey rsa:2048 -keyout ca-key.pem -out $out/ca.pem -days 3650 \
       -subj /CN=TerraceWindmillSyntheticCA -addext basicConstraints=critical,CA:TRUE \
@@ -70,8 +72,12 @@ in
     };
     testScript = {nodes}:
       assert pkgs.lib.assertMsg (bootOptionsPresent nodes.host.virtualisation.qemu.options && bootOptionsPresent nodes.client.virtualisation.qemu.options) "Windmill functional guests require native direct boot, shared filesystem and test network options."; ''
+        ${import ./test-trust.nix {inherit pkgs;}}
         import shlex, tempfile
         roster_enabled = "${rosterFlag}" == "1"
+        CA = "${certificate}/ca.pem"
+        CURL = "curl --cacert " + CA + " "
+        BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
         from pathlib import Path
 
         def sql(query):
@@ -79,7 +85,7 @@ in
 
         def browser(phase):
             try:
-                assert client.succeed("python /etc/windmill-functional-browser.py " + phase + (roster_enabled and phase in ["create", "verify"] and " --roster" or ""), timeout=240).strip() == "Windmill functional browser phase " + phase + " passed."
+                assert client.succeed("SSL_CERT_FILE=" + CA + " NODE_EXTRA_CA_CERTS=" + CA + " python /etc/windmill-functional-browser.py " + phase + (roster_enabled and phase in ["create", "verify"] and " --roster" or ""), timeout=240).strip() == "Windmill functional browser phase " + phase + " passed."
                 print("Windmill functional browser phase " + phase + " passed.")
             except Exception:
                 try:
@@ -103,14 +109,19 @@ in
             start_all()
             host.wait_for_unit("keycloak.service", timeout=300)
             host.wait_for_unit("nginx.service")
+            client.wait_for_unit("multi-user.target")
+            host.wait_for_unit("terrace-test-system-trust.service")
+            trust_consistent(client, CA, "windmill.terrace.invalid:443", ["windmill.terrace.invalid", "identity.terrace.invalid"], "client")
+            # Windmill's default identityCaFile is the system bundle, assembled at boot from the CA's store path.
+            trust_consistent(host, BUNDLE, "127.0.0.1:443", ["identity.terrace.invalid", "windmill.terrace.invalid"], "host system bundle")
             with subtest("reviewed synthetic enrollment and explicit migration/bootstrap"):
-                host.succeed("python /etc/gateway-protocol.py seed", timeout=120)
+                host.succeed("SSL_CERT_FILE=" + CA + " python /etc/gateway-protocol.py seed", timeout=120)
                 assert host.succeed("runuser -u postgres -- psql -w -XAt -d keycloak -c \"SELECT count(*) FROM user_entity WHERE username='gateway-fixture-bootstrap'\" 2>/dev/null", timeout=10).strip() == "0"
                 host.succeed("chmod 0600 ${directory}/keycloak.env && truncate -s 0 ${directory}/keycloak.env && chmod 0400 ${directory}/keycloak.env")
-                assert host.succeed("curl --silent --max-time 5 -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid", timeout=10).strip() == "503"
+                assert host.succeed(CURL + "--silent --max-time 5 -o /dev/null -w '%{http_code}' https://windmill.terrace.invalid", timeout=10).strip() == "503"
                 host.succeed("systemctl start terrace-windmill-migrate.service", timeout=300)
                 host.succeed("touch /run/windmill-test-release && systemctl start podman-terrace-windmill-server.service && systemctl start podman-terrace-windmill-worker.service", timeout=300)
-                host.wait_until_succeeds("curl --fail --silent --max-time 5 https://windmill.terrace.invalid/api/version >/dev/null", timeout=90)
+                host.wait_until_succeeds(CURL + "--fail --silent --max-time 5 https://windmill.terrace.invalid/api/version >/dev/null", timeout=90)
                 assert sql("SELECT count(*) FROM password WHERE email IN ('local-member@terrace.invalid','local-alumni@terrace.invalid','local-editorial-admin@terrace.invalid') AND disabled=false AND login_type='keycloak'") == "3"
                 assert sql("SELECT count(*) FROM password WHERE email='local-unapproved@terrace.invalid'") == "0"
                 client.succeed("install -d -m 0700 /root/windmill-functional /root/.pki/nssdb && certutil -N -d sql:/root/.pki/nssdb --empty-password && certutil -A -d sql:/root/.pki/nssdb -n TerraceWindmillTest -t 'C,,' -i ${certificate}/ca.pem")
@@ -140,9 +151,9 @@ in
                         recovery_sessions = sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'")
                         assert host.succeed("terrace-windmill-inspect", timeout=55).strip() == "Native Windmill private admin readback passed."
                         assert sql("SELECT count(*) FROM token WHERE email='admin@windmill.dev'") == recovery_sessions
-                        assert client.succeed("curl --silent --max-time 5 -o /dev/null -w '%{http_code}' -X POST https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == "403"
+                        assert client.succeed(CURL + "--silent --max-time 5 -o /dev/null -w '%{http_code}' -X POST https://windmill.terrace.invalid/api/auth/login", timeout=10).strip() == "403"
                         host.succeed("test ! -s ${directory}/keycloak.env && systemctl start keycloak.service terrace-identity-health.timer", timeout=300)
-                        host.wait_until_succeeds("curl --fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null", timeout=90)
+                        host.wait_until_succeeds(CURL + "--fail --silent --max-time 5 https://identity.terrace.invalid/realms/terrace/.well-known/openid-configuration >/dev/null", timeout=90)
                         assert host.succeed("runuser -u postgres -- psql -w -XAt -d keycloak -c \"SELECT count(*) FROM user_entity WHERE username='gateway-fixture-bootstrap'\" 2>/dev/null", timeout=10).strip() == "0"
                 browser("verify")
             with subtest("approval removal rejects old session and fresh native OIDC"):

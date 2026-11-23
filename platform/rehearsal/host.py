@@ -108,7 +108,14 @@ def unit_off(unit):
 
 def stop_unit(unit, log):
     if not unit_off(unit):
-        command(["sudo", "-n", "systemctl", "stop", unit], log)
+        try:
+            command(["sudo", "-n", "systemctl", "stop", unit], log)
+        except subprocess.CalledProcessError:
+            # The guardian may finish, and systemd collect the transient unit (--collect),
+            # between the check above and the stop: "Unit ... not loaded". Only a unit that
+            # is still not off is a stop failure.
+            if not unit_off(unit):
+                raise
     deadline = time.monotonic() + 10
     while not unit_off(unit) and time.monotonic() < deadline:
         time.sleep(0.1)
