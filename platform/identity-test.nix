@@ -148,6 +148,7 @@ in {
         mutations = [
             {"users": [{"username": "forbidden-private-fixture"}]},
             {"registrationAllowed": True}, {"sslRequired": "none"},
+            {"adminEventsDetailsEnabled": True}, {"adminEventsDetailsEnabled": None}, {"adminEventsEnabled": "true"},
             {"identityProviders": [{"alias": "unreviewed"}]},
             {"components": {"org.keycloak.storage.UserStorageProvider": [{"name": "ldap"}]}},
             {"userFederationProviders": [{"providerName": "ldap"}]},

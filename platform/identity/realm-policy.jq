@@ -2,7 +2,9 @@
 def https_origin: type == "string" and test("^https://[A-Za-z0-9.-]+(:[0-9]+)?$");
 def https_redirect: type == "string" and test("^https://[A-Za-z0-9.-]+(:[0-9]+)?/") and (contains("*") | not);
 type == "object" and .realm == "terrace" and .enabled == true and
-.registrationAllowed == false and (.adminEventsDetailsEnabled // false) == false and (.sslRequired == "external" or .sslRequired == "all") and
+.registrationAllowed == false and ((has("adminEventsDetailsEnabled") | not) or .adminEventsDetailsEnabled == false) and
+((has("adminEventsEnabled") | not) or (.adminEventsEnabled | type == "boolean")) and
+(.sslRequired == "external" or .sslRequired == "all") and
 ((.users // []) | length == 0) and ((.federatedUsers // []) | length == 0) and
 ((.identityProviders // []) | length == 0) and ((.identityProviderMappers // []) | length == 0) and
 ((.userFederationProviders // []) | length == 0) and ((.userFederationMappers // []) | length == 0) and

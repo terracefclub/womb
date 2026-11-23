@@ -339,11 +339,15 @@ attributes or other personal data.
   website release pinned today predates that, so the `terrace` realm's admin
   events stay as they are until Womb re-pins to a release that carries them.
   Until then the journal lines are the record of changes to site accounts.
-- **Both values must be booleans.** `adminEventsDetailsEnabled: true` is
-  refused by hosting, in the plan (`REFUSED`, exit 3, nothing applied) and by
-  the realm hosting policy that also guards the first import: representations
-  in the audit log can contain personal data, and that decision belongs to the
-  hosting side, not to an artifact.
+- **Both values are checked strictly.** When present, `adminEventsEnabled`
+  must be a boolean and `adminEventsDetailsEnabled` must be exactly `false`;
+  absent is accepted. `adminEventsDetailsEnabled: true` is refused by hosting
+  because representations in the audit log can contain personal data, and that
+  decision belongs to the hosting side, not to an artifact. Through the command
+  line the realm hosting policy (`realm-policy.jq`) refuses first, with exit 1
+  ("fails the hosting policy") and nothing planned; the same policy guards the
+  first import. The plan's own check (`REFUSED`, exit 3) is defence in depth
+  that the command line cannot reach today; only its unit tests exercise it.
 
 ## Not provided, and why
 

@@ -543,7 +543,6 @@ in {
             "drops a user-profile attribute": '(.components["org.keycloak.userprofile.UserProfileProvider"][0].config["kc.user.profile.config"][0]) |= (fromjson | .attributes |= map(select(.name != "lastName")) | tojson)',
             "turns a confidential client public": '(.clients[] | select(.clientId == "terrace-web") | .publicClient) = true',
             "declares a key it does not understand": '.someFutureSetting = true',
-            "declares an admin events flag that is not a boolean": '.adminEventsEnabled = "true"',
         }
         for label, change in destructive.items():
             app.succeed(f"umask 077; jq {shlex.quote(change)} /root/changed.json >/root/destructive.json")
@@ -553,6 +552,8 @@ in {
         app.succeed(f"umask 077; echo {shlex.quote(json.dumps(config))} >/etc/terrace/identity-admin.json && chmod 0400 /etc/terrace/identity-admin.json")
         ok("Plan refused" in tia(f"realm apply --admin ops-alice --password-stdin --plan-sha256 {digest}", stdin=alice, expect=3), "apply refuses a destructive pinned definition")
         for label, change in {"admin event representations": '.adminEventsDetailsEnabled = true',
+                              "admin event representations set to null": '.adminEventsDetailsEnabled = null',
+                              "admin events flag that is not a boolean": '.adminEventsEnabled = "true"',
                               "wildcard redirect URI": '(.clients[] | select(.clientId == "terrace-web") | .redirectUris) += ["https://*.terrace.invalid/*"]',
                               "direct access grants": '(.clients[] | select(.clientId == "terrace-web") | .directAccessGrantsEnabled) = true'}.items():
             app.succeed(f"umask 077; jq {shlex.quote(change)} /root/changed.json >/root/policy.json")
