@@ -155,10 +155,15 @@ mismatched SNI get 421).
 
 `terrace-tls-check.service` connects to the host's own port 443 once per public
 name, with that name as SNI, and fails when the served chain does not verify
-against the system trust store ("no verified TLS session"), does not name the
-host ("does not name"), or has fewer than `tls.minDays` days left. It is the
-safety net for everything above, including a reload that did not take. It prints one line per name (expiry date and issuer,
-no key material). `terrace-tls-check.timer` runs it an hour after adoption or
+against the system trust store ("no verified TLS session", followed by
+OpenSSL's reason, for example `verify error 9: certificate is not yet valid`,
+`verify error 20: unable to get local issuer certificate` or `cannot connect to
+127.0.0.1:443`), does not name the host ("does not name"), or has fewer than
+`tls.minDays` days left. It is the safety net for everything above, including a
+reload that did not take. It prints one line per name (expiry date and issuer,
+or the failure and its reason; no key material). The script is
+`platform/production/tls-check.sh`; its reasons are unit-tested in
+`tests/platform/test_tls_check.py`. `terrace-tls-check.timer` runs it an hour after adoption or
 boot and daily after that. A failure shows in `systemctl --failed`. Delivering
 that to a person is G-23 (alerting), not built.
 
@@ -274,16 +279,26 @@ order succeeds. Run the DNS and port 80 checks above first.
 
 ```sh
 sudo terrace-tls status       # mode, names, issuer, expiry, PLACEHOLDER or NOT YET ISSUED BY ACME,
-                              # order unit state and retries, next renewal and check runs (root only)
+                              # order unit state and retries, next renewal and check runs, and the
+                              # expiry check run now ("served now", with any failure reason; root only)
 sudo terrace-tls check        # the expiry check, printed to the terminal
 systemctl --failed            # acme-order-renew-<name> or terrace-tls-check if anything failed
 journalctl -u acme-order-renew-<name>.service
 ```
 
-If `terrace-tls check` fails right after an issuance on a real host, check the
-host's clock (for example `timedatectl`) before suspecting the chain: a
-certificate that is not yet valid for a host whose clock is behind fails the
-same way as an untrusted one.
+`status` makes one TLS handshake per public name for its "served now" lines,
+each bounded to 5 seconds (the check itself allows 30), so a hung listener
+delays it by at most 5 seconds per name (15 on the app host, 5 on the relay) and
+is reported as `no answer from 127.0.0.1:443 within 5 s`. A failing check is
+only reported there: it never changes the exit status of `status`.
+`terrace-tls check` exits 1 when any name fails.
+
+If `terrace-tls check` says `certificate is not yet valid`, the host's clock is
+behind the CA's: fix the clock (for example `timedatectl`), not the
+certificate. `certificate has expired` on a certificate that should be fresh
+can be a clock that is ahead. Other reasons (`unable to get local issuer
+certificate`, `self-signed certificate`) point at the chain itself or the
+placeholder.
 
 ## Force a renewal
 
@@ -328,7 +343,8 @@ that one and `prepare-acme` refuses to overwrite it unless given
   above), same command as in the [production profile](production-profile.md#verification).
 - VM proof, on the Linux builder (the wrapper takes the shared lock itself):
   `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-tls-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
-- Tool unit tests: `python3 platform/production/test_terrace_secrets.py -v`.
+- Tool unit tests: `python3 platform/production/test_terrace_secrets.py -v`;
+  expiry check reasons: `python3 tests/platform/test_tls_check.py -v`.
 
 The VM proof boots the same app and relay role modules (`instance =
 "rehearsal"`, `.test` names) next to a local ACME server (`pebble` from
@@ -348,11 +364,19 @@ redirects (also POSTs) and serves challenge files, 421 for other hosts; owners
 and modes, and that the nginx user cannot read the key (ACME directory and
 lego copy) while nginx serves it as a credential; the expiry check passing on a
 fresh certificate and failing (a failed unit), with its own message, on a
-3-day and on a wrong-name certificate; a not-due renewal changes nothing; a
+3-day and on a wrong-name certificate, and with OpenSSL's reason (`verify error
+9: certificate is not yet valid`, also shown by `terrace-tls status`) on a
+certificate whose notBefore is a day ahead, and with a verification reason on
+the relay's placeholder; a not-due renewal changes nothing; a
 forced renewal needs `--yes`, keeps the same nginx process and answers 80 new
 HTTPS connections spread across the reload; with the CA unreachable the
 previous certificate keeps being served and the unit recovers by its own retry
-once the CA is back; a reboot keeping the certificate and the account key; the
+once the CA is back; a first backup right after adoption (the hourly backup
+freshness check fails without one and passes after it; every adopted host in
+the proof, the relay and the app replacement too, takes its backup at once, so
+the proof does not depend on when the clock crosses the hour); a reboot keeping
+the certificate and the account key, across which the freshness timer is made
+to fire at boot as if the reboot had crossed the hour, and passes; the
 relay's first boot with the CA unreachable (placeholder served, failing check,
 a failed unit after its retries), then issuance with a fresh account; backup
 snapshots of both roles without ACME state, and an app replacement restored
@@ -380,12 +404,19 @@ recorded runs, commit and receipts.
   backdating is a common practice of public CAs, and Let's Encrypt documents it,
   but it was not exercised here. Test guests start from a whole-second clock, so
   the proof sets each guest to the host clock at boot and, before every verifying
-  check, waits (at most 30 s) until that guest's clock has reached the served
-  certificate's notBefore. A host whose clock trails the CA by more than its
+  check, asserts that the verifying guest's clock has already reached the
+  served certificate's notBefore: after the sync the proof fails rather than
+  waits, so a broken sync or a wrong issuance time cannot hide behind a wait
+  (the failure path is exercised with a certificate whose notBefore is a day
+  ahead). A host whose clock trails the CA by more than its
   backdating would fail the expiry check: a host clock fault, not a certificate
-  fault, which the check's message does not yet distinguish (backlog).
-- A timer actually firing (the proof starts every unit itself; the daily timer,
-  its jitter and the start-limit window are configuration).
+  fault, which the check names (`certificate is not yet valid`).
+- A TLS timer actually firing: the proof starts the ACME order, renewal and
+  expiry check units itself; their daily timers, jitter and the start-limit
+  window are configuration. The one timer this proof does make fire is the
+  backup freshness timer (not a TLS timer), once, at the app's reboot, through
+  its `Persistent` catch-up after its stamp is moved two hours back; its hourly
+  calendar schedule itself is not exercised.
 - A change of the hostname list on a running host (a new order is needed; the
   expiry check should then fail for the new name until it succeeds), a
   replacement of the relay, and the live switch on the app role (proven on the

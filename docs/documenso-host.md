@@ -281,7 +281,13 @@ signing token enters diagnostics.
 Identity is stopped before the shared database restart
 and started again with the temporary bootstrap credentials removed; its deleted
 master administrator must stay absent. It sets up native two-factor encryption, enables it with an actual TOTP,
-and decrypts the same recovery codes after restart. This tests encryption key
+and decrypts the same recovery codes after restart. Documenso v2.21.1 accepts a
+code only in its own current 30-second step and answers a rejected one with 500,
+so the browser helper never makes a code within 3 seconds of a step edge
+(checking again after every wait, at most three), gives each two-factor request
+only the time left in that step less 1 second, fails a slower request as
+"request outlasted the TOTP margin", and prints one bounded `Documenso TOTP
+request: {...}` line per request (timing facts only, no code or secret). This tests encryption key
 continuity; generic OIDC relies on the identity provider for MFA and does not
 thereby enforce Documenso's native password-login second factor.
 

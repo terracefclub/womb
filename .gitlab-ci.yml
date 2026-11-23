@@ -33,6 +33,7 @@ check-supervision:
     - python infra/cloud/test_rehearsal_escrow.py -v
     - python platform/production/test_terrace_secrets.py -v
     - python platform/production/test_terrace_identity_admin.py -v
+    - python tests/platform/test_tls_check.py -v
 
 oci-metadata:
   image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a

@@ -68,3 +68,16 @@ check-then-collected case, and the containment check above runs real transient
 units and guests through the same stop path. No complete rehearsal has hit the
 race since the fix: the two complete all-services runs since then did not
 trigger it, so that path is covered only by the unit test.
+
+## Purging a failed run
+
+`full.py purge` removes a completed run's synthetic state. A failed or
+incomplete run is refused by that form; `purge RUN --synthetic-only --yes
+--failed` removes it once the run's unit is off, no tagged guest is left and the
+controller recorded in `controller.json` (written by `full.py run` right after
+it creates the run) or `control.json` (written when the guardian is started) has
+exited, judged by process id and kernel start time. The same run-directory
+checks apply (owner, mode, scope and run id; the run path itself, `state/`,
+`retained/` and `escrow/` must not be links); the logs, `evidence/` and the
+receipt stay. See [the full rehearsal](../../docs/full-rehearsal.md) for the
+command and what it keeps.

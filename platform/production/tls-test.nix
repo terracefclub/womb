@@ -243,29 +243,30 @@ in {
     # The local CA (pebble) sets notBefore to the moment of issue; a public CA backdates it
     # (Let's Encrypt by an hour). Guest clocks start from the RTC (whole seconds), so they can
     # trail the CA's guest by a second or two. Each guest is set to the host clock when it
-    # boots, and every verifying client first waits, bounded, until its own clock has reached
-    # the served certificate's notBefore: the real condition, never a blind retry.
+    # boots. After that sync every guest is within milliseconds of the CA's guest, so a
+    # verifying client whose clock has not reached the served certificate's notBefore points
+    # at a broken sync or a wrong issuance: the proof fails then, it does not wait.
     clock_offsets = {}
-    clock_waits = []
 
     def sync_clock(machine):
         offset = float(machine.succeed("date +%s.%N").strip()) - time.time()
         clock_offsets.setdefault(machine.name, []).append(round(offset, 3))
         machine.succeed(f"date -u -s @{time.time():.3f} >/dev/null")
 
-    def wait_valid(machine, target, name):
+    def assert_valid_now(machine, target, name):
+        # Only fetching the served certificate is retried (a connection can race a reload);
+        # the clock comparison is made once.
         started = f"echo | openssl s_client -connect {target}:443 -servername {name} 2>/dev/null | openssl x509 -noout -startdate | cut -d= -f2"
-        condition = f"nb=$({started}) && test -n \"$nb\" && test \"$(date +%s)\" -ge \"$(date -d \"$nb\" +%s)\""
-        if machine.execute(condition)[0] != 0:
-            begun = time.monotonic()
-            machine.wait_until_succeeds(condition, timeout=30)
-            clock_waits.append(f"{machine.name} {name}: {time.monotonic() - begun:.1f} s until notBefore")
+        before = machine.wait_until_succeeds(f"nb=$({started}) && test -n \"$nb\" && date -d \"$nb\" +%s", timeout=30).strip()
+        now = machine.succeed("date +%s.%N").strip()
+        if float(now) < int(before):
+            raise AssertionError(f"{machine.name} {name}: after the boot clock sync the clock ({now}) is still {int(before) - float(now):.3f} s before the served certificate's notBefore ({before}); offsets before the syncs {clock_offsets}")
 
     def served(host, name, verify=True):
         # What a client sees: chain verified against the local CA's roots, name checked.
         base = f"echo | openssl s_client -connect {host}:443 -servername {name}"
         if verify:
-            wait_valid(operator, host, name)
+            assert_valid_now(operator, host, name)
             status, output = operator.execute(base + f" -verify_return_error -verify_hostname {name} -CAfile /root/roots.pem 2>&1")
             if status != 0:
                 diagnosis = [line for line in output.splitlines() if re.search(r"verif|error|depth|connect", line, re.I)][:12]
@@ -302,11 +303,16 @@ in {
         public = op(f"terrace-secrets public {host} backup/primary/sftp-key").strip()
         operator.succeed(f"install -d -o restic -g users -m 0700 /home/restic/.ssh /home/restic/{directory} && echo {shlex.quote(public)} >>/home/restic/.ssh/authorized_keys && chown restic:users /home/restic/.ssh/authorized_keys && chmod 0600 /home/restic/.ssh/authorized_keys")
 
-    def leaf(label, sans, days):
+    def leaf(label, sans, days, starts_in_days=0):
         # Test leaves signed at test time by the local CA's intermediate (management API).
+        # starts_in_days > 0: notBefore that far in the future (a host clock behind its certificate).
+        validity = f"-days {days}"
+        if starts_in_days:
+            stamp = lambda offset: time.strftime("%Y%m%d%H%M%SZ", time.gmtime(time.time() + offset * 86400))
+            validity = f"-not_before {stamp(starts_in_days)} -not_after {stamp(starts_in_days + days)}"
         acme.succeed(f"cd /root/leaf && openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -subj /CN={sans[0]} -keyout {label}-key.pem -out {label}.csr 2>/dev/null && "
                      f"printf 'basicConstraints=critical,CA:FALSE\\nkeyUsage=critical,digitalSignature\\nextendedKeyUsage=serverAuth\\nsubjectAltName=%s\\n' {','.join('DNS:' + s for s in sans)} >{label}.ext && "
-                     f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) -days {days} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
+                     f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) {validity} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
         return acme.succeed(f"cat /root/leaf/{label}.pem"), acme.succeed(f"cat /root/leaf/{label}-key.pem"), fingerprint(acme, f"/root/leaf/{label}.pem")
 
     def served_locally(machine, name, fp):
@@ -324,7 +330,7 @@ in {
     def tls_check(machine, expect_ok, label):
         if expect_ok:
             for name in (NAMES if machine.name == "app" else [RELAY]):
-                wait_valid(machine, "127.0.0.1", name)
+                assert_valid_now(machine, "127.0.0.1", name)
             machine.succeed("systemctl start terrace-tls-check.service", timeout=120)
         else:
             machine.fail("systemctl start terrace-tls-check.service", timeout=120)
@@ -332,6 +338,22 @@ in {
         failed = machine.succeed("systemctl is-failed terrace-tls-check.service || true").strip() == "failed"
         ok(failed != expect_ok and (expect_ok or "terrace-tls-check.service" in failed_units(machine)), label)
         return output
+
+    FRESHNESS = "terrace-backup-freshness.service"
+    FRESHNESS_STAMP = "/var/lib/systemd/timers/stamp-terrace-backup-freshness.timer"
+
+    def first_backup(machine, label, init=True):
+        # Adoption arms the hourly, Persistent backup freshness timer. Until a backup is
+        # recorded its unit fails (correct on a real host); whenever the proof's clock crosses
+        # the hour it would fire and trip the no-failed-units checks. So every adopted host
+        # here takes its backup at once, and the freshness unit is run (as its next hourly
+        # run would) and must pass, which also clears a failure from that short window.
+        if init:
+            machine.succeed("terrace-backup init primary >/dev/null 2>&1")
+        machine.succeed("systemctl start terrace-backup.service", timeout=600)
+        ok(state(machine, "terrace-backup.service", "Result") == "success", f"{label}: backup recorded")
+        machine.succeed(f"systemctl start {FRESHNESS}", timeout=120)
+        ok(state(machine, FRESHNESS, "Result") == "success" and FRESHNESS not in failed_units(machine), f"{label}: backup freshness check passes")
 
     def no_failed_units(machine, label):
         units = failed_units(machine)
@@ -405,6 +427,13 @@ in {
         ok(app.succeed("journalctl -u nginx.service -o cat --no-pager | grep -c 'Reloaded\\|Reloading' || true").strip() != "0", "nginx reloaded after issuance")
         app.wait_for_unit("keycloak.service", timeout=360)
         ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert /root/roots.pem --resolve identity.terrace.test:443:{address('app')} {OIDC}").strip() == "200", "HTTPS identity endpoint with the issued certificate")
+
+    with subtest("first backup: the freshness check fails without one, passes after it"):
+        ok(state(app, "terrace-backup-freshness.timer", "ActiveState") == "active", "hourly backup freshness timer armed by adoption")
+        app.fail(f"systemctl start {FRESHNESS}", timeout=120)
+        journal = app.succeed(f"journalctl -u {FRESHNESS} -o cat --no-pager -n 20")
+        ok("no successful backup recorded" in journal and FRESHNESS in failed_units(app), "without a backup the freshness check fails (a failed unit)")
+        first_backup(app, "app")
 
     with subtest("port 80: only the challenge and the redirect"):
         for name in NAMES:
@@ -490,17 +519,28 @@ in {
         ok(account_hash(app) == account, "the same ACME account renewed")
         no_failed_units(app, "after the forced renewal")
 
-    with subtest("expiry check fails on a short-lived or wrong-name certificate"):
+    with subtest("expiry check fails on a short-lived, wrong-name or not yet valid certificate, naming the cause"):
         directory = live("web.terrace.test")
         app.succeed(f"install -d -m 0700 /run/tls-held && cp -p {directory}/fullchain.pem {directory}/key.pem /run/tls-held/")
-        for label, sans, days, expected in [("short", NAMES, 3, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, "the served certificate does not name")]:
-            chain, key, test_leaf = leaf(label, sans, days)
+        # "future": a certificate whose notBefore is a day ahead, what a host clock behind its CA sees.
+        for label, sans, days, starts, expected in [("short", NAMES, 3, 0, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, 0, "the served certificate does not name"),
+                                                    ("future", NAMES, 60, 1, "web.terrace.test: FAIL: no verified TLS session: verify error 9: certificate is not yet valid")]:
+            chain, key, test_leaf = leaf(label, sans, days, starts)
             put(app, directory + "/fullchain.pem", chain, "0640")
             put(app, directory + "/key.pem", key, "0640")
             app.succeed(f"chown acme:acme {directory}/fullchain.pem {directory}/key.pem && systemctl reload nginx.service")
             app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(test_leaf), timeout=60)
             output = tls_check(app, False, f"expiry check fails visibly on the {label} certificate")
-            ok(expected in output and (label == "short" or "no verified TLS session" not in output), f"{label}: {expected}")
+            ok(expected in output and (label in ["short", "future"] or "no verified TLS session" not in output), f"{label}: {expected}")
+            if label == "future":
+                status = app.succeed("terrace-tls status")
+                ok("served now (5 s per name):" in status and "verify error 9: certificate is not yet valid" in status, "terrace-tls status names the verification failure reason")
+                try:
+                    assert_valid_now(operator, "app", "web.terrace.test")
+                    refused = ""
+                except AssertionError as error:
+                    refused = str(error)
+                ok("before the served certificate's notBefore" in refused, "a verifying client still before notBefore after the clock sync fails the proof instead of waiting")
         app.succeed(f"cp -p /run/tls-held/fullchain.pem /run/tls-held/key.pem {directory}/ && rm -rf /run/tls-held && systemctl reload nginx.service")
         app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(after), timeout=60)
         tls_check(app, True, "expiry check passes again on the real certificate")
@@ -546,6 +586,9 @@ in {
 
     with subtest("reboot keeps the certificate and the account key"):
         certificate, account = fingerprint(app, live("web.terrace.test") + "/cert.pem"), account_hash(app)
+        # As if the reboot crossed the top of the hour (the 2026-11-23 wall-clock flake): the
+        # freshness timer's last run is two hours back, so the Persistent timer must fire at boot.
+        app.succeed(f"test -f {FRESHNESS_STAMP} && touch -d @$(( $(date +%s) - 7200 )) {FRESHNESS_STAMP}")
         app.shutdown()
         app.start()
         app.wait_for_unit("multi-user.target")
@@ -556,6 +599,8 @@ in {
         ok(fingerprint(app, live("web.terrace.test") + "/cert.pem") == certificate and account_hash(app) == account, "certificate and account key survive the reboot")
         ok(all(served("app", name) == certificate for name in NAMES), "same chain served after the reboot")
         app.wait_for_unit("keycloak.service", timeout=360)
+        app.wait_until_succeeds(f"test \"$(systemctl show {FRESHNESS} -p ExecMainStartTimestampMonotonic --value)\" != 0 && test \"$(systemctl show {FRESHNESS} -p ActiveState --value)\" != activating", timeout=300)
+        ok(state(app, FRESHNESS, "Result") == "success", "the freshness timer fired at boot for the missed hour and passed on the recorded backup")
         no_failed_units(app, "after the reboot")
 
     with subtest("relay: first boot with the CA unreachable is safe and visible; issuance once it is back"):
@@ -578,8 +623,13 @@ in {
         ok("minica" in placeholder, f"relay: nginx up with the placeholder {placeholder.strip()}")
         operator.fail(f"echo | openssl s_client -connect relay:443 -servername {RELAY} -verify_return_error -verify_hostname {RELAY} -CAfile /root/roots.pem >/dev/null 2>&1")
         ok(True, "relay: the placeholder is not trusted")
-        tls_check(relay, False, "relay: expiry check fails on the placeholder")
-        ok("PLACEHOLDER" in relay.succeed("terrace-tls status"), "relay: status names the placeholder")
+        output = tls_check(relay, False, "relay: expiry check fails on the placeholder")
+        found = re.search(r"no verified TLS session: (verify error [0-9]+: [^\n]+)", output)
+        assert found is not None, f"relay: no verification reason in the check output: {output}"
+        reason = found.group(1)
+        ok("not yet valid" not in reason, f"relay: the check names OpenSSL's reason for the placeholder ({reason})")
+        status = relay.succeed("terrace-tls status")
+        ok("PLACEHOLDER" in status and reason in status, "relay: status names the placeholder and the reason")
         ok(http("relay", RELAY, "/x") == f"301 https://{RELAY}/x", "relay: port 80 redirect")
         acme.succeed(unblock)
         # The first run could not register; the retry must register afresh, not "recover" it.
@@ -591,8 +641,8 @@ in {
         ok(served("relay", RELAY) == relay_cert, "relay: issued chain served and verified")
         ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert /root/roots.pem --resolve {RELAY}:443:{address('relay')} https://{RELAY}/health").strip() == "200", "relay: Headscale over the issued certificate")
         tls_check(relay, True, "relay: expiry check passes after issuance")
+        first_backup(relay, "relay")
         no_failed_units(relay, "relay after issuance")
-        relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
         relay_listing = relay.succeed("terrace-backup restic primary ls latest 2>/dev/null").splitlines()
         ok(len(relay_listing) > 1 and not [path for path in relay_listing if "/acme" in path], f"relay: snapshot of {len(relay_listing)} paths holds no ACME state")
 
@@ -646,7 +696,6 @@ in {
     with subtest("backup leaves ACME state out; a replacement host re-issues with a new account"):
         old_certificate, old_account = fingerprint(app, live("web.terrace.test") + "/cert.pem"), account_hash(app)
         app.succeed("systemctl stop terrace-cms-sweep.timer terrace-web.service terrace-cms.service keycloak.service nginx.service", timeout=120)
-        app.succeed("terrace-backup init primary >/dev/null 2>&1")
         app.succeed("systemctl start terrace-backup.service", timeout=600)
         snapshot = json.loads(app.succeed("terrace-backup restic primary snapshots --json 2>/dev/null"))[-1]["id"]
         listing = app.succeed(f"terrace-backup restic primary ls {snapshot} 2>/dev/null").splitlines()
@@ -683,6 +732,8 @@ in {
             ok(served("app", name) == new_certificate, f"replacement: {name} served and verified")
         app.wait_for_unit("keycloak.service", timeout=360)
         tls_check(app, True, "replacement: expiry check passes")
+        # The restore does not bring the old host's backup record: back up from the replacement.
+        first_backup(app, "replacement", init=False)
         no_failed_units(app, "replacement")
 
     with subtest("stop owned guests"):
@@ -691,6 +742,6 @@ in {
         acme.shutdown()
     # Labels carry names and counts only, never key material.
     print("TLS-CHECKS " + json.dumps(checks))
-    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "clockOffsetsBeforeSync": clock_offsets, "clockWaits": clock_waits, "seconds": round(time.monotonic() - started_at, 2)}))
+    print("TLS-PROOF " + json.dumps({"assertions": len(checks), "clockOffsetsBeforeSync": clock_offsets, "seconds": round(time.monotonic() - started_at, 2)}))
   '';
 }

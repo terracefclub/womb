@@ -510,6 +510,10 @@ def concurrent_browsers(phase):
         # exclusive directory and cannot accidentally consume an old result.
         target = '/root/rehearsal-concurrent-' + phase
         client.succeed('test ! -e ' + target + ' && test ! -L ' + target + ' && mv -T /root/rehearsal-concurrent ' + target, timeout=10)
+        # The Documenso helper's per-request TOTP facts (fixed keys and numbers only) into the driver log, so a
+        # passing run also shows whether the step-edge guard fired.
+        for line in client.succeed("grep -h '^Documenso TOTP request: {' " + target + '/documents.stderr | head -n 8 || true', timeout=10).splitlines():
+            print('concurrent ' + phase + ': ' + line)
         return value
     except Exception:
         # Stop the owned whole cgroup before reading bounded private evidence.

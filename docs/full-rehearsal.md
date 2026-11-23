@@ -194,8 +194,30 @@ platform/full-rehearsal purge /absolute/private/terrace-rehearsals/run-UUID \
 Purge requires the matching owner/scope markers, completed receipt, exact unit
 and cgroup off, and no tagged guest. It removes that run's recorded runtime,
 state, retained encrypted repository and escrow. It retains receipts/evidence
-and unrelated paths. Failed runs are rejected: investigate/capture them before
-a separately reviewed deletion. Pure rejection/sentinel tests run with
+and unrelated paths. A failed or incomplete run is refused by this form. The
+disk budget still requires purging it, pass or fail: copy its small evidence
+first (`driver.log`, `receipt.json`, `evidence/`), then
+
+```sh
+platform/full-rehearsal purge /absolute/private/terrace-rehearsals/run-UUID \
+  --synthetic-only --yes --failed
+```
+
+`--failed` accepts only a run directory the tool created (same owner, scope,
+run id and mode checks) whose receipt is not complete, whose unit and cgroup are
+off with no tagged guest, and whose controller has exited: the run records the
+controller's process id and start time in `controller.json` (and, once guests
+start, `control.json`); it checks every record present and refuses, printing
+a fixed reason, when there is none, when one is malformed (a link, not private,
+not a JSON object, a wrong run id) or when one names a process that is still
+running. A process that has exited counts as gone, also when it exits while
+being checked. It removes the same things (`state/` with the disks, `retained/`,
+`escrow/`, the recorded runtime directory when one was recorded, a leftover
+`driver-root` link, never following a link out of the run) and keeps
+`driver.log`, `evidence/` and the receipt, marked `syntheticStatePurged` and
+`purgedIncomplete`. A run that failed before this record existed and before its
+guests started has neither file and is still removed by hand. Pure
+rejection/sentinel tests run with
 `direnv exec . python platform/rehearsal/test-full.py -v`.
 
 This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
@@ -372,7 +394,8 @@ direnv exec . ./platform/full-rehearsal purge \
   --synthetic-only --yes
 ```
 
-Receipts/evidence and unrelated or failed runs remain. No provider apply, blank
+Receipts/evidence and unrelated or failed runs remain; a failed run is purged
+with the same command plus `--failed` (above). No provider apply, blank
 provider-machine install, live-data migration, public DNS/cutover, human relay
 OIDC enrollment, forced DERP/NAT path or live Sheets/mail/payment integration is
 claimed by this mode. Website/CMS, identity, Vaultwarden, automation and relay
@@ -411,6 +434,23 @@ into the restored outbox; the invitation files still name the applicants),
 `sweep` by the real timer, and `redaction` (both invitations redacted, two
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
+
+### Observed all-services rehearsals at the proof follow-ups — November 23, 2026 (Pacific)
+
+Website `eab4189`, output on the build machine's non-snapshotted scratch
+dataset, both passed: Womb `ce03a7c` (TLS check reasons, the TLS proof's clock
+and backup-freshness changes, the Documenso TOTP guard, `purge --failed`), run
+`2a1b0d0c`, 10:52 to 11:21 (scenario 1734.96 seconds); and after review fixes,
+Womb `f0c35bd`, run `1f051756`, 12:26 to 12:54 (scenario 1702.27 seconds). Each
+had 198 HTTPS protocol assertions in each of the three phases, all four
+concurrent native browser helpers, and every receipt check true. The driver log
+now carries one `Documenso TOTP request` line per two-factor request,
+sequential and concurrent: five per run, all ended in their code's step, and
+the guard fired once in each run (the original phase's concurrent call, which
+waited 2.6 and 0.4 seconds and made its code at second 3.0). Both were purged
+with the ordinary command (they passed, so `--failed` was not needed); evidence
+on the build machine in `proof-followups-evidence-ce03a7c/` and
+`proof-followups-evidence-f0c35bd/`.
 
 ### Observed all-services rehearsal with website `eab4189` — November 23, 2026 (Pacific)
 

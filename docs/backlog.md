@@ -101,22 +101,42 @@ known to affect a deployed host (none exists).
   (`platform/documenso/functional-browser.py`, `totp`), with unit tests that drive
   both edges on a fake clock. It is the only TOTP generator in Womb (two-factor
   `enable` and both `view-recovery-codes` calls use it). With it the next
-  all-services rehearsal (run `798369c9`, 2026-11-23) passed, but that run keeps
+  all-services rehearsal (run `798369c9`, 2026-11-23) passed, but that run kept
   no per-request record of whether the guard fired, and one pass does not show
   that the failure rate (3 failures in about 10 runs) has dropped.
-  Open robustness points (left as they are so the passing rehearsal still covers
-  the merged code): `totp()` checks the clock once, sleeps once and then generates
-  without checking again, so a clock step during the sleep could still land the
-  code near an edge; and the 3-second margin only covers a request that returns
-  within 3 seconds, while the request uses the default timeout. A follow-up would
-  check again after the sleep with a bounded number of tries, and fail with a
-  clear message when a request outlasts the margin instead of surfacing the
-  server's 500.
-- The rehearsal's `purge` refuses a failed run by design, but the disk budget
-  requires purging a run's disks pass or fail; a failed run's directory currently
-  has to be removed by hand after copying its small evidence (done for run
-  `9d18e784` on 2026-11-23). Give `purge` an explicit failed-run mode that keeps the
-  logs and receipt and removes the disks, repository and escrow.
+  Done since (proof follow-ups PR): `totp()` checks the clock again after every
+  wait (at most 3 waits, then a fixed "clock was still within 3 s of a step
+  edge" message) and makes the code from the same clock reading it checked; each
+  two-factor request gets only the time left in the step less 1 s as its
+  timeout, and a request that outlasts it fails with "request outlasted the
+  TOTP margin" instead of the server's 500. Every TOTP request now prints one
+  `Documenso TOTP request: {...}` line (fixed keys and numbers only: second in
+  the step when the code was made, guard waits and milliseconds slept, the
+  deadline, elapsed time, status, second in the step at the end, whether the
+  request ended in the code's step, the server's step second); the sequential
+  calls show it in the driver log through the guest console, and the
+  all-services rehearsal copies the concurrent call's lines into its driver log
+  on a pass. Unit tests on a patched clock (`tests/platform/test_documenso_functional.py`).
+  In the two all-services rehearsals at the proof follow-ups (runs `2a1b0d0c`
+  and `1f051756`, 2026-11-23, both passed) the guard fired once in each (the
+  original phase's concurrent call waited 2.6 s and 0.4 s, and made its code at
+  second 3.0); all ten TOTP requests ended in their code's step (evidence on the
+  build machine in `proof-followups-evidence-ce03a7c/` and
+  `proof-followups-evidence-f0c35bd/`).
+  Still not shown: that the guard removes the failure (it needs many runs), and
+  the server's step at the instant it checks a code.
+- Done: the rehearsal's `purge` has an explicit `--failed` mode for a failed
+  or incomplete run (the disk budget requires purging pass or fail; run
+  `9d18e784` was removed by hand on 2026-11-23). It keeps the logs, `evidence/`
+  and receipt and removes the disks, repository and escrow, with the existing
+  checks plus: the receipt must not be complete, and the run's controller
+  (`controller.json` or `control.json`, process id and start time) must have
+  exited ([full rehearsal](full-rehearsal.md)). Unit tests for the success and
+  each refusal in `platform/rehearsal/test-full.py` (evidence in `proof-followups-evidence-f0c35bd/`). Not yet
+  used on a real failed run: the rehearsals since passed and were purged with
+  the ordinary command. A run that failed before
+  either record existed (older runs that died before their guests started) is
+  still removed by hand.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
   (`platform/production/tls-test.nix`) failed once on 2026-11-20 at "relay:
   first boot with the CA unreachable is safe and visible; issuance once it is
@@ -130,26 +150,47 @@ known to affect a deployed host (none exists).
   log timestamps of two guests, not measured directly; corroborating, an earlier
   run counted a "certificate is not yet valid" retry of the operator's handshake
   in the same subtest, and later runs measured boot offsets of -1.44 to +0.45 s.
-  The proof now sets each guest to the host clock at boot and waits, at most
-  30 s, for the served certificate's notBefore before every verifying check
-  ([TLS](tls.md#not-proven)). Not observed: that wait's timeout path, and a public
-  CA's backdating. Test-only, given that inference.
-- Follow-up (product): `terrace-tls check` and `status` should print the verify
-  result or reason (for example "certificate is not yet valid") instead of the
-  generic "no verified TLS session", so a clock problem is not misread as an
-  untrusted chain.
-- Follow-up (test): the TLS proof should fail, or assert a small bound, if any
-  notBefore wait is needed after the boot sync, so a broken clock sync cannot
-  hide behind 30 s waits.
-- Known flake (test, wall clock): the TLS proof's "reboot keeps the certificate
-  and the account key" subtest fails when the app guest's reboot crosses a full
-  hour. `terrace-backup-freshness.timer` is hourly and `Persistent`, so it fires
-  at boot; the proof's host has no backup yet, the unit fails ("target primary:
-  no successful backup recorded") and the proof's no-failed-units check trips.
-  Seen once on 2026-11-23 (reboot at 13:59:58 UTC) during the website `eab4189`
-  re-pin; the rerun passed. Not a product defect: a host with a recorded backup
-  passes the check. Fix: stop or mask the freshness timer before the reboot in
-  that subtest, or exclude it from that one check.
+  The proof now sets each guest to the host clock at boot and, before every
+  verifying check, asserts that the client's clock has reached the served
+  certificate's notBefore ([TLS](tls.md#not-proven)). Not observed: a public CA's
+  backdating. Test-only, given that inference.
+- Done (product): `terrace-tls check` and `status` print OpenSSL's verification
+  reason after "no verified TLS session" (for example `verify error 9:
+  certificate is not yet valid`), so a clock problem is not misread as an
+  untrusted chain. Unit tests `tests/platform/test_tls_check.py`; the TLS VM
+  proof asserts the reason for a certificate whose notBefore is a day ahead
+  (check and status) and for the relay's placeholder ([TLS](tls.md)); evidence
+  in `proof-followups-evidence-f0c35bd/`.
+- Done (test): the TLS proof fails, instead of waiting up to 30 s, when a
+  verifying client's clock is still before the served certificate's notBefore
+  after the boot sync (only fetching the served certificate is retried). No
+  earlier run needed a wait (`clockWaits` was empty in all ten recorded passes
+  since the sync was added); the failure path is asserted with a certificate
+  whose notBefore is a day ahead (evidence in `proof-followups-evidence-f0c35bd/`).
+- Fixed (test, wall clock): the TLS proof's "reboot keeps the certificate and
+  the account key" subtest failed when the app guest's reboot crossed a full
+  hour (seen once on 2026-11-23, reboot at 13:59:58 UTC, during the website
+  `eab4189` re-pin): `terrace-backup-freshness.timer` is hourly and
+  `Persistent`, so it fired at boot on a host with no backup yet, the unit failed
+  ("target primary: no successful backup recorded") and the no-failed-units
+  check tripped. The same exposure existed without a reboot, whenever the hour
+  passed between a host's adoption and its first backup (the app until the last
+  subtest, the relay until after its issuance check, the restored replacement
+  until the end). Production behaviour is unchanged (a host with no recent
+  backup fails that unit, and the proof asserts it). The proof now takes each
+  adopted host's backup at once and runs the freshness unit, which must pass,
+  and makes the timer fire at boot across the reboot by moving its stamp two
+  hours back; the no-failed-units checks are unchanged. Reproduced on purpose
+  before the fix (same stamp move, no early backup) and passing after it:
+  evidence in `proof-followups-evidence-ce03a7c/repro-before-fix/`, and the TLS
+  proof in `proof-followups-evidence-f0c35bd/`. Other VM proofs with a reboot are not exposed:
+  the production proof reboots once before adoption (timers not armed) and once
+  after its first backup, and has no no-failed-units check; the identity
+  administration proof does not reboot; the all-services rehearsal turns the
+  backup timers off. Still possible in the TLS proof, not seen: the daily
+  `terrace-backup.timer` (03:15 UTC) or the weekly `terrace-backup-check.timer`
+  (Sunday 05:30 UTC) firing in the minutes between an adoption and that first
+  backup (the backup's own rerun clears the first, nothing clears the second).
 - The all-services rehearsal sets Vaultwarden's and Windmill's `identityCaFile`
   to the synthetic CA itself, so only the standalone Vaultwarden functional and
   Windmill checks exercise those modules' default (the system trust bundle). They

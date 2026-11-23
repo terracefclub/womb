@@ -92,41 +92,18 @@
     && bare httpReject;
   check = pkgs.writeShellApplication {
     name = "terrace-tls-check";
-    runtimeInputs = [pkgs.openssl pkgs.coreutils pkgs.gnused];
-    text = ''
-      # Connects to this host's own HTTPS listener for every public name and
-      # verifies what is actually served: chain to the trust store, the name,
-      # and at least ${toString tls.minDays} days left. Prints no key material.
-      min_days=${toString tls.minDays}
-      trust=${lib.escapeShellArg trust}
-      failed=0
-      names=(${lib.escapeShellArgs names})
-      for name in "''${names[@]}"; do
-        # The chain is verified here, the name separately below: each cause has its own message.
-        if ! served=$(timeout 30 openssl s_client -connect 127.0.0.1:443 -servername "$name" \
-            -verify_return_error -CAfile "$trust" </dev/null 2>/dev/null); then
-          echo "$name: FAIL: no verified TLS session (untrusted, self-signed or placeholder chain, or nothing listening)"
-          failed=1
-          continue
-        fi
-        leaf=$(sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' <<<"$served")
-        match=$(openssl x509 -noout -checkhost "$name" <<<"$leaf" 2>/dev/null || true)
-        if [[ -z $leaf || $match != *"does match"* ]]; then
-          echo "$name: FAIL: the served certificate does not name $name"
-          failed=1
-          continue
-        fi
-        end=$(openssl x509 -noout -enddate <<<"$leaf" | cut -d= -f2)
-        if ! openssl x509 -noout -checkend $((min_days * 86400)) <<<"$leaf" >/dev/null; then
-          echo "$name: FAIL: expires $end, fewer than $min_days days left"
-          failed=1
-          continue
-        fi
-        issuer=$(openssl x509 -noout -issuer -nameopt RFC2253 <<<"$leaf" | sed 's/^issuer=//')
-        echo "$name: OK: expires $end; issuer $issuer"
-      done
-      exit "$failed"
-    '';
+    runtimeInputs = [pkgs.openssl pkgs.coreutils pkgs.gnused pkgs.gnugrep];
+    # The body is its own file so its failure reasons are unit-tested
+    # (tests/platform/test_tls_check.py).
+    text =
+      ''
+        export TLS_CHECK_NAMES=${lib.escapeShellArg (toString names)}
+        export TLS_CHECK_TRUST=${lib.escapeShellArg trust}
+        export TLS_CHECK_MIN_DAYS=${toString tls.minDays}
+        export TLS_CHECK_CONNECT=127.0.0.1:443
+        export TLS_CHECK_TIMEOUT="''${TLS_CHECK_TIMEOUT:-30}"
+      ''
+      + builtins.readFile ./tls-check.sh;
   };
   # lego 5 (5.5.1, cmd/internal/storage/storage_accounts.go) writes the account
   # file with `"registration": null` and the key before it registers. If that
@@ -186,6 +163,12 @@
             systemctl list-timers --all --no-pager terrace-tls-check.timer
           fi
           systemctl show terrace-tls-check.service -p Result -p ExecMainExitTimestamp --no-pager
+          # What is served now, with OpenSSL's reason when a chain does not verify
+          # (for example "certificate is not yet valid": check the clock first).
+          # 5 s per name, so a hung listener cannot hold status for long; a failure
+          # here is reported, it does not change the exit status of status.
+          echo 'served now (5 s per name):'
+          TLS_CHECK_TIMEOUT=5 terrace-tls-check || true
           ;;
         check) terrace-tls-check ;;
         renew)
