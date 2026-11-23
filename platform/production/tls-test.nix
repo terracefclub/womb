@@ -302,11 +302,16 @@ in {
         public = op(f"terrace-secrets public {host} backup/primary/sftp-key").strip()
         operator.succeed(f"install -d -o restic -g users -m 0700 /home/restic/.ssh /home/restic/{directory} && echo {shlex.quote(public)} >>/home/restic/.ssh/authorized_keys && chown restic:users /home/restic/.ssh/authorized_keys && chmod 0600 /home/restic/.ssh/authorized_keys")
 
-    def leaf(label, sans, days):
+    def leaf(label, sans, days, starts_in_days=0):
         # Test leaves signed at test time by the local CA's intermediate (management API).
+        # starts_in_days > 0: notBefore that far in the future (a host clock behind its certificate).
+        validity = f"-days {days}"
+        if starts_in_days:
+            stamp = lambda offset: time.strftime("%Y%m%d%H%M%SZ", time.gmtime(time.time() + offset * 86400))
+            validity = f"-not_before {stamp(starts_in_days)} -not_after {stamp(starts_in_days + days)}"
         acme.succeed(f"cd /root/leaf && openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -subj /CN={sans[0]} -keyout {label}-key.pem -out {label}.csr 2>/dev/null && "
                      f"printf 'basicConstraints=critical,CA:FALSE\\nkeyUsage=critical,digitalSignature\\nextendedKeyUsage=serverAuth\\nsubjectAltName=%s\\n' {','.join('DNS:' + s for s in sans)} >{label}.ext && "
-                     f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) -days {days} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
+                     f"openssl x509 -req -in {label}.csr -CA int.pem -CAkey int-key.pem -set_serial 0x$(openssl rand -hex 8) {validity} -sha256 -extfile {label}.ext -out {label}.pem 2>/dev/null && cat int.pem >>{label}.pem")
         return acme.succeed(f"cat /root/leaf/{label}.pem"), acme.succeed(f"cat /root/leaf/{label}-key.pem"), fingerprint(acme, f"/root/leaf/{label}.pem")
 
     def served_locally(machine, name, fp):
@@ -490,17 +495,22 @@ in {
         ok(account_hash(app) == account, "the same ACME account renewed")
         no_failed_units(app, "after the forced renewal")
 
-    with subtest("expiry check fails on a short-lived or wrong-name certificate"):
+    with subtest("expiry check fails on a short-lived, wrong-name or not yet valid certificate, naming the cause"):
         directory = live("web.terrace.test")
         app.succeed(f"install -d -m 0700 /run/tls-held && cp -p {directory}/fullchain.pem {directory}/key.pem /run/tls-held/")
-        for label, sans, days, expected in [("short", NAMES, 3, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, "the served certificate does not name")]:
-            chain, key, test_leaf = leaf(label, sans, days)
+        # "future": a certificate whose notBefore is a day ahead, what a host clock behind its CA sees.
+        for label, sans, days, starts, expected in [("short", NAMES, 3, 0, "fewer than 14 days left"), ("wrong", ["other.terrace.test"], 60, 0, "the served certificate does not name"),
+                                                    ("future", NAMES, 60, 1, "web.terrace.test: FAIL: no verified TLS session: verify error 9: certificate is not yet valid")]:
+            chain, key, test_leaf = leaf(label, sans, days, starts)
             put(app, directory + "/fullchain.pem", chain, "0640")
             put(app, directory + "/key.pem", key, "0640")
             app.succeed(f"chown acme:acme {directory}/fullchain.pem {directory}/key.pem && systemctl reload nginx.service")
             app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(test_leaf), timeout=60)
             output = tls_check(app, False, f"expiry check fails visibly on the {label} certificate")
-            ok(expected in output and (label == "short" or "no verified TLS session" not in output), f"{label}: {expected}")
+            ok(expected in output and (label in ["short", "future"] or "no verified TLS session" not in output), f"{label}: {expected}")
+            if label == "future":
+                status = app.succeed("terrace-tls status")
+                ok("served now (5 s per name):" in status and "verify error 9: certificate is not yet valid" in status, "terrace-tls status names the verification failure reason")
         app.succeed(f"cp -p /run/tls-held/fullchain.pem /run/tls-held/key.pem {directory}/ && rm -rf /run/tls-held && systemctl reload nginx.service")
         app.wait_until_succeeds("test \"$(echo | openssl s_client -connect 127.0.0.1:443 -servername web.terrace.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256)\" = " + shlex.quote(after), timeout=60)
         tls_check(app, True, "expiry check passes again on the real certificate")
@@ -578,8 +588,13 @@ in {
         ok("minica" in placeholder, f"relay: nginx up with the placeholder {placeholder.strip()}")
         operator.fail(f"echo | openssl s_client -connect relay:443 -servername {RELAY} -verify_return_error -verify_hostname {RELAY} -CAfile /root/roots.pem >/dev/null 2>&1")
         ok(True, "relay: the placeholder is not trusted")
-        tls_check(relay, False, "relay: expiry check fails on the placeholder")
-        ok("PLACEHOLDER" in relay.succeed("terrace-tls status"), "relay: status names the placeholder")
+        output = tls_check(relay, False, "relay: expiry check fails on the placeholder")
+        found = re.search(r"no verified TLS session: (verify error [0-9]+: [^\n]+)", output)
+        assert found is not None, f"relay: no verification reason in the check output: {output}"
+        reason = found.group(1)
+        ok("not yet valid" not in reason, f"relay: the check names OpenSSL's reason for the placeholder ({reason})")
+        status = relay.succeed("terrace-tls status")
+        ok("PLACEHOLDER" in status and reason in status, "relay: status names the placeholder and the reason")
         ok(http("relay", RELAY, "/x") == f"301 https://{RELAY}/x", "relay: port 80 redirect")
         acme.succeed(unblock)
         # The first run could not register; the retry must register afresh, not "recover" it.

@@ -134,10 +134,12 @@ known to affect a deployed host (none exists).
   30 s, for the served certificate's notBefore before every verifying check
   ([TLS](tls.md#not-proven)). Not observed: that wait's timeout path, and a public
   CA's backdating. Test-only, given that inference.
-- Follow-up (product): `terrace-tls check` and `status` should print the verify
-  result or reason (for example "certificate is not yet valid") instead of the
-  generic "no verified TLS session", so a clock problem is not misread as an
-  untrusted chain.
+- Done (product): `terrace-tls check` and `status` print OpenSSL's verification
+  reason after "no verified TLS session" (for example `verify error 9:
+  certificate is not yet valid`), so a clock problem is not misread as an
+  untrusted chain. Unit tests `tests/platform/test_tls_check.py`; the TLS VM
+  proof asserts the reason for a certificate whose notBefore is a day ahead
+  (check and status) and for the relay's placeholder ([TLS](tls.md)).
 - Follow-up (test): the TLS proof should fail, or assert a small bound, if any
   notBefore wait is needed after the boot sync, so a broken clock sync cannot
   hide behind 30 s waits.
