@@ -209,8 +209,9 @@ off with no tagged guest, and whose controller has exited: the run records the
 controller's process id and start time in `controller.json` (and, once guests
 start, `control.json`); it checks every record present and refuses, printing
 a fixed reason, when there is none, when one is malformed (a link, not private,
-not a JSON object, a wrong run id) or when one names a process that is still
-running. A process that has exited counts as gone, also when it exits while
+not a JSON object, nested too deeply to read, a wrong run id), when the named
+process's state cannot be read or parsed, or when one names a process that is
+still running. A process that has exited counts as gone, also when it exits while
 being checked. It removes the same things (`state/` with the disks, `retained/`,
 `escrow/`, the recorded runtime directory when one was recorded, a leftover
 `driver-root` link, never following a link out of the run) and keeps

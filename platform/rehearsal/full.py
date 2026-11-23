@@ -58,8 +58,8 @@ def require_controller_gone(run, run_id):
     for name in names:
         try:
             record = private_json(run / name, 4096)
-        except (OSError, ValueError):
-            # A link, a public or foreign file, a non-file or unparsable JSON.
+        except (OSError, ValueError, RecursionError):
+            # A link, a public or foreign file, a non-file, unparsable JSON or JSON nested too deeply to read.
             raise Refused('malformed controller record ' + name) from None
         if not isinstance(record, dict):
             raise Refused('malformed controller record ' + name)
@@ -72,7 +72,8 @@ def require_controller_gone(run, run_id):
             # The process exited while its start time was read: no process has this id now, so it is not
             # the controller (a later process reusing the id has a different start time and counts as gone too).
             current = None
-        except OSError:
+        except (OSError, IndexError):
+            # Unreadable process state, or a /proc/PID/stat line without the expected fields.
             raise Refused('cannot tell whether the controller in ' + name + ' is running') from None
         if current == start:
             raise Refused('the controller in ' + name + ' is still running')
