@@ -146,15 +146,29 @@ known to affect a deployed host (none exists).
   earlier run needed a wait (`clockWaits` was empty in all ten recorded passes
   since the sync was added); the failure path is asserted with a certificate
   whose notBefore is a day ahead.
-- Known flake (test, wall clock): the TLS proof's "reboot keeps the certificate
-  and the account key" subtest fails when the app guest's reboot crosses a full
-  hour. `terrace-backup-freshness.timer` is hourly and `Persistent`, so it fires
-  at boot; the proof's host has no backup yet, the unit fails ("target primary:
-  no successful backup recorded") and the proof's no-failed-units check trips.
-  Seen once on 2026-11-23 (reboot at 13:59:58 UTC) during the website `eab4189`
-  re-pin; the rerun passed. Not a product defect: a host with a recorded backup
-  passes the check. Fix: stop or mask the freshness timer before the reboot in
-  that subtest, or exclude it from that one check.
+- Fixed (test, wall clock): the TLS proof's "reboot keeps the certificate and
+  the account key" subtest failed when the app guest's reboot crossed a full
+  hour (seen once on 2026-11-23, reboot at 13:59:58 UTC, during the website
+  `eab4189` re-pin): `terrace-backup-freshness.timer` is hourly and
+  `Persistent`, so it fired at boot on a host with no backup yet, the unit failed
+  ("target primary: no successful backup recorded") and the no-failed-units
+  check tripped. The same exposure existed without a reboot, whenever the hour
+  passed between a host's adoption and its first backup (the app until the last
+  subtest, the relay until after its issuance check, the restored replacement
+  until the end). Production behaviour is unchanged (a host with no recent
+  backup fails that unit, and the proof asserts it). The proof now takes each
+  adopted host's backup at once and runs the freshness unit, which must pass,
+  and makes the timer fire at boot across the reboot by moving its stamp two
+  hours back; the no-failed-units checks are unchanged. Reproduced on purpose
+  before the fix (same stamp move, no early backup) and passing after it:
+  evidence in the pull request. Other VM proofs with a reboot are not exposed:
+  the production proof reboots once before adoption (timers not armed) and once
+  after its first backup, and has no no-failed-units check; the identity
+  administration proof does not reboot; the all-services rehearsal turns the
+  backup timers off. Still possible in the TLS proof, not seen: the daily
+  `terrace-backup.timer` (03:15 UTC) or the weekly `terrace-backup-check.timer`
+  (Sunday 05:30 UTC) firing in the minutes between an adoption and that first
+  backup (the backup's own rerun clears the first, nothing clears the second).
 - The all-services rehearsal sets Vaultwarden's and Windmill's `identityCaFile`
   to the synthetic CA itself, so only the standalone Vaultwarden functional and
   Windmill checks exercise those modules' default (the system trust bundle). They

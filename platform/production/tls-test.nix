@@ -339,6 +339,22 @@ in {
         ok(failed != expect_ok and (expect_ok or "terrace-tls-check.service" in failed_units(machine)), label)
         return output
 
+    FRESHNESS = "terrace-backup-freshness.service"
+    FRESHNESS_STAMP = "/var/lib/systemd/timers/stamp-terrace-backup-freshness.timer"
+
+    def first_backup(machine, label, init=True):
+        # Adoption arms the hourly, Persistent backup freshness timer. Until a backup is
+        # recorded its unit fails (correct on a real host); whenever the proof's clock crosses
+        # the hour it would fire and trip the no-failed-units checks. So every adopted host
+        # here takes its backup at once, and the freshness unit is run (as its next hourly
+        # run would) and must pass, which also clears a failure from that short window.
+        if init:
+            machine.succeed("terrace-backup init primary >/dev/null 2>&1")
+        machine.succeed("systemctl start terrace-backup.service", timeout=600)
+        ok(state(machine, "terrace-backup.service", "Result") == "success", f"{label}: backup recorded")
+        machine.succeed(f"systemctl start {FRESHNESS}", timeout=120)
+        ok(state(machine, FRESHNESS, "Result") == "success" and FRESHNESS not in failed_units(machine), f"{label}: backup freshness check passes")
+
     def no_failed_units(machine, label):
         units = failed_units(machine)
         ok(units == [], f"{label}: no failed units {units}")
@@ -411,6 +427,13 @@ in {
         ok(app.succeed("journalctl -u nginx.service -o cat --no-pager | grep -c 'Reloaded\\|Reloading' || true").strip() != "0", "nginx reloaded after issuance")
         app.wait_for_unit("keycloak.service", timeout=360)
         ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert /root/roots.pem --resolve identity.terrace.test:443:{address('app')} {OIDC}").strip() == "200", "HTTPS identity endpoint with the issued certificate")
+
+    with subtest("first backup: the freshness check fails without one, passes after it"):
+        ok(state(app, "terrace-backup-freshness.timer", "ActiveState") == "active", "hourly backup freshness timer armed by adoption")
+        app.fail(f"systemctl start {FRESHNESS}", timeout=120)
+        journal = app.succeed(f"journalctl -u {FRESHNESS} -o cat --no-pager -n 20")
+        ok("no successful backup recorded" in journal and FRESHNESS in failed_units(app), "without a backup the freshness check fails (a failed unit)")
+        first_backup(app, "app")
 
     with subtest("port 80: only the challenge and the redirect"):
         for name in NAMES:
@@ -563,6 +586,9 @@ in {
 
     with subtest("reboot keeps the certificate and the account key"):
         certificate, account = fingerprint(app, live("web.terrace.test") + "/cert.pem"), account_hash(app)
+        # As if the reboot crossed the top of the hour (the 2026-11-23 wall-clock flake): the
+        # freshness timer's last run is two hours back, so the Persistent timer must fire at boot.
+        app.succeed(f"test -f {FRESHNESS_STAMP} && touch -d @$(( $(date +%s) - 7200 )) {FRESHNESS_STAMP}")
         app.shutdown()
         app.start()
         app.wait_for_unit("multi-user.target")
@@ -573,6 +599,8 @@ in {
         ok(fingerprint(app, live("web.terrace.test") + "/cert.pem") == certificate and account_hash(app) == account, "certificate and account key survive the reboot")
         ok(all(served("app", name) == certificate for name in NAMES), "same chain served after the reboot")
         app.wait_for_unit("keycloak.service", timeout=360)
+        app.wait_until_succeeds(f"test \"$(systemctl show {FRESHNESS} -p ExecMainStartTimestampMonotonic --value)\" != 0 && test \"$(systemctl show {FRESHNESS} -p ActiveState --value)\" != activating", timeout=300)
+        ok(state(app, FRESHNESS, "Result") == "success", "the freshness timer fired at boot for the missed hour and passed on the recorded backup")
         no_failed_units(app, "after the reboot")
 
     with subtest("relay: first boot with the CA unreachable is safe and visible; issuance once it is back"):
@@ -613,8 +641,8 @@ in {
         ok(served("relay", RELAY) == relay_cert, "relay: issued chain served and verified")
         ok(operator.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' --cacert /root/roots.pem --resolve {RELAY}:443:{address('relay')} https://{RELAY}/health").strip() == "200", "relay: Headscale over the issued certificate")
         tls_check(relay, True, "relay: expiry check passes after issuance")
+        first_backup(relay, "relay")
         no_failed_units(relay, "relay after issuance")
-        relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
         relay_listing = relay.succeed("terrace-backup restic primary ls latest 2>/dev/null").splitlines()
         ok(len(relay_listing) > 1 and not [path for path in relay_listing if "/acme" in path], f"relay: snapshot of {len(relay_listing)} paths holds no ACME state")
 
@@ -668,7 +696,6 @@ in {
     with subtest("backup leaves ACME state out; a replacement host re-issues with a new account"):
         old_certificate, old_account = fingerprint(app, live("web.terrace.test") + "/cert.pem"), account_hash(app)
         app.succeed("systemctl stop terrace-cms-sweep.timer terrace-web.service terrace-cms.service keycloak.service nginx.service", timeout=120)
-        app.succeed("terrace-backup init primary >/dev/null 2>&1")
         app.succeed("systemctl start terrace-backup.service", timeout=600)
         snapshot = json.loads(app.succeed("terrace-backup restic primary snapshots --json 2>/dev/null"))[-1]["id"]
         listing = app.succeed(f"terrace-backup restic primary ls {snapshot} 2>/dev/null").splitlines()
@@ -705,6 +732,8 @@ in {
             ok(served("app", name) == new_certificate, f"replacement: {name} served and verified")
         app.wait_for_unit("keycloak.service", timeout=360)
         tls_check(app, True, "replacement: expiry check passes")
+        # The restore does not bring the old host's backup record: back up from the replacement.
+        first_backup(app, "replacement", init=False)
         no_failed_units(app, "replacement")
 
     with subtest("stop owned guests"):

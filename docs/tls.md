@@ -371,7 +371,12 @@ the relay's placeholder; a not-due renewal changes nothing; a
 forced renewal needs `--yes`, keeps the same nginx process and answers 80 new
 HTTPS connections spread across the reload; with the CA unreachable the
 previous certificate keeps being served and the unit recovers by its own retry
-once the CA is back; a reboot keeping the certificate and the account key; the
+once the CA is back; a first backup right after adoption (the hourly backup
+freshness check fails without one and passes after it; every adopted host in
+the proof, the relay and the app replacement too, takes its backup at once, so
+the proof does not depend on when the clock crosses the hour); a reboot keeping
+the certificate and the account key, across which the freshness timer is made
+to fire at boot as if the reboot had crossed the hour, and passes; the
 relay's first boot with the CA unreachable (placeholder served, failing check,
 a failed unit after its retries), then issuance with a fresh account; backup
 snapshots of both roles without ACME state, and an app replacement restored
@@ -406,8 +411,12 @@ recorded runs, commit and receipts.
   ahead). A host whose clock trails the CA by more than its
   backdating would fail the expiry check: a host clock fault, not a certificate
   fault, which the check names (`certificate is not yet valid`).
-- A timer actually firing (the proof starts every unit itself; the daily timer,
-  its jitter and the start-limit window are configuration).
+- A TLS timer actually firing: the proof starts the ACME order, renewal and
+  expiry check units itself; their daily timers, jitter and the start-limit
+  window are configuration. The one timer this proof does make fire is the
+  backup freshness timer (not a TLS timer), once, at the app's reboot, through
+  its `Persistent` catch-up after its stamp is moved two hours back; its hourly
+  calendar schedule itself is not exercised.
 - A change of the hostname list on a running host (a new order is needed; the
   expiry check should then fail for the new name until it succeeds), a
   replacement of the relay, and the live switch on the app role (proven on the
