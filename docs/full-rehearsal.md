@@ -435,6 +435,23 @@ into the restored outbox; the invitation files still name the applicants),
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
 
+### Observed all-services rehearsals at the proof follow-ups — November 23, 2026 (Pacific)
+
+Website `eab4189`, output on the build machine's non-snapshotted scratch
+dataset, both passed: Womb `ce03a7c` (TLS check reasons, the TLS proof's clock
+and backup-freshness changes, the Documenso TOTP guard, `purge --failed`), run
+`2a1b0d0c`, 10:52 to 11:21 (scenario 1734.96 seconds); and after review fixes,
+Womb `f0c35bd`, run `1f051756`, 12:26 to 12:54 (scenario 1702.27 seconds). Each
+had 198 HTTPS protocol assertions in each of the three phases, all four
+concurrent native browser helpers, and every receipt check true. The driver log
+now carries one `Documenso TOTP request` line per two-factor request,
+sequential and concurrent: five per run, all ended in their code's step, and
+the guard fired once in each run (the original phase's concurrent call, which
+waited 2.6 and 0.4 seconds and made its code at second 3.0). Both were purged
+with the ordinary command (they passed, so `--failed` was not needed); evidence
+on the build machine in `proof-followups-evidence-ce03a7c/` and
+`proof-followups-evidence-f0c35bd/`.
+
 ### Observed all-services rehearsal with website `eab4189` — November 23, 2026 (Pacific)
 
 The first `--all-services` run at the re-pin (Womb `1356603`, run `9d18e784`, 07:23 to

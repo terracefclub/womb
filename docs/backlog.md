@@ -117,6 +117,12 @@ known to affect a deployed host (none exists).
   calls show it in the driver log through the guest console, and the
   all-services rehearsal copies the concurrent call's lines into its driver log
   on a pass. Unit tests on a patched clock (`tests/platform/test_documenso_functional.py`).
+  In the two all-services rehearsals at the proof follow-ups (runs `2a1b0d0c`
+  and `1f051756`, 2026-11-23, both passed) the guard fired once in each (the
+  original phase's concurrent call waited 2.6 s and 0.4 s, and made its code at
+  second 3.0); all ten TOTP requests ended in their code's step (evidence on the
+  build machine in `proof-followups-evidence-ce03a7c/` and
+  `proof-followups-evidence-f0c35bd/`).
   Still not shown: that the guard removes the failure (it needs many runs), and
   the server's step at the instant it checks a code.
 - Done: the rehearsal's `purge` has an explicit `--failed` mode for a failed
@@ -126,7 +132,9 @@ known to affect a deployed host (none exists).
   checks plus: the receipt must not be complete, and the run's controller
   (`controller.json` or `control.json`, process id and start time) must have
   exited ([full rehearsal](full-rehearsal.md)). Unit tests for the success and
-  each refusal in `platform/rehearsal/test-full.py`. A run that failed before
+  each refusal in `platform/rehearsal/test-full.py` (evidence in `proof-followups-evidence-f0c35bd/`). Not yet
+  used on a real failed run: the rehearsals since passed and were purged with
+  the ordinary command. A run that failed before
   either record existed (older runs that died before their guests started) is
   still removed by hand.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
@@ -151,13 +159,14 @@ known to affect a deployed host (none exists).
   certificate is not yet valid`), so a clock problem is not misread as an
   untrusted chain. Unit tests `tests/platform/test_tls_check.py`; the TLS VM
   proof asserts the reason for a certificate whose notBefore is a day ahead
-  (check and status) and for the relay's placeholder ([TLS](tls.md)).
+  (check and status) and for the relay's placeholder ([TLS](tls.md)); evidence
+  in `proof-followups-evidence-f0c35bd/`.
 - Done (test): the TLS proof fails, instead of waiting up to 30 s, when a
   verifying client's clock is still before the served certificate's notBefore
   after the boot sync (only fetching the served certificate is retried). No
   earlier run needed a wait (`clockWaits` was empty in all ten recorded passes
   since the sync was added); the failure path is asserted with a certificate
-  whose notBefore is a day ahead.
+  whose notBefore is a day ahead (evidence in `proof-followups-evidence-f0c35bd/`).
 - Fixed (test, wall clock): the TLS proof's "reboot keeps the certificate and
   the account key" subtest failed when the app guest's reboot crossed a full
   hour (seen once on 2026-11-23, reboot at 13:59:58 UTC, during the website
@@ -173,7 +182,8 @@ known to affect a deployed host (none exists).
   and makes the timer fire at boot across the reboot by moving its stamp two
   hours back; the no-failed-units checks are unchanged. Reproduced on purpose
   before the fix (same stamp move, no early backup) and passing after it:
-  evidence in the pull request. Other VM proofs with a reboot are not exposed:
+  evidence in `proof-followups-evidence-ce03a7c/repro-before-fix/`, and the TLS
+  proof in `proof-followups-evidence-f0c35bd/`. Other VM proofs with a reboot are not exposed:
   the production proof reboots once before adoption (timers not armed) and once
   after its first backup, and has no no-failed-units check; the identity
   administration proof does not reboot; the all-services rehearsal turns the
