@@ -1,5 +1,7 @@
 # Optional native website host
 
+> **Note, 2026-11-23.** Re-pinned to website `dev` `eab4189` (website PRs #19 to #22: bulk roster onboarding, review follow-ups, realm admin events). The ledger now has twelve migrations (adds `20261119_165021_roster_journal`). Nothing new to wire: the roster tool is not in the bundle and its journal is ordinary database state (see [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep)); the realm producer's hash changed in `platform/identity-contract.json`.
+
 > **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18, including the packaged CMS `bin/sweep`). The ledger now has eleven migrations, recorded in `platform/website-release.json` and checked in order by the VM test. The module now supplies the member-lifecycle settings listed under [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep).
 
 This disabled-by-default module runs the accepted TFC website and CMS bundles
@@ -16,7 +18,7 @@ remain disabled in actual host profiles; CDN activation remains separate.
 ## Accepted inputs
 
 `platform/website-release.json` pins the exact secret-free Linux x86-64 glibc
-archives from TFC source `680ad567f553449280664cafad2d200011b6abac` (website `dev`, PR #15).
+archives from TFC source `eab41891f6d68ea000f86148d086daf737f1216e` (website `dev`, PR #22).
 `website-release.nix` checks the raw archive SHA256, source/runtime manifest and
 every packaged file hash before producing immutable Nix packages. The archive hash
 must match before that archive is copied into the Nix store. It uses local retained
@@ -31,8 +33,8 @@ Never put environment files, credentials, uploads or a database into a bundle.
 
 Import `platform/website.nix` or `nixosModules.website`. A reviewed host can
 construct `release = import ./platform/website-release.nix { inherit pkgs;
-webArchive = "/protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz";
-cmsArchive = "/protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz"; };`
+webArchive = "/protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz";
+cmsArchive = "/protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz"; };`
 and set `terrace.website.webPackage = release.web`, `cmsPackage = release.cms`,
 `revision = release.revision` and `enable = true`. This is an integration
 example, not an enabled host configuration.
@@ -238,8 +240,8 @@ On the x86-64 Linux builder, under the shared queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-check \
-  /protected/releases/terrace-web-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-680ad567f553449280664cafad2d200011b6abac-linux-x64-gnu.tar.gz
+  /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz
 ```
 
 This separate check accepts local hash-pinned artifacts so ordinary flake
@@ -259,6 +261,14 @@ real timer unit fires it (a backdated persistent stamp makes it catch up), and
 restores the outbox with identical bytes, owner and modes. It measures migration, backup,
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
+
+Verified 2026-11-23 on the shared Linux builder with the `eab4189` bundles (05:26
+to 05:30 Pacific, fresh result): the two-guest test passed with 39 actual
+non-system CMS tables and the twelve-migration ledger in pinned order, and a
+synthetic bulk-roster journal row (`roster_runs`, `roster_run_items`) came back
+identical from the restore. Migration 5.84 s, encrypted backup 8.28 s, complete
+repository check 5.62 s, restore 4.87 s, recovered HTTP verification 11.01 s;
+source cgroup peaks 81.9 MiB CMS, 47.3 MiB website, 125.6 MiB PostgreSQL.
 
 Verified 2026-11-19 on the shared Linux builder at Womb `48ab695` with the
 `680ad56` bundles (06:06 to 06:10 Pacific, prebuilt closure): the two-guest test

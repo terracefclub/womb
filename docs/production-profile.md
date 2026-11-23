@@ -353,6 +353,13 @@ give the expiry check an explicit trust anchor file, so the default system
 trust store path of `terrace-tls check` is not exercised by any VM proof
 ([TLS](tls.md#verification)).
 
+Re-verified 2026-11-23 with the pinned `eab4189` bundles (fresh results): VM
+proof PASS in 610 s with 202 assertions (198 shared protocol assertions). Two
+are new: the first import of the release's realm artifact through the hosting
+policy reads back admin events on and details off from Keycloak's database, and
+the restored host's signature now includes those two flags. The evaluation check
+passes with 123 rejected variants and the cloud rehearsal check passes.
+
 ## Keycloak administration
 
 The app role also installs `terrace-identity-admin` (root-only wrapper) and the

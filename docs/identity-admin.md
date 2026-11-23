@@ -402,11 +402,16 @@ attributes or other personal data.
   against a concurrent command; a first sign-in through the HTTPS gateway with
   Keycloak's forced password change; the `terrace-cms` secret rotated end to end
   (store, push, sign-in failing in the window, `sync`, old secret refused with
-  an OAuth refusal, the editor signing in again); a converged plan, a changed
+  an OAuth refusal, the editor signing in again); a realm first imported from
+  the previous website release's artifact (`680ad56`, no admin-events keys:
+  admin events off) re-pinned to the real `eab4189` artifact (the two differ
+  only by those keys), planned as exactly one change, applied and read back
+  from Keycloak's database as on with details off; a converged plan, a changed
   definition with all nine change kinds shown, applied from the pinned path with
   users, credentials and sessions unchanged, a second run as a no-op, three
-  refused plans, two hosting-policy refusals and a return to the pinned
-  definition; revoke and disable ending sessions and `--keep-sessions`
+  refused plans, five hosting-policy refusals and a return to the pinned
+  definition, then to the previous release's (no change planned for the
+  undeclared keys); revoke and disable ending sessions and `--keep-sessions`
   keeping them; break-glass with the proxy stopped and every administrator
   disabled, `begin` killed in the window and still usable, refused while that
   account works, a lost handoff not blocking a second `begin` that survives a
@@ -424,7 +429,8 @@ attributes or other personal data.
 Not proven: a real host, real accounts or passwords, a real operator's
 terminal (the proof feeds passwords on stdin and sends signals to a transient
 unit, not to an SSH session), Keycloak upgrades, a definition change from an
-actual website release (the proof edits the pinned template), rotation of the
+actual website release other than the admin-events keys (the other change
+kinds are applied by editing the pinned template), rotation of the
 other three client secrets (same code path as `terrace-cms`), the tool's own
 access tokens (the scans look for one captured by the test, of the same kind),
 the exec audit trace on a production host (test-only configuration), the
