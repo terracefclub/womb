@@ -321,14 +321,29 @@ brings back the realm and accounts, and every secret must be regenerated.
 sudo journalctl -t terrace-identity-admin --since today
 ```
 
-Master-realm admin events are enabled by `first-admin` (without
-representations), so Keycloak also records what each administrator changed in
-the master realm. Admin events for the `terrace` realm are **not** enabled:
-`adminEventsEnabled` is a realm setting the identity contract
-(`identity/tools/realm-config.ts`, website repository) does not declare, so
-turning it on here would drift from the contract. That change belongs in the
-website repository; the reconciler will then apply it. Until then the journal
-lines are the record of changes to site accounts.
+Admin events are Keycloak's record of what each administrator changed. With
+details off (the setting here) an event records the operation, the resource
+path (which includes user IDs), the acting administrator, the client address
+and the time. It carries no submitted or returned values, so no passwords,
+attributes or other personal data.
+
+- **Master realm:** enabled by `first-admin` (details off).
+- **`terrace` realm:** managed by `realm plan` and `realm apply` when the
+  release's realm artifact declares `adminEventsEnabled` and
+  `adminEventsDetailsEnabled`; the artifact is the source of truth, so drift in
+  either direction is planned and applied like any other realm setting (an
+  ordinary realm update, the same path as the other scalar settings). If the
+  artifact does not declare them, reconciliation neither changes nor refuses
+  anything about them. The website's realm contract declares them
+  (`adminEventsEnabled: true`, `adminEventsDetailsEnabled: false`), but the
+  website release pinned today predates that, so the `terrace` realm's admin
+  events stay as they are until Womb re-pins to a release that carries them.
+  Until then the journal lines are the record of changes to site accounts.
+- **Both values must be booleans.** `adminEventsDetailsEnabled: true` is
+  refused by hosting, in the plan (`REFUSED`, exit 3, nothing applied) and by
+  the realm hosting policy that also guards the first import: representations
+  in the audit log can contain personal data, and that decision belongs to the
+  hosting side, not to an artifact.
 
 ## Not provided, and why
 

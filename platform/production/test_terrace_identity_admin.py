@@ -57,6 +57,7 @@ class FakeKeycloak:
     def __init__(self, definition=DEFINITION):
         d = copy.deepcopy(definition)
         self.realm = {k: v for k, v in d.items() if k in tool.REALM_SCALARS or k in ("realm", "enabled")}
+        self.realm = {"adminEventsEnabled": False, "adminEventsDetailsEnabled": False} | self.realm  # Keycloak always reports both
         self.roles = [r["name"] for r in d["roles"]["realm"]] + ["offline_access", "uma_authorization", "default-roles-terrace"]
         profile = json.loads(d["components"][tool.PROFILE][0]["config"]["kc.user.profile.config"][0])
         for attribute in profile["attributes"]:  # Keycloak adds keys of its own
@@ -256,7 +257,8 @@ class ReconcileTest(unittest.TestCase):
         cases = {
             "drop": lambda d: d["components"][tool.PROFILE][0]["config"].update({"kc.user.profile.config": [json.dumps({**PROFILE, "attributes": PROFILE["attributes"][:2]})]}),
             "public": lambda d: d["clients"][0].update(publicClient=True),
-            "unknown": lambda d: d.update(eventsEnabled=True),
+            "unknown": lambda d: d.update(someFutureSetting=True),
+            "unknown near a managed key": lambda d: d.update(adminEventsExtra=True),
             "client key": lambda d: d["clients"][0].update(authorizationSettings={}),
             "disable": lambda d: d["clients"][0].update(enabled=False),
             "realm off": lambda d: d.update(enabled=False),
@@ -267,6 +269,48 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(label):
                 plan, _ = plan_for(changed(edit=edit))
                 self.assertTrue(plan.refused, label)
+
+    def test_admin_events_keys_absent_are_not_managed(self):
+        for running in ({}, {"adminEventsEnabled": True}, {"adminEventsEnabled": True, "adminEventsDetailsEnabled": True}):
+            api = FakeKeycloak()
+            api.realm.update(running)
+            plan, _ = plan_for(DEFINITION, api)
+            self.assertEqual((plan.changes, plan.refused), ([], []), running)
+
+    def test_admin_events_keys_drifting_are_planned_applied_and_converged(self):
+        d = changed(events=lambda d: d.update(adminEventsEnabled=True, adminEventsDetailsEnabled=False))
+        plan, api = plan_for(d)
+        self.assertEqual(plan.refused, [])
+        self.assertEqual([(c["kind"], c["target"]) for c in plan.changes], [("realm-setting", "terrace/adminEventsEnabled")])
+        self.assertEqual(tool.describe(plan.changes[0]), "~ realm adminEventsEnabled: false -> true")
+        tool.apply_change(api, CONFIG, d, plan.changes[0])
+        self.assertEqual((api.realm["adminEventsEnabled"], api.realm["adminEventsDetailsEnabled"]), (True, False))
+        self.assertEqual(plan_for(d, api)[0].changes, [])
+        # Declared false while running true: drift too (the artifact is the source of truth).
+        api.realm["adminEventsEnabled"] = False
+        api.realm["adminEventsDetailsEnabled"] = True
+        plan, _ = plan_for(changed(events=lambda d: d.update(adminEventsEnabled=False, adminEventsDetailsEnabled=False)), api)
+        self.assertEqual(sorted(c["target"] for c in plan.changes), ["terrace/adminEventsDetailsEnabled"])
+
+    def test_admin_events_keys_already_equal_are_converged(self):
+        d = changed(events=lambda d: d.update(adminEventsEnabled=True, adminEventsDetailsEnabled=False))
+        api = FakeKeycloak(d)
+        plan, _ = plan_for(d, api)
+        self.assertEqual((plan.changes, plan.refused), ([], []))
+
+    def test_admin_events_keys_must_be_booleans(self):
+        for key in ("adminEventsEnabled", "adminEventsDetailsEnabled"):
+            for value in ("true", "false", 1, 0, None, [], {}):
+                with self.subTest(key=key, value=value):
+                    plan, _ = plan_for(changed(bad=lambda d: d.update({key: value})))
+                    self.assertTrue(any(key in item for item in plan.refused), plan.refused)
+                    self.assertEqual(plan.changes, [])
+
+    def test_admin_events_details_true_is_refused_and_never_applied(self):
+        plan, api = plan_for(changed(details=lambda d: d.update(adminEventsEnabled=True, adminEventsDetailsEnabled=True)))
+        self.assertTrue(any("personal data" in item for item in plan.refused))
+        self.assertFalse(any(c["target"].endswith("adminEventsDetailsEnabled") for c in plan.changes))
+        self.assertEqual(api.writes, [])
 
     def test_new_client_with_a_delivered_secret_is_created_without_its_secret_in_the_plan(self):
         config = copy.deepcopy(CONFIG)
