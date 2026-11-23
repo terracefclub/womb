@@ -416,10 +416,11 @@ receipt records each step's seconds.
 
 The first `--all-services` run at the re-pin (Womb `1356603`, run `9d18e784`, 07:23 to
 07:51) failed in the restored phase's concurrent Documenso browser check:
-`two-factor view-recovery-codes` answered 500 to a TOTP code made at second 29 of
-its step. Documenso accepts only the server's current step and returns 500 for a
-rejected code, so the browser helper now never makes a code within 3 seconds of
-either edge of a step ([backlog](backlog.md)). Its disks were removed by hand
+`two-factor view-recovery-codes` answered 500 to a request that ended at second 29
+of the client's TOTP step. Documenso accepts only the server's current step and
+returns 500 for a rejected code, so a code checked in the next step is the most
+likely cause; it is not shown ([backlog](backlog.md) says why). As a mitigation the
+browser helper now never makes a code within 3 seconds of either edge of a step. Its disks were removed by hand
 (the purge command refuses failed runs). The second run, Womb `78188ce` with that
 fix, run `798369c9`, passed from 08:19 to 08:49 (scenario 1722.43 seconds) with its
 output on the build machine's non-snapshotted scratch dataset: 198 HTTPS protocol
