@@ -341,7 +341,8 @@ an earlier `prepare-acme`, a copy of a manual key), unencrypted. Remove it with
 `sudo rm -rf /var/lib/acme` once the host stays on the manual mode. Going back
 to ACME later: if it still holds a valid ACME certificate, deploying ACME serves
 that one and `prepare-acme` refuses to overwrite it unless given
-`--overwrite`. The VM proof does this switch and back on the relay.
+`--overwrite` (any other argument is a usage error, so a mistyped option never
+proceeds as if none were given). The VM proof does this switch and back on the relay.
 
 ## Verification
 

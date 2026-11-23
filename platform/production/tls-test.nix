@@ -672,6 +672,8 @@ in {
         ok("already holds a valid ACME certificate" in refused, "prepare-acme does not overwrite a valid ACME certificate without --overwrite")
         # Back to ACME on a host that never ran it: no lego state, no account.
         relay.succeed("rm -rf /var/lib/acme")
+        status, typo = relay.execute("terrace-tls prepare-acme --overwite 2>&1")
+        ok(status == 2 and "usage: terrace-tls" in typo and relay.execute(f"test -e {live(RELAY)}")[0] != 0, "prepare-acme refuses a mistyped option instead of staging")
         ok("staged" in relay.succeed("terrace-tls prepare-acme"), "the served certificate is staged before the switch")
         watch = f"for i in $(seq 1 150); do echo | timeout 3 openssl s_client -connect relay:443 -servername {RELAY} 2>/dev/null | openssl x509 -noout -fingerprint -sha256 -issuer >>/root/switch.log 2>/dev/null; sleep 0.3; done"
         operator.succeed("rm -f /root/switch.log && systemd-run --unit=tls-switch-watch ${pkgs.bash}/bin/bash -c " + shlex.quote("PATH=${lib.makeBinPath [pkgs.openssl pkgs.coreutils]}; " + watch))

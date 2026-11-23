@@ -198,6 +198,8 @@
           # Before switching a live manual host to ACME: stage the certificate it serves
           # now as the first ACME certificate, so the switch never serves the placeholder.
           root
+          # Only --overwrite: a mistyped option must not just proceed as if none were given.
+          [[ -z ''${2:-} || ''${2:-} == --overwrite ]] || usage
           [[ $mode == manual ]] || { echo 'terrace-tls: this host already gets its certificate by ACME' >&2; exit 1; }
           [[ -r /run/secrets/tls/certificate && -r /run/secrets/tls/key ]] || { echo 'terrace-tls: no delivered certificate in /run/secrets/tls' >&2; exit 1; }
           issued=(/var/lib/acme/.lego/"$cert"/*/"$cert".crt)
