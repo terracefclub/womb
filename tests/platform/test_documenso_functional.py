@@ -32,7 +32,7 @@ class FunctionalFixtureTests(unittest.TestCase):
             fixture.request_fact("download original", 12.0, response)
             timeout = type("TimeoutError", (Exception,), {"__module__": "playwright._impl._errors"})
             fixture.request_fact("two-factor view-recovery-codes", 12.0, error=timeout())
-        self.assertEqual(fixture.request_diagnostics[0], {"request": "download original", "ms": 250, "status": 200, "totpStepSecond": 29, "serverClockSkewSeconds": 0})
+        self.assertEqual(fixture.request_diagnostics[0], {"request": "download original", "ms": 250, "status": 200, "totpStepSecond": 29, "serverClockSkewSeconds": 0, "serverStepSecond": 0})
         self.assertEqual(fixture.request_diagnostics[1]["exceptionClass"], "PlaywrightTimeout")
         self.assertNotIn("secret", json.dumps(fixture.request_diagnostics))
         for index in range(20):
@@ -40,8 +40,36 @@ class FunctionalFixtureTests(unittest.TestCase):
         self.assertEqual(len(fixture.request_diagnostics), 12)
 
     def test_totp_rfc6238_six_digit_vector(self):
-        with patch.object(fixture.time, "time", return_value=59):
-            self.assertEqual(fixture.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"), "287082")
+        with patch.object(fixture.time, "time", return_value=45):
+            self.assertEqual(fixture.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"), "287082")  # RFC 6238 SHA-1 vector, step 1
+
+    def boundary(self, start):
+        # A fake clock whose sleep advances it: drives the step boundary without waiting.
+        clock = SimpleNamespace(now=start, slept=[])
+        def sleep(seconds):
+            clock.slept.append(seconds)
+            clock.now += seconds
+        with patch.object(fixture.time, "time", side_effect=lambda: clock.now), patch.object(fixture.time, "sleep", side_effect=sleep):
+            code = fixture.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        return code, clock
+
+    def test_totp_is_never_generated_at_the_end_of_a_step(self):
+        # Documenso v2.21.1 checks only the server's current step and answers a rejected code with 500: a code made
+        # at second 29.5 reaches a server one second ahead in the next step (the 2026-11-23 rehearsal failure).
+        code, clock = self.boundary(59.5)
+        self.assertEqual(code, "359152")  # step 2 (RFC 6238 counter 2), not step 1's "287082"
+        self.assertEqual(clock.slept, [3.5])
+        self.assertGreaterEqual(clock.now % 30, 3)
+
+    def test_totp_is_never_generated_at_the_start_of_a_step(self):
+        # A server behind the client would still be in the previous step.
+        code, clock = self.boundary(60.5)
+        self.assertEqual(code, "359152")
+        self.assertEqual(clock.slept, [2.5])
+
+    def test_totp_mid_step_does_not_wait(self):
+        code, clock = self.boundary(45)
+        self.assertEqual((code, clock.slept), ("287082", []))
 
     def test_pdf_offsets_and_stream_are_consistent(self):
         value = fixture.pdf_fixture()

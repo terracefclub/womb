@@ -71,33 +71,34 @@ known to affect a deployed host (none exists).
   app only, not the relay, and its fingerprint comparison is nearly
   tautological. The proof also no longer exercises the expiry check's default
   system trust store.
-- The all-services rehearsal's concurrent Documenso browser check (`verify
-  --signing`) failed twice in a row on 2026-11-20 at the stage then named
-  "retained document and encryption keys" (original download, recovery codes
-  with a TOTP code, signed download), after a successful sign-in. Both failures
-  were on the first commit of the store-path-trust change (PR 58), before the
-  diagnostics below existed. Of eight runs that day it failed 2 and passed 6:
-  that first commit 2 failures and 1 pass; the same code plus a stage-split
-  diagnostic 1 pass; trunk 1 pass (the only trunk run); the final commit 3
-  passes. Cause not found; too few runs to say whether the change made it
-  likelier. On failure the browser now records which of the three requests
-  failed and, for each recent request, its HTTP status, elapsed time, the
-  server's clock minus the client's in seconds, the second within the 30-second
-  TOTP step and the exception class. That separates the candidates (the 5 s
-  timeout on the original download, a TOTP step boundary, a wrong status) but
-  may not by itself explain them. In the rehearsal's concurrent phase these
-  lines go to the browser's private stderr file, retained only on failure as
-  `evidence/concurrent-failure-original/documents.stderr` (or `-restored`) in the
-  run directory, not to the driver log.
-  Third failure, first with these diagnostics: 2026-11-23, the website `eab4189`
-  re-pin's all-services rehearsal, restored phase. The original download
-  returned 200, then `two-factor view-recovery-codes` returned 500 after 69 ms;
-  both requests were made at second 29 of the 30-second TOTP step with zero
-  server clock skew. That points to a TOTP step boundary (a code generated at
-  the end of its step and checked in the next) rather than the download timeout;
-  inferred, not shown. A likely fix is for the browser helper to wait for a new
-  step when fewer than a few seconds remain before generating the code. The
-  standalone Documenso functional check passed fresh at the same commit.
+- Explained and fixed (test client): the all-services rehearsal's concurrent
+  Documenso browser check (`verify --signing`) failed intermittently at
+  "retained document: encryption keys (recovery codes)": twice on 2026-11-20
+  (PR 58's first commit, before diagnostics; 2 of 8 runs that day) and once on
+  2026-11-23 in the website `eab4189` re-pin's first all-services rehearsal (run
+  `9d18e784`, restored phase; evidence on the build machine in
+  `website-repin-evidence-eab4189/rehearsal-run-9d18e784/evidence/concurrent-failure-restored/documents.stderr`).
+  Cause, from the pinned Documenso v2.21.1 source: the server accepts a TOTP code
+  only in its own current 30-second step (`verify-2fa-token.ts`, `window = 1`, no
+  look-back, no replay store), and a rejected code is an `AppError` without a
+  status, which the auth error handler returns as HTTP 500. The 2026-11-23 failure
+  was exactly that 500 on `two-factor view-recovery-codes`, 69 ms after a code made
+  at second 29 of its step; the same restored data had passed the same call in the
+  run's sequential verify minutes earlier (so not a key or data fault), and a reused
+  code or the concurrent browsers cannot make a code wrong (no replay store; they
+  use other services). Guest clocks in these VM runs differ by up to about a second
+  (the TLS proof measures it), enough to put the server in the next step. Not
+  directly observed: the server's own step at that instant (the `Date` header has
+  whole-second resolution); the client now records it as `serverStepSecond`. Fix:
+  the browser helper never generates a code within 3 seconds of either edge of a
+  step (`platform/documenso/functional-browser.py`, `totp`), with unit tests that
+  drive both edges on a fake clock. It is the only TOTP generator in Womb (two-factor
+  `enable` and both `view-recovery-codes` calls use it).
+- The rehearsal's `purge` refuses a failed run by design, but the disk budget
+  requires purging a run's disks pass or fail; a failed run's directory currently
+  has to be removed by hand after copying its small evidence (done for run
+  `9d18e784` on 2026-11-23). Give `purge` an explicit failed-run mode that keeps the
+  logs and receipt and removes the disks, repository and escrow.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
   (`platform/production/tls-test.nix`) failed once on 2026-11-20 at "relay:
   first boot with the CA unreachable is safe and visible; issuance once it is
