@@ -71,6 +71,108 @@ class FunctionalFixtureTests(unittest.TestCase):
         code, clock = self.boundary(45)
         self.assertEqual((code, clock.slept), ("287082", []))
 
+    @staticmethod
+    def hotp(counter):
+        # Independent RFC 4226 reference for the RFC 6238 test secret ("12345678901234567890").
+        import hashlib, hmac, struct
+        value = hmac.new(b"12345678901234567890", struct.pack(">Q", counter), hashlib.sha1).digest()
+        offset = value[-1] & 15
+        return str((struct.unpack(">I", value[offset:offset + 4])[0] & 0x7fffffff) % 1000000).zfill(6)
+
+    def stepping(self, start, jumps, guard=None):
+        # A fake clock whose sleep advances it by the pause plus a clock step (jumps[i] for the i-th sleep).
+        clock = SimpleNamespace(now=start, slept=[])
+        def sleep(seconds):
+            clock.now += seconds + (jumps[len(clock.slept)] if len(clock.slept) < len(jumps) else 0)
+            clock.slept.append(seconds)
+        with patch.object(fixture.time, "time", side_effect=lambda: clock.now), patch.object(fixture.time, "sleep", side_effect=sleep):
+            # RFC 6238's published SHA-1 test seed, base32.
+            arguments = ["GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"] + ([] if guard is None else [guard])
+            code = fixture.totp(*arguments)
+        return code, clock
+
+    def test_totp_checks_the_clock_again_after_its_wait(self):
+        # The clock steps forward 26.5 s during the first wait and lands at second 29.5 of the next step:
+        # the code must not be made there; a second wait reaches second 3 of the step after.
+        code, clock = self.stepping(59.5, [26.5])
+        self.assertEqual(clock.slept, [3.5, 3.5])
+        self.assertEqual(clock.now, 93.0)
+        self.assertEqual(code, self.hotp(3))
+
+    def test_totp_gives_up_after_bounded_waits_with_a_clear_message(self):
+        # A clock that keeps stepping back to the end of a step: three waits, then a fixed message.
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(AssertionError):
+            self.stepping(59.5, [-3.5, -3.5, -3.5, -3.5])
+        self.assertEqual(output.getvalue(), "Documenso TOTP guard: the clock was still within 3 s of a step edge after 3 waits.\n")
+
+    def test_totp_records_whether_the_guard_fired_and_the_request_deadline(self):
+        guard = {}
+        code, _clock = self.stepping(59.5, [], guard)
+        self.assertEqual(code, self.hotp(2))
+        self.assertEqual(guard, {"codeStep": 2, "codeStepSecond": 3.0, "guardWaits": 1, "guardSleptMs": 3500, "deadlineMs": 26000})
+        guard = {}
+        self.stepping(45.25, [], guard)
+        self.assertEqual(guard, {"codeStep": 1, "codeStepSecond": 15.2, "guardWaits": 0, "guardSleptMs": 0, "deadlineMs": 13750})
+
+    def test_request_fact_records_the_code_and_end_step(self):
+        fixture.request_diagnostics.clear()
+        guard = {"codeStep": 2, "codeStepSecond": 27.0, "guardWaits": 0, "guardSleptMs": 0, "deadlineMs": 2000}
+        response = SimpleNamespace(status=500, headers={})
+        with patch.object(fixture.time, "time", return_value=90.4), patch.object(fixture.time, "monotonic", return_value=15.0):
+            fixture.request_fact("two-factor view-recovery-codes", 12.0, response, guard=guard)
+        fact = fixture.request_diagnostics[-1]
+        self.assertEqual((fact["endStepSecond"], fact["sameClientStep"], fact["guardWaits"], fact["codeStepSecond"]), (0.4, False, 0, 27.0))
+
+    def two_factor(self, behaviour, elapsed, guard):
+        # post() against a fake request context; monotonic time advances by `elapsed` during the request.
+        clock = SimpleNamespace(now=100.0)
+        calls = []
+        def request(url, **options):
+            calls.append(options)
+            clock.now += elapsed
+            return behaviour()
+        ctx = SimpleNamespace(request=SimpleNamespace(post=request))
+        output = io.StringIO()
+        fixture.request_diagnostics.clear()
+        with patch.object(fixture.time, "monotonic", side_effect=lambda: clock.now), patch.object(fixture.time, "time", return_value=63.0), \
+                contextlib.redirect_stderr(output):
+            try:
+                result = fixture.post(ctx, "view-recovery-codes", {"token": "000000"}, guard)
+            except BaseException as error:
+                result = error
+        return result, calls, output.getvalue()
+
+    def test_two_factor_request_gets_the_time_left_in_the_step_as_its_timeout(self):
+        guard = {"codeStep": 2, "codeStepSecond": 3.0, "guardWaits": 1, "guardSleptMs": 3500, "deadlineMs": 26000}
+        ok = SimpleNamespace(status=200, headers={}, body=lambda: b"{}", json=lambda: {"success": True, "backupCodes": []})
+        result, calls, output = self.two_factor(lambda: ok, 0.25, guard)
+        self.assertEqual(result, {"success": True, "backupCodes": []})
+        self.assertEqual(calls[0]["timeout"], 26000)
+        line = json.loads(output.removeprefix("Documenso TOTP request: "))
+        self.assertEqual((line["guardWaits"], line["guardSleptMs"], line["codeStepSecond"], line["ms"], line["status"], line["sameClientStep"]), (1, 3500, 3.0, 250, 200, True))
+        self.assertNotIn("000000", output)
+
+    def test_an_answer_after_the_margin_fails_naming_the_cause_not_the_500(self):
+        guard = {"codeStep": 2, "codeStepSecond": 27.0, "guardWaits": 0, "guardSleptMs": 0, "deadlineMs": 2000}
+        late = SimpleNamespace(status=500, headers={}, body=lambda: b"{}", json=lambda: {"success": False})
+        result, _calls, output = self.two_factor(lambda: late, 2.5, guard)
+        self.assertIsInstance(result, AssertionError)
+        self.assertEqual(str(result), "TOTP margin outlasted")
+        self.assertIn("Documenso two-factor view-recovery-codes: request outlasted the TOTP margin (2500 ms, deadline 2000 ms after a code made at step second 27.0)", output)
+        self.assertIn("any late answer, even a success, is treated as a failure.", output)
+
+    def test_a_request_timeout_at_the_margin_names_the_cause(self):
+        guard = {"codeStep": 2, "codeStepSecond": 27.0, "guardWaits": 0, "guardSleptMs": 0, "deadlineMs": 2000}
+        timeout = type("TimeoutError", (Exception,), {"__module__": "playwright._impl._errors"})
+        def raises():
+            raise timeout("PRIVATE_URL")
+        result, _calls, output = self.two_factor(raises, 2.0, guard)
+        self.assertIsInstance(result, timeout)
+        self.assertIn("request outlasted the TOTP margin (2000 ms, deadline 2000 ms", output)
+        self.assertIn('"exceptionClass": "PlaywrightTimeout"', output)
+        self.assertNotIn("PRIVATE_URL", output)
+
     def test_pdf_offsets_and_stream_are_consistent(self):
         value = fixture.pdf_fixture()
         self.assertTrue(value.startswith(b"%PDF-1.4"))

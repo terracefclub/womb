@@ -56,10 +56,16 @@ login_diagnostics = None
 request_diagnostics = []
 
 
-def request_fact(label, started, response=None, error=None):
+def request_fact(label, started, response=None, error=None, guard=None):
     # The second within the 30-second TOTP step at which the request ended, to expose a step-boundary race.
     fact = {"request": label, "ms": int((time.monotonic() - started) * 1000),
             "status": 0 if response is None else response.status, "totpStepSecond": int(time.time()) % 30}
+    if guard is not None:
+        # When and how the code was made (see totp): enough to tell afterwards whether the guard fired.
+        ended = time.time()
+        fact.update(guard)
+        fact["endStepSecond"] = round(ended % TOTP_PERIOD, 1)
+        fact["sameClientStep"] = int(ended) // TOTP_PERIOD == guard["codeStep"]
     if response is not None and response.headers.get("date"):
         try:
             served = email.utils.parsedate_to_datetime(response.headers["date"]).timestamp()
@@ -73,6 +79,34 @@ def request_fact(label, started, response=None, error=None):
         fact["exceptionClass"] = login_exception_class(error)
     request_diagnostics.append(fact)
     del request_diagnostics[:-12]
+
+
+def post(ctx, suffix, value, guard=None):
+    # guard: the facts totp() recorded for the code in value (None for setup).
+    assert suffix in ["setup", "enable", "view-recovery-codes"] and (guard is None) == (suffix == "setup")
+    label = "two-factor " + suffix
+    options = {} if guard is None else {"timeout": max(1, guard["deadlineMs"])}
+    started = time.monotonic()
+    try:
+        response = ctx.request.post(DOC + "/api/auth/two-factor/" + suffix, data=value,
+                                    headers={"Origin": DOC}, **options)
+    except BaseException as error:
+        request_fact(label, started, error=error, guard=guard)
+        if guard is not None:
+            print("Documenso TOTP request: " + json.dumps(request_diagnostics[-1], sort_keys=True), file=sys.stderr)
+            if request_diagnostics[-1].get("exceptionClass") == "PlaywrightTimeout" or request_diagnostics[-1]["ms"] >= guard["deadlineMs"]:
+                totp_margin_outlasted(label, request_diagnostics[-1])
+        raise
+    request_fact(label, started, response, guard=guard)
+    if guard is not None:
+        print("Documenso TOTP request: " + json.dumps(request_diagnostics[-1], sort_keys=True), file=sys.stderr)
+        if request_diagnostics[-1]["ms"] > guard["deadlineMs"]:
+            totp_margin_outlasted(label, request_diagnostics[-1])
+            raise AssertionError("TOTP margin outlasted")
+    assert response.status == 200 and len(response.body()) <= 65536
+    result = response.json()
+    assert result["success"] is True
+    return result
 
 
 def private_read(path):
@@ -93,19 +127,44 @@ def digest(value):
 # Documenso v2.21.1 accepts a code only in the server's own current 30-second step (packages/lib/server-only/2fa/
 # verify-2fa-token.ts: window = 1, no look-back) and answers a rejected code with HTTP 500 (an AppError without a
 # status). Guest clocks differ by up to about a second and the request takes time, so a code made near either edge
-# of a step can reach the server in the neighbouring step. Never generate one within TOTP_GUARD seconds of an edge.
+# of a step can reach the server in the neighbouring step. Never generate one within TOTP_GUARD seconds of an edge
+# (checked again after every wait, at most TOTP_TRIES waits), and give the request only the time left in the step,
+# less TOTP_SKEW for the clocks, so a slow answer fails as such instead of as the server's 500.
 TOTP_PERIOD = 30
 TOTP_GUARD = 3
+TOTP_SKEW = 1
+TOTP_TRIES = 3
 
 
-def totp(secret):
-    into = time.time() % TOTP_PERIOD
-    if into < TOTP_GUARD or into > TOTP_PERIOD - TOTP_GUARD:
-        time.sleep((TOTP_GUARD - into) % TOTP_PERIOD)
+def totp(secret, guard=None):
+    waits, slept = 0, 0.0
+    while True:
+        now = time.time()
+        into = now % TOTP_PERIOD
+        if TOTP_GUARD <= into <= TOTP_PERIOD - TOTP_GUARD:
+            break
+        # A clock that steps during the sleep could land near an edge again: check again, bounded.
+        if waits == TOTP_TRIES:
+            print(f"Documenso TOTP guard: the clock was still within {TOTP_GUARD} s of a step edge after {waits} waits.", file=sys.stderr)
+            raise AssertionError("TOTP guard exhausted")
+        pause = (TOTP_GUARD - into) % TOTP_PERIOD
+        time.sleep(pause)
+        waits, slept = waits + 1, slept + pause
+    step = int(now) // TOTP_PERIOD
+    if guard is not None:
+        guard.update({"codeStep": step, "codeStepSecond": round(into, 1), "guardWaits": waits, "guardSleptMs": int(slept * 1000),
+                      "deadlineMs": int((TOTP_PERIOD - into - TOTP_SKEW) * 1000)})
     key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
-    value = hmac.new(key, struct.pack(">Q", int(time.time()) // TOTP_PERIOD), hashlib.sha1).digest()
+    value = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
     offset = value[-1] & 15
     return str((struct.unpack(">I", value[offset:offset + 4])[0] & 0x7fffffff) % 1000000).zfill(6)
+
+
+def totp_margin_outlasted(label, fact):
+    # Fixed text and integers only. The server's answer (often 500) is then not evidence of a server fault.
+    print(f"Documenso {label}: request outlasted the TOTP margin ({fact['ms']} ms, deadline {fact['deadlineMs']} ms after a code "
+          f"made at step second {fact['codeStepSecond']}); the code may have reached the server in the next step, so any late "
+          f"answer, even a success, is treated as a failure.", file=sys.stderr)
 
 
 def pdf_fixture():
@@ -227,21 +286,6 @@ def main():
                                for cookie in ctx.cookies(DOC))
                 facts["step"] = "passed"
                 return ctx, page
-
-            def post(ctx, suffix, value):
-                assert suffix in ["setup", "enable", "view-recovery-codes"]
-                started = time.monotonic()
-                try:
-                    response = ctx.request.post(DOC + "/api/auth/two-factor/" + suffix, data=value,
-                                                headers={"Origin": DOC})
-                except BaseException as error:
-                    request_fact("two-factor " + suffix, started, error=error)
-                    raise
-                request_fact("two-factor " + suffix, started, response)
-                assert response.status == 200 and len(response.body()) <= 65536
-                result = response.json()
-                assert result["success"] is True
-                return result
 
             def download(ctx, path, save=False):
                 assert re.fullmatch(r"/api/files/envelope/[A-Za-z0-9_-]+/envelopeItem/[A-Za-z0-9_-]+/download/(original|signed)", path)
@@ -371,9 +415,11 @@ def main():
                 if mode == "create":
                     stage = "encrypted two factor setup and decryption"
                     secret = post(member, "setup", {})["secret"]
-                    codes = post(member, "enable", {"code": totp(secret)})["recoveryCodes"]
+                    guard = {}
+                    codes = post(member, "enable", {"code": totp(secret, guard)}, guard)["recoveryCodes"]
                     assert isinstance(codes, list) and len(codes) >= 8
-                    assert digest(post(member, "view-recovery-codes", {"token": totp(secret)})["backupCodes"]) == digest(codes)
+                    guard = {}
+                    assert digest(post(member, "view-recovery-codes", {"token": totp(secret, guard)}, guard)["backupCodes"]) == digest(codes)
                     # The pinned English catalogue translates Organisation to Organization.
                     stage = "native organisation settings page"
                     response = page.goto(DOC + "/settings/organisations")
@@ -464,7 +510,8 @@ def main():
                     path = receipt["path"]
                     assert download(member, path) == receipt["sha256"]
                     stage = "retained document: encryption keys (recovery codes)"
-                    assert digest(post(member, "view-recovery-codes", {"token": totp(receipt["totpSecret"])})["backupCodes"]) == receipt["backupCodesHash"]
+                    guard = {}
+                    assert digest(post(member, "view-recovery-codes", {"token": totp(receipt["totpSecret"], guard)}, guard)["backupCodes"]) == receipt["backupCodesHash"]
                     if signing:
                         stage = "retained document: signed download"
                         signed = private_read(ROOT / "signed-receipt.json")

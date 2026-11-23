@@ -101,17 +101,24 @@ known to affect a deployed host (none exists).
   (`platform/documenso/functional-browser.py`, `totp`), with unit tests that drive
   both edges on a fake clock. It is the only TOTP generator in Womb (two-factor
   `enable` and both `view-recovery-codes` calls use it). With it the next
-  all-services rehearsal (run `798369c9`, 2026-11-23) passed, but that run keeps
+  all-services rehearsal (run `798369c9`, 2026-11-23) passed, but that run kept
   no per-request record of whether the guard fired, and one pass does not show
   that the failure rate (3 failures in about 10 runs) has dropped.
-  Open robustness points (left as they are so the passing rehearsal still covers
-  the merged code): `totp()` checks the clock once, sleeps once and then generates
-  without checking again, so a clock step during the sleep could still land the
-  code near an edge; and the 3-second margin only covers a request that returns
-  within 3 seconds, while the request uses the default timeout. A follow-up would
-  check again after the sleep with a bounded number of tries, and fail with a
-  clear message when a request outlasts the margin instead of surfacing the
-  server's 500.
+  Done since (proof follow-ups PR): `totp()` checks the clock again after every
+  wait (at most 3 waits, then a fixed "clock was still within 3 s of a step
+  edge" message) and makes the code from the same clock reading it checked; each
+  two-factor request gets only the time left in the step less 1 s as its
+  timeout, and a request that outlasts it fails with "request outlasted the
+  TOTP margin" instead of the server's 500. Every TOTP request now prints one
+  `Documenso TOTP request: {...}` line (fixed keys and numbers only: second in
+  the step when the code was made, guard waits and milliseconds slept, the
+  deadline, elapsed time, status, second in the step at the end, whether the
+  request ended in the code's step, the server's step second); the sequential
+  calls show it in the driver log through the guest console, and the
+  all-services rehearsal copies the concurrent call's lines into its driver log
+  on a pass. Unit tests on a patched clock (`tests/platform/test_documenso_functional.py`).
+  Still not shown: that the guard removes the failure (it needs many runs), and
+  the server's step at the instant it checks a code.
 - The rehearsal's `purge` refuses a failed run by design, but the disk budget
   requires purging a run's disks pass or fail; a failed run's directory currently
   has to be removed by hand after copying its small evidence (done for run
