@@ -476,6 +476,8 @@ in {
                 "all sessions": all_sessions(),
                 "realm": sql("select id from realm where name = 'terrace'"),
             }
+        events_sql = "select admin_events_enabled::text || ',' || admin_events_details_enabled::text from realm where name = 'terrace'"
+        ok(sql(events_sql) == "false,false", "the imported realm starts with admin events off (the pinned artifact does not declare them)")
         before = signature()
         ok(before["site sessions"] > 0, f"site sessions exist to protect ({before['site sessions']})")
         ok("Converged" in tia("realm plan --admin ops-alice --password-stdin", stdin=alice), "freshly imported realm matches the pinned definition")
@@ -487,7 +489,7 @@ in {
         config["clientSecrets"]["terrace-probe"] = {"file": f"{T}/probe-secret", "consumers": []}
         app.succeed(f"umask 077; echo {shlex.quote(json.dumps(config))} >/etc/terrace/identity-admin.json && chmod 0400 /etc/terrace/identity-admin.json")
         jq_change = (
-            '.accessTokenLifespan = 120 | .roles.realm += [{"name": "terrace-reconcile-probe"}]'
+            '.accessTokenLifespan = 120 | .adminEventsEnabled = true | .adminEventsDetailsEnabled = false | .roles.realm += [{"name": "terrace-reconcile-probe"}]'
             ' | (.clients[] | select(.clientId == "terrace-web") | .redirectUris) += ["https://web.terrace.invalid/auth/callback-v2"]'
             ' | (.clients[] | select(.clientId == "terrace-web") | .protocolMappers[0].config["lightweight.claim"]) = "false"'
             ' | (.clients[] | select(.clientId == "terrace-cms") | .protocolMappers) += [{"name": "probe-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "config": {"included.custom.audience": "terrace-editorial", "id.token.claim": "false", "access.token.claim": "false"}}]'
@@ -499,8 +501,8 @@ in {
         out = tia("realm plan --admin ops-alice --password-stdin --definition /root/changed.json", stdin=alice)
         found = re.search(r"Plan: ([0-9]+) change\(s\)\. sha256 ([0-9a-f]{64})", out)
         assert found is not None, "plan summary"
-        ok(found.group(1) == "9", f"nine declared differences planned ({found.group(1)})")
-        for needle in ["~ realm accessTokenLifespan: 60 -> 120", "+ role-create terrace/role/terrace-reconcile-probe",
+        ok(found.group(1) == "10", f"ten declared differences planned ({found.group(1)})")
+        for needle in ["~ realm accessTokenLifespan: 60 -> 120", "~ realm adminEventsEnabled: false -> true", "+ role-create terrace/role/terrace-reconcile-probe",
                        "+ mapper-create terrace/client/terrace-cms/mapper/probe-audience: type oidc-audience-mapper",
                        "~ mapper-update terrace/client/terrace-web/mapper/community-resource: type oidc-audience-mapper",
                        "+ client-scope-add terrace/client/terrace-cms/optional-scope/microprofile-jwt: scope microprofile-jwt as optional",
@@ -521,8 +523,9 @@ in {
         ok(digest == found.group(2), "the same plan from the pinned path")
         out = tia("realm apply --admin ops-alice --password-stdin --plan-sha256 " + "0" * 64, stdin=alice, expect=1)
         ok("does not match the plan" in out and sql("select access_token_lifespan from realm where name = 'terrace'") == "60", "apply refuses an unreviewed plan")
-        ok("Applied 9 change(s)" in tia(f"realm apply --admin ops-alice --password-stdin --plan-sha256 {digest}", stdin=alice), "reviewed plan applied")
+        ok("Applied 10 change(s)" in tia(f"realm apply --admin ops-alice --password-stdin --plan-sha256 {digest}", stdin=alice), "reviewed plan applied")
         ok(sql("select access_token_lifespan from realm where name = 'terrace'") == "120", "realm setting applied")
+        ok(sql(events_sql) == "true,false", "admin events enabled without representations, read back from Keycloak's database")
         ok(sql("select count(*) from keycloak_role where name = 'terrace-reconcile-probe'") == "1", "role created")
         ok(sql("select count(*) from redirect_uris r join client c on c.id = r.client_id where c.client_id = 'terrace-web'") == "2", "redirect URI added")
         ok(sql("select count(*) from client where client_id = 'terrace-probe'") == "1", "client created")
@@ -539,7 +542,7 @@ in {
         destructive = {
             "drops a user-profile attribute": '(.components["org.keycloak.userprofile.UserProfileProvider"][0].config["kc.user.profile.config"][0]) |= (fromjson | .attributes |= map(select(.name != "lastName")) | tojson)',
             "turns a confidential client public": '(.clients[] | select(.clientId == "terrace-web") | .publicClient) = true',
-            "declares a key it does not understand": '.eventsEnabled = true',
+            "declares a key it does not understand": '.someFutureSetting = true',
         }
         for label, change in destructive.items():
             app.succeed(f"umask 077; jq {shlex.quote(change)} /root/changed.json >/root/destructive.json")
@@ -548,11 +551,14 @@ in {
         config["definition"] = "/root/destructive.json"
         app.succeed(f"umask 077; echo {shlex.quote(json.dumps(config))} >/etc/terrace/identity-admin.json && chmod 0400 /etc/terrace/identity-admin.json")
         ok("Plan refused" in tia(f"realm apply --admin ops-alice --password-stdin --plan-sha256 {digest}", stdin=alice, expect=3), "apply refuses a destructive pinned definition")
-        for label, change in {"wildcard redirect URI": '(.clients[] | select(.clientId == "terrace-web") | .redirectUris) += ["https://*.terrace.invalid/*"]',
+        for label, change in {"admin event representations": '.adminEventsDetailsEnabled = true',
+                              "admin event representations set to null": '.adminEventsDetailsEnabled = null',
+                              "admin events flag that is not a boolean": '.adminEventsEnabled = "true"',
+                              "wildcard redirect URI": '(.clients[] | select(.clientId == "terrace-web") | .redirectUris) += ["https://*.terrace.invalid/*"]',
                               "direct access grants": '(.clients[] | select(.clientId == "terrace-web") | .directAccessGrantsEnabled) = true'}.items():
             app.succeed(f"umask 077; jq {shlex.quote(change)} /root/changed.json >/root/policy.json")
             ok("fails the hosting policy" in tia("realm plan --admin ops-alice --password-stdin --definition /root/policy.json", stdin=alice, expect=1), f"hosting policy refuses: {label}")
-        ok(signature()["users"] == before["users"] and sql("select access_token_lifespan from realm where name = 'terrace'") == "120", "refused plans changed nothing")
+        ok(signature()["users"] == before["users"] and sql("select access_token_lifespan from realm where name = 'terrace'") == "120" and sql(events_sql) == "true,false", "refused plans changed nothing")
         # Back to the pinned release: removals of exact lists are applied; roles, clients, mappers and scopes are kept.
         app.succeed("install -m 0400 /root/identity-admin.json.pinned /etc/terrace/identity-admin.json")
         out = tia("realm plan --admin ops-alice --password-stdin", stdin=alice)
@@ -564,6 +570,7 @@ in {
             ok(needle in out, "back to pinned: " + needle[:60])
         tia(f"realm apply --admin ops-alice --password-stdin --plan-sha256 {back.group(1)}", stdin=alice)
         ok("Converged" in tia("realm plan --admin ops-alice --password-stdin", stdin=alice), "converged on the pinned definition again")
+        ok(sql(events_sql) == "true,false", "the pinned artifact does not declare the events flags, so reconciliation left them alone")
         ok(probe("signin", "ed-carol", carol) == "signed-in role=editor", "editor still signs in after reconciliation")
 
     with subtest("revoke and disable end sessions; --keep-sessions keeps them"):

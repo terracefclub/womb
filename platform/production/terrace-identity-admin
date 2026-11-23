@@ -989,7 +989,12 @@ def cmd_client_secret(config, args):
 
 REALM_SCALARS = ("displayName", "registrationAllowed", "resetPasswordAllowed", "loginWithEmailAllowed", "duplicateEmailsAllowed",
                  "editUsernameAllowed", "bruteForceProtected", "sslRequired", "accessTokenLifespan", "ssoSessionIdleTimeout",
-                 "ssoSessionMaxLifespan", "revokeRefreshToken", "refreshTokenMaxReuse", "verifyEmail")
+                 "ssoSessionMaxLifespan", "revokeRefreshToken", "refreshTokenMaxReuse", "verifyEmail",
+                 "adminEventsEnabled", "adminEventsDetailsEnabled")
+# Managed only when the artifact declares them (absent means untouched). Booleans only. Admin events record who did
+# what to which resource; with details on they also carry the submitted and returned representations, which can hold
+# personal data, so hosting refuses `adminEventsDetailsEnabled: true` (also in realm-policy.jq, which guards the import).
+REALM_BOOLEANS = ("adminEventsEnabled", "adminEventsDetailsEnabled")
 REALM_KEYS = set(REALM_SCALARS) | {"realm", "enabled", "roles", "components", "clients", "scopeMappings"}
 CLIENT_UPDATABLE = ("enabled", "standardFlowEnabled", "directAccessGrantsEnabled", "implicitFlowEnabled", "consentRequired", "fullScopeAllowed")
 CLIENT_FIXED = ("publicClient", "protocol", "clientAuthenticatorType", "serviceAccountsEnabled")
@@ -1131,7 +1136,17 @@ def realm_plan(api, config, definition):
     running = api.get(realm)
     if definition.get("enabled") is not True:
         plan.refused.append("disabling the realm is not applied by reconciliation")
+    invalid = set()
+    for key in REALM_BOOLEANS:
+        if key in definition and not isinstance(definition[key], bool):
+            plan.refused.append(f"{key} must be true or false, not {json.dumps(definition[key])}")
+            invalid.add(key)
+    if definition.get("adminEventsDetailsEnabled") is True:
+        plan.refused.append("adminEventsDetailsEnabled: true is not applied by hosting: admin event representations can contain personal data")
+        invalid.add("adminEventsDetailsEnabled")
     for key in REALM_SCALARS:
+        if key in invalid:
+            continue
         if key in definition and norm(definition[key]) != norm(running.get(key)):
             plan.change("realm-setting", f"{realm}/{key}", setting=key, **{"from": running.get(key), "to": definition[key]})
     roles = definition.get("roles") or {}

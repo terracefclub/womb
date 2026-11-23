@@ -125,6 +125,8 @@ known to affect a deployed host (none exists).
   had already been garbage-collected before the scan. The identity proof itself
   passed, including once with the certificate rebuilt under a new key. Redo the
   scan right after an identity run while its outputs are still in the store.
-- The website repository's realm contract should enable admin events for the
-  `terrace` realm (`adminEventsEnabled`); the realm reconciliation then applies
-  it. Until then the journal lines are the record of site-account changes.
+- The website's realm contract now declares admin events for the `terrace`
+  realm (`adminEventsEnabled: true`, details off) and the realm reconciliation
+  applies them. Remaining: re-pin the website release to one that carries them,
+  then run `realm plan` and `realm apply`. Until then the journal lines are the
+  record of site-account changes.
