@@ -194,8 +194,30 @@ platform/full-rehearsal purge /absolute/private/terrace-rehearsals/run-UUID \
 Purge requires the matching owner/scope markers, completed receipt, exact unit
 and cgroup off, and no tagged guest. It removes that run's recorded runtime,
 state, retained encrypted repository and escrow. It retains receipts/evidence
-and unrelated paths. Failed runs are rejected: investigate/capture them before
-a separately reviewed deletion. Pure rejection/sentinel tests run with
+and unrelated paths. A failed or incomplete run is refused by this form. The
+disk budget still requires purging it, pass or fail: copy its small evidence
+first (`driver.log`, `receipt.json`, `evidence/`), then
+
+```sh
+platform/full-rehearsal purge /absolute/private/terrace-rehearsals/run-UUID \
+  --synthetic-only --yes --failed
+```
+
+`--failed` accepts only a run directory the tool created (same owner, scope,
+run id and mode checks) whose receipt is not complete, whose unit and cgroup are
+off with no tagged guest, and whose controller has exited: the run records the
+controller's process id and start time in `controller.json` (and, once guests
+start, `control.json`); it checks every record present and refuses, printing
+a fixed reason, when there is none, when one is malformed (a link, not private,
+not a JSON object, a wrong run id) or when one names a process that is still
+running. A process that has exited counts as gone, also when it exits while
+being checked. It removes the same things (`state/` with the disks, `retained/`,
+`escrow/`, the recorded runtime directory when one was recorded, a leftover
+`driver-root` link, never following a link out of the run) and keeps
+`driver.log`, `evidence/` and the receipt, marked `syntheticStatePurged` and
+`purgedIncomplete`. A run that failed before this record existed and before its
+guests started has neither file and is still removed by hand. Pure
+rejection/sentinel tests run with
 `direnv exec . python platform/rehearsal/test-full.py -v`.
 
 This is prebuilt-closure VM bootstrap/recovery, not a blank-provider install,
@@ -372,7 +394,8 @@ direnv exec . ./platform/full-rehearsal purge \
   --synthetic-only --yes
 ```
 
-Receipts/evidence and unrelated or failed runs remain. No provider apply, blank
+Receipts/evidence and unrelated or failed runs remain; a failed run is purged
+with the same command plus `--failed` (above). No provider apply, blank
 provider-machine install, live-data migration, public DNS/cutover, human relay
 OIDC enrollment, forced DERP/NAT path or live Sheets/mail/payment integration is
 claimed by this mode. Website/CMS, identity, Vaultwarden, automation and relay

@@ -119,11 +119,16 @@ known to affect a deployed host (none exists).
   on a pass. Unit tests on a patched clock (`tests/platform/test_documenso_functional.py`).
   Still not shown: that the guard removes the failure (it needs many runs), and
   the server's step at the instant it checks a code.
-- The rehearsal's `purge` refuses a failed run by design, but the disk budget
-  requires purging a run's disks pass or fail; a failed run's directory currently
-  has to be removed by hand after copying its small evidence (done for run
-  `9d18e784` on 2026-11-23). Give `purge` an explicit failed-run mode that keeps the
-  logs and receipt and removes the disks, repository and escrow.
+- Done: the rehearsal's `purge` has an explicit `--failed` mode for a failed
+  or incomplete run (the disk budget requires purging pass or fail; run
+  `9d18e784` was removed by hand on 2026-11-23). It keeps the logs, `evidence/`
+  and receipt and removes the disks, repository and escrow, with the existing
+  checks plus: the receipt must not be complete, and the run's controller
+  (`controller.json` or `control.json`, process id and start time) must have
+  exited ([full rehearsal](full-rehearsal.md)). Unit tests for the success and
+  each refusal in `platform/rehearsal/test-full.py`. A run that failed before
+  either record existed (older runs that died before their guests started) is
+  still removed by hand.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
   (`platform/production/tls-test.nix`) failed once on 2026-11-20 at "relay:
   first boot with the CA unreachable is safe and visible; issuance once it is

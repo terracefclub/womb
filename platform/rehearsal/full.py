@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 
-from host import HERE, contained_driver, create_run, owned_guests, unit_off, write_json
+from host import HERE, contained_driver, create_run, fingerprint, owned_guests, unit_off, write_json
 
 
 STORE = '/nix/store/'
@@ -44,22 +44,64 @@ def checked_run(path):
     return run, run_id, receipt
 
 
-def purge(path, confirmed=False):
+class Refused(ValueError):
+    """A refusal whose reason is a fixed text without paths or values; the command line prints it."""
+
+
+def require_controller_gone(run, run_id):
+    # A failed or incomplete run is purged only when the controller that created it has exited.
+    # Runs record it in controller.json (since the failed-run purge); the driver phase also in control.json.
+    # Every record present must be well formed and name a process that is not running.
+    names = [name for name in ['controller.json', 'control.json'] if os.path.lexists(run / name)]
+    if not names:
+        raise Refused('no controller record (controller.json or control.json)')
+    for name in names:
+        try:
+            record = private_json(run / name, 4096)
+        except (OSError, ValueError):
+            # A link, a public or foreign file, a non-file or unparsable JSON.
+            raise Refused('malformed controller record ' + name) from None
+        if not isinstance(record, dict):
+            raise Refused('malformed controller record ' + name)
+        pid, start = record.get('controllerPid'), record.get('controllerStart')
+        if record.get('runId') != run_id or type(pid) is not int or pid <= 0 or not isinstance(start, str) or not start:
+            raise Refused('malformed controller record ' + name)
+        try:
+            current = fingerprint(pid)
+        except ProcessLookupError:
+            # The process exited while its start time was read: no process has this id now, so it is not
+            # the controller (a later process reusing the id has a different start time and counts as gone too).
+            current = None
+        except OSError:
+            raise Refused('cannot tell whether the controller in ' + name + ' is running') from None
+        if current == start:
+            raise Refused('the controller in ' + name + ' is still running')
+
+
+def purge(path, confirmed=False, failed=False):
     if not confirmed:
         raise ValueError()
     run, run_id, receipt = checked_run(path)
     unit = 'terrace-rehearsal-' + run_id + '.service'
-    # Failure disks stay protected until separately captured and investigated.
-    # This command purges only a completed, verified synthetic rehearsal.
-    if receipt.get('complete') is not True or receipt.get('computeOff') is not True or not unit_off(unit) or owned_guests(run_id):
+    if failed:
+        # A failed or incomplete run (no complete receipt): its compute must be provably off now,
+        # and its controller gone. A complete run uses the ordinary purge.
+        if receipt.get('complete') is not False:
+            raise Refused('the receipt is not that of a failed or incomplete run')
+        if not unit_off(unit) or owned_guests(run_id):
+            raise Refused('the run unit or a tagged guest is still running')
+        require_controller_gone(run, run_id)
+    # Otherwise only a completed, verified synthetic rehearsal.
+    elif receipt.get('complete') is not True or receipt.get('computeOff') is not True or not unit_off(unit) or owned_guests(run_id):
         raise ValueError()
-    record = private_json(run / 'runtime.json', 4096)
-    directory = Path(record.get('directory', ''))
-    if record.get('scope') != receipt['scope'] or record.get('runId') != run_id:
+    # A run that failed before its guardian started has no runtime directory record.
+    record = private_json(run / 'runtime.json', 4096) if not failed or os.path.lexists(run / 'runtime.json') else None
+    directory = Path(record.get('directory', '')) if record is not None else None
+    if record is not None and (record.get('scope') != receipt['scope'] or record.get('runId') != run_id):
         raise ValueError()
-    if directory.parent != Path('/tmp') or not directory.name.startswith('tr-' + run_id[:8] + '-') or directory.is_symlink():
+    if directory is not None and (directory.parent != Path('/tmp') or not directory.name.startswith('tr-' + run_id[:8] + '-') or directory.is_symlink()):
         raise ValueError()
-    if directory.exists():
+    if directory is not None and directory.exists():
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError()
@@ -78,12 +120,14 @@ def purge(path, confirmed=False):
             raise ValueError()
     if root.is_symlink():
         root.unlink()
-    if directory.exists():
+    if directory is not None and directory.exists():
         shutil.rmtree(directory)
     for target in targets:
         shutil.rmtree(target)
         target.mkdir(mode=0o700)
     receipt['syntheticStatePurged'] = True
+    if failed:
+        receipt['purgedIncomplete'] = True
     write_json(run / 'receipt.json', receipt)
 
 
@@ -135,6 +179,8 @@ def execute(args):
     if not re.fullmatch(r'/[A-Za-z0-9/_.-]+', str(parent)):
         raise ValueError()
     run, run_id = create_run(parent)
+    # Lets a failed-run purge tell that this controller has exited.
+    write_json(run / 'controller.json', {'runId': run_id, 'controllerPid': os.getpid(), 'controllerStart': fingerprint(os.getpid())})
     try:
         driver = warm(run, run_id, args, lock)
         containment = contained_driver(run, run_id, [driver, '--no-interactive', '--keep-machine-state', '--output_directory', str(run / 'evidence')], lock, runtime=2700 if args.all_services else 1800, queue=1200)
@@ -193,6 +239,7 @@ def main():
     delete.add_argument('run')
     delete.add_argument('--synthetic-only', action='store_true', required=True)
     delete.add_argument('--yes', action='store_true', required=True)
+    delete.add_argument('--failed', action='store_true', help='Purge a failed or incomplete run once its compute and controller are gone.')
     args = parser.parse_args()
     if getattr(args, 'all_services', False):
         args.documenso_signing = True
@@ -202,8 +249,8 @@ def main():
 
     convert_signals()
     if args.command == 'purge':
-        purge(args.run, args.synthetic_only and args.yes)
-        print('Completed synthetic run state purged; receipts and unrelated paths retained.')
+        purge(args.run, args.synthetic_only and args.yes, failed=args.failed)
+        print(('Failed or incomplete' if args.failed else 'Completed') + ' synthetic run state purged; receipts, logs and unrelated paths retained.')
     else:
         execute(args)
 
@@ -211,6 +258,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except Refused as refused:
+        print('Purge refused: ' + str(refused) + '. Run state retained.', file=sys.stderr)
+        sys.exit(1)
     except Exception:
         print('Rehearsal rejected or failed; protected run evidence and failure disks retained. No raw diagnostics emitted.', file=sys.stderr)
         sys.exit(1)

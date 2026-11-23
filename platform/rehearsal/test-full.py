@@ -232,6 +232,16 @@ class DriverRoot(unittest.TestCase):
         self.assertFalse(json.loads((self.last / 'receipt.json').read_text())['complete'])
         self.assertTrue(self.output.is_dir())
 
+    def test_a_failed_run_records_its_controller_for_the_failed_run_purge(self):
+        def fail(_run, _run_id):
+            raise RuntimeError()
+
+        with patch.object(full, 'fingerprint', return_value='controller-start'), self.assertRaises(RuntimeError):
+            self.execute(containment=fail)
+        record = json.loads((self.last / 'controller.json').read_text())
+        self.assertEqual(record, {'runId': self.last.name.removeprefix('run-'), 'controllerPid': os.getpid(), 'controllerStart': 'controller-start'})
+        self.assertEqual((self.last / 'controller.json').stat().st_mode & 0o777, 0o600)
+
     def test_root_is_released_when_a_signal_interrupts_the_guests(self):
         for number, signum in enumerate([signal.SIGTERM, signal.SIGINT, signal.SIGHUP]):
             self.out = self.base / f'signal{number}'
@@ -384,6 +394,157 @@ class SyntheticPurge(unittest.TestCase):
         (self.run / 'receipt.json').symlink_to(self.sentinel)
         with self.assertRaises(OSError):
             full.purge(self.run, True)
+        self.assert_preserved()
+
+
+
+class FailedRunPurge(unittest.TestCase):
+    """purge --failed: a failed or incomplete run, once its compute and its controller are gone."""
+
+    assert_preserved = SyntheticPurge.assert_preserved
+
+    def setUp(self):
+        SyntheticPurge.setUp(self)
+        write_json(self.run / 'receipt.json', {'schema': 1, 'scope': 'terrace-disposable-synthetic', 'runId': self.run_id, 'complete': False, 'computeOff': False})
+        self.controller(self.run_id, 4242, 'start-of-the-exited-controller')
+        (self.run / 'driver.log').write_text('kept')
+        (self.run / 'evidence' / 'concurrent-failure-restored').mkdir(mode=0o700)
+        (self.run / 'evidence' / 'concurrent-failure-restored' / 'documents.stderr').write_text('kept')
+        # Whatever process 4242 is now, it is not the controller that started this run.
+        self.alive = patch.object(full, 'fingerprint', return_value='start-of-another-process')
+        self.alive.start()
+        self.addCleanup(self.alive.stop)
+
+    def controller(self, run_id, pid, start, name='controller.json'):
+        write_json(self.run / name, {'runId': run_id, 'controllerPid': pid, 'controllerStart': start})
+
+    def test_failed_run_purge_removes_disks_repository_and_escrow_and_keeps_logs(self):
+        full.purge(self.run, True, failed=True)
+        self.assertFalse(self.runtime.exists())
+        for name in ['state', 'retained', 'escrow']:
+            self.assertEqual(list((self.run / name).iterdir()), [])
+        self.assertEqual((self.run / 'driver.log').read_text(), 'kept')
+        self.assertEqual((self.run / 'evidence' / 'concurrent-failure-restored' / 'documents.stderr').read_text(), 'kept')
+        receipt = json.loads((self.run / 'receipt.json').read_text())
+        self.assertEqual((receipt['complete'], receipt['syntheticStatePurged'], receipt['purgedIncomplete']), (False, True, True))
+        self.assertEqual(self.sentinel.read_text(), 'retained')
+
+    def test_run_that_failed_before_its_guardian_started(self):
+        # No runtime record: nothing in /tmp is touched, not even a directory that looks like the run's.
+        (self.run / 'runtime.json').unlink()
+        full.purge(self.run, True, failed=True)
+        self.assertTrue(self.runtime.exists())
+        self.assertEqual(list((self.run / 'state').iterdir()), [])
+
+    def test_driver_phase_record_alone_is_accepted(self):
+        # Runs started before controller.json existed: the driver phase's control.json identifies the controller.
+        (self.run / 'controller.json').unlink()
+        self.controller(self.run_id, 4242, 'start-of-the-exited-controller', 'control.json')
+        full.purge(self.run, True, failed=True)
+        self.assertEqual(list((self.run / 'retained').iterdir()), [])
+
+    def test_failed_mode_requires_explicit_confirmation(self):
+        with self.assertRaises(ValueError):
+            full.purge(self.run, failed=True)
+        self.assert_preserved()
+
+    def test_complete_run_is_refused_by_failed_mode_and_failed_run_by_ordinary_mode(self):
+        with self.assertRaises(ValueError):
+            full.purge(self.run, True)
+        self.assert_preserved()
+        write_json(self.run / 'receipt.json', {'scope': 'terrace-disposable-synthetic', 'runId': self.run_id, 'complete': True, 'computeOff': True})
+        with self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+
+    def test_live_or_unknown_controller_preserves_everything(self):
+        with patch.object(full, 'fingerprint', return_value='start-of-the-exited-controller'), self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+        for name, record in [('controller.json', {'runId': '0' * 32, 'controllerPid': 4242, 'controllerStart': 'x'}),
+                             ('controller.json', {'runId': self.run_id, 'controllerPid': '4242', 'controllerStart': 'x'}),
+                             ('controller.json', {'runId': self.run_id, 'controllerPid': 4242, 'controllerStart': ''})]:
+            write_json(self.run / name, record)
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                full.purge(self.run, True, failed=True)
+            self.assert_preserved()
+        (self.run / 'controller.json').unlink()
+        with self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+
+    def refused(self, pattern):
+        with self.assertRaisesRegex(full.Refused, pattern):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+        self.assertTrue(self.runtime.exists())
+
+    def test_every_controller_record_must_be_gone(self):
+        # Both records exist; either one naming a live process refuses (not only the first one read).
+        starts = {4242: 'start-of-another-process', 5151: 'start-of-the-driver-controller'}
+        self.controller(self.run_id, 5151, 'start-of-the-driver-controller', 'control.json')
+        with patch.object(full, 'fingerprint', side_effect=lambda pid: starts[pid]):
+            self.refused(r'^the controller in control\.json is still running$')
+        starts = {4242: 'start-of-the-exited-controller', 5151: 'start-of-another-process'}
+        with patch.object(full, 'fingerprint', side_effect=lambda pid: starts[pid]):
+            self.refused(r'^the controller in controller\.json is still running$')
+
+    def test_symlinked_or_non_object_controller_record_is_refused(self):
+        target = self.base / 'elsewhere.json'
+        write_json(target, {'runId': self.run_id, 'controllerPid': 4242, 'controllerStart': 'start-of-the-exited-controller'})
+        (self.run / 'controller.json').unlink()
+        (self.run / 'controller.json').symlink_to(target)
+        self.refused(r'^malformed controller record controller\.json$')
+        (self.run / 'controller.json').unlink()
+        for value in [[self.run_id, 4242], 4242, 'controller', None]:
+            write_json(self.run / 'controller.json', value)
+            with self.subTest(value=value):
+                self.refused(r'^malformed controller record controller\.json$')
+
+    def test_a_controller_that_exits_while_read_is_gone_but_an_unreadable_one_refuses(self):
+        # ProcessLookupError: no process has the id any more, so it cannot be the controller.
+        with patch.object(full, 'fingerprint', side_effect=ProcessLookupError()):
+            full.purge(self.run, True, failed=True)
+        self.assertEqual(list((self.run / 'state').iterdir()), [])
+
+    def test_unreadable_process_state_refuses(self):
+        with patch.object(full, 'fingerprint', side_effect=PermissionError()):
+            self.refused(r'^cannot tell whether the controller in controller\.json is running$')
+
+    def test_running_guests_or_unit_preserve_everything(self):
+        with patch.object(full, 'unit_off', return_value=False), self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        with patch.object(full, 'owned_guests', return_value={123: 'synthetic'}), self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+        self.assertTrue(self.runtime.exists())
+
+    def test_public_controller_record_or_symlinked_run_refused(self):
+        (self.run / 'controller.json').chmod(0o644)
+        with self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+        (self.run / 'controller.json').chmod(0o600)
+        link = self.base / 'link-to-run'
+        link.symlink_to(self.run, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            full.purge(link, True, failed=True)
+        self.assert_preserved()
+
+    def test_failed_mode_never_follows_a_symlink_out_of_the_run(self):
+        shutil.rmtree(self.run / 'state')
+        (self.run / 'state').symlink_to(self.base, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            full.purge(self.run, True, failed=True)
+        self.assert_preserved()
+        self.assertTrue(self.runtime.exists())
+
+    def test_failed_flag_still_needs_synthetic_only_and_yes(self):
+        for extra in [['--yes', '--failed'], ['--synthetic-only', '--failed']]:
+            result = subprocess.run([sys.executable, str(Path(full.__file__)), 'purge', str(self.run), *extra],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('Traceback', result.stderr)
         self.assert_preserved()
 
 
