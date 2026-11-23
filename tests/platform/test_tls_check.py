@@ -17,9 +17,9 @@ SCRIPT = Path(os.environ.get("TLS_CHECK_SCRIPT", Path(__file__).resolve().parent
 NAME = "web.terrace.test"
 
 
-def run(path, env):
+def run(path, env, args=()):
     # writeShellApplication runs the body with errexit, nounset and pipefail.
-    return subprocess.run(["bash", "-euo", "pipefail", str(SCRIPT)], capture_output=True, text=True, timeout=60,
+    return subprocess.run(["bash", "-euo", "pipefail", str(SCRIPT), *args], capture_output=True, text=True, timeout=60,
                           env={"PATH": path, "TLS_CHECK_MIN_DAYS": "14", **env})
 
 
@@ -39,11 +39,11 @@ class FakeOpenSSL(unittest.TestCase):
         stub.write_text('#!/usr/bin/env bash\necho "$1" >>"$FAKE_BOUND"\nshift\nexec "$@"\n')
         stub.chmod(0o700)
 
-    def check(self, output, status, names=NAME, **extra):
+    def check(self, output, status, names=NAME, args=(), **extra):
         self.output.write_text(output)
         return run(f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    {"FAKE_OUTPUT": str(self.output), "FAKE_STATUS": str(status), "FAKE_BOUND": str(self.bound), "TLS_CHECK_NAMES": names,
-                    "TLS_CHECK_TRUST": "/synthetic/roots.pem", "TLS_CHECK_CONNECT": "127.0.0.1:443", **extra})
+                    "TLS_CHECK_TRUST": "/synthetic/roots.pem", "TLS_CHECK_CONNECT": "127.0.0.1:443", **extra}, args)
 
     def test_a_subject_containing_the_phrase_is_not_taken_for_the_reason(self):
         # OpenSSL prints the subject after "depth=N "; only its own line starts with "verify error:num=".
@@ -51,11 +51,35 @@ class FakeOpenSSL(unittest.TestCase):
                             "verify error:num=18:self-signed certificate\n", 1)
         self.assertEqual(result.stdout, f"{NAME}: FAIL: no verified TLS session: verify error 18: self-signed certificate\n")
 
-    def test_the_handshake_bound_is_30_s_unless_set(self):
+    def test_the_handshake_bound_is_30_s_and_5_s_only_for_status(self):
         self.check("CONNECTED(00000003)\n", 124)
-        result = self.check("CONNECTED(00000003)\n", 124, TLS_CHECK_TIMEOUT="5")
+        result = self.check("CONNECTED(00000003)\n", 124, args=["--status"])
         self.assertEqual(self.bound.read_text().split(), ["30", "5"])
         self.assertEqual(result.stdout, f"{NAME}: FAIL: no verified TLS session: no answer from 127.0.0.1:443 within 5 s\n")
+
+    def test_an_exported_timeout_does_not_change_the_bound(self):
+        # The installed command's environment cannot shorten (or break) the check's 30 s bound, nor status's 5 s.
+        for value in ["5", "0", "", "not-a-number"]:
+            with self.subTest(value=value):
+                self.bound.write_text("")
+                result = self.check("CONNECTED(00000003)\n", 124, TLS_CHECK_TIMEOUT=value)
+                self.check("CONNECTED(00000003)\n", 124, args=["--status"], TLS_CHECK_TIMEOUT=value)
+                self.assertEqual(self.bound.read_text().split(), ["30", "5"])
+                self.assertEqual(result.stdout, f"{NAME}: FAIL: no verified TLS session: no answer from 127.0.0.1:443 within 30 s\n")
+
+    def test_an_unknown_argument_is_a_usage_error_without_a_handshake(self):
+        result = self.check("CONNECTED(00000003)\n", 0, args=["--stats"])
+        self.assertEqual((result.returncode, result.stdout), (2, ""))
+        self.assertIn("usage: terrace-tls-check [--status]", result.stderr)
+        self.assertFalse(self.bound.exists())
+
+    def test_the_installed_command_sets_no_bound_of_its_own(self):
+        # tls.nix prepends the configuration to this script; it must not reintroduce an environment bound.
+        module = (SCRIPT.parent / "tls.nix").read_text() if (SCRIPT.parent / "tls.nix").exists() else None
+        if module is None:
+            self.skipTest("tls.nix is not next to the script")
+        self.assertNotIn("TLS_CHECK_TIMEOUT", module)
+        self.assertIn("terrace-tls-check --status || true", module)
 
     def test_a_clock_behind_the_certificate_is_named_not_an_untrusted_chain(self):
         result = self.check("Connecting to 127.0.0.1\nCONNECTED(00000003)\n"
@@ -131,8 +155,8 @@ class RealOpenSSL(unittest.TestCase):
             time.sleep(0.05)
         self.fail("s_server did not listen")
 
-    def check(self, port, trust, **extra):
-        return run(os.environ["PATH"], {"TLS_CHECK_NAMES": NAME, "TLS_CHECK_TRUST": trust, "TLS_CHECK_CONNECT": f"127.0.0.1:{port}", **extra})
+    def check(self, port, trust, args=(), **extra):
+        return run(os.environ["PATH"], {"TLS_CHECK_NAMES": NAME, "TLS_CHECK_TRUST": trust, "TLS_CHECK_CONNECT": f"127.0.0.1:{port}", **extra}, args)
 
     def test_a_subject_containing_the_phrase_does_not_become_the_reason(self):
         phrase = "verify error:num=9:certificate is not yet valid"
@@ -156,10 +180,10 @@ class RealOpenSSL(unittest.TestCase):
         self.openssl("req", "-x509", "-nodes", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-days", "30",
                      "-subj", "/CN=synthetic ca", "-keyout", "ca-key.pem", "-out", "ca.pem")
         started = time.monotonic()
-        result = self.check(port, str(self.dir / "ca.pem"), TLS_CHECK_TIMEOUT="2")
+        result = self.check(port, str(self.dir / "ca.pem"), args=["--status"])
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout, f"{NAME}: FAIL: no verified TLS session: no answer from 127.0.0.1:{port} within 2 s\n")
+        self.assertEqual(result.stdout, f"{NAME}: FAIL: no verified TLS session: no answer from 127.0.0.1:{port} within 5 s\n")
 
     def test_trusted_passes_and_an_untrusted_chain_names_openssls_reason(self):
         for label in ["ca", "other"]:

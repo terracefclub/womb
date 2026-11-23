@@ -101,7 +101,6 @@
         export TLS_CHECK_TRUST=${lib.escapeShellArg trust}
         export TLS_CHECK_MIN_DAYS=${toString tls.minDays}
         export TLS_CHECK_CONNECT=127.0.0.1:443
-        export TLS_CHECK_TIMEOUT="''${TLS_CHECK_TIMEOUT:-30}"
       ''
       + builtins.readFile ./tls-check.sh;
   };
@@ -168,7 +167,7 @@
           # 5 s per name, so a hung listener cannot hold status for long; a failure
           # here is reported, it does not change the exit status of status.
           echo 'served now (5 s per name):'
-          TLS_CHECK_TIMEOUT=5 terrace-tls-check || true
+          terrace-tls-check --status || true
           ;;
         check) terrace-tls-check ;;
         renew)

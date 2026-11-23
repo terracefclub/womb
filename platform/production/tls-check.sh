@@ -11,12 +11,20 @@
 # TLS_CHECK_TRUST     CA file the chain must verify against
 # TLS_CHECK_MIN_DAYS  days a served certificate must have left
 # TLS_CHECK_CONNECT   host:port of the listener (127.0.0.1:443 on a host)
-# TLS_CHECK_TIMEOUT   seconds allowed for each handshake (30 by default)
+#
+# Each handshake is bounded to 30 s; with `--status` (what `terrace-tls status`
+# runs, so a hung listener cannot hold it for long) to 5 s. The bound is never
+# taken from the environment: an exported value cannot shorten or break the
+# check's own bound.
 
+case ${1:-} in
+  '') bound=30 ;;
+  --status) bound=5 ;;
+  *) echo 'usage: terrace-tls-check [--status]' >&2; exit 2 ;;
+esac
 min_days=${TLS_CHECK_MIN_DAYS:?}
 trust=${TLS_CHECK_TRUST:?}
 connect=${TLS_CHECK_CONNECT:?}
-bound=${TLS_CHECK_TIMEOUT:-30}
 read -r -a names <<<"${TLS_CHECK_NAMES:?}"
 # s_client's diagnostics are kept apart from what it prints of the session, so a
 # diagnostic line can never become part of the served certificate below.

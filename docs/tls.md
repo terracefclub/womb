@@ -287,10 +287,13 @@ journalctl -u acme-order-renew-<name>.service
 ```
 
 `status` makes one TLS handshake per public name for its "served now" lines,
-each bounded to 5 seconds (the check itself allows 30), so a hung listener
-delays it by at most 5 seconds per name (15 on the app host, 5 on the relay) and
-is reported as `no answer from 127.0.0.1:443 within 5 s`. A failing check is
-only reported there: it never changes the exit status of `status`.
+each bounded to 5 seconds (it runs `terrace-tls-check --status`); the check
+itself, from its timer or `terrace-tls check`, always allows 30 seconds per name.
+Neither bound is read from the environment, so an exported variable cannot
+shorten or break them. A hung listener delays `status` by at most 5 seconds per
+name (15 on the app host, 5 on the relay) and is reported as `no answer from
+127.0.0.1:443 within 5 s`. A failing check is only reported there: it never
+changes the exit status of `status`.
 `terrace-tls check` exits 1 when any name fails.
 
 If `terrace-tls check` says `certificate is not yet valid`, the host's clock is
