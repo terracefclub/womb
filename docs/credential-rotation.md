@@ -106,7 +106,7 @@ back up (`extraPaths`):
 | CMS database role `terrace_cms` | no password: local socket, "no remote database or password is accepted" (`platform/website.nix`, option description near line 346) | CMS and sweep | same | nothing to rotate |
 | K3s server token | `/var/lib/rancher/k3s/server/token`, not in any backup (`docs/backups.md`) | K3s | single-node module | rehearsal only; not determined |
 | Headscale pre-auth keys | created per client by the rehearsal driver, single use, expired before capture (`platform/full/scenario.py` `bootstrap_tailnet_peers`) | `tailscale up` | scenario.py | rehearsal only |
-| Per-lease Hetzner SSH key and the Rescue root password the provider returns; the install banner proof nonce | lease directory files (`infra/cloud/rehearsal_provider_actions.py:63-92`, `infra/nixos/rescue_install.py:388-399`) | the rehearsal controller, once per lease | rehearsal only; short-lived; never reused: excluded from the procedures | each lease | none |
+| Per-lease Hetzner SSH key, the Rescue root password the provider returns, and the install banner proof nonce | lease directory files, made once per lease | the rehearsal controller | `infra/cloud/rehearsal_provider_actions.py:63-92`, `infra/nixos/rescue_install.py:388-399` | rehearsal only; short-lived and never reused, so excluded from the procedures; not in any backup |
 | Rehearsal certificate authority, TLS leaves, repository password | operator tooling files (`install_runtime`, `infra/nixos/rehearsal_services.py`) | the rehearsal hosts | cloud-rehearsal.md | synthetic, per run |
 
 ### 1.4 Credentials held outside the hosts
@@ -152,7 +152,9 @@ VM checks is not part of a production command.
   "$TERRACE_SECRETS_STORE/hosts/<host>/secrets.sops.json" <saved copy>`. It holds
   every secret of the host (encrypted to the host key and the escrow key), so keep
   it with the same care as the store, off the host, and delete it only after the
-  procedure's last check has passed. If the store is a private Git repository
+  procedure's last check has passed. **After a compromise of the escrow identity, or
+  of the host key of that host, such copies stay readable by the leaked key: delete
+  them once the rotation is verified** (section 4). If the store is a private Git repository
   ([secrets](secrets.md#where-things-live)) its history also holds earlier revisions,
   but that is the owner's choice, not something the tooling creates.
 - **How the old value comes back (the "way back" below).** Either (a) restore the
@@ -250,7 +252,11 @@ succeeds. **The VM check asserts the new password works; it does not assert that
 old one is refused.** Way back: if `apply` fails, the role still has the old password
 and the host file holds the new one, so Keycloak cannot log in on its next start.
 Restore the old value (saved copy), `push`, and restart Keycloak. If `apply` ran but
-Keycloak did not restart, restart it. A restore from a backup taken before the
+Keycloak did not restart, restart it. **After a successful `apply` the role already
+has the new password**, so going back needs the old value restored in the store, a
+`push` (the host file becomes the old value), and another `terrace-secrets apply app
+identity/database-password`, which reads the delivered file and sets the role and
+restarts Keycloak again (`cmd_host_apply`, `terrace-secrets:999-1011`). A restore from a backup taken before the
 rotation brings back the old role hash (roles dump, backups.md); run `apply` again
 after the restore ([restore promotion](restore-promotion.md)). Evidence: VM
 rehearsal (synthetic data), `platform/production/test.nix:507-523`; a failing apply
@@ -303,7 +309,12 @@ identity names until you push a good pair.**
    each. The repository gives no command for this (its own checks in
    `platform/production/tls.nix` and the TLS VM test only look at subject, expiry and
    chain), so use your operator tools; do not proceed until the two public keys are
-   identical.
+   identical. As an example, **standard OpenSSL usage, not from this repository;
+   verify it before relying on it**: compare
+   `openssl x509 -in <certificate.pem> -noout -pubkey | openssl sha256` with
+   `openssl pkey -in <key.pem> -pubout | openssl sha256`; the two digests must be
+   identical. Both commands print only digests. The key file must never leave the
+   operator machine.
 4. `terrace-secrets set app tls/key < key.pem` and `terrace-secrets set app tls/certificate < fullchain.pem`
    (`set` reads stdin and validates only the PEM structure)
 5. `terrace-secrets check app`, then `terrace-secrets push app --address <app address> --identity <key>`
@@ -354,8 +365,12 @@ a copy in the team password manager, outside the servers.
      using the new delivered file.
    - The new password is copied to the independent escrow (password manager).
 5. `terrace-secrets apply app backup/primary/repository-password --finish --keep <id> ... --address <app address> --identity <key>`,
-   with `--keep <key id>` (4 to 64 hex digits, a prefix of an id from `key list`) for
-   every key that must survive. **`--only-current` instead removes every key but the
+   with `--keep <key id>` (4 to 64 hex digits, a prefix of an id from the checkpoint's
+   `key list --json`) for every key that must survive. `--finish` is refused unless
+   you give `--keep` or `--only-current` (`terrace-secrets:1040-1041`). When nothing
+   else is being kept, pass the **new key's own id**, the entry with `"current": true`
+   at the checkpoint: the current key is always kept and every other key is removed,
+   the same effect as `--only-current`. **`--only-current` removes every key but the
    current one, including a separately added escrow key** (`terrace-secrets:1038-1059`).
 
 `--finish` lists keys with `key list --json`, requires exactly one `current` key,
@@ -384,9 +399,12 @@ refused and does not run a backup afterwards: not exercised anywhere.
   in the repository.
 - *If you rotated twice.* After step 2 and a second `rotate`, the repository holds
   the old key and the first new key, the store a third password. Restore the old
-  value (saved copy), push, then `terrace-backup restic primary key list --json` on
-  the host and remove the stray key with `terrace-backup restic primary key remove
-  <id>` (the same command the tool uses), then start again.
+  value (saved copy), push, then run `terrace-backup restic primary key list --json`
+  on the host and **confirm which key is marked `current`** (the one the restored old
+  file opens). The stray key to remove is the one that is **not** `current`:
+  `terrace-backup restic primary key remove <id>` (the command the tool uses), then
+  start again. Removing the `current` key is refused by restic itself, but never rely
+  on that: read the list first.
 - *`--finish` fails after some keys were removed.* Run `key list --json`; if the
   remaining keys are not exactly what you intended and the delivered file does not
   open the repository, do not proceed.
@@ -666,6 +684,9 @@ replacement is needed.
    ever saw: R4, R3, R2, R1, R7, R8, R6, B2 credentials (`set backup/secondary/environment`
    after creating a new key at the provider, then push, then delete the old provider
    key), and the bootstrap password (R5).
+3. **Delete every saved pre-rotation copy of the store files** made under the general
+   precondition: the leaked escrow identity still decrypts them, and they hold the
+   old values.
 
 **D. A host private key (a staged host key from `host create` before `host
 unstage`, or a stolen host disk), escrow safe.**
