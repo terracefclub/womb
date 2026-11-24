@@ -341,11 +341,12 @@ in {
         out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=75)
         assert err.strip() == "A CMS migration is in progress; run the tool after it has finished.", err
         source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx inactive", timeout=120)
-        source.succeed("rm /run/website-test-slow-migration && systemctl start terrace-cms.service terrace-web.service")
+        # Each migration stops the CMS and website; their start limit (3 in 10 minutes) is not under test here.
+        source.succeed("rm /run/website-test-slow-migration && systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
         # A migration refuses to start under a running operator tool (a unit with the tools' name prefix stands in for one).
         source.succeed("systemd-run --unit=terrace-cms-tool-probe ${pkgs.coreutils}/bin/sleep 60")
         source.fail("systemctl start terrace-cms-migrate.service")
-        source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service")
+        source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
 
         # Roster: a write needs --confirm-production (the host's database counts as a production target); then apply, no-op, rollback.
