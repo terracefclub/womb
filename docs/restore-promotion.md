@@ -105,7 +105,8 @@ after the migration gate is open (step 16). The conflict, from the code:
 
 - Adoption (step 15) starts nginx, and the host firewall already allows TCP 443
   from anywhere (`platform/website-gateway.nix`, `networking.firewall.allowedTCPPorts`;
-  the production app role opens 22 and 443). The gateway has **no maintenance or
+  the production app role opens 22 and 443, and 80 as well in ACME mode,
+  `platform/production/tls.nix`). The gateway has **no maintenance or
   closed state**: its only refusals are 421 for an unknown host name and the
   application's own authorisation. From adoption the restored site can be reached
   by anyone who connects to the replacement's address with the right host name.
@@ -119,12 +120,17 @@ after the migration gate is open (step 16). The conflict, from the code:
   loopback only (port 13048 by default), the gateway serves its host name on 443,
   and the CMS configuration, its single sign-on issuer and the site origins all use
   the public host names (`platform/website.nix`, `platform/production/app.nix`).
-  The only documented way to reach such a host without public DNS is the
-  rehearsal's: an SSH loopback forward to 443 plus a local name mapping on the
-  operator machine, trusting the run's private CA ([cloud rehearsal](cloud-rehearsal.md#keep-the-data-and-checks-private),
-  lease 5, synthetic data). Whether a CMS administrator can sign in that way with
-  a production certificate has not been tried; a bare loopback forward to port 13048
-  without the names is **not determined from the repository** to work.
+  The only route the repository describes for reaching such a host without public
+  DNS is the rehearsal design: an SSH loopback forward to 443 plus a local name
+  mapping on the operator machine, trusting a private CA ([cloud rehearsal](cloud-rehearsal.md#keep-the-data-and-checks-private)).
+  That is a described design only: lease 5 did not run browser checks, and its
+  protocol steps ran on the host itself (`protocol()` in
+  `infra/nixos/rehearsal_services.py`). What has run is name-mapped HTTPS from a
+  separate client guest on the VM rehearsal's private test network
+  (`scenario.py`, the `client` guest). Whether a CMS administrator can sign in
+  through a forward with a production certificate has not been tried; a bare
+  loopback forward to port 13048 without the names is **not determined from the
+  repository** to work.
 
 Options, each with its evidence:
 
@@ -132,13 +138,28 @@ Options, each with its evidence:
    re-applied.** The operator supplies a certificate valid for all public names
    (`terrace-secrets set app tls/certificate`, `tls/key`; supported, the default
    mode, [TLS](tls.md#two-modes)), reaches the replacement by SSH forward and name
-   mapping, re-applies the erasures, and only then moves DNS. If the host is to
-   use ACME afterwards, `terrace-secrets host tls app acme --yes` switches it
-   ([TLS](tls.md#switching-a-live-manual-host-to-acme); proven on the relay only).
-   Evidence: manual mode, VM rehearsal (production VM check); forward and name
-   mapping, also on temporary Hetzner hosts once (rehearsal profile, private CA);
-   the whole sequence on a production profile: not exercised anywhere. Residual
-   exposure: port 443 stays open to anyone using the address and host name.
+   mapping, re-applies the erasures, and only then moves DNS. The administrator's
+   browser must resolve both the CMS host name and the identity host name to the
+   replacement (single sign-on goes through the identity host; the website host
+   name is needed to see the site); that is part of the same mapping and is not
+   exercised. This option assumes a **manual-mode replacement**: built with
+   `tls.mode = "manual"` and with `tls/certificate` and `tls/key` in its store. A
+   replacement created with the `acme-tls` feature has no such files and no manual
+   mode; to use this option it must first be switched back by the sequence in
+   [TLS, "Fall back to the manual path"](tls.md#fall-back-to-the-manual-path) (its
+   order and checks are there, not restated here), or created without the feature.
+   If the host is to use ACME afterwards, follow
+   [TLS, "Switching a live manual host to ACME"](tls.md#switching-a-live-manual-host-to-acme)
+   in its order: `terrace-tls prepare-acme` first and the store change last, because
+   the last command drops the manual certificate and key, and run early it removes
+   the only certificate the host can serve. `tls.md` records that live switch as
+   proven on the relay only, not on the app role.
+   Evidence, piece by piece: an operator-supplied (manual-mode) certificate: VM
+   rehearsal (production VM check); name-mapped HTTPS from a client guest: VM
+   rehearsal; an SSH loopback forward: a described design, not exercised anywhere;
+   administrator sign-in through either: not exercised anywhere; the whole
+   sequence on the production profile: not exercised anywhere. Residual exposure:
+   port 443 stays open to anyone using the address and host name.
 2. **ACME mode, accept a window.** DNS goes to the replacement, the certificate is
    issued, the erasures are re-applied through the public names. Erased people's
    data is served, or can be, from DNS cut-over until the last erasure completes.
@@ -485,7 +506,7 @@ not adopt; the cluster is not what the backup captured.
 
 ### Part E. Start the writers once, migrate, check
 
-**Step 15. D4, then adopt.**
+**Step 15. D2b and D4 decided, then adopt.**
 
 ```sh
 terrace-production adopt --restored
@@ -515,9 +536,12 @@ replacement whose CMS gate is closed or whose media copy was skipped, and every
 backup run ends in `forget --prune` against the repository the restore came from
 (`platform/backup/backup.sh`; what that can remove is in step 21). The sweep
 timer (03:30 daily) will act on the restored data as soon as the migration gate
-opens: it expires stale invitations, withdraws unreviewed applications and
-completes pending outbox redactions; it never erases a member by itself
-(READ: website `docs/member-lifecycle.md` section 9 at `dd1aef7`). So, as soon as
+opens. Stopping it is a precaution so that nothing changes restored data before you
+have checked it, not a protection of any erasure: the sweep expires stale invitations, withdraws
+unreviewed applications and completes pending outbox redactions, the same things
+the original's sweep would have done, and it never erases a member by itself
+(READ: website `docs/member-lifecycle.md` section 9 at `dd1aef7`). The manual
+sweep run in step 16 performs the same actions anyway. So, as soon as
 you have started `adopt`, whether it succeeded or not:
 
 ```sh
@@ -566,6 +590,10 @@ also stops it while it compares state.
 gate is open and the CMS is running, and before D5. For each person the owner lists
 as erased since the snapshot's time (READ: website `docs/member-lifecycle.md`
 sections 5 and 8 at `dd1aef7`, `cms/src/lifecycle/erasure.ts`):
+
+The administrator signs in through single sign-on, so the browser must resolve the
+CMS host name and the identity host name to the replacement (the same name mapping
+as D2b, option 1, or public DNS); not exercised.
 
 1. In the CMS administrator interface, create a **Member offboardings** record for
    the member. An administrator-initiated erasure is only possible for a member who
@@ -813,7 +841,7 @@ network).
 | 10. Writers off | `inactive` in `rehearsal_services.py`; `assert_blank_writers` in `scenario.py`; `writers_inactive` in `test.nix` | Units inactive with no main or control PID; ports closed; target inactive | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile) |
 | 11. Copy file sets | `COPY_RESTORED` in `rehearsal_services.py`; `fresh_restore` in `scenario.py`; copy loop in `test.nix` | Target empty and not a link (K3s server directory: exactly the one manifest skeleton); outbox bytes, owner and modes equal the original's; media hashes equal | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile copies more paths than production). Equality is checked against a signature taken from the original after its writers were stopped and while it was still alive (`original()` in `rehearsal_services.py`, `test.nix`), which a lost original cannot give |
 | 12. PostgreSQL cluster in place | `ADOPT_POSTGRES` in `rehearsal_services.py`; lines after `fresh_restore` in `scenario.py`; copy in `test.nix` | Source bootstrap identity preserved; no `terrace-restore` role; native HBA and `fsync` on; restore OS user cannot connect; app roles log in but cannot assume `postgres`; role, membership and setting fingerprints equal; Windmill role boundary | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile). The production VM check copies the cluster and lets adoption start it but runs none of these role checks. Loading a database into a running, populated cluster: not exercised anywhere |
-| 13. Headscale keys and database before first start | `relay-state-adoption` and `sqlite-adoption` in `rehearsal_services.py`; `restore-relay` in `scenario.py` | Key hashes equal the original's; user list equal; `PRAGMA integrity_check` ok; relay health through HTTPS; with `--relay-peers`, all three client identities (node ID, key, address) return without enrolling again | Keys, database and users: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile; "identity and private HTTPS unchanged"). Client reconnection after restore: VM rehearsal (synthetic data) only (lease 5 ran no peer checks). The production relay role replaced and adopted with `--restored`: not exercised anywhere. The relay's public name and address changing: not exercised anywhere (guests used `.invalid` names on a private test network or a loopback forward) |
+| 13. Headscale keys and database before first start | `relay-state-adoption` and `sqlite-adoption` in `rehearsal_services.py`; `restore-relay` in `scenario.py` | Key hashes equal the original's; user list equal; `PRAGMA integrity_check` ok; relay health through HTTPS; with `--relay-peers`, all three client identities (node ID, key, address) return without enrolling again | Keys, database and users: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile; "identity and private HTTPS unchanged"). Client reconnection after restore: VM rehearsal (synthetic data) only (lease 5 ran no peer checks). The production relay role replaced and adopted with `--restored`: not exercised anywhere. The relay's public name and address changing: not exercised anywhere (the VM guests used `.invalid` names on a private test network; lease 5 ran its checks on the hosts themselves) |
 | 14. Database role checks | `ADOPT_POSTGRES`, `WIND_ROLES` | as step 12 | as step 12 |
 | 15. `adopt --restored` | "replacement" subtest in `test.nix`, `terrace-production` in `platform/production/base.nix` | Refused with no reconciled restore; refused for `--new` on a restored replacement; adoption succeeds; replacement marker gone; the next `push` clears the store's marker | VM rehearsal (synthetic data), app role only; relay and lease 5: not exercised anywhere (the rehearsal profile has no adoption gate; `bootstrap_app` starts services directly) |
 | 16. CMS migration gate | `BOOTSTRAP_APP` in `rehearsal_services.py` (`terrace-cms-migrate.service`); `bootstrap_app` in `scenario.py`; `test.nix` | Rehearsals: the restored database's signature equals the original's, compared before the migration runs (`replacement()` in `rehearsal_services.py`, the signature check before `recoveredBootstrapApplication` in `scenario.py`); afterwards only the protocol assertions run. Production VM check: the whole signature (realm, users, migrations, outbox, applications, roles, media) compared before and after the migration and start, and the replacement runs with the delivered secret | Restored-database signature equals the original's: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Ledger and signature unchanged across the migration gate: VM rehearsal (synthetic data), production VM check only. A production release pair differing from the original's: not exercised anywhere |
@@ -828,8 +856,9 @@ network).
 
 ## 4. What a production promotion needs that nothing has exercised
 
-- **DNS and public-name cut-over.** Every rehearsal used `.invalid` names with
-  local name mapping or loopback forwards. Nothing changes a public record, waits
+- **DNS and public-name cut-over.** Every rehearsal used `.invalid` names (the VM
+  rehearsals with name mapping on a private test network; lease 5 ran its checks
+  on the hosts themselves). Nothing changes a public record, waits
   for a TTL, or orders the cut-over against ACME's HTTP-01 challenge. The relay's
   `server_url` is its hostname and its configuration takes its public IPv4 as a
   parameter; a replacement relay with a new address, and clients reconnecting to it,
