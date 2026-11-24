@@ -136,6 +136,10 @@ before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
 
+Verified 2026-11-24 on the shared Linux builder with the kept `dd1aef7` build at
+Womb `3f4bc9e` (00:10 to 00:13 Pacific, fresh result): 198 HTTPS protocol
+assertions and the same lifecycle stage counts as below passed.
+
 Verified 2026-11-23 on the shared Linux builder with the `eab4189` bundles
 (05:52 to 05:55 Pacific, fresh result): 198 HTTPS protocol assertions and the same
 lifecycle stage counts as below (18, 83, 49, 40, 15, 24, 28 and 63) passed.

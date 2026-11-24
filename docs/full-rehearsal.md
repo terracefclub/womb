@@ -436,6 +436,31 @@ into the restored outbox; the invitation files still name the applicants),
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
 
+### Observed rehearsals with website `dd1aef7` and the operator tools — November 24, 2026 (Pacific)
+
+Womb `3f4bc9e` (re-pin to the kept `dd1aef7` build: web `1a4e07f7…bd12`, CMS
+`8929443f…2a4c`; `terrace-cms-tool`), output on the build machine's
+non-snapshotted scratch dataset, one run at a time, each purged with the ordinary
+command as soon as it ended. Every variant composes the website with the pinned
+release, so the re-pin changed all five driver derivations and all five ran once.
+The rehearsals do not run the operator tools; the website and production VM
+proofs do ([website host](website-host.md#operator-tools-terrace-cms-tool)).
+
+| Flags | Run | Time | Scenario | Result |
+| --- | --- | --- | --- | --- |
+| `--all-services` | `9c0164ad` | 01:41 to 02:11 | 1735.81 s | passed: 198 HTTPS protocol assertions in each of the three phases, every receipt check true |
+| (default) | `f2f9e504` | 02:11 to 02:22 | 553.57 s | passed |
+| `--documenso` | `4621a7f4` | 02:22 to 02:36 | 826.16 s | passed |
+| `--documenso-signing` | `b3c35eb0` | 02:36 to 02:52 | 891.50 s | passed |
+| `--relay-peers` | `444bfb5e` | 02:52 to 03:03 | 603.36 s | passed |
+
+Every receipt is complete with all owned compute off, no check false, and 198
+HTTPS protocol assertions in each phase; each purge left `syntheticStatePurged`
+true and the scratch directory empty. One invocation before these was rejected
+before it created a run (its output directory did not exist yet); nothing was
+started or written. Evidence on the build machine in
+`cms-tools-evidence-3f4bc9e/`.
+
 ### Observed driver variants and failed-run purges at the verification sweep — November 23, 2026 (Pacific)
 
 Womb `ede1f07`, website `eab4189`, output on the build machine's

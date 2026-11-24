@@ -325,6 +325,35 @@ restores the outbox with identical bytes, owner and modes. It measures migration
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
 
+Through `terrace-cms-tool` it also runs both operator tools as the CMS account, with
+the protected file switched to a public-profile variant for the writes (same
+secrets; the original is put back byte for byte): the wrapper refuses a non-root
+caller, an unknown tool, a closed migration gate and a running migration, and a
+migration refuses to start under a running tool; a path with a space and an
+option-like argument reach the tool unchanged and exit statuses come back. Roster:
+the default dry run writes nothing, a write without `--confirm-production` is
+refused, the apply writes the journal (`completed`, two items), two approved
+applications with pending invitations and two link files (`0600`, CMS account) with
+the public origin, a re-run is a no-op and rollback revokes both. Importer (the
+website's synthetic fixture plan): refused without `--allow-nonlocal-database`, the
+dry run writes nothing, an apply without `--confirm-production` is refused, the
+confirmed apply creates the planned documents, a re-apply skips them all and
+rollback deletes the documents and redirects it created. With
+`lifecycleLockTimeoutMs = 500` and the address lock held, the public apply endpoint
+answers 503 within the bound and a roster row waits about half a second, then stops
+with `address-locked` and stores nothing. A frozen run's transient unit has the CMS
+unit's account and settings, and no synthetic secret value appears in its
+properties (as root or another user), any process's arguments or any journal. The
+backup snapshot contains the outbox and not the operator directory, which is then
+purged; the roster journal rows come back from the restore.
+
+Verified 2026-11-24 on the shared Linux builder with the kept `dd1aef7` build
+(web `1a4e07f7…bd12`, CMS `8929443f…2a4c`) at Womb `3f4bc9e` (fresh result): 39
+CMS tables and the twelve-migration ledger; roster lock wait 0.52 s at 500 ms,
+public apply 503 in 0.56 s; migration 4.99 s, encrypted backup 9.08 s, complete
+repository check 5.41 s, restore 4.85 s, recovered HTTP verification 11.20 s;
+source cgroup peaks 82.1 MiB CMS, 47.1 MiB website, 128.3 MiB PostgreSQL.
+
 Verified 2026-11-23 on the shared Linux builder with the `eab4189` bundles (05:26
 to 05:30 Pacific, fresh result): the two-guest test passed with 39 actual
 non-system CMS tables and the twelve-migration ledger in pinned order, and a
