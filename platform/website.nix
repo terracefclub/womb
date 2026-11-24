@@ -446,7 +446,9 @@ in {
         TimeoutStartSec = 180;
         # A running sweep is interrupted (it is idempotent and retried); a sweep
         # requested during the migration waits for it, see terrace-cms-sweep.
-        ExecStartPre = ["+${refuseDuringTool}" "+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" (identityGuard "cms")];
+        # The sweep stop stays first (as before the tool check existed), so a sweep requested at a migration's start is
+        # queued behind it rather than cancelled; then a running operator tool refuses the migration.
+        ExecStartPre = ["+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" "+${refuseDuringTool}" (identityGuard "cms")];
       };
       script = ''
         set -euo pipefail
