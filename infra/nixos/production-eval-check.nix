@@ -384,6 +384,16 @@ let
   failsMissing = path: system:
     lib.assertMsg (!(builtins.tryEval system.config.system.build.toplevel.drvPath).success && !(lib.attrByPath path {isDefined = true;} system.options).isDefined)
     "Missing ${lib.concatStringsSep "." path} not reported";
+  # An option value outside its declared range is an evaluation error, not an assertion: the value must fail to
+  # evaluate, while the range's own bounds must evaluate and leave the production app without a violation.
+  outOfRange = path: value:
+    lib.assertMsg (!(builtins.tryEval (builtins.deepSeq (lib.attrByPath path null (app (lib.setAttrByPath path value)).config) true)).success)
+    "${lib.concatStringsSep "." path} = ${toString value} was accepted";
+  atBound = path: value: let
+    v = violations "app" (app (lib.setAttrByPath path value));
+  in
+    lib.assertMsg (v == []) "${lib.concatStringsSep "." path} = ${toString value} rejected: ${toString v}";
+  operatorBackup = "operator directory must not be inside, contain or equal a backup path";
   positive = {
     app = violations "app" (app {});
     static = violations "app" (app staticNetwork);
@@ -603,8 +613,33 @@ let
     (rejects "boot timers: " (appAcme {systemd.timers."acme-renew-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["timers.target"];}))
     (rejects "boot services: acme-www.terracefclub.org" (appAcme {systemd.services."acme-www.terracefclub.org".wantedBy = lib.mkOverride 10 ["multi-user.target"];}))
     (rejects "boot timers: " (app {systemd.timers.terrace-tls-check.wantedBy = lib.mkOverride 10 ["timers.target"];}))
+    # CMS operator tools: the operator directory (personal-data inputs) is never in a backup set, however a backup root is spelled.
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/terrace-cms-operator";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/terrace-cms-operator/";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib//terrace-cms-operator";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/./terrace-cms-operator";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/terrace-cms-operator/inbox";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "var/lib/terrace-cms-operator";}))
+    (rejects operatorBackup (app {terrace.backup.extraPaths.probe = "/var/lib/terrace-cms-outbox/../terrace-cms-operator";}))
+    (rejects operatorBackup (app {terrace.backup.media.probe = "/var/lib/terrace-cms-operator/";}))
+    (rejects "the operator directory must not overlap" (app {terrace.website.operatorDirectory = "/var/lib/terrace-cms-outbox/operator";}))
+    (outOfRange ["terrace" "website" "lifecycleLockTimeoutMs"] 99)
+    (outOfRange ["terrace" "website" "lifecycleLockTimeoutMs"] 10001)
+    (outOfRange ["terrace" "website" "operatorToolMaxSeconds"] 59)
+    (outOfRange ["terrace" "website" "operatorToolMaxSeconds"] 86401)
+  ];
+  # The new options' own bounds are accepted (not counted as rejected variants).
+  boundsAccepted = [
+    (atBound ["terrace" "website" "lifecycleLockTimeoutMs"] 100)
+    (atBound ["terrace" "website" "lifecycleLockTimeoutMs"] 10000)
+    (atBound ["terrace" "website" "operatorToolMaxSeconds"] 60)
+    (atBound ["terrace" "website" "operatorToolMaxSeconds"] 86400)
   ];
 in
+  assert lib.all lib.id boundsAccepted;
   assert lib.assertMsg (positive.app == []) "Production app violations: ${toString positive.app}";
   assert lib.assertMsg (positive.static == []) "Static-network app violations: ${toString positive.static}";
   assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";

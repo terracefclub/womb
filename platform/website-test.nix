@@ -31,6 +31,8 @@
       revision = release.revision;
       # A non-default per-address lock wait (CMS default 3000 ms), proven below with a held lock.
       lifecycleLockTimeoutMs = 500;
+      # The smallest run-time bound, so the proof can wait for it (every real tool run here takes seconds).
+      operatorToolMaxSeconds = 60;
     };
     terrace.backup = {
       enable = true;
@@ -171,7 +173,8 @@ in {
 
     def data_signature(machine, isolated=False):
         return {table: sql(machine, f"select md5(string_agg(to_jsonb(t)::text, chr(10) order by to_jsonb(t)::text)) from {table} t", isolated)
-                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox", "roster_runs", "roster_run_items"]}
+                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox", "roster_runs", "roster_run_items",
+                              "member_applications", "member_invitations", "wp_import_runs", "wp_import_journal", "pages", "posts", "redirects"]}
 
     def assert_content(machine):
         docs = api(machine, "/api/events?limit=10&draft=true")["docs"]
@@ -304,6 +307,16 @@ in {
             script = "/run/current-system/sw/bin/terrace-cms-tool " + " ".join(shlex.quote(a) for a in args) + f" >{base}.out 2>{base}.err; echo $? >{base}.rc"
             source.succeed(f"systemd-run --quiet --collect --unit=website-test-{name} ${pkgs.bash}/bin/bash -c " + shlex.quote(script))
             return base
+        def files(directory):
+            # Every file and its hash (names may contain spaces).
+            return source.succeed(f"cd {directory} && find . -type f -print0 | sort -z | xargs -0 -r sha256sum")
+        def directories():
+            return {name: files(path) for name, path in [("outbox", "${outbox}"), ("media", "${media}"), ("operator", "${operator}")]}
+        def written_only_report(before, after, report_path):
+            # A dry run leaves the outbox and uploads byte-identical; in the operator directory it adds exactly its own report.
+            added = sorted(set(after["operator"].splitlines()) - set(before["operator"].splitlines()))
+            assert after["outbox"] == before["outbox"] and after["media"] == before["media"], "a dry run changed the outbox or uploads"
+            assert set(before["operator"].splitlines()) <= set(after["operator"].splitlines()) and len(added) == 1 and added[0].endswith("./" + report_path.rsplit("/", 1)[1]), added
         def counts():
             return {name: sql(source, query) for name, query in [
                 ("applications", "select count(*) from member_applications"), ("invitations", "select count(*) from member_invitations"),
@@ -329,10 +342,13 @@ in {
         out, err = tool(["wp-import", "--surprise"], expect=1)
         assert out == "" and err.startswith("Usage: wp-import.ts"), err
         rows_before = counts()
+        dirs_before = directories()
         # A path with a space and an option-like argument reach the tool unchanged; the default command is a dry run.
-        dry = summary(tool(["roster-invite", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report(), "--reinvite-lapsed"])[0])
+        dry_report = report()
+        dry = summary(tool(["roster-invite", "--file", roster, "--operator", "operator@terrace.invalid", "--report", dry_report, "--reinvite-lapsed"])[0])
         assert dry["mode"] == "dry-run" and dry["reinviteLapsed"] is True and dry["counts"] == {"rows": 2, "create": 2, "reject": 0, "skip": 0, "deferred": 0}, dry
         assert counts() == rows_before
+        written_only_report(dirs_before, directories(), dry_report)
         source.succeed("mv /var/lib/terrace-cms/migrated-revision /root/migrated-revision")
         out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=1)
         assert "CMS migration gate is closed" in err, err
@@ -386,8 +402,11 @@ in {
         rows_before = counts()
         out, err = tool(["wp-import", "dry-run", "--plan", plan_file], expect=1)
         assert err.strip() == "The database is not local. Pass --allow-nonlocal-database only for an approved target.", err
-        dry = summary(tool(["wp-import", "dry-run", "--plan", plan_file, "--report", report(), "--allow-nonlocal-database"])[0])
+        dirs_before = directories()
+        dry_report = report()
+        dry = summary(tool(["wp-import", "dry-run", "--plan", plan_file, "--report", dry_report, "--allow-nonlocal-database"])[0])
         assert dry["mode"] == "dry-run" and dry["counts"]["failed"] == 0 and dry["counts"]["created"] > 0 and counts() == rows_before, dry
+        written_only_report(dirs_before, directories(), dry_report)
         out, err = tool(["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-host-1", "--allow-nonlocal-database"], expect=1)
         assert err.strip().startswith("The database is a production target") and "--confirm-production" in err and counts() == rows_before, err
         imported = summary(tool(["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-host-1", "--report", report(), "--allow-nonlocal-database", "--confirm-production"])[0])
@@ -449,6 +468,12 @@ in {
         props = lambda name: dict(line.split("=", 1) for line in source.succeed(f"systemctl show {name} -p User,Group,UMask,ProtectSystem,ProtectHome,NoNewPrivileges,PrivateTmp,PrivateDevices,RestrictAddressFamilies,MemoryHigh,MemoryMax,CPUQuotaPerSecUSec,TasksMax,LogNamespace,WorkingDirectory,EnvironmentFiles").splitlines())
         tool_props, cms_props = props(unit), props("terrace-cms.service")
         assert tool_props == cms_props and tool_props["User"] == "terrace_cms" and tool_props["EnvironmentFiles"].startswith("${inputs}/cms.env"), (tool_props, cms_props)
+        assert source.succeed(f"systemctl show {unit} -p RuntimeMaxUSec --value").strip() == "1min"
+        # What another local user can see of a running tool (recorded, then documented): argv carries the operator's email and file paths.
+        seen = {view: "operator@terrace.invalid" in source.execute(f"runuser -u nobody -- {command} 2>&1")[1] and source.execute(f"runuser -u nobody -- {command} >/dev/null 2>&1")[0] == 0
+                for view, command in [("ps", "ps -eo args"), ("status", f"systemctl status --no-pager {unit}"), ("show", f"systemctl show {unit}"), ("cat", f"systemctl cat --no-pager {unit}")]}
+        print("TOOL-VISIBILITY " + json.dumps(seen))
+        assert not any(value in source.execute(f"runuser -u nobody -- systemctl cat --no-pager {unit} 2>&1")[1] for value in secrets)
         source.succeed(f"systemctl thaw {unit}")
         source.wait_until_succeeds(f"test -s {frozen_run}.rc", timeout=60)
         assert source.succeed(f"cat {frozen_run}.rc").strip() == "0" and summary(source.succeed(f"cat {frozen_run}.out"))["mode"] == "dry-run"
@@ -456,6 +481,9 @@ in {
         # No secret value in any journal, including the tools' namespace.
         logs = source.succeed("journalctl --no-pager -o json; journalctl --namespace=terrace-apps --no-pager -o json")
         assert len(logs) > 1000 and not any(value in logs for value in secrets), "secret value in a journal"
+        # Nor the tools' own output: their stdout and stderr go to the caller (--pipe), never to a journal.
+        for printed in [plan["planSha256"], applied["runId"], "Usage: roster-invite.ts", "This is a production target"]:
+            assert printed not in logs, "tool output in a journal: " + printed
         # Inputs and reports stay in the operator directory, which no backup includes (checked against the snapshot below); purge it.
         names = source.succeed("ls ${operator}").strip().split("\n")
         assert {"locked.csv", "plan.json", "roster file.csv"} <= set(names) and all(name in ("locked.csv", "plan.json", "roster file.csv") or (name.startswith("report-") and name.endswith(".json")) for name in names), names
@@ -463,6 +491,56 @@ in {
         operator_files = source.succeed("find ${operator} -type f | wc -l").strip()
         source.succeed("cp -a /root/cms.env.loopback ${inputs}/cms.env && rm /root/cms.env.loopback")
         assert source.succeed("sha256sum ${inputs}/cms.env").split()[0] == original_cms_env
+
+        # A tool that does not end (a dry run blocked on a held table lock stands in for a hung or orphaned run).
+        source.succeed("systemd-run --unit=website-test-table-holder -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
+        def hung(name):
+            run = background(name, ["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])
+            source.wait_until_succeeds("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | grep -q .", timeout=30)
+            return run, source.succeed("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | cut -d' ' -f1").strip()
+        rc_and_result = lambda run, name: (source.succeed(f"cat {run}.rc").strip(), source.succeed(f"journalctl --no-pager -u {name} -o cat | grep -o \"Failed with result '[a-z-]*'\" | tail -n 1").strip())
+        # One at a time: while a wrapper runs, another is refused by its lock.
+        first, first_unit = hung("hung-first")
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=73)
+        assert err.strip() == "Another terrace-cms-tool run is starting or running; run the tools one at a time.", err
+        # A dropped session: the wrapper dies, its tool unit keeps running, and the next wrapper names that unit.
+        source.succeed("systemctl kill --signal=SIGKILL website-test-hung-first.service")
+        source.wait_until_fails("systemctl is-active --quiet website-test-hung-first.service", timeout=30)
+        source.succeed(f"systemctl is-active --quiet {first_unit}")
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=73)
+        assert err.strip() == f"An operator tool unit is still active: {first_unit}. Wait for it, or stop it: systemctl stop 'terrace-cms-tool-*'", err
+        # A migration started now is refused, but only after Conflicts= has stopped the CMS and the website: the site is down.
+        source.fail("systemctl start terrace-cms-migrate.service")
+        reason = source.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager")
+        assert f"A CMS operator tool is running ({first_unit} ); start the migration after it has finished." in reason, reason[-1500:]
+        for service in ["terrace-cms", "terrace-web"]:
+            source.fail(f"systemctl is-active --quiet {service}.service")
+        assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+        # The documented way out (docs/website-host.md, "When a tool is still running"), command for command.
+        listed = source.succeed("systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'")
+        assert listed.split()[0] == first_unit, listed
+        source.succeed("systemctl stop 'terrace-cms-tool-*'")
+        source.succeed("systemctl stop website-test-table-holder.service")
+        source.succeed("systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service")
+        source.succeed("systemctl start terrace-cms-migrate.service")
+        source.succeed("systemctl start terrace-cms.service terrace-web.service")
+        assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+        assert_content(source)
+        # Exit statuses: a tool unit killed by a signal, and one stopped at the run-time bound (60 s here).
+        source.succeed("systemd-run --unit=website-test-table-holder-2 -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
+        killed, killed_unit = hung("hung-killed")
+        source.succeed(f"systemctl kill --signal=SIGKILL {killed_unit}")
+        source.wait_until_succeeds(f"test -s {killed}.rc", timeout=60)
+        bounded, bounded_unit = hung("hung-bounded")
+        source.wait_until_succeeds(f"test -s {bounded}.rc", timeout=120)
+        exits = {"signal": rc_and_result(killed, killed_unit), "bound": rc_and_result(bounded, bounded_unit)}
+        print("TOOL-EXIT " + json.dumps(exits))
+        assert exits["signal"][0] != "0" and exits["bound"][0] != "0" and exits["bound"][1] == "Failed with result 'timeout'", exits
+        source.succeed("systemctl stop website-test-table-holder-2.service")
+        for service in ["terrace-cms", "terrace-web"]:
+            source.succeed(f"systemctl is-active --quiet {service}.service")
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()

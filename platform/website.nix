@@ -160,9 +160,14 @@
   # terrace-cms-tool as the CMS account. The transient unit's properties are generated from cmsRuntime, the
   # attrset of the CMS units, so the tools cannot drift from them; only the operator input directory is added.
   # ExecStartPre's guards run inside the runner instead, as the same account with the same environment.
+  # The only other addition is the run-time bound: an orphaned or hung tool (a dropped SSH session leaves its unit
+  # running) is stopped after operatorToolMaxSeconds instead of blocking every migration indefinitely.
   toolServiceConfig =
     removeAttrs cmsRuntime.serviceConfig ["ExecStartPre"]
-    // {ReadWritePaths = cmsRuntime.serviceConfig.ReadWritePaths ++ [cfg.operatorDirectory];};
+    // {
+      ReadWritePaths = cmsRuntime.serviceConfig.ReadWritePaths ++ [cfg.operatorDirectory];
+      RuntimeMaxSec = cfg.operatorToolMaxSeconds;
+    };
   toolProperty = name: value: "${name}=${
     if builtins.isBool value
     then
@@ -190,21 +195,35 @@
   # The wrapper's logic is platform/cms-tool.sh (unit-tested in tests/platform/test_cms_tool.py with stub commands).
   cmsTool = pkgs.writeShellApplication {
     name = "terrace-cms-tool";
-    runtimeInputs = [pkgs.coreutils pkgs.systemd];
+    runtimeInputs = [pkgs.coreutils pkgs.systemd pkgs.util-linux];
     text =
       ''
         TOOL_RUNNER=${toolRunner}
+        TOOL_LOCK=/run/terrace-cms-tool.lock
         TOOL_PROPERTIES=(${lib.concatMapStringsSep " " lib.escapeShellArg toolProperties})
       ''
       + builtins.readFile ./cms-tool.sh;
   };
   # A migration never starts under a running operator tool (it would change the schema beneath it).
+  # Fails closed: a listing that cannot be read refuses too.
   refuseDuringTool = pkgs.writeShellScript "terrace-cms-migrate-refuse-during-tool" ''
-    if test -n "$(${pkgs.systemd}/bin/systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*')"; then
-      echo 'A CMS operator tool is running; start the migration after it has finished.' >&2
+    if ! units=$(${pkgs.systemd}/bin/systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'); then
+      echo 'Cannot list CMS operator tool units; migration refused.' >&2
+      exit 1
+    fi
+    if test -n "$units"; then
+      echo "A CMS operator tool is running ($(printf '%s\n' "$units" | ${pkgs.coreutils}/bin/cut -d' ' -f1 | ${pkgs.coreutils}/bin/tr '\n' ' ')); start the migration after it has finished." >&2
       exit 1
     fi
   '';
+  # Backup roots are free strings: compare normalised forms. Relative paths and any ".." segment are refused outright.
+  normalisePath = path: "/" + lib.concatStringsSep "/" (lib.filter (part: part != "" && part != ".") (lib.splitString "/" path));
+  plainAbsolute = path: lib.hasPrefix "/" path && !(lib.elem ".." (lib.splitString "/" path));
+  covers = outer: inner: let
+    a = normalisePath outer;
+    b = normalisePath inner;
+  in
+    a == b || a == "/" || lib.hasPrefix (a + "/") b;
 in {
   imports = [./backup.nix];
   options.terrace.website = {
@@ -257,6 +276,11 @@ in {
       type = lib.types.str;
       default = "/var/lib/terrace-cms-operator";
       description = "Private (0700, CMS account) directory for the operator tools' inputs and reports (roster files, import plans). Never backed up: the operator keeps the originals elsewhere and purges it after each run.";
+    };
+    operatorToolMaxSeconds = lib.mkOption {
+      type = lib.types.ints.between 60 86400;
+      default = 3600;
+      description = "RuntimeMaxSec of a terrace-cms-tool unit: systemd stops a tool still running after this many seconds (a hung run, or one orphaned by a dropped session, would otherwise block migrations). Measured VM runs take seconds; a roster apply is at most 200 rows and the real WordPress plan about 245 items.";
     };
     lifecycleLockTimeoutMs = lib.mkOption {
       type = lib.types.nullOr (lib.types.ints.between 100 10000);
@@ -360,7 +384,7 @@ in {
           backup = config.terrace.backup;
           roots = lib.attrValues backup.media ++ lib.attrValues backup.extraPaths;
         in
-          lib.all (root: root != cfg.operatorDirectory && !(lib.hasPrefix (root + "/") cfg.operatorDirectory) && !(lib.hasPrefix (cfg.operatorDirectory + "/") root)) roots;
+          lib.all (root: plainAbsolute root && !(covers root cfg.operatorDirectory) && !(covers cfg.operatorDirectory root)) roots;
         message = "The Terrace CMS operator directory must not be inside, contain or equal a backup path.";
       }
       {

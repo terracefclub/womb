@@ -16,6 +16,8 @@ SCRIPT = Path(os.environ.get("CMS_TOOL_SCRIPT", Path(__file__).resolve().parents
 RUNNER = "/nix/store/synthetic-terrace-cms-tool-run"
 # Absolute: a NixOS host has no bash under /usr/bin or /bin.
 BASH = shutil.which("bash") or "/bin/bash"
+# cut and tr come from coreutils on the host's PATH; the stubs below stand in for everything else.
+TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr")),}))
 PROPERTIES = ["User=terrace_cms", "EnvironmentFile=/run/secrets/rendered/terrace-website/cms.env", "ReadWritePaths=/var/lib/a /var/lib/b",
               "Environment=PATH=/nix/store/x/bin:/nix/store/y/bin"]
 
@@ -30,7 +32,11 @@ class CmsTool(unittest.TestCase):
         self.calls = self.dir / "systemd-run.args"
         stubs = {
             "id": '[[ $1 == -u ]] || exit 99\necho "$FAKE_UID"\n',
-            "systemctl": '[[ "$*" == "show terrace-cms-migrate.service -p ActiveState --value" ]] || exit 99\necho "$FAKE_STATE"\n',
+            "systemctl": ('if [[ "$*" == "show terrace-cms-migrate.service -p ActiveState --value" ]]; then echo "$FAKE_STATE"\n'
+                          "elif [[ \"$*\" == \"list-units --plain --no-legend --state=active,activating,deactivating terrace-cms-tool-*\" ]]; then printf '%b' \"$FAKE_UNITS\"\n"
+                          'else exit 99; fi\n'),
+            # The lock: refused when FAKE_LOCK_BUSY is set, as `flock -n` on a held lock; it must be fd 9.
+            "flock": '[[ "$*" == "-n 9" ]] || exit 99\n[[ -z "$FAKE_LOCK_BUSY" ]]\n',
             "date": '[[ $1 == +%s%N ]] || exit 99\necho 1700000000123456789\n',
             # Records its arguments NUL-separated, prints a line to each stream and exits with the requested status.
             "systemd-run": 'printf "%s\\0" "$@" >"$FAKE_CALLS"\necho tool-output\necho tool-error >&2\nexit "$FAKE_EXIT"\n',
@@ -39,12 +45,14 @@ class CmsTool(unittest.TestCase):
             path = self.bin / name
             path.write_text(f"#!{BASH}\n" + body)
             path.chmod(0o700)
-        prelude = f"TOOL_RUNNER={shlex.quote(RUNNER)}\nTOOL_PROPERTIES=({' '.join(shlex.quote(p) for p in PROPERTIES)})\n"
+        self.lock = self.dir / "tool.lock"
+        prelude = f"TOOL_RUNNER={shlex.quote(RUNNER)}\nTOOL_LOCK={shlex.quote(str(self.lock))}\nTOOL_PROPERTIES=({' '.join(shlex.quote(p) for p in PROPERTIES)})\n"
         self.wrapper = self.dir / "terrace-cms-tool"
         self.wrapper.write_text(prelude + SCRIPT.read_text())
 
-    def run_tool(self, *args, uid="0", state="inactive", status="0"):
-        env = {"PATH": f"{self.bin}:{os.path.dirname(BASH)}", "FAKE_UID": uid, "FAKE_STATE": state, "FAKE_EXIT": status, "FAKE_CALLS": str(self.calls)}
+    def run_tool(self, *args, uid="0", state="inactive", status="0", units="", busy=""):
+        env = {"PATH": f"{self.bin}:{TOOLS_PATH}", "FAKE_UID": uid, "FAKE_STATE": state, "FAKE_EXIT": status, "FAKE_CALLS": str(self.calls),
+               "FAKE_UNITS": units, "FAKE_LOCK_BUSY": busy}
         return subprocess.run([BASH, "-euo", "pipefail", str(self.wrapper), *args], capture_output=True, text=True, timeout=30, env=env)
 
     def recorded(self):
@@ -81,6 +89,22 @@ class CmsTool(unittest.TestCase):
         options = recorded[:separator]
         self.assertEqual(options[:6], ["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", "--unit=terrace-cms-tool-roster-invite-1700000000123456789"])
         self.assertEqual(options[6:], [item for prop in PROPERTIES for item in ("-p", prop)])
+
+    def test_refuses_while_another_wrapper_holds_the_lock(self):
+        result = self.run_tool("roster-invite", "dry-run", busy="1")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (73, "", "Another terrace-cms-tool run is starting or running; run the tools one at a time.\n"))
+        self.assertFalse(self.calls.exists())
+        self.assertTrue(self.lock.exists())
+
+    def test_refuses_while_a_tool_unit_is_active_and_names_it(self):
+        units = "terrace-cms-tool-wp-import-1 loaded active running /nix/store/x-run\\nterrace-cms-tool-roster-invite-2 loaded activating start /nix/store/x-run\\n"
+        result = self.run_tool("roster-invite", "apply", units=units)
+        self.assertEqual(result.returncode, 73)
+        self.assertEqual(result.stderr, "An operator tool unit is still active: terrace-cms-tool-wp-import-1 terrace-cms-tool-roster-invite-2. "
+                                        "Wait for it, or stop it: systemctl stop 'terrace-cms-tool-*'\n")
+        self.assertFalse(self.calls.exists())
+        # Checked before the migration state: a tool unit is reported even while a migration runs.
+        self.assertEqual(self.run_tool("roster-invite", "apply", units=units, state="active").returncode, 73)
 
     def test_passes_the_tools_exit_status_through(self):
         for status in ["0", "1", "2", "64"]:

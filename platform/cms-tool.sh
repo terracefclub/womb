@@ -3,10 +3,16 @@
 #
 #   terrace-cms-tool roster-invite|wp-import ARGS...
 #
-# The module prepends TOOL_RUNNER (the runner script) and TOOL_PROPERTIES (NAME=VALUE unit properties, including
-# EnvironmentFile= naming the protected CMS environment file). This script never reads that file: systemd does,
+# The module prepends TOOL_RUNNER (the runner script), TOOL_LOCK (a root-only lock file) and TOOL_PROPERTIES
+# (NAME=VALUE unit properties, including EnvironmentFile= naming the protected CMS environment file). This script never reads that file: systemd does,
 # before it drops privileges. Arguments reach the tool unchanged and its output and exit status come back.
-# Exit codes of its own: 64 usage (no or unknown tool), 75 a CMS migration is running, 77 not root.
+# Exit codes of its own: 64 usage (no or unknown tool), 73 another operator tool is starting or running,
+# 75 a CMS migration is running, 77 not root.
+#
+# One tool at a time: the wrapper holds TOOL_LOCK from its checks until the tool ends (systemd-run inherits the
+# descriptor), so two wrappers cannot both pass the checks and start. A tool unit whose wrapper is gone (a dropped
+# session) no longer holds the lock, so the wrapper also refuses while any terrace-cms-tool-* unit is active. What
+# remains is a migration started at the same moment: its own check and this one can both pass within milliseconds.
 
 usage() {
   echo 'Usage: terrace-cms-tool roster-invite|wp-import ARGS...' >&2
@@ -23,6 +29,16 @@ case "$1" in
   *) usage ;;
 esac
 
+exec 9>"$TOOL_LOCK"
+if ! flock -n 9; then
+  echo 'Another terrace-cms-tool run is starting or running; run the tools one at a time.' >&2
+  exit 73
+fi
+active=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*' | cut -d' ' -f1 | tr '\n' ' ')
+if [[ -n "${active// /}" ]]; then
+  echo "An operator tool unit is still active: ${active% }. Wait for it, or stop it: systemctl stop 'terrace-cms-tool-*'" >&2
+  exit 73
+fi
 state=$(systemctl show terrace-cms-migrate.service -p ActiveState --value)
 case "$state" in
   active | activating | reloading | deactivating)
