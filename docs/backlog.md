@@ -248,6 +248,14 @@ known to affect a deployed host (none exists).
   realm producer from the current one and checks it against the old pinned
   hash; the next re-pin that changes `identity/tools/realm-config.ts` must
   replace that reconstruction (the build fails until it does).
+- Proof derivations read ignored files: the Windmill checks (and the all-services
+  rehearsal driver, which composes Windmill) copy `platform/windmill` as a path,
+  so an ignored `__pycache__` left there by Python unit tests changes their
+  derivation without any commit. Found at PR 68: the same commit evaluated to two
+  Windmill derivations, one with and one without the cache; on a clean tree they
+  match the proven ones. The PR 68 rehearsals were built after the unit tests had
+  created such caches (no functional effect). Run unit tests with
+  `PYTHONDONTWRITEBYTECODE=1`, and check `git status --ignored` before a proof.
 - Sweep and migration (pre-existing, also on trunk before PR 68): the migration's
   first `ExecStartPre` stops `terrace-cms-sweep.service`, so a sweep start
   requested between the migration becoming `activating` and that stop (a window
