@@ -599,10 +599,12 @@ in {
         source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder-2.service", timeout=30)
         for service in ["terrace-cms", "terrace-web"]:
             source.succeed(f"systemctl is-active --quiet {service}.service")
-        # A real importer apply stopped mid-run: its run row is written, then its first document waits on a held lock (the
-        # document hooks write redirects) and the tool unit is stopped there. Then the documented follow-up: rollback
+        # A real importer apply stopped mid-run: its run row and the plan's 6 media documents (no redirect hook) are
+        # written, then its first event waits on a held lock (the document hooks write redirects) and the tool unit is
+        # stopped there. Then the documented follow-up: rollback
         # refuses a run still marked running, refuses a takeover before it is idle long enough, and takes it over after.
         imports_before = counts()
+        media_before = int(sql(source, "select count(*) from media"))
         source.succeed("systemd-run --unit=website-test-redirect-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table redirects in access exclusive mode; select pg_sleep(900); commit"))
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'redirects'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
         stopped_run = background("import-stopped", ["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-stopped-1", "--allow-nonlocal-database", "--confirm-production"])
@@ -613,16 +615,20 @@ in {
         left = counts()
         assert sql(source, "select status from wp_import_runs where run_id = 'wpimport-stopped-1'") == "running"
         assert {k: v for k, v in left.items() if k != "import_runs"} == {k: v for k, v in imports_before.items() if k != "import_runs"}, (imports_before, left)
-        print("TOOL-STOPPED-IMPORT " + json.dumps({"wrapperExit": source.succeed(f"cat {stopped_run}.rc").strip(), "before": imports_before, "left": left}))
+        assert int(sql(source, "select count(*) from media")) == media_before + 6
+        # systemd counts a death by SIGTERM (its stop) as clean, so the wrapper of a stopped tool exits 0: check the run, not the status.
+        assert source.succeed(f"cat {stopped_run}.rc").strip() == "0"
+        print("TOOL-STOPPED-IMPORT " + json.dumps({"wrapperExit": "0", "before": imports_before, "left": left, "media": [media_before, media_before + 6]}))
         refused = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--allow-nonlocal-database", "--confirm-production"], expect=1)[0])
         assert refused["ok"] is False and [r["reason"] for r in refused["refusals"]] == ["run-still-running"], refused
         refused = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--take-over-stale", "--allow-nonlocal-database", "--confirm-production"], expect=1)[0])
         assert refused["ok"] is False and [r["reason"] for r in refused["refusals"]] == ["run-not-stale"], refused
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select (now() - updated_at > interval '61 seconds')::int from wp_import_runs where run_id = 'wpimport-stopped-1'\") = 1", timeout=120)
         taken = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--take-over-stale", "--stale-after-minutes", "1", "--allow-nonlocal-database", "--confirm-production"])[0])
-        assert taken["ok"] is True and taken["deleted"] == 0 and taken["refusals"] == [], taken
+        assert taken["ok"] is True and taken["deleted"] == 6 and taken["refusals"] == [], taken
         assert sql(source, "select status from wp_import_runs where run_id = 'wpimport-stopped-1'") == "rolled-back"
         assert {k: v for k, v in counts().items() if k != "import_runs"} == {k: v for k, v in imports_before.items() if k != "import_runs"}
+        assert int(sql(source, "select count(*) from media")) == media_before
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()

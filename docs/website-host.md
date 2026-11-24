@@ -213,7 +213,9 @@ rollback --take-over-stale` while its unit could still be running. Keep it at
 takeover. In the website VM a tool stopped at the bound made the wrapper exit 1
 (the unit's journal says `Failed with result 'timeout'`), and one killed by
 `SIGKILL` made it exit 255 (`Failed with result 'signal'`); the tool's own exit
-statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool
+statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool unit
+stopped with `systemctl stop` makes the wrapper exit 0 (systemd counts a death by
+its own `SIGTERM` as clean): after a stop, check the run, not the exit status. A tool
 stopped at the bound (or by a signal) ends where it was:
 - roster `apply`: rows committed before the stop stay, journaled, with their
   link files; the run stays `running` until it has been idle for 30 minutes,
@@ -462,10 +464,10 @@ or by the identity guard, leaves the CMS and website running with the same
 processes and still serving, and the ledger unchanged; an accepted migration
 finds the CMS, website and a running sweep stopped, their processes gone, at the
 step standing in for its first statement; a real importer apply stopped mid-run
-(its run row written, its first document waiting on a held lock) leaves the run
-`running`, rollback refuses it (`run-still-running`, then `run-not-stale`), and
-`--take-over-stale --stale-after-minutes 1` rolls it back once it has been idle
-for a minute; a roster run left `running` is refused by rollback while it is
+with `systemctl stop` (its run row and 6 media documents written, its first event
+waiting on a held lock; the wrapper exits 0) leaves the run `running`, rollback refuses it (`run-still-running`, then `run-not-stale`), and
+`--take-over-stale --stale-after-minutes 1` rolls it back (the 6 documents
+deleted) once it has been idle for a minute; a roster run left `running` is refused by rollback while it is
 younger than 30 minutes and marked failed and rolled back after.
 
 Verified again 2026-11-24 at Womb `e7403a5` after the review (fresh result,
