@@ -248,6 +248,21 @@ known to affect a deployed host (none exists).
   realm producer from the current one and checks it against the old pinned
   hash; the next re-pin that changes `identity/tools/realm-config.ts` must
   replace that reconstruction (the build fails until it does).
+- Sweep and migration (pre-existing, also on trunk before PR 68): the migration's
+  first `ExecStartPre` stops `terrace-cms-sweep.service`, so a sweep start
+  requested between the migration becoming `activating` and that stop (a window
+  of milliseconds) is cancelled instead of queued behind the migration. The
+  sweep is idempotent and the daily timer retries it; the website VM proof's
+  queued-sweep check passes because it requests the sweep after that stop. A
+  fix would order the stop before the migration's start job (for example in a
+  separate unit the migration requires), not attempted here.
+- Migrations start with a plain `systemctl start terrace-cms-migrate.service`
+  (by hand in the production steps, or from the rehearsal launcher); there is no
+  single deployment entry point that could check for a running CMS operator tool
+  before `Conflicts=` stops the CMS and the website. The migration unit's own
+  check is a backstop that refuses after they are stopped; operators check for a
+  running tool first ([website host](website-host.md), "When a tool is still
+  running"). A deployment entry point with that preflight is not built.
 - Operator tools (G-45). Website `dd1aef7` packages the bulk roster tool and the
   WordPress import applier as `bin/roster-invite` and `bin/wp-import`; Womb runs
   them as the CMS account through the root-only `terrace-cms-tool`
@@ -261,8 +276,13 @@ known to affect a deployed host (none exists).
   `--allow-nonlocal-database` on a Womb host because the module's `DATABASE_URI`
   names a user with an empty host, which the tools' local-database check does not
   parse (a different URI form is a website or Womb decision, not made here); the
-  operator directory is purged by hand; only the migration unit refuses to start
-  under a running tool (a migration run another way is not blocked).
+  operator directory is purged by hand; a migration refused because a tool runs
+  has already stopped the CMS and website (see the migration entry point above);
+  a migration started in the same milliseconds as a wrapper can pass both checks;
+  while a tool runs, its command line (operator email, file paths) is visible to
+  every local user; the wrapper has not been run as a background job with an open
+  standard input. Tool runs are serialised and bounded (`operatorToolMaxSeconds`,
+  default 3600 s), proven in the website VM.
 
 ## Follow-ups from the proof follow-ups review (PR 64), done in the verification sweep
 

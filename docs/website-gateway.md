@@ -136,6 +136,9 @@ before the task is idle; protected retained archives and evidence can remain.
 The check uses the shared [bounded supervisor](../platform/README.md#check-supervision)
 for lock ownership, whole-run/build deadlines and cancellation cleanup.
 
+Verified again 2026-11-24 at Womb `e7403a5` after the PR 68 review (04:44 to
+04:47 Pacific, fresh result): same counts.
+
 Verified 2026-11-24 on the shared Linux builder with the kept `dd1aef7` build at
 Womb `3f4bc9e` (00:10 to 00:13 Pacific, fresh result): 198 HTTPS protocol
 assertions and the same lifecycle stage counts as below passed.

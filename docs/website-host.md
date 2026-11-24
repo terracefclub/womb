@@ -24,7 +24,9 @@ archives from TFC source `dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191` (website `de
 `website-release.nix` checks the raw archive SHA256, source/runtime manifest and
 every packaged file hash before producing immutable Nix packages. The archive hash
 must match before that archive is copied into the Nix store. It uses local retained
-archives, not expiring CI links. Node24.21.0 is required; Bun,
+archives, not expiring CI links. The website archives are not byte-reproducible
+(two builds of one commit differ in build-ID files and chunk names), so the pin is
+one kept build: keep those exact files; a rebuild of the same commit will not match. Node24.21.0 is required; Bun,
 package installation, source and builds are absent from runtime services.
 
 Retain the web/CMS pair, manifests and checksum index independently of expiring
@@ -139,8 +141,12 @@ every administrator-initiated erasure:
 systemctl start terrace-cms-sweep.service
 ```
 
-A sweep requested while an explicit migration runs waits for it (and is skipped
-if one is still active when it starts); starting a migration stops a running sweep,
+A sweep requested while an explicit migration runs normally waits for it (and is
+skipped if one is still active when it starts). There is one exception: the
+migration's first step stops the sweep unit, so a sweep requested in the few
+milliseconds between the migration becoming `activating` and that step is
+cancelled rather than queued; the next timer run (or a manual start) does the
+work. Starting a migration stops a running sweep,
 which is idempotent and retried (website `680ad56`:
 `cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
 writes every mirror file to a private temporary file and renames it into place,
@@ -177,9 +183,38 @@ guard and migration gate run, the module's settings are exported exactly as for
 and exit status come back to the caller. The environment file is only named:
 systemd reads it before dropping privileges, and the wrapper never sources,
 copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
-missing or unknown tool (64) and a running migration (75); the migration unit in
-turn refuses to start while a tool runs. Its logic is `platform/cms-tool.sh`
-(unit tests: `python3 -B tests/platform/test_cms_tool.py -v`).
+missing or unknown tool (64), another tool run (73) and a running migration (75).
+Its logic is `platform/cms-tool.sh` (unit tests:
+`python3 -B tests/platform/test_cms_tool.py -v`).
+
+**One at a time, in the foreground.** The wrapper holds a lock
+(`/run/terrace-cms-tool.lock`) from its checks until the tool ends, and refuses
+while any `terrace-cms-tool-*` unit is still active, naming it (exit 73). Run the
+tools one at a time, in the foreground of an SSH session (or in `tmux`/`screen`),
+and do not start the wrapper as a background job with an open standard input
+(no proof exercises that). A dropped session kills the wrapper but not the
+tool's unit: it keeps running until it ends or reaches its bound, and while it
+runs the next wrapper and every migration refuse. A migration started at the very
+moment a wrapper starts can still pass both checks (a window of milliseconds).
+
+**Run-time bound.** Each tool unit has `RuntimeMaxSec` from
+`operatorToolMaxSeconds` (60 to 86400, default 3600). The website VM's runs take
+seconds; a roster apply handles at most 200 rows and the real WordPress plan
+about 245 items, so an hour leaves wide room while still freeing an orphaned or
+hung run. In the website VM a tool stopped at the bound made the wrapper exit 1
+(the unit's journal says `Failed with result 'timeout'`), and one killed by
+`SIGKILL` made it exit 255 (`Failed with result 'signal'`); the tool's own exit
+statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool
+stopped at the bound (or by a signal) ends where it was:
+- roster `apply`: rows committed before the stop stay, journaled, with their
+  link files; the run stays `running` until it has been idle for 30 minutes,
+  after which the next apply or a rollback marks it failed. Roll it back with
+  `roster-invite rollback --run RUN_ID ... --confirm-production` (a failed run can
+  be rolled back), or dry-run the file again and apply what is left;
+- importer `apply` or `publish`: the run ledger stays `running`; roll it back
+  once it has been idle for an hour with `wp-import rollback --run RUN_ID
+  --take-over-stale ...` (or sooner with `--stale-after-minutes N`), then apply
+  again.
 
 **Inputs and reports.** The tools read only owner-only files of the account
 that runs them, outside any Git checkout, by absolute path. Put them in the
@@ -201,6 +236,7 @@ terrace-cms-tool roster-invite apply --file $D/roster.csv --operator OP --plan-s
 terrace-cms-tool roster-invite rollback --run RUN_ID --operator OP --report $D/roster-rollback.json --confirm-production
 terrace-cms-tool wp-import dry-run --plan $D/wp-import-plan.json --report $D/import-dry-run.json --allow-nonlocal-database
 terrace-cms-tool wp-import apply --plan $D/wp-import-plan.json --report $D/import-apply.json --allow-nonlocal-database --confirm-production
+terrace-cms-tool wp-import rollback --run RUN_ID --report $D/import-rollback.json --allow-nonlocal-database --confirm-production
 ```
 
 Both flags stay explicit operator choices; the wrapper adds neither. The host's
@@ -210,6 +246,44 @@ counts as not local: the importer refuses every command without
 `--allow-nonlocal-database`, and both tools treat the database as production, so
 every write also needs `--confirm-production`. Take a verified backup before an
 importer apply or a roster apply, as for a migration.
+
+**When a tool is still running.** A migration refuses to start while a
+`terrace-cms-tool-*` unit is active, but only after `Conflicts=` has already
+stopped `terrace-cms.service` and `terrace-web.service` (and a running sweep):
+the site is down until you finish the steps below. `systemctl start` only says
+that the unit failed; the reason is in the apps journal namespace. Before
+deploying, check that no tool is running (no output means none):
+
+```sh
+systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
+```
+
+If a migration was refused (or a tool unit was left behind), read the reason,
+stop the tool unit, then migrate and start the services again (the website VM
+proof runs exactly these commands):
+
+```sh
+journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager
+systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
+systemctl stop 'terrace-cms-tool-*'
+systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service
+systemctl start terrace-cms-migrate.service
+systemctl start terrace-cms.service terrace-web.service
+```
+
+Stopping a tool unit stops the tool where it was (see the run-time bound above
+for what that leaves and how to roll it back).
+
+**Output, arguments and who sees them.** The tools' output (counts, hashes and
+fixed refusal text; reports go to files) and their exit status reach only the
+caller's terminal: with `--pipe` nothing of it is written to any journal, and the
+unit has a fixed description, so its command line is not in systemd's start and
+stop messages either (the website VM proof checks both). While a tool runs, its
+command line, which carries the operator's email and file paths, is visible to
+every local user through `ps`, `systemctl status`, `systemctl show` and
+`systemctl cat` (checked in the website VM as `nobody`). On a production host
+the only local accounts are the operators' and the services' own, but do not put
+anything confidential in arguments: personal data belongs in the files.
 
 **What is backed up.** The tools' database rows (the roster journal
 `roster_runs` and `roster_run_items`, applications, invitations, outbox rows,
@@ -222,7 +296,12 @@ supplies and keeps elsewhere, and a module assertion refuses a configuration tha
 puts it inside, around or at a backup path.
 
 **Proven where.** In VM proofs only (below and in the production profile
-proof); nothing has been run on a real host or against a provider.
+proof); nothing has been run on a real host or against a provider. The website VM
+switches the protected `cms.env` to a public-profile variant (same secrets) for
+the tools' writes while the running CMS server stays on the proof's loopback
+profile; the public profile's server path is proven by the HTTPS gateway check,
+and the tools under the real sops-rendered environment only by the production
+profile proof's dry run.
 
 ## Health, private logs and capacity
 
@@ -346,6 +425,27 @@ unit's account and settings, and no synthetic secret value appears in its
 properties (as root or another user), any process's arguments or any journal. The
 backup snapshot contains the outbox and not the operator directory, which is then
 purged; the roster journal rows come back from the restore.
+
+Since the PR 68 review the proof also covers: dry runs leave the outbox and
+upload directories byte-identical and add only their own report to the operator
+directory; one wrapper at a time (the second is refused by the lock, and after
+the first wrapper is killed, as by a dropped session, its unit keeps running and
+the next wrapper names it); a migration started then is refused with the reason
+in the apps journal while the CMS and website are already stopped, and the
+recovery commands above bring them back; a tool killed by a signal and one
+stopped at a 60-second `operatorToolMaxSeconds` (exit statuses above); the run
+time bound is set on the unit; neither the tools' output nor their arguments
+appear in any journal entry; and the restore comparison now includes
+applications, invitations, the import ledger and journal, pages, posts and
+redirects (the imported documents and redirects were rolled back earlier in the
+proof, so those last three compare their remaining rows).
+
+Verified again 2026-11-24 at Womb `e7403a5` after the review (fresh result,
+04:02 to 04:08 Pacific): 39 CMS tables; roster lock wait 0.50 s at 500 ms,
+public apply 503 in 0.55 s; migration 5.32 s, encrypted backup 7.73 s, complete
+check 5.00 s, restore 4.11 s, recovered HTTP verification 10.42 s. The Documenso
+and Vaultwarden functional proofs were not rerun for this re-pin: their
+derivations equal ones that passed before (Womb PR 64), so they carry over.
 
 Verified 2026-11-24 on the shared Linux builder with the kept `dd1aef7` build
 (web `1a4e07f7…bd12`, CMS `8929443f…2a4c`) at Womb `3f4bc9e` (fresh result): 39

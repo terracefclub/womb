@@ -436,6 +436,26 @@ into the restored outbox; the invitation files still name the applicants),
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
 
+### Observed rehearsals after the PR 68 review — November 24, 2026 (Pacific)
+
+Womb `e7403a5` (operator tools serialised and bounded, backup-path check
+normalised, fixed unit description; same kept `dd1aef7` build). The website module
+changed, so every driver derivation changed again and all five ran once more, one
+at a time, each purged with the ordinary command at once. As before, they do not
+run the operator tools.
+
+| Flags | Run | Time | Scenario | Result |
+| --- | --- | --- | --- | --- |
+| `--all-services` | `b72d148d` | 05:48 to 06:18 | 1706.80 s | passed: 198 HTTPS protocol assertions in each of the three phases |
+| (default) | `03fefb94` | 06:18 to 06:28 | 551.29 s | passed |
+| `--documenso` | `dd0ed6e0` | 06:28 to 06:43 | 836.96 s | passed |
+| `--documenso-signing` | `24dd7242` | 06:43 to 06:59 | 889.23 s | passed |
+| `--relay-peers` | `43e45186` | 06:59 to 07:10 | 599.94 s | passed |
+
+Every receipt is complete with all owned compute off and no check false; each
+purge left `syntheticStatePurged` true and the scratch directory empty. Evidence on
+the build machine in `cms-tools-evidence-e7403a5/`.
+
 ### Observed rehearsals with website `dd1aef7` and the operator tools — November 24, 2026 (Pacific)
 
 Womb `3f4bc9e` (re-pin to the kept `dd1aef7` build: web `1a4e07f7…bd12`, CMS

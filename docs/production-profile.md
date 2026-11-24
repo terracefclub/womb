@@ -353,6 +353,14 @@ give the expiry check an explicit trust anchor file, so the default system
 trust store path of `terrace-tls check` is not exercised by any VM proof
 ([TLS](tls.md#verification)).
 
+Re-verified 2026-11-24 at Womb `e7403a5` after the PR 68 review (fresh results):
+205 assertions (198 protocol) in 626 s; the evaluation check passes with 139
+rejected variants, now including the operator directory at, inside and around a
+backup path in every spelling (trailing or repeated slashes, `.`, `..`, relative,
+`/`), an operator directory overlapping the outbox, and out-of-range values of
+`lifecycleLockTimeoutMs` and `operatorToolMaxSeconds` (both options' bounds
+evaluate cleanly).
+
 Re-verified 2026-11-24 with the kept `dd1aef7` build at Womb `3f4bc9e` (fresh
 results): VM proof PASS in 634 s with 205 assertions (198 shared protocol
 assertions). Three are new: as root, `terrace-cms-tool roster-invite dry-run`
