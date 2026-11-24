@@ -330,7 +330,19 @@ class StoreTest(Fixture):
         # names the half to set next; push is refused on the host until the pair matches (HostTest).
         out = self.ok("set", "app", "tls/key", stdin=OTHER_KEY.encode())
         self.assertIn("WARNING: tls/certificate and tls/key in the store do not belong together (the certificate's public key is not the key's)."
-                      " `push` is refused until they do: set the matching tls/certificate next.", out)
+                      " `push` refuses to send them and the host's `install` refuses them until they do: set the matching tls/certificate next.", out)
+        # push checks the pair before sending anything when it can decrypt the store; without an identity it says so
+        # and leaves the check to the host.
+        err = self.refused("push", "app", "--address", "app")
+        self.assertIn("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing sent", err)
+        self.assertNotIn('"install"', self.argv_log())
+        identity = os.environ.pop("SOPS_AGE_KEY_FILE")
+        try:
+            code, out, _ = self.call("push", "app", "--address", "app")
+        finally:
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
+        self.assertEqual(code, 0)  # the stand-in ssh accepts anything; on a host `install` refuses (HostTest)
+        self.assertIn("NOTE: SOPS_AGE_KEY_FILE is not set, so the TLS pair is not checked here; the host's install checks it.", out)
         self.assertEqual(self.plaintext()["tls/key"], OTHER_KEY)
         self.assertNotIn("WARNING", self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode()))
         self.assertIn("set the matching tls/key next", self.ok("set", "app", "tls/certificate",
@@ -655,6 +667,19 @@ class HostTest(Fixture):
             calls.clear()
             self.assertIn("Removed 1 old repository key(s)", self.ok("host-apply", name, "--finish", "--keep", "3333", stdin=new.encode()))
             self.assertEqual(removed(), [previous])
+            # A --keep prefix that names no key (a typo) or two keys is refused with the list, before anything is removed.
+            calls.clear()
+            keys.append({"id": "3333" + "e" * 60, "current": False})
+            for flags in (["--keep", "3334"], ["--keep", "3333"], ["--keep", "1111", "--keep", "3334"]):
+                code, out, err = self.call("host-apply", name, "--finish", *flags, stdin=new.encode())
+                self.assertEqual(code, 1, flags)
+                self.assertIn("does not name exactly one key; nothing removed", err)
+                self.assertIn(f"key {escrowed} other", out)
+            keys.pop()
+            self.assertEqual(removed(), [])
+            # A prefix of the current key is a valid --keep (it is kept anyway).
+            self.assertIn("Removed 2 old repository key(s)", self.ok("host-apply", name, "--finish", "--keep", "1111", stdin=new.encode()))
+            self.assertEqual(sorted(removed()), sorted([previous, escrowed]))
             calls.clear()
             self.assertIn("give either --keep or --only-current", self.refused("host-apply", name, "--finish", "--only-current", "--keep", "3333", stdin=new.encode()))
             self.assertIn("--remove belongs to --finish --only-current", self.refused("host-apply", name, "--finish", "--keep", "3333", "--remove", "2222", stdin=new.encode()))
@@ -781,6 +806,9 @@ class RealOpenSSLTest(unittest.TestCase):
     def test_matching_mismatched_and_chained_pairs(self):
         rsa_cert, rsa_key = self.pair("rsa", "rsa:2048")
         ec_cert, ec_key = self.pair("ec", "ec:" + str(self.ec_parameters()))
+        ed_cert, ed_key = self.pair("ed25519", "ed25519")
+        self.assertIsNone(tool.tls_pair_problem(ed_cert, ed_key))
+        self.assertEqual(tool.tls_pair_problem(ed_cert, rsa_key), "the certificate's public key is not the key's")
         other_cert, other_key = self.pair("other", "rsa:2048")
         self.assertIsNone(tool.tls_pair_problem(rsa_cert, rsa_key))
         self.assertIsNone(tool.tls_pair_problem(ec_cert, ec_key))

@@ -507,7 +507,7 @@ in {
           rotated = app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip()
           app.succeed("rm -rf /run/terrace-rotation")
 
-      with subtest("TLS pair: a certificate that is not the key's is refused at push, nginx untouched; the matching pair is delivered"):
+      with subtest("TLS pair: a certificate that is not the key's is refused by push and by the host's install, nginx untouched; the matching pair is delivered"):
           served_fp = lambda: app.succeed("echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername web.terrace.invalid 2>/dev/null | ${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256").strip()
           before_fp, nginx_before = served_fp(), pids(["nginx"])
           host_file = app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip()
@@ -518,7 +518,11 @@ in {
           out = op("terrace-secrets set app tls/certificate </dev/shm/tls-next/cert.pem")
           ok("WARNING: tls/certificate and tls/key in the store do not belong together" in out and "set the matching tls/key next" in out, "set warns about a mismatched pair")
           refused = operator.fail(ENV + "terrace-secrets push app" + PUSH + " 2>&1")
-          ok("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing installed, nginx not restarted" in refused, "push of a mismatched pair refused by the host")
+          ok("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing sent" in refused, "push of a mismatched pair refused before sending")
+          # Without an identity the operator side cannot decrypt the pair, says so and sends it: the host's install refuses it.
+          refused = operator.fail(ENV + "unset SOPS_AGE_KEY_FILE; terrace-secrets push app" + PUSH + " 2>&1")
+          ok("the TLS pair is not checked here" in refused and "tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing installed, nginx not restarted" in refused,
+             "push of a mismatched pair without an operator identity refused by the host's install")
           ok(app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip() == host_file, "host ciphertext unchanged")
           ok(pids(["nginx"]) == nginx_before and served_fp() == before_fp, "nginx not restarted, still serving the previous certificate")
           out = op("terrace-secrets set app tls/key </dev/shm/tls-next/key.pem && rm -rf /dev/shm/tls-next")

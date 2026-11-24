@@ -83,9 +83,17 @@ the SQL of the database-password action is `hex64`.
 
 Beyond the formats, the TLS pair must belong together: the first certificate's
 public key must be the key's (OpenSSL reads both on stdin, `tls_pair_problem`).
-`set` warns while the stored pair does not match (one half is set at a time), and
-the host's `install` refuses a mismatched pair before anything is installed, so a
-`push` of one fails and nginx is not restarted on it.
+`set` warns while the stored pair does not match (one half is set at a time);
+`push` checks the pair before it sends anything when `SOPS_AGE_KEY_FILE` lets it
+decrypt the store (without one it prints a note and leaves the check to the host);
+and the host's `install` refuses a mismatched pair before anything is installed, so
+nginx is not restarted on it. A host still running an older `terrace-secrets`
+does not check, so the operator-side check is the only one until the host is
+updated. `check` decrypts nothing and does not check the pair. Known false
+refusals, not tested: a certificate whose key is RSASSA-PSS (OpenSSL reports a PSS
+public key for the certificate and an RSA one for the key) and an EC key with
+explicit curve parameters where the certificate names the curve (the encodings
+differ); a working pair of that kind is refused, never a mismatched one accepted.
 
 ## Where things live
 

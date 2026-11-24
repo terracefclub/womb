@@ -303,9 +303,11 @@ break-glass; not exercised after a restore (identity-admin.md says so).
 certificate's public key against the key's, with OpenSSL reading both on stdin,
 `tls_pair_problem`). `set` stores one half at a time and prints a `WARNING ... set
 the matching tls/key next` (or `tls/certificate`) while the stored pair does not
-match; the host's `install` refuses a mismatched pair (`tls/certificate and tls/key
-do not belong together ...; nothing installed, nginx not restarted`), so `push`
-fails and the host keeps its previous pair. nginx still restarts on every push that
+match; `push` refuses a mismatched pair before sending (`...; nothing sent`) when
+`SOPS_AGE_KEY_FILE` lets it decrypt the store (without one it prints a note and
+sends); and the host's `install` refuses it (`tls/certificate and tls/key do not
+belong together ...; nothing installed, nginx not restarted`), so the host keeps its
+previous pair. A host on an older `terrace-secrets` has no install check. nginx still restarts on every push that
 changes the pair.
 
 1. Do the general preconditions.
@@ -318,7 +320,8 @@ changes the pair.
    after both means the two files do not belong together: do not push, find the
    matching file. The key file must never leave the operator machine.
 4. `terrace-secrets check app`, then `terrace-secrets push app --address <app address> --identity <key>`
-   (refused by the host, with nothing changed, if the pair still does not match)
+   (refused before sending, or by the host with nothing changed, if the pair still
+   does not match)
 
 Worked: `terrace-tls check` exits 0 on the host ([TLS](tls.md#check-status)).
 **If nginx does not come up after the push** (`systemctl status nginx.service`,
@@ -327,10 +330,11 @@ previous pair from the saved copy (preconditions) and push, which restarts nginx
 old pair. Revoke the old certificate at its issuer afterwards. Evidence: VM rehearsal
 (synthetic data), a delivered manual certificate passing the expiry check
 (`platform/production/tls-test.nix`); the production VM check's subtest "TLS pair"
-stores a new certificate for a new key (warning), has the push refused with the host
-ciphertext, nginx's process and the served certificate unchanged, then sets the
-matching key (no warning) and pushes the new pair. Unit tests with the real OpenSSL
-(RSA, EC, chains, mismatches) in `platform/production/test_terrace_secrets.py`. Not
+stores a new certificate for a new key (warning), has the push refused before
+sending, then refused by the host's install when pushed without an operator
+identity, with the host ciphertext, nginx's process and the served certificate
+unchanged, then sets the matching key (no warning) and pushes the new pair. Unit tests with the real OpenSSL
+(RSA, EC, Ed25519, chains, mismatches) in `platform/production/test_terrace_secrets.py`. Not
 exercised anywhere: a public CA, and the issuer-side revocation.
 
 In ACME mode there is no store entry and renewal is automatic. `terrace-tls renew`
@@ -372,7 +376,9 @@ a copy in the team password manager, outside the servers.
 5. `terrace-secrets apply app backup/primary/repository-password --finish --keep <id> ... --address <app address> --identity <key>`,
    with `--keep <key id>` (4 to 64 hex digits, a prefix of an id from the checkpoint's
    `key list --json`) for every key that must survive; every other key that is not
-   `current` is removed. Or `--finish --only-current`, which removes every key but the
+   `current` is removed. Each `--keep` must match exactly one key: a prefix that
+   matches no key (a typo) or two is refused with the key list before anything is
+   removed. Or `--finish --only-current`, which removes every key but the
    current one, **including a separately added escrow key**: run without `--remove`
    it removes nothing, prints every key (`key <id> current (kept)` or `other
    (removed)`, with user, host and creation time) and refuses; read the list, then
