@@ -7,12 +7,15 @@ Run: python3 -B tests/platform/test_cms_tool.py -v
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
 
 SCRIPT = Path(os.environ.get("CMS_TOOL_SCRIPT", Path(__file__).resolve().parents[2] / "platform/cms-tool.sh"))
 RUNNER = "/nix/store/synthetic-terrace-cms-tool-run"
+# Absolute: a NixOS host has no bash under /usr/bin or /bin.
+BASH = shutil.which("bash") or "/bin/bash"
 PROPERTIES = ["User=terrace_cms", "EnvironmentFile=/run/secrets/rendered/terrace-website/cms.env", "ReadWritePaths=/var/lib/a /var/lib/b",
               "Environment=PATH=/nix/store/x/bin:/nix/store/y/bin"]
 
@@ -34,15 +37,15 @@ class CmsTool(unittest.TestCase):
         }
         for name, body in stubs.items():
             path = self.bin / name
-            path.write_text("#!/usr/bin/env bash\n" + body)
+            path.write_text(f"#!{BASH}\n" + body)
             path.chmod(0o700)
         prelude = f"TOOL_RUNNER={shlex.quote(RUNNER)}\nTOOL_PROPERTIES=({' '.join(shlex.quote(p) for p in PROPERTIES)})\n"
         self.wrapper = self.dir / "terrace-cms-tool"
         self.wrapper.write_text(prelude + SCRIPT.read_text())
 
     def run_tool(self, *args, uid="0", state="inactive", status="0"):
-        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "FAKE_UID": uid, "FAKE_STATE": state, "FAKE_EXIT": status, "FAKE_CALLS": str(self.calls)}
-        return subprocess.run(["bash", "-euo", "pipefail", str(self.wrapper), *args], capture_output=True, text=True, timeout=30, env=env)
+        env = {"PATH": f"{self.bin}:{os.path.dirname(BASH)}", "FAKE_UID": uid, "FAKE_STATE": state, "FAKE_EXIT": status, "FAKE_CALLS": str(self.calls)}
+        return subprocess.run([BASH, "-euo", "pipefail", str(self.wrapper), *args], capture_output=True, text=True, timeout=30, env=env)
 
     def recorded(self):
         return self.calls.read_bytes().decode().split("\0")[:-1]
