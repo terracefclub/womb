@@ -29,6 +29,13 @@ case "$1" in
   *) usage ;;
 esac
 
+# The lock file is root's alone (0600): a user who could open it could hold a lock on it and refuse every run. A file
+# that is not a root-owned 0600 regular file (an older wrapper's 0644 one, a link, anything else) is replaced: whoever
+# still holds the old one keeps only the old inode, and /run is root-only, so nobody else can recreate it meanwhile.
+umask 077
+if [[ -e "$TOOL_LOCK" || -L "$TOOL_LOCK" ]] && [[ -z "$(find "$TOOL_LOCK" -maxdepth 0 -type f -user "$EUID" -perm 600 2>/dev/null)" ]]; then
+  rm -f -- "$TOOL_LOCK"
+fi
 exec 9>"$TOOL_LOCK"
 if ! flock -n 9; then
   echo 'Another terrace-cms-tool run is starting or running; run the tools one at a time.' >&2

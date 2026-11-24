@@ -50,10 +50,18 @@ in {
   nodes = {
     source = {lib, ...}: {
       imports = [common];
-      # Keep old app PIDs alive during stop so Conflicts without After would race.
+      # Keep old app PIDs alive during stop, so a migration that did not wait for the stop would find them.
       systemd.services.terrace-cms.serviceConfig.ExecStop = "${pkgs.coreutils}/bin/sleep 3";
       systemd.services.terrace-web.serviceConfig.ExecStop = "${pkgs.coreutils}/bin/sleep 3";
-      systemd.services.terrace-cms-migrate.serviceConfig.ExecStartPre = lib.mkAfter [
+      # Test-only: a sweep that stays running (activating) while the flag exists, for the accepted-migration check.
+      systemd.services.terrace-cms-sweep.serviceConfig.ExecStartPre = lib.mkAfter [
+        "${pkgs.writeShellScript "website-test-slow-sweep" ''
+          if test -e /run/website-test-slow-sweep; then ${pkgs.coreutils}/bin/sleep 120; fi
+        ''}"
+      ];
+      # Ordered after the module's preflight (mkOrder 2000), so these run where the migration statements would: after
+      # every check and after the stop.
+      systemd.services.terrace-cms-migrate.serviceConfig.ExecStartPre = lib.mkOrder 2500 [
         "+${pkgs.writeShellScript "website-test-stopped-before-migration" ''
           set -euo pipefail
           if test -f /var/lib/terrace-cms/old-pids; then
@@ -61,6 +69,10 @@ in {
               test "$pid" -gt 1
               test ! -e "/proc/$pid" || { echo 'Old app survived into migration.' >&2; exit 1; }
             done </var/lib/terrace-cms/old-pids
+            for unit in terrace-cms terrace-web terrace-cms-sweep; do
+              state=$(${pkgs.systemd}/bin/systemctl show "$unit.service" -p ActiveState --value)
+              test "$state" = inactive || test "$state" = failed || { echo "$unit is $state at migration time." >&2; exit 1; }
+            done
             touch /var/lib/terrace-cms/stop-verified
           fi
         ''}"
@@ -212,7 +224,24 @@ in {
         assert dict(line.split("=", 1) for line in source.succeed("systemctl show systemd-journald-sync@terrace-apps.service -p Result,ActiveState").splitlines())["Result"] == "success"
         source.fail("systemctl is-failed --quiet systemd-journald-sync@terrace-apps.service")
         source.succeed("systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
-        source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value | grep -v '^$' >/var/lib/terrace-cms/old-pids && systemctl start terrace-cms-migrate.service && test -f /var/lib/terrace-cms/stop-verified")
+        # A guard that refuses (here the identity guard, on a too-short intake secret) refuses before the preflight stops
+        # anything: the CMS and website keep running, same processes.
+        pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
+        source.succeed("cp -a ${inputs}/cms.env /root/cms.env.keep && sed -i 's/^LIFECYCLE_INTAKE_SECRET=.*/LIFECYCLE_INTAKE_SECRET=too-short/' ${inputs}/cms.env")
+        source.fail("systemctl start terrace-cms-migrate.service")
+        assert "Native Terrace runtime requires complete per-user identity" in source.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager")
+        source.succeed("cp -a /root/cms.env.keep ${inputs}/cms.env && rm /root/cms.env.keep && systemctl reset-failed terrace-cms-migrate.service")
+        source.succeed("systemctl is-active --quiet terrace-cms.service && systemctl is-active --quiet terrace-web.service")
+        assert source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip() == pids
+        # Accepted migration: the running CMS, website and a running sweep are all stopped (their processes gone) before
+        # the step standing in for the first migration statement.
+        source.succeed("touch /run/website-test-slow-sweep && systemctl start --no-block terrace-cms-sweep.service")
+        source.wait_until_succeeds("systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx activating", timeout=60)
+        source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value | grep -v '^$' >/var/lib/terrace-cms/old-pids && systemctl show terrace-cms-sweep.service -p ControlPID --value | grep -v '^0$' >>/var/lib/terrace-cms/old-pids")
+        assert len(source.succeed("cat /var/lib/terrace-cms/old-pids").split()) == 3
+        source.succeed("systemctl start terrace-cms-migrate.service && test -f /var/lib/terrace-cms/stop-verified")
+        # old-pids stays: every later migration in this proof checks again that these units are down when it runs.
+        source.succeed("rm /run/website-test-slow-sweep /var/lib/terrace-cms/stop-verified")
         source.fail("systemctl is-active --quiet terrace-cms.service")
         source.fail("systemctl is-failed --quiet terrace-cms.service")
         source.fail("systemctl is-active --quiet terrace-web.service")
@@ -360,10 +389,15 @@ in {
         source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx inactive", timeout=120)
         # Each migration stops the CMS and website; their start limit (3 in 10 minutes) is not under test here.
         source.succeed("rm /run/website-test-slow-migration && systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
-        # A migration refuses to start under a running operator tool (a unit with the tools' name prefix stands in for one).
+        # A migration refuses to start under a running operator tool (a unit with the tools' name prefix stands in for one),
+        # before anything is stopped: the CMS and website keep running.
+        cms_pid = source.succeed("systemctl show terrace-cms.service -p MainPID --value").strip()
         source.succeed("systemd-run --unit=terrace-cms-tool-probe ${pkgs.coreutils}/bin/sleep 60")
         source.fail("systemctl start terrace-cms-migrate.service")
-        source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
+        assert "A CMS operator tool is running (terrace-cms-tool-probe.service); migration refused before anything was stopped." in source.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager")
+        source.succeed("systemctl is-active --quiet terrace-cms.service && systemctl is-active --quiet terrace-web.service")
+        assert source.succeed("systemctl show terrace-cms.service -p MainPID --value").strip() == cms_pid
+        source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
 
         # The writes run in the public profile, as on a production host: swap in a public variant of the protected file (same
@@ -376,6 +410,9 @@ in {
         plan = summary(tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])[0])
         out, err = tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"]], expect=1)
         assert err.strip() == "This is a production target. Pass --confirm-production." and counts() == rows_before, err
+        # The wrapper's lock file is root's alone: another user cannot open it, so cannot hold it.
+        assert source.succeed("stat -c %U:%a /run/terrace-cms-tool.lock").strip() == "root:600"
+        assert "Permission denied" in source.fail("runuser -u nobody -- ${pkgs.util-linux}/bin/flock -n /run/terrace-cms-tool.lock true 2>&1")
         files_before = set(source.succeed("ls ${outbox}").split())
         applied = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"], "--report", report(), "--confirm-production"])[0])
         assert applied["counts"]["created"] == 2 and applied["counts"]["failed"] == 0, applied
@@ -391,6 +428,12 @@ in {
         assert again["counts"]["create"] == 0 and again["counts"]["skip"] == 2, again
         noop = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", again["planSha256"], "--confirm-production"])[0])
         assert noop["runId"] is None and noop["counts"]["created"] == 0 and counts() == after_apply, noop
+        # A run left `running` (as by a tool stopped mid-run; simulated by moving its heartbeat back): refused while it is
+        # younger than 30 minutes, then the documented rollback marks it failed and rolls it back.
+        sql(source, f"update roster_runs set status = 'running', updated_at = now() - interval '5 minutes' where run_id = '{applied['runId']}'")
+        out, err = tool(["roster-invite", "rollback", "--run", applied["runId"], "--operator", "operator@terrace.invalid", "--confirm-production"], expect=1)
+        assert err.strip() == "A roster run is still marked running. Wait for it, or retry after it has gone stale.", err
+        sql(source, f"update roster_runs set updated_at = now() - interval '31 minutes' where run_id = '{applied['runId']}'")
         back = summary(tool(["roster-invite", "rollback", "--run", applied["runId"], "--operator", "operator@terrace.invalid", "--confirm-production"])[0])
         assert back["ok"] is True and back["revoked"] == 2 and back["withdrawn"] == 2, back
         assert sql(source, f"select status from roster_runs where run_id = '{applied['runId']}'") == "rolled-back"
@@ -520,21 +563,26 @@ in {
         source.succeed(f"systemctl is-active --quiet {first_unit}")
         out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=73)
         assert err.strip() == f"An operator tool unit is still active: {first_unit}. Wait for it, or stop it: systemctl stop 'terrace-cms-tool-*'", err
-        # A migration started now is refused, but only after Conflicts= has stopped the CMS and the website: the site is down.
+        # A migration started now is refused before anything is stopped: the reason is in the apps journal, the CMS and the
+        # website keep running and serving (same processes), and the ledger is unchanged.
+        pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
         source.fail("systemctl start terrace-cms-migrate.service")
         reason = source.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager")
-        assert f"A CMS operator tool is running ({first_unit} ); start the migration after it has finished." in reason, reason[-1500:]
+        assert f"A CMS operator tool is running ({first_unit}); migration refused before anything was stopped. Start the migration after it has finished." in reason, reason[-1500:]
         for service in ["terrace-cms", "terrace-web"]:
-            source.fail(f"systemctl is-active --quiet {service}.service")
+            source.succeed(f"systemctl is-active --quiet {service}.service")
+        assert source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip() == pids
+        assert_content(source)
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
         # The documented way out (docs/website-host.md, "When a tool is still running"), command for command.
         listed = source.succeed("systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'")
         assert listed.split()[0] == first_unit, listed
         source.succeed("systemctl stop 'terrace-cms-tool-*'")
         source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder.service", timeout=30)
-        source.succeed("systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service")
+        source.succeed("systemctl reset-failed terrace-cms-migrate.service")
         source.succeed("systemctl start terrace-cms-migrate.service")
         source.succeed("systemctl start terrace-cms.service terrace-web.service")
+        assert source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip() != pids  # the accepted migration stopped them
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
         assert_content(source)
         # Exit statuses: a tool unit killed by a signal, and one stopped at the run-time bound (60 s here).
@@ -551,6 +599,36 @@ in {
         source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder-2.service", timeout=30)
         for service in ["terrace-cms", "terrace-web"]:
             source.succeed(f"systemctl is-active --quiet {service}.service")
+        # A real importer apply stopped mid-run: its run row and the plan's 6 media documents (no redirect hook) are
+        # written, then its first event waits on a held lock (the document hooks write redirects) and the tool unit is
+        # stopped there. Then the documented follow-up: rollback
+        # refuses a run still marked running, refuses a takeover before it is idle long enough, and takes it over after.
+        imports_before = counts()
+        media_before = int(sql(source, "select count(*) from media"))
+        source.succeed("systemd-run --unit=website-test-redirect-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table redirects in access exclusive mode; select pg_sleep(900); commit"))
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'redirects'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
+        stopped_run = background("import-stopped", ["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-stopped-1", "--allow-nonlocal-database", "--confirm-production"])
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'redirects'::regclass and not granted\") -ge 1", timeout=120)
+        source.succeed("systemctl stop 'terrace-cms-tool-*'")
+        source.wait_until_succeeds(f"test -s {stopped_run}.rc", timeout=60)
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-redirect-holder.service", timeout=30)
+        left = counts()
+        assert sql(source, "select status from wp_import_runs where run_id = 'wpimport-stopped-1'") == "running"
+        assert {k: v for k, v in left.items() if k != "import_runs"} == {k: v for k, v in imports_before.items() if k != "import_runs"}, (imports_before, left)
+        assert int(sql(source, "select count(*) from media")) == media_before + 6
+        # systemd counts a death by SIGTERM (its stop) as clean, so the wrapper of a stopped tool exits 0: check the run, not the status.
+        assert source.succeed(f"cat {stopped_run}.rc").strip() == "0"
+        print("TOOL-STOPPED-IMPORT " + json.dumps({"wrapperExit": "0", "before": imports_before, "left": left, "media": [media_before, media_before + 6]}))
+        refused = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--allow-nonlocal-database", "--confirm-production"], expect=1)[0])
+        assert refused["ok"] is False and [r["reason"] for r in refused["refusals"]] == ["run-still-running"], refused
+        refused = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--take-over-stale", "--allow-nonlocal-database", "--confirm-production"], expect=1)[0])
+        assert refused["ok"] is False and [r["reason"] for r in refused["refusals"]] == ["run-not-stale"], refused
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select (now() - updated_at > interval '61 seconds')::int from wp_import_runs where run_id = 'wpimport-stopped-1'\") = 1", timeout=120)
+        taken = summary(tool(["wp-import", "rollback", "--run", "wpimport-stopped-1", "--take-over-stale", "--stale-after-minutes", "1", "--allow-nonlocal-database", "--confirm-production"])[0])
+        assert taken["ok"] is True and taken["deleted"] == 6 and taken["refusals"] == [], taken
+        assert sql(source, "select status from wp_import_runs where run_id = 'wpimport-stopped-1'") == "rolled-back"
+        assert {k: v for k, v in counts().items() if k != "import_runs"} == {k: v for k, v in imports_before.items() if k != "import_runs"}
+        assert int(sql(source, "select count(*) from media")) == media_before
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()

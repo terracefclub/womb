@@ -84,9 +84,12 @@ systemctl start terrace-cms-migrate.service
 systemctl start terrace-cms.service terrace-web.service
 ```
 
-The migration action stops both application services, applies the bundle's
-explicit migrations and records the successful revision under
-`/var/lib/terrace-cms`. It is never enabled at boot or called by normal startup.
+The migration action first runs its checks (the identity guard, any guard
+another module adds, and a refusal while a CMS operator tool runs); a refused
+migration stops nothing. Only then does it stop the CMS, the website and a
+running sweep, apply the bundle's explicit migrations and record the successful
+revision under `/var/lib/terrace-cms`. A start of the CMS, website or sweep
+requested while it runs waits for it. It is never enabled at boot or called by normal startup.
 Repeat the migration action to check that the ledger is unchanged, then start
 both services again. Startup rejects a missing/different revision marker. This
 gate prevents accidental unmigrated startup; it does not prove schema downgrade
@@ -188,7 +191,9 @@ Its logic is `platform/cms-tool.sh` (unit tests:
 `python3 -B tests/platform/test_cms_tool.py -v`).
 
 **One at a time, in the foreground.** The wrapper holds a lock
-(`/run/terrace-cms-tool.lock`) from its checks until the tool ends, and refuses
+(`/run/terrace-cms-tool.lock`, root's alone: mode `0600`, so no other account can
+open it to hold it; a lock file of any other kind, mode or owner is replaced) from
+its checks until the tool ends, and refuses
 while any `terrace-cms-tool-*` unit is still active, naming it (exit 73). Run the
 tools one at a time, in the foreground of an SSH session (or in `tmux`/`screen`),
 and do not start the wrapper as a background job with an open standard input
@@ -201,10 +206,16 @@ moment a wrapper starts can still pass both checks (a window of milliseconds).
 `operatorToolMaxSeconds` (60 to 86400, default 3600). The website VM's runs take
 seconds; a roster apply handles at most 200 rows and the real WordPress plan
 about 245 items, so an hour leaves wide room while still freeing an orphaned or
-hung run. In the website VM a tool stopped at the bound made the wrapper exit 1
+hung run. Above 3600 the bound is longer than the importer's one-hour takeover
+window: an importer run idle for an hour would look stale to `wp-import
+rollback --take-over-stale` while its unit could still be running. Keep it at
+3600 or below; if you raise it, check that no tool unit is active before a
+takeover. In the website VM a tool stopped at the bound made the wrapper exit 1
 (the unit's journal says `Failed with result 'timeout'`), and one killed by
 `SIGKILL` made it exit 255 (`Failed with result 'signal'`); the tool's own exit
-statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool
+statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool unit
+stopped with `systemctl stop` makes the wrapper exit 0 (systemd counts a death by
+its own `SIGTERM` as clean): after a stop, check the run, not the exit status. A tool
 stopped at the bound (or by a signal) ends where it was:
 - roster `apply`: rows committed before the stop stay, journaled, with their
   link files; the run stays `running` until it has been idle for 30 minutes,
@@ -248,28 +259,39 @@ every write also needs `--confirm-production`. Take a verified backup before an
 importer apply or a roster apply, as for a migration.
 
 **When a tool is still running.** A migration refuses to start while a
-`terrace-cms-tool-*` unit is active, but only after `Conflicts=` has already
-stopped `terrace-cms.service` and `terrace-web.service` (and a running sweep):
-the site is down until you finish the steps below. `systemctl start` only says
-that the unit failed; the reason is in the apps journal namespace. Before
-deploying, check that no tool is running (no output means none):
+`terrace-cms-tool-*` unit is active, before it stops anything: the CMS and the
+website keep running and serving, and the ledger is unchanged. `systemctl start`
+only says that the unit failed; the reason is in the apps journal namespace.
+Before deploying, check that no tool is running (no output means none):
 
 ```sh
 systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
 ```
 
 If a migration was refused (or a tool unit was left behind), read the reason,
-stop the tool unit, then migrate and start the services again (the website VM
-proof runs exactly these commands):
+stop the tool unit, then run the normal release steps (the website VM proof runs
+exactly these commands):
 
 ```sh
 journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager
 systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
 systemctl stop 'terrace-cms-tool-*'
-systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service
+systemctl reset-failed terrace-cms-migrate.service
 systemctl start terrace-cms-migrate.service
 systemctl start terrace-cms.service terrace-web.service
 ```
+
+The site stays up until the second-to-last command, which stops it as any
+migration does.
+
+If that stop fails partway (not tested), some of the CMS, website and sweep are
+already stopped and the migration does not run: `systemctl start` reports the
+migration unit failed and the apps journal has the stop error. Check which of
+the three are active (`systemctl is-active terrace-cms.service
+terrace-web.service terrace-cms-sweep.service`), then either start the CMS and
+website again (`systemctl start terrace-cms.service terrace-web.service`) or fix
+the cause, `systemctl reset-failed terrace-cms-migrate.service` and run the
+migration again.
 
 Stopping a tool unit stops the tool where it was (see the run-time bound above
 for what that leaves and how to roll it back).
@@ -283,7 +305,12 @@ command line, which carries the operator's email and file paths, is visible to
 every local user through `ps`, `systemctl status`, `systemctl show` and
 `systemctl cat` (checked in the website VM as `nobody`). On a production host
 the only local accounts are the operators' and the services' own, but do not put
-anything confidential in arguments: personal data belongs in the files.
+anything confidential in arguments: personal data belongs in the files. Other
+places a command line can be recorded on a host, none of them tested here:
+sudo's own log of the command it ran (the system journal), audit `execve`
+records if auditing is turned on, and root's shell history. Do not run the tools
+on a host with unprivileged interactive users until they can take the operator
+from a file or an environment variable (backlog).
 
 **What is backed up.** The tools' database rows (the roster journal
 `roster_runs` and `roster_run_items`, applications, invitations, outbox rows,
@@ -431,7 +458,7 @@ upload directories byte-identical and add only their own report to the operator
 directory; one wrapper at a time (the second is refused by the lock, and after
 the first wrapper is killed, as by a dropped session, its unit keeps running and
 the next wrapper names it); a migration started then is refused with the reason
-in the apps journal while the CMS and website are already stopped, and the
+in the apps journal (see the follow-up below for what is true since); and the
 recovery commands above bring them back; a tool killed by a signal and one
 stopped at a 60-second `operatorToolMaxSeconds` (exit statuses above); the run
 time bound is set on the unit; neither the tools' output nor their arguments
@@ -439,6 +466,20 @@ appear in any journal entry; and the restore comparison now includes
 applications, invitations, the import ledger and journal, pages, posts and
 redirects (the imported documents and redirects were rolled back earlier in the
 proof, so those last three compare their remaining rows).
+
+Since the PR 68 round 2 review the proof also covers: the lock file is
+`root:600` and `nobody` cannot open it; a migration refused by a running tool,
+or by the identity guard, leaves the CMS and website running with the same
+processes and still serving, and the ledger unchanged; an accepted migration
+finds the CMS, website and a running sweep stopped, their processes gone, at the
+step standing in for its first statement; a real importer apply stopped mid-run
+with `systemctl stop` (its run row and 6 media documents written, its first event
+waiting on a held lock; the wrapper exits 0) leaves the run `running`, rollback refuses it (`run-still-running`, then `run-not-stale`), and
+`--take-over-stale --stale-after-minutes 1` rolls it back (the 6 documents
+deleted) once it has been idle for a minute; a roster run left `running` is refused by rollback while it is
+younger than 30 minutes and marked failed and rolled back after (simulated by
+setting the run's status and timestamp in `roster_runs`, not produced by stopping
+a real roster apply).
 
 Verified again 2026-11-24 at Womb `e7403a5` after the review (fresh result,
 04:02 to 04:08 Pacific): 39 CMS tables; roster lock wait 0.50 s at 500 ms,
