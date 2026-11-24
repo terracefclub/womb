@@ -503,7 +503,34 @@ in {
           rotated = app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip()
           app.succeed("rm -rf /run/terrace-rotation")
 
-      with subtest("manual secrets: database password and backup repository password via `apply`"):
+      with subtest("TLS pair: a certificate that is not the key's is refused at push, nginx untouched; the matching pair is delivered"):
+          served_fp = lambda: app.succeed("echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername web.terrace.invalid 2>/dev/null | ${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256").strip()
+          before_fp, nginx_before = served_fp(), pids(["nginx"])
+          host_file = app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip()
+          # A new leaf for a NEW key, made in tmpfs scratch; first only its certificate goes into the store.
+          op("sh -ec 'umask 077; d=/dev/shm/tls-next; rm -rf $d; mkdir -m 0700 $d; "
+             "openssl req -new -nodes -newkey rsa:2048 -sha256 -keyout $d/key.pem -out $d/req.pem -subj /CN=web.terrace.invalid 2>/dev/null; "
+             "openssl x509 -req -in $d/req.pem -CA ${ca}/ca.pem -CAkey ${ca}/ca-key.pem -set_serial 0x$(openssl rand -hex 8) -days 30 -sha256 -extfile ${extension} -out $d/cert.pem 2>/dev/null'")
+          out = op("terrace-secrets set app tls/certificate </dev/shm/tls-next/cert.pem")
+          ok("WARNING: tls/certificate and tls/key in the store do not belong together" in out and "set the matching tls/key next" in out, "set warns about a mismatched pair")
+          refused = operator.fail(ENV + "terrace-secrets push app" + PUSH + " 2>&1")
+          ok("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing installed, nginx not restarted" in refused, "push of a mismatched pair refused by the host")
+          ok(app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip() == host_file, "host ciphertext unchanged")
+          ok(pids(["nginx"]) == nginx_before and served_fp() == before_fp, "nginx not restarted, still serving the previous certificate")
+          out = op("terrace-secrets set app tls/key </dev/shm/tls-next/key.pem && rm -rf /dev/shm/tls-next")
+          ok("WARNING" not in out, "the matching key completes the pair without a warning")
+          push("TLS pair")
+          app.wait_until_succeeds("systemctl is-active nginx.service && test \"$(systemctl show nginx.service -p MainPID --value)\" != " + nginx_before["nginx"], timeout=120)
+          app.wait_until_succeeds("test \"$(echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername web.terrace.invalid 2>/dev/null | ${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256)\" != " + shlex.quote(before_fp), timeout=60)
+          trust_consistent("new TLS pair")
+
+      with subtest("manual secrets: database password and backup repository password via `apply`; the old ones are refused"):
+          # The old values, kept on root-only tmpfs to show afterwards that they no longer open anything.
+          app.succeed("rm -rf /run/terrace-rotation && install -d -m 0700 /run/terrace-rotation && install -m 0400 /run/secrets/identity/database-password /run/terrace-rotation/old-db"
+                      " && install -m 0400 /run/secrets/backup/primary/repository-password /run/terrace-rotation/old-repo")
+          db_login = "PGPASSWORD=\"$(cat {})\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null 2>&1"
+          app.succeed(db_login.format("/run/terrace-rotation/old-db"))
+          ok(True, "the old database password opens the Keycloak role before the rotation (control)")
           before = pids(["keycloak"])
           op("terrace-secrets rotate app identity/database-password --manual")
           push("database password")
@@ -512,15 +539,42 @@ in {
           ok("Database role keycloak updated with a SCRAM verifier and Keycloak restarted." in out, "database password applied on the host as a SCRAM verifier")
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(pids(["keycloak"]) != before, "Keycloak restarted onto the new database password")
-          app.succeed("PGPASSWORD=\"$(cat /run/secrets/identity/database-password)\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null")
+          app.succeed(db_login.format("/run/secrets/identity/database-password"))
           ok(True, "the delivered database password opens the Keycloak role")
+          app.fail("cmp -s /run/terrace-rotation/old-db /run/secrets/identity/database-password")
+          ok("password authentication failed" in app.fail(db_login.format("/run/terrace-rotation/old-db").replace(" >/dev/null 2>&1", " 2>&1 >/dev/null")),
+             "the old database password no longer opens the Keycloak role")
+          # Opening the repository with a given password file (restic's flag overrides the configured file).
+          repo_open = "terrace-backup restic primary --password-file {} cat config >/dev/null 2>&1"
+          app.succeed(repo_open.format("/run/terrace-rotation/old-repo"))
           op("terrace-secrets rotate app backup/primary/repository-password --manual")
           out = op("terrace-secrets apply app backup/primary/repository-password" + PUSH)
           ok("Added the new repository key" in out, "new repository key added over the pinned channel")
+          # --finish before push: the host still delivers the old password (whose key is "current"); finishing now would
+          # remove the NEW key, so it is refused before restic is asked, and both keys stay.
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH + " 2>&1")
+          ok("the password delivered to this host is not the store's newest value; `push` first" in refused, "apply --finish refused before push")
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --keep 0000" + PUSH + " 2>&1")
+          ok("not the store's newest value" in refused, "apply --finish --keep refused before push")
+          keys = json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))
+          ok(len(keys) == 2 and app.succeed("cmp -s /run/terrace-rotation/old-repo /run/secrets/backup/primary/repository-password && echo same").strip() == "same", "both repository keys kept, the old password still delivered")
           push("repository password")
-          out = op("terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH)
+          app.succeed(repo_open.format("/run/secrets/backup/primary/repository-password") + " && " + repo_open.format("/run/terrace-rotation/old-repo"))
+          ok(True, "between push and finish both passwords open the repository (control)")
+          keys = json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))
+          old_key = [key["id"] for key in keys if not key["current"]]
+          ok(len(keys) == 2 and len(old_key) == 1, "after push the new key is current")
+          # --only-current shows every key and removes nothing until each removal is named.
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH + " 2>&1")
+          ok(f"key {old_key[0]} other (removed)" in refused and "repeat with --remove KEYID" in refused, "apply --finish --only-current lists the keys and refuses without --remove")
+          ok(len(json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))) == 2, "nothing removed by the refused finish")
+          out = op("terrace-secrets apply app backup/primary/repository-password --finish --only-current --remove " + old_key[0][:12] + PUSH)
           ok("Removed 1 old repository key(s)" in out, "old repository key removed")
           ok(len(json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))) == 1, "one repository key left")
+          app.succeed(repo_open.format("/run/secrets/backup/primary/repository-password"))
+          ok("wrong password" in app.fail(repo_open.format("/run/terrace-rotation/old-repo").replace(" >/dev/null 2>&1", " 2>&1 >/dev/null")).lower(),
+             "the old repository password no longer opens the repository")
+          app.succeed("rm -rf /run/terrace-rotation")
 
       with subtest("a failing database-password apply logs neither the cleartext nor the verifier"):
           app.succeed("rm -rf /run/terrace-db && install -d -m 0700 /run/terrace-db && install -m 0400 /run/secrets/identity/database-password /run/terrace-db/patterns && echo 'SCRAM-SHA-256$' >>/run/terrace-db/patterns && echo 'role \"terrace_missing_role\" does not exist' >/run/terrace-db/control")

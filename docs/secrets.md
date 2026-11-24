@@ -81,6 +81,12 @@ templates safe: sops-nix substitutes placeholders textually (it cannot
 JSON-escape), and every value that lands in an env file, in the realm JSON or in
 the SQL of the database-password action is `hex64`.
 
+Beyond the formats, the TLS pair must belong together: the first certificate's
+public key must be the key's (OpenSSL reads both on stdin, `tls_pair_problem`).
+`set` warns while the stored pair does not match (one half is set at a time), and
+the host's `install` refuses a mismatched pair before anything is installed, so a
+`push` of one fails and nginx is not restarted on it.
+
 ## Where things live
 
 | Item | Location | Public repo? |
@@ -270,7 +276,10 @@ changed values) and `verify`, and restores the previous file if either fails.
   restic key while the old one still opens the repository); `push`; `apply
   --finish --keep <id>` for every key to keep (for example a separately
   escrowed one; an id is 4 to 64 lowercase hex digits, checked on both ends), or `--finish --only-current` to remove every key but the one
-  the delivered password opens. The escrowed store holds the new value.
+  the delivered password opens: run alone it lists every key and removes nothing,
+  then `--remove <id>` must name exactly each key it removes. `--finish` sends the
+  store value again and the host refuses it until `push` has delivered that value
+  (before the push it would remove the new key). The escrowed store holds the new value.
 - **SFTP key**: `rotate --manual backup/primary/sftp-key`; `public` and enrol the
   new public key at the Storage Box (owner, alongside the old); `push`; run a
   backup; remove the old public key at the Storage Box.
@@ -349,7 +358,10 @@ non-secret control (the closure scan a string built into the closure); no core
 file or coredump journal entry after a writer is aborted; `root:root 0400` on
 ramfs and nothing left after a reboot; rotation of the intake secret (old value
 refused, both services on the new one, PostgreSQL, Keycloak and nginx not
-restarted); the database-password and repository-password `apply` procedures;
+restarted); the database-password and repository-password `apply` procedures,
+each previous password refused afterwards, and `apply --finish` refused before the
+`push` and, with `--only-current`, until every removed key is named; a mismatched
+TLS pair refused by `install` with nginx untouched;
 and a host replacement re-keyed from escrow (the retired key can no longer
 decrypt the new file), restored with reconciliation, identical data and the
 lifecycle continuing. The operator guest's disk and journal hold no value either.
