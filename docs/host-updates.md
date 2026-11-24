@@ -123,8 +123,9 @@ tried on this profile:
 3. **Build on the host** as root from a checkout, the private module, the kept
    archives and the TFC source copied there. AGENTS.md says to build NixOS on the
    configured Linux builder, so this contradicts the project rules, and the build
-   competes with the writers for memory: the profile sizes the host so that the
-   writers' ceilings (6912 MiB on the app) fit in 75 percent of it
+   competes with the services for memory: the profile sizes the host so that the
+   memory ceilings of the writers and the backup job (6912 MiB on the app, nginx
+   and the 768 MiB backup job included) fit in 75 percent of it
    ([production profile](production-profile.md#decisions-waiting-on-the-owner),
    item 4) and reserves nothing for a build. Its memory and time are not measured.
 
@@ -157,7 +158,7 @@ Each is a stop point: nothing after it runs until the owner says go.
 | U3, before step 7, only when step 2 found a Keycloak or Headscale version change | Activate: **for such an update this is the point of no return** for that service's database | Upstream schema changes happen when the new version starts; whether the old version starts on the new schema is not determined (section 4.3) |
 | U4, before step 9 | Apply the realm plan | The printed plan and its hash; what `apply` changes and never deletes, and that a generation rollback does not undo it (section 4.4) |
 | U5, before step 10 | Run the CMS migration: **the point of no return** for the CMS database | After the migration starts, the only documented way back for the database is a restore onto a replacement host (section 4.3) |
-| U6 | Reboot (kernel, initrd or kernel-module change) | Console access at the provider in case the new generation does not boot (section 5, H4) |
+| U6 | Reboot (kernel, initrd or kernel-module change) | Console access at the provider in case the new generation does not boot (section 5, H4); that a reboot re-arms every timer and starts the writers, the ungated website among them, so a parked failed migration (step 10) needs its stops repeated after it |
 | U7, step 13 | Declare the update done, or go back (section 4) | The checks of steps 11 and 12 |
 | U8 | Go back by restore onto a replacement | The data written since the pre-update snapshot is lost (section 4.3) |
 
@@ -219,8 +220,11 @@ it arrived:
 test -e <new toplevel>/bin/switch-to-configuration
 ```
 
-Worked: the test succeeds on the host. Failed: nothing changed on the host and the
-site is still up; stop and fix the mechanism. Not determined from the repository;
+Worked: the test succeeds on the host. The copy adds the new closure to the host's
+store, next to every earlier generation (nothing collects them, H8): check free space
+on the root filesystem first (`df -h /nix/store`); the space a closure needs is not
+measured. Failed: nothing changed on the host and the site is still up; stop and fix
+the mechanism. Not determined from the repository;
 not exercised anywhere.
 
 **Step 5. Record where you start, and check the window.**
@@ -241,8 +245,11 @@ Worked: `adopted <time>` and `active` (READ: the strings `terrace-production`
 prints, `base.nix`); no failed units; the marker equals the running pin's revision;
 the ledger lists the running pin's migrations; the tool listing prints nothing (a
 running tool makes step 10 refuse, [website host](website-host.md#operator-tools-terrace-cms-tool));
-`terrace-backup age` shows today's run and exits 0, and the backup timer's next run
-is tomorrow, so **today's scheduled backup has completed**. The timer is `03:15`
+`terrace-backup age` exits 0; the backup timer's next run is tomorrow, so **today's
+scheduled backup has completed**. The `list-timers` line carries the weight here:
+`terrace-backup age` prints the seconds since the last success against a limit
+(`cmd_age` in `platform/backup/backup.sh`; 26 hours by default), so yesterday's
+success passes it too. The timer is `03:15`
 with up to 15 minutes' random delay (`RandomizedDelaySec = "15m"`,
 `platform/backup.nix`), so "after 03:15" is not enough: check. Do not start while
 the weekly `terrace-backup-check` (Sundays 05:30, up to 30 minutes' delay,
@@ -333,7 +340,7 @@ profile:
 
 ```sh
 nix-env --profile /nix/var/nix/profiles/system --set <new toplevel>
-systemd-run --unit=terrace-switch --service-type=exec --wait -- <new toplevel>/bin/switch-to-configuration switch
+systemd-run --unit=terrace-switch --collect --service-type=exec --wait -- <new toplevel>/bin/switch-to-configuration switch
 journalctl -u terrace-switch.service -o cat --no-pager
 ```
 
@@ -342,10 +349,14 @@ the boot entries (the profile's newest generation becomes the default) and switc
 the running system. It runs as a transient system unit, not as a child of your SSH
 session: an activation can restart sshd, nginx or the network, and a dropped
 session must not kill a half-finished switch. That is standard practice
-(`nixos-rebuild` does the same), not tested in this repository. If the session
-drops, reconnect and read the journal line above; `systemctl status
-terrace-switch.service` shows a failed run until `systemctl reset-failed
-terrace-switch.service`.
+(`nixos-rebuild` does the same), not tested in this repository. `--collect` makes
+systemd unload the transient unit when it ends, failed or not, so the same unit
+name can be used again at once (a rollback in section 4.1, or `switch` after
+`test`); without it a failed run stays loaded and the next `systemd-run
+--unit=terrace-switch` is refused until `systemctl reset-failed
+terrace-switch.service` (standard systemd behaviour, not tested here). The result
+is therefore in the journal only: `--wait` prints it, and if the session drops,
+reconnect and read the journal line above.
 
 If the kernel, the initrd or the kernel modules differ, use `boot` instead of
 `switch` and follow section 5. Compare all three:
@@ -471,8 +482,10 @@ tls` drops `tls/*`): how to remove one is **not determined from the repository**
 
 Failed: `push` refused or `verify` FAIL. The host keeps the previous ciphertext
 (`install` restores it on failure, `cmd_install`). Fix the store and push again; if
-that cannot be done, roll back the generation (section 4.2), whose manifest matches
-the delivered ciphertext. Evidence: adding or removing an inventory secret on a
+that cannot be done and no U3 was taken, roll back the generation (section 4.2),
+whose manifest matches the delivered ciphertext. After a Keycloak or Headscale
+version change (U3), section 4.2 does not apply: fix the store and push (the host
+keeps running on the previous ciphertext meanwhile), or go to section 4.3. Evidence: adding or removing an inventory secret on a
 running host: not exercised anywhere.
 
 ### Part D. Identity, then the migration (app role)
@@ -562,7 +575,15 @@ timeout. Then:
 - The marker still holds the **old** revision. On the new generation the gate stays
   closed (old marker, new pin), so the CMS, the sweep and the tools refuse; keep it
   so. Keep the website stopped (`systemctl stop terrace-web.service`; it has no gate)
-  and the sweep and backup timers stopped.
+  and the sweep and backup timers stopped. **A reboot undoes this**: at boot the
+  adopted host starts `terrace-production.target`, which arms the backup, check,
+  freshness and sweep timers and starts the writers, the ungated website among
+  them (`base.nix`; [restore promotion](restore-promotion.md) step 2 says the same
+  for an original). After any reboot in this state run `systemctl list-timers` and
+  `systemctl is-active terrace-web.service`, then stop the website and the timers
+  again (the same commands as step 6's first line and this item). The boot default
+  must be the new generation (`nix-env --set` and `switch`, step 7), never an old
+  one left by a `test` activation.
 - **Do not roll back the generation and start the old CMS.** The old generation's
   gate expects the old revision, which is exactly what the marker holds, so the old
   CMS **would start** on a database that may be partly migrated. Do not run "restart
@@ -575,6 +596,15 @@ timeout. Then:
   retry when the cause is known and outside the database, such as a guard), or
   **restore** the step 6 snapshot onto a replacement (U8, section 4.3). A blind
   retry of step 10 is not a decision the operator takes alone.
+- **Fixing forward does not restart this procedure from the top.** Build and copy
+  the corrected closure (steps 3 and 4), then go straight to activation (step 7),
+  secrets (step 8) if needed, the realm (step 9) and the migration (step 10). Do
+  **not** run step 5's checks as a gate (its marker check fails by design in this
+  state) and do **not** run step 6 again the same day: a second snapshot today
+  strips the keep-daily protection from the pre-update snapshot, the only restore
+  point, and would itself hold a partly migrated database (H2). If the fix waits
+  for another day, the scheduled backups stay stopped in the meantime, and the
+  pre-update snapshot is then the last of its day.
 
 Evidence: VM rehearsal (synthetic data), `platform/website-test.nix`, subtest
 "explicit migration gate on actual immutable bundles": the pinned bundle migrates an
@@ -687,7 +717,8 @@ No quiesce: the backup copies Headscale's SQLite through SQLite's online backup 
 (`snapshot_headscale` in `platform/backup/backup.sh`). Worked: `success` and a new
 snapshot ID; keep the two key hashes. The relay's own repository and retention
 behave as in step 6 (its own group: one repository per role). Failed: start the two
-timers again and stop. **U2** for the relay.
+timers again (`systemctl start terrace-backup.timer terrace-backup-check.timer`)
+and stop. **U2** for the relay.
 
 **R2. Activate** as step 7 (U3 first if Headscale's version changes). Activation
 restarts Headscale if its package or settings changed: connected clients reconnect
@@ -713,8 +744,11 @@ hashes equal R1's (a changed key means a new network identity for every client:
 keys, and the only documented way to put them back is a restore onto a replacement,
 section 4.3). From outside, `https://<relay hostname>/health` answers 200 (the route
 the production VM check uses). A client reconnecting is not checked by anything on
-the host. Failed: without a Headscale version change, roll back (section 4.2);
-with one, section 4.3.
+the host. Failed: without a Headscale version change, roll back as in section
+4.1, then run only `systemctl start terrace-backup.timer terrace-backup-check.timer`
+(the relay variant of "restart after quiesce": R1 stopped nothing else, and the
+CMS units of section 4.2 do not exist on the relay); with a version change,
+section 4.3.
 
 **R5. Re-arm and U7 for the relay:** `systemctl start terrace-backup.timer
 terrace-backup-check.timer`, as step 13.
@@ -735,7 +769,7 @@ the switch detached, as in step 7):
 ```sh
 nix-env --profile /nix/var/nix/profiles/system --list-generations
 nix-env --profile /nix/var/nix/profiles/system --switch-generation <previous number>
-systemd-run --unit=terrace-switch --service-type=exec --wait -- /nix/var/nix/profiles/system/bin/switch-to-configuration switch
+systemd-run --unit=terrace-switch --collect --service-type=exec --wait -- /nix/var/nix/profiles/system/bin/switch-to-configuration switch
 ```
 
 (With `switch-to-configuration test` in step 7 and no reboot, the profile and the
@@ -758,8 +792,10 @@ Headscale or PostgreSQL version change. Then a generation rollback is the whole 
 back:
 
 1. Roll back as in 4.1.
-2. Run "restart after quiesce" (step 6). The marker still holds the old revision,
-   which the old generation's gate expects.
+2. App: run "restart after quiesce" (step 6). The marker still holds the old
+   revision, which the old generation's gate expects. Relay: run only `systemctl
+   start terrace-backup.timer terrace-backup-check.timer` (R1 stopped nothing else;
+   the relay has no CMS units).
 3. If step 8 pushed a ciphertext with a name the old inventory does not take, the
    host keeps working (READ: `verify` checks only the manifest's names), but the
    next `push` is refused by the old generation's `install`: restore the store file
