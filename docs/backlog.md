@@ -69,7 +69,8 @@ marked done.
   password); add a rotation path and a VM assertion.
 - Done (production safeguards): `apply --finish` sends the store value and the host
   refuses it unless its delivered file holds exactly that value, before restic is
-  asked (unit tests; production VM: refused before `push` with both keys kept).
+  asked (unit tests; the production VM check asserts it is refused before `push`
+  with both keys kept (proof run of this change pending)).
 - Code: no `client-secret sync` for the Documenso, Windmill and Vaultwarden OIDC
   clients (only the four production clients), no rotation of Headscale keys, host SSH
   key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
@@ -79,7 +80,7 @@ marked done.
   it before sending when `SOPS_AGE_KEY_FILE` lets it decrypt the store (otherwise
   it prints a note); the host's `install` refuses a mismatched pair before anything
   is installed or restarted (unit tests with stand-in and real OpenSSL, RSA, EC and
-  Ed25519; production VM: push refused before sending, and by the host's install
+  Ed25519; the production VM check asserts (proof run of this change pending): push refused before sending, and by the host's install
   when pushed without an identity, nginx and the served certificate unchanged, then
   the matching pair delivered). Left: a host still running an older
   `terrace-secrets` has no install check; `check` does not decrypt and so does not
@@ -88,7 +89,7 @@ marked done.
   [secrets](secrets.md)).
 - Done (production safeguards): `--finish --only-current` without `--remove` lists
   every key and removes nothing; `--remove KEYID` must name exactly each key it
-  removes (unit tests; production VM). `--finish --keep PREFIX` refuses, with the
+  removes (unit tests; asserted in the production VM check (proof run of this change pending)). `--finish --keep PREFIX` refuses, with the
   key list and before removing anything, a prefix that matches no key or more than
   one (a typo would otherwise have removed the key meant to be kept; unit tests).
   It still removes every other non-current key without listing it first.
@@ -119,17 +120,18 @@ None of these was done in that pull request; the production safeguards follow-up
   arm-timers` arms the backup timers (procedure step 21, after a backup by hand);
   `arm-timers --in-service` arms the sweep (D5, after the erasure replay); both say
   what they armed and what is still held, and are idempotent; `status` prints one
-  line per held group. A plain adoption is unchanged. Production VM: both paths, a
+  line per held group. `--in-service` refuses while the backup timers are held, so
+  the order is enforced. A plain adoption is unchanged. The production VM check
+  asserts (proof run of this change pending): both paths, the refused order, a
   failed and resumed restored adoption, both stages with a reboot between them, and
   the relay's `--in-service` answer. Not exercised: a restored relay's held timers
-  (no relay replacement in the VM). No unit tests: `terrace-production` is a shell
-  script inside `platform/production/base.nix` with no stub harness.
+  (no relay replacement in the VM). The script is now
+  `platform/production/terrace-production.sh` with unit tests
+  (`tests/platform/test_terrace_production.py`, stub systemctl).
 - A restored host whose timers are never armed takes no scheduled backup and
   nothing says so: the hold markers never expire, the freshness timer that would
   report a missing backup is itself held, and only `terrace-production status`
   shows the hold. Belongs to the alerting gap (G-23); not built here.
-  `docs/host-updates.md` describes a reboot of an adopted host as re-arming every
-  writer timer, which is not true for a restored host whose timers are still held.
 - Decide and document: the production website backup set is the `terrace_cms`
   database, the media directory (`/var/lib/terrace-cms-media`) and the outbox
   (`/var/lib/terrace-cms-outbox`), plus the `keycloak` database. It does not
@@ -415,9 +417,9 @@ known to affect a deployed host (none exists).
   (same inode as the path, owned by root); a wider mode is narrowed to `0600` under
   the lock; anything else is refused with exit 72. Unit tests (Linux only, they need
   GNU `stat` and `/dev/fd`; a stub `stat` drives the foreign-owner and swapped-inode
-  branches) fail against the earlier script; the website VM proof asserts the
+  branches) fail against the earlier script; the website VM proof asserts (proof run of this change pending) the
   narrowing on the same inode and the refusal of a foreign owner and of a link.
-- Done (production safeguards): the website VM proof requests sweep, CMS and website
+- Done (production safeguards; (proof run of this change pending)): the website VM proof requests sweep, CMS and website
   starts while a slowed migration runs, asserts that each stays inactive with its
   start job waiting, and that each runs after the migration ended. Still not tested:
   a migration preflight whose stop of the CMS, website and sweep fails partway
