@@ -53,16 +53,45 @@ Issue descriptions: problem, intended behavior, acceptance criteria. Labels:
 `platform`, `website`, `migration`, `integrations`, `community`. Distinguish ready,
 in progress, review, and external dependency. Keep evidence in the linked MR.
 
+## Restore promotion follow-ups (G-22), recorded 2026-11-24
+
+From the review of the written [restore promotion](restore-promotion.md) procedure.
+None of these is done in that pull request.
+
+- Drill: run the procedure's commands verbatim in a VM on the production profile
+  for both roles with the original disks destroyed, and add the assertions in its
+  "Drill to add" section. Until then it is written from the rehearsals and has not
+  been run as written.
+- Code: `terrace-production adopt` arms the backup, check, freshness and sweep
+  timers (`writerTimers` in `platform/production/app.nix` and `relay.nix`) before
+  the operator has verified the restored services; a scheduled backup ends in
+  `forget --prune` against the repository the restore came from. Decide whether
+  adoption after a restore should leave them off until a second explicit step.
+- Decide and document: the production website backup set is the `terrace_cms`
+  database, the media directory (`/var/lib/terrace-cms-media`) and the outbox
+  (`/var/lib/terrace-cms-outbox`), plus the `keycloak` database. It does not
+  include the website input files (`cms.env`, `web.env`: sops templates, the
+  inputs directory is backed up only when `inputFiles` is null,
+  `platform/website.nix`), the CMS migration marker
+  (`/var/lib/terrace-cms/migrated-revision`), ACME state (`/var/lib/acme`) or the
+  operator directory. Decide whether that is intended and document the re-supply
+  path for each.
+- Docs corrections found and not made there: `docs/website-host.md` says the module
+  backs up "the entire protected input directory" (only when `inputFiles` is null;
+  production sets it); `docs/production-profile.md` "Host replacement" says to copy
+  the PostgreSQL directory "exactly as" `fresh_restore` does (that function copies
+  file sets only, the cluster copy is separate, and the rehearsals read the data
+  directory from `/etc/rehearsal-pg-directory`, a harness-only file);
+  `docs/secrets.md` says push then `host unstage` while the production VM check
+  unstages first (harmless); `docs/full-rehearsal.md` says "a full repository read
+  check" (the rehearsal profiles set `check.readDataSubset` to 100 percent, the
+  production default is 5 percent); `docs/backups.md` still says four hours to
+  recover where `docs/migration.md` proposes same-day recovery.
+
 ## Follow-ups recorded 2026-11-20
 
 Small review findings that did not block a merge. Each is open work, not a defect
 known to affect a deployed host (none exists).
-
-- Drill the written [restore promotion](restore-promotion.md) procedure in a VM
-  (G-22): run its commands verbatim on the production profile for both roles with
-  the original disks destroyed, and add the assertions listed in its "Drill to
-  add" section. Until then the procedure is written from the rehearsals and has
-  not been run as written.
 
 - `terrace-tls prepare-acme` inspects only the first stored certificate
   directory entry (`platform/production/tls.nix`; [TLS](tls.md)). Done since

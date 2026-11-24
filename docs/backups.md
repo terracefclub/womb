@@ -30,10 +30,10 @@ before real data is loaded.** Until then "TBD" means nobody is responsible.
 
 | Dataset | Where | Method | Owner | Off-site | Restore check |
 | --- | --- | --- | --- | --- | --- |
-| CMS database (`cms`, Payload) | PostgreSQL on the application host | `pg_dump -Fc` in a `REPEATABLE READ` snapshot | TBD | Primary and optional secondary | Row counts per table vs counts taken in the same snapshot |
+| CMS database (`terrace_cms`, Payload) | PostgreSQL on the application host | `pg_dump -Fc` in a `REPEATABLE READ` snapshot | TBD | Primary and optional secondary | Row counts per table vs counts taken in the same snapshot |
 | Community database (`community`), only if one is created | same cluster | same | TBD (also moderator ownership) | same | same |
 
-Note (2026-11-18): the accepted community pilot is Payload and SvelteKit, whose community collections live in the CMS database (`cms`), so the CMS row covers them. `community` was the database name in the superseded HumHub plan ([community pilot](community-pilot.md)); it remains only as an example and as a synthetic test database in `platform/backup-test.nix`. Choose the real database list when the production host profile is written.
+Note (2026-11-18): the accepted community pilot is Payload and SvelteKit, whose community collections live in the CMS database (`terrace_cms`), so the CMS row covers them. `community` was the database name in the superseded HumHub plan ([community pilot](community-pilot.md)); it remains only as an example and as a synthetic test database in `platform/backup-test.nix`. Choose the real database list when the production host profile is written.
 
 | CMS lifecycle outbox | `/var/lib/terrace-cms-outbox` (`terrace.website.outboxDirectory`, `0700` CMS account; holds live invitation links) | restic file backup via `extraPaths.website-outbox`, added automatically by the website module; sha256 manifest | TBD | same | sha256; the website VM test and the full rehearsal also compare bytes, owner and modes after restore |
 | Keycloak database (`keycloak`) | same cluster | same | TBD | same | Table counts plus a separate [actual schema/issuer/signing-key recovery check](identity-recovery.md), with no real accounts |
@@ -215,7 +215,7 @@ terrace-backup-restore --target primary --snapshot <ID|latest> \
   `<dest>/reconciliation.txt`.
 - Files are under `<dest>/files/<original path>`; the isolated database socket is
   `<dest>/pgsock`:
-  `runuser -u terrace-restore -- psql -h <dest>/pgsock -U "$SQL_BOOTSTRAP" -d cms`,
+  `runuser -u terrace-restore -- psql -h <dest>/pgsock -U "$SQL_BOOTSTRAP" -d terrace_cms`,
   where `SQL_BOOTSTRAP` is the validated source name retained in
   `<dest>/bootstrap-role.json`; the OS owner stays `terrace-restore`.
 - Re-check later with `terrace-backup-restore --verify-only <dest>`; stop the
@@ -235,9 +235,10 @@ keys), that the file count and every sha256 match. Headscale's snapshot must pas
 ownership come from the restored schema; the VM test additionally asserts them.
 
 The script does not put recovered data into service. Promoting a recovery
-(copying media back, loading the databases into the production cluster, restoring
+(copying media back, putting the databases into the production cluster, restoring
 Headscale's keys before its first start so clients keep their network identity) is
-a manual, owner-approved step. [Restore promotion](restore-promotion.md) writes
+a manual, owner-approved step; the rehearsals replace the whole cluster directory
+on an empty host rather than loading databases into a running cluster. [Restore promotion](restore-promotion.md) writes
 it down from the rehearsals' behaviour; it has not been drilled as a written
 procedure and has never been run with real data or on a production host.
 Never restore over a live host to "test".

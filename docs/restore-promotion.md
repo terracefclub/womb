@@ -53,10 +53,11 @@ keeps running (nothing in the repository does that, see section 4), or to
 
 Two cases differ at the start only:
 
-- **Planned replacement**: the original is reachable. Step 3 quiesces it and takes
-  a final backup, so the data-loss window is small. This is the only case any
-  rehearsal exercises.
-- **Original lost**: no final backup is possible. The newest scheduled snapshot is
+- **Planned replacement**: the original is reachable. Step 2 quiesces it and takes
+  a final backup, and only then does step 3 fence it, so the data-loss window is
+  small. This is the only case any rehearsal exercises.
+- **Original lost**: no final backup is possible, so you skip step 2 and fence
+  first (step 3). The newest scheduled snapshot is
   all there is: up to one backup interval of data is lost (the schedule is daily at
   03:15; the proposed 24 hour target is unmeasured) and that snapshot was taken
   without quiescing writers. Its database and media files can disagree
@@ -88,17 +89,20 @@ until the owner says go.
 | Point | Decision | Needs to be known first |
 | --- | --- | --- |
 | D1, before step 2 | Declare the original dead, or authorise a planned replacement | Why the original cannot be recovered in place; who can power it off |
-| D2, after step 7 | Accept the data-loss window | The chosen snapshot's time against now; for the unplanned case, that it was not quiesced |
+| D2, after step 7 | Accept the data-loss window | The chosen snapshot's time against now; for the unplanned case, that it was not quiesced; which member erasures were made after the snapshot time (section 4, "Erasure replay") |
 | D3, after step 9 | Go or no-go to touch live paths | The reconciliation report (table names and counts, file counts) looks like the real thing |
 | D4, before step 15 | Go or no-go to start the writers | Steps 10 to 14 done. After step 15 the replacement writes; this document has no tested way back (step 15) |
 | D5, step 21 | Declare the replacement in service, and cut public traffic over | The checks of step 20 and 21 |
-| D6, after D5 | Retire the original's disk and state for good | Never earlier: the rehearsals keep the retired original disks until the run is verified |
+| D6, after D5 | Retire the original's disk and state for good | Never earlier. Only the all-services scenario (`platform/full/scenario.py`, `stopped_guest`) keeps the retired original disks; the production VM check and the TLS VM test delete the original disk (`test.nix`, `tls-test.nix`), so a production promotion's retention of the original is your decision, not a rehearsed practice |
 
 ## 2. The procedure
 
-Order follows the rehearsal: stop and fence the original, restore to a staging
-directory and reconcile, load into live paths while nothing writes, start the
-writers once, migrate where a migration gate exists, check health, resume backups.
+Order follows the rehearsal: quiesce and fence the original (in the order the case
+needs, Part A), restore to a staging directory and reconcile, load into live paths
+while nothing writes, start the writers once, migrate where a migration gate
+exists, check health. Scheduled backups do **not** wait for the end: adoption
+(step 15) arms the backup and sweep timers, so steps 15 and 21 tell you to stop
+them until the checks pass.
 All commands run as root on the host named, unless a step says "operator machine".
 `<...>` marks a value you supply. Never paste a command's output that could hold a
 secret into a ticket or chat; the commands below send secret-bearing output to
@@ -112,11 +116,62 @@ K3s is off too. Step 18 therefore describes only what the rehearsal does with
 them; a production procedure for them cannot exist until their modules are
 allowed into a profile.
 
-### Part A. Decide and fence the original
+### Part A. Decide, then quiesce and fence the original
+
+The order depends on the case. Do not fence a planned replacement before its final
+backup: the final backup needs the original running.
+
+- **Planned replacement** (original reachable): step 1, step 2 (quiesce and final
+  backup), step 3 (fence), then step 4.
+- **Original lost**: step 1, step 3 (fence), then step 4. Skip step 2.
 
 **Step 1. Owner decision D1.** Record the time, who decided and why.
 
-**Step 2. Fence the original.** What the repository can and cannot do:
+**Step 2. Planned replacement only: quiesce the original and take a final
+backup.** On the original `app` host
+([production profile](production-profile.md#host-replacement-rehearsed), as the
+production VM check does, `platform/production/test.nix`), first stop the
+original's own backup and check timers, then quiesce, back up and stop the
+database:
+
+```sh
+systemctl stop terrace-backup.timer terrace-backup-check.timer
+systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service terrace-web.service terrace-cms.service keycloak.service nginx.service
+systemctl start terrace-backup.service
+terrace-backup restic primary snapshots --json
+systemctl stop postgresql.target postgresql.service
+```
+
+The first line is not in the production VM check or any rehearsal (READ: timers
+are `wantedBy` the production target, `platform/production/base.nix`, and stopping
+services does not stop them); it is here because the original's own scheduled
+backup could otherwise run between your final backup and the fence, and end in a
+prune of the repository you are about to restore from. Stopping the timers lasts
+until the next boot of the original (see below).
+
+On the original `relay`, stop `nginx.service` and `headscale.service` first and then
+run the same backup (the rehearsal does: `quiesce_relay` in
+`infra/nixos/rehearsal_services.py`). This disconnects Headscale clients until the
+replacement is up.
+
+**After this step the original is quiesced, not fenced.** Its boot gate is still
+open: `terrace-production-boot` starts the production target at every boot of an
+adopted host, and that target wants every writer and timer
+(`platform/production/base.nix`, the `terrace-production` target and
+`terrace-production-boot`; READ, not tried). A reboot of the original, by anyone or
+by the provider, restarts the writers and re-arms the backup, sweep and freshness
+timers. Fence it (step 3) before anything else touches it.
+
+Worked: `systemctl show terrace-backup.service -p Result --value` prints `success`
+(the backup log line is `target primary: backup succeeded in <n>s`), and
+`terrace-backup age` exits 0. Note the snapshot ID of the newest `app` entry.
+Failed: the unit's `Result` is not `success` and the log says `target primary:
+backup FAILED` (`backup_target` in `platform/backup/backup.sh`); stop and do not
+fence or destroy the original.
+
+**Step 3. Fence the original.** For a planned replacement, only after step 2
+worked; for a lost original, right after step 1. What the repository can and
+cannot do:
 
 - It cannot power off, delete or isolate a production host. No tool here does it,
   and no provider access exists. Do this at the provider (or physically) and write
@@ -138,30 +193,6 @@ allowed into a profile.
   adopted as a new host. They do nothing about the original.
 - Public traffic: pointing DNS at the replacement is the practical fence for
   users. It is part of step 21 and nothing exercises it.
-
-**Step 3. Planned replacement only: quiesce the original and take a final
-backup.** On the original `app` host
-([production profile](production-profile.md#host-replacement-rehearsed), as the
-production VM check does):
-
-```sh
-systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service terrace-web.service terrace-cms.service keycloak.service nginx.service
-systemctl start terrace-backup.service
-terrace-backup restic primary snapshots --json
-systemctl stop postgresql.target postgresql.service
-```
-
-On the original `relay`, stop `nginx.service` and `headscale.service` first and then
-run the same backup (the rehearsal does: `quiesce_relay` in
-`infra/nixos/rehearsal_services.py`). This disconnects Headscale clients until the
-replacement is up.
-
-Worked: `systemctl show terrace-backup.service -p Result --value` prints `success`
-(the backup log line is `target primary: backup succeeded in <n>s`), and
-`terrace-backup age` exits 0. Note the snapshot ID of the newest `app` entry.
-Failed: the unit's `Result` is not `success` and the log says `target primary:
-backup FAILED` (`backup_target` in `platform/backup/backup.sh`); stop and do not
-destroy the original.
 
 ### Part B. Prepare the replacement pair (nothing writes yet)
 
@@ -264,10 +295,20 @@ Worked: exit status 0, the `grep` succeeds, and `reconciliation.txt` ends with
 relay, `OK sqlite headscale` line per item (table names and counts only). Failed:
 `RECONCILIATION FAILED: <n> mismatch(es)` and exit 1. Stop. Nothing live was
 touched. Diagnostics are root-only files in the restore directory
-(`restore-<db>.err`, `globals.err`, `diff-*.txt`, `hashfail-*.txt`). The repository
-gives no command for discarding a failed restore directory before a retry at the
-same path; **not determined from the repository**. Try another snapshot or
-`--target secondary`.
+(`restore-<db>.err`, `globals.err`, `diff-*.txt`, `hashfail-*.txt`). Try another
+snapshot or `--target secondary`. The tool refuses to restore into a non-empty
+directory (`check_dest`), so a retry at the same path needs the failed directory
+gone. The repository gives no command for that. Reading `restore.sh`, the
+directory is referenced by nothing live: the tool's own PROTECTED_PATHS do not
+include it, the only external reader is `terrace-production adopt --restored`,
+which reads its `reconciliation.txt`, and a failed run stops its isolated database
+itself (`cleanup_db`). So, READ and not tried, the safe sequence is: (1) confirm
+no isolated cluster is running, with `terrace-backup-restore --stop
+/var/lib/terrace-restore` (it errors harmlessly if none runs; only a restore that
+succeeded with `--keep-running`, or a crash, can leave one); (2) remove the
+directory (`rm -rf /var/lib/terrace-restore`); (3) restore again. Never remove it
+after a *successful* restore and before adoption has finished: adoption needs its
+`reconciliation.txt`, and removing it deletes the file the copy steps read.
 
 Relay: the same command on the replacement relay.
 
@@ -301,7 +342,10 @@ the backup on production (they are sops templates; the module backs
 `website-inputs` up only when `inputFiles` is null, `platform/website.nix`), and
 `/var/lib/acme` is deliberately not in any backup ([TLS](tls.md#backup-deliberately-excluded)).
 Numeric owners are restored as they were: the CMS and website accounts have static
-IDs 44121 and 44122 for this reason. Worked: no error, then
+IDs 44121 and 44122 for this reason, and they are the only accounts whose numeric
+IDs the repository fixes (`platform/production/app.nix`; Windmill and Vaultwarden
+have a `uid` option, but only on the rehearsal profile). The PostgreSQL directory is
+chowned explicitly in step 12; the Headscale files in step 13 are not. Worked: no error, then
 `test "$(stat -c %U:%a /var/lib/terrace-cms-outbox)" = terrace_cms:700` (the
 rehearsal's `ownership` step also checks the two invitation files are
 `terrace_cms:600`). Failed: a non-empty target means the host already holds state;
@@ -351,6 +395,15 @@ Worked: `sqlite3 /var/lib/headscale/db.sqlite "PRAGMA integrity_check"` prints
 to the backup's manifest). Failed: stop. Without the keys or the database, do not
 start Headscale; a fresh start would create a new identity.
 
+Ownership: only `db.sqlite` is installed with the Headscale owner; the copied key
+files keep the numeric owner `cp -a` gives them from the backup, and the rehearsals
+do nothing more about it (they rely on identical closures giving identical
+IDs). The repository fixes numeric IDs for no account except the CMS and website
+accounts (`platform/production/app.nix`), so for the relay the operator should
+check, before adoption: `stat -c %U:%G /var/lib/headscale /var/lib/headscale/noise_private.key /var/lib/headscale/derp_server_private.key`
+shows `headscale:headscale`, and if not, `chown -R headscale:headscale
+/var/lib/headscale`. This check and `chown` are not in any rehearsal (READ only).
+
 **Step 14. Optional check of the restored database's roles, before any writer
 starts.** The rehearsal starts PostgreSQL alone and checks its identity and
 isolation (`ADOPT_POSTGRES` in `infra/nixos/rehearsal_services.py`):
@@ -391,29 +444,56 @@ not running and exits non-zero; fix the cause and run **the same command again**
 (it resumes). Next, from the operator machine, a later `terrace-secrets push`
 clears the store's own replacement marker (asserted in the VM check).
 
+**Adoption arms the backup, check, freshness and sweep timers now, not at step 21**
+(`writerTimers` in `platform/production/app.nix` and `relay.nix`; the target wants
+them, `platform/production/base.nix`). Until your checks pass, a scheduled backup
+(03:15 daily with up to 15 minutes' delay, `Persistent=true`) could back up a
+replacement whose CMS gate is closed or whose media copy was skipped, and every
+backup run ends in `forget --prune` against the repository the restore came from
+(`platform/backup/backup.sh`; what that can remove is in step 21). The sweep
+timer (03:30 daily, `Persistent=true`) will erase and redact on the restored data
+as soon as the migration gate opens. So, immediately after adoption succeeds:
+
+```sh
+systemctl stop terrace-backup.timer terrace-cms-sweep.timer
+```
+
+On the relay only `terrace-backup.timer`. This is not in any rehearsal (not
+exercised anywhere); stopping a timer does not stop the writers. A reboot of the
+replacement re-arms them, because the production target wants them again. Start
+them again in step 21 and after D5 respectively.
+
 **There is no documented way back after this step.** The snapshot still exists in
 the repository and the original's disk exists if you kept it, so a second
-restore onto a fresh replacement is possible; stopping the writers on a running
-replacement is not described in the repository: **not determined from the
-repository**.
+restore onto a fresh replacement is possible. How to stop a running replacement for
+good is not described in the repository: **not determined from the repository**.
+Reading `base.nix`, the adopted marker `/var/lib/terrace-production/adopted` is the
+only condition on the boot start, so removing it would stop writers starting at the
+next boot; that is READ only and not tried.
 
 **Step 16. Run the CMS migration gate and start the CMS and website.** The marker
 `/var/lib/terrace-cms/migrated-revision` is not in any backup, so a restored host
 starts with the gate closed (the CMS and website are skipped, not failed):
 
+Read the ledger first (PostgreSQL is running after adoption), keep the output:
+
 ```sh
+runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -c 'select name||batch from payload_migrations order by id'
 systemctl start terrace-cms-migrate.service
 systemctl start terrace-cms.service terrace-web.service
+runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -c 'select name||batch from payload_migrations order by id'
 ```
 
-Use the same release pair the data was written by. Worked: both succeed, and the
-migration ledger is unchanged: read it before and after with
-`runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -c 'select name||batch from payload_migrations order by id'`
-(the VM check compares this and the rest of the signature before and after).
-The sweep timer was armed by adoption and, once running, erases and redacts
-according to the member lifecycle; the VM check stops it while it compares state.
-Failed: a changed ledger means the replacement runs a different release than the
-original; stop and decide with the owner.
+Use the same release pair the data was written by. Worked: both units succeed and
+the two ledger readings are identical (only the production VM check compares a
+ledger across this step, `test.nix`; see the traceability table). Failed: a changed
+ledger means the replacement runs a different release than the original; stop and
+decide with the owner.
+
+Keep `terrace-cms-sweep.timer` stopped (step 15) until D5. Once the gate is open
+the sweep erases and redacts according to the member lifecycle on whatever the
+snapshot held; the production VM check also stops it while it compares state.
+Before members are served, deal with erasure replay (section 4).
 
 **Step 17. Identity (Keycloak).** Nothing is imported over the restored realm:
 Keycloak's startup import creates a missing realm and skips an existing one
@@ -485,8 +565,9 @@ production:
 - ACME mode: the replacement registers a new account and orders a new certificate
   after adoption; until the order succeeds nginx serves a placeholder that clients
   reject. HTTP-01 needs each public name to already resolve to the replacement, so
-  DNS (step 21) and adoption are tied together, and the CA's rate limits (for
-  example five certificates a week for the same names) apply to retries. Worked:
+  DNS (step 21) and adoption are tied together, and the CA's rate limits apply to retries (`tls.md` quotes Let's Encrypt's published
+  figure of 5 certificates a week for the same set of names as of its writing; check
+  the CA's current page). Worked:
   `terrace-tls status` shows an issued certificate and `terrace-tls check` exits 0.
 
 Apps that trust a private CA (the rehearsal's `identityCaFile`) need none on
@@ -502,7 +583,7 @@ terrace-backup age
 ```
 
 Worked: no failed units, every public name passes `terrace-tls check`, `verify` passes. `terrace-backup age`
-exits 1 until the first backup of the replacement (step 21 resumes backups).
+exits 1 until the first backup of the replacement (step 21 takes it; you stopped the timer in step 15).
 The rehearsal's functional checks (198 HTTPS protocol assertions, the website
 lifecycle steps, the browser checks) use scripts that only the rehearsal harness
 installs (`/etc/gateway-protocol.py`); no equivalent is installed on a production
@@ -510,35 +591,67 @@ host, so the production health check after a promotion is thinner than the
 rehearsal's. Alerting that reaches a person does not exist (G-23): a writer that
 fails later shows only in `systemctl --failed`.
 
-### Part F. Resume scheduled backups, then declare
+### Part F. First backup and timers, then declare
 
-**Step 21. Resume backups without damaging the repository, then D5.** Adoption
-arms the backup, check and freshness timers; their state files on the replacement
-start empty, so the hourly freshness unit fails until one backup succeeds (shown for a
-newly adopted host in `platform/production/tls-test.nix`). Do **not** run `terrace-backup init primary`: the
-repository exists, and `init` is only for a first deployment. Take a backup at
-once and check it:
+**Step 21. Take the first backup by hand, restart the timers, then D5.** Adoption
+(step 15) already armed the backup, check and freshness timers, and you stopped
+the backup timer there. Their state files on the replacement start empty, so the
+hourly freshness unit fails until one backup succeeds (shown for a newly adopted
+host, not for a replacement, in `platform/production/tls-test.nix`). Do **not** run
+`terrace-backup init primary`: the repository exists, and `init` is only for a
+first deployment. When steps 16 to 20 have passed, take a backup and check it:
 
 ```sh
 systemctl start terrace-backup.service
 terrace-backup age
 systemctl start terrace-backup-freshness.service
 terrace-backup restic primary snapshots --json
+systemctl start terrace-backup.timer
 ```
 
 Worked: the service succeeds, `terrace-backup age` exits 0, the freshness unit
-passes, and a new snapshot appears under the same host name. What this does to the
-repository, from reading `platform/backup/backup.sh` (not exercised across a
-promotion): the run does `restic backup --tag terrace --host <hostname>` and then
-`forget --tag terrace --group-by host,tags --prune` with keep-last 3, daily 7,
-weekly 4, monthly 6. With the same host name the replacement continues the
-original's series, and the snapshot you restored from will eventually be pruned by
-that policy; there is no pin-a-snapshot option in this tooling (**not determined
-from the repository**); record its ID and let the owner decide. With a different host name the old snapshots form a group nobody
-prunes. Never let the original run a backup after promotion.
+passes, and a new snapshot appears under the same host name
+(`platform/production/tls-test.nix` takes such a backup on the replacement into
+the same repository and checks that it succeeds; nothing there checks the series or
+the retention).
+
+What a backup run can remove. READ from `platform/backup/backup.sh` and the
+retention options in `platform/backup.nix`, not tried across a promotion. The run
+does `restic backup --tag terrace --host <hostname>` and then `forget --tag
+terrace --group-by host,tags --prune` with keep-last 3, daily 7, weekly 4, monthly
+6 (restic's rules, summarised in [backups](backups.md#retention)). Everything in
+the repository with the same host name and tag is one group, whoever wrote it.
+Per run, the group gains one snapshot and loses the ones outside the keep rules.
+Consequences:
+
+- A snapshot that was the newest when you restored from it is among the 3 newest
+  after the next two runs, so under the default settings one or two backups cannot
+  remove it. If you restored from an older snapshot because the newest was bad, it
+  is already not among the newest: one more run can push it out, unless it is the
+  kept newest snapshot of its day, week or month. Settings lower than the defaults
+  change this; I could not determine the effect of a changed policy without running
+  it.
+- What a backup from a half-restored replacement certainly does is add a snapshot
+  that is incomplete (for example an empty media directory) to the group, and
+  prune older snapshots outside the windows: the very fallbacks you would use if
+  this promotion turns out wrong. That is why the timer stays stopped until now.
+- The same applies to a returning original, which has the same host name and
+  credentials. A prune by it while you are restoring could remove a snapshot you
+  chose: whether restic refuses to prune while your restore holds a lock on the
+  repository is restic behaviour, **not determined from the repository**. Fence
+  first (step 3).
+- With a different host name the replacement's snapshots are a separate group, and
+  nobody ever prunes the original's.
+- There is no pin-a-snapshot option in this tooling; whether tagging a snapshot
+  differently from `terrace` would protect it from this `forget` (which filters on
+  `--tag terrace`) is untested and changes its ID: **not determined from the
+  repository**. Record the ID restored from and let the owner decide.
+
+Never let the original run a backup after promotion.
 
 Only now is the replacement ready to be declared in service. **D5**: the owner
-declares it when steps 15 to 21 passed and public traffic has been moved. The
+declares it when steps 15 to 21 passed and public traffic has been moved; only
+then start `terrace-cms-sweep.timer` (`Persistent=true`, so it may run at once). The
 rehearsals end with every guest stopped; none has a "declared in service" point,
 and DNS cut-over, member communication and the retirement of the original (D6) are
 outside every test.
@@ -564,29 +677,29 @@ network).
 
 | Step | Rehearsal code that does the equivalent | What the rehearsal asserts | Evidence, and how it differs from a promotion |
 | --- | --- | --- | --- |
-| 2. Original absent | `stopped_guest` in `platform/full/scenario.py`; `check_original_absence` and the `original-absence-*.json` receipt in `infra/nixos/rehearsal_services.py` | Each original guest's QEMU PID and start time are absent before its disk is retired; on Hetzner, absence receipts for the original servers and addresses (three reads), baseline preserved, replacement IDs disjoint | Guest absence: VM rehearsal (synthetic data). Provider absence: also on temporary Hetzner hosts once (synthetic data; the controller deleted run-owned servers it created; no production fence of an unreachable host). Fencing a host you cannot reach, or one that comes back: not exercised anywhere |
-| 2. Cut a returning original off the repository (rotate SFTP key and password) | none | none | Repository password rotation: VM rehearsal (synthetic data) in the production VM check, for the running host only. SFTP key rotation and use as a fence: not exercised anywhere |
-| 3. Quiesce and final backup | `quiesce_writers` and `backup` in `scenario.py`; `quiesce`, `STOP_APP` and `original()` in `rehearsal_services.py`; the "back up, destroy the host" subtest in `platform/production/test.nix` | Every writer inactive (`ActiveState`, `MainPID`, `ControlPID`), K3s runtime gone, PostgreSQL left up only for the dump, backup succeeds, signature equal before and after | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile, `writersStopped` true; backup repository a directory on the build machine). A restore from a scheduled snapshot taken during writes: not exercised anywhere |
+| 2. Quiesce and final backup | `quiesce_writers` and `backup` in `scenario.py`; `quiesce`, `STOP_APP` and `original()` in `rehearsal_services.py`; the "back up, destroy the host" subtest in `platform/production/test.nix` | Every writer inactive (`ActiveState`, `MainPID`, `ControlPID`), K3s runtime gone, PostgreSQL left up only for the dump, backup succeeds, signature equal before and after | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile, `writersStopped` true; backup repository a directory on the build machine). A final backup while the original's own backup timer is stopped, and the original rebooting after quiesce: not exercised anywhere. A restore from a scheduled snapshot taken during writes: not exercised anywhere |
+| 3. Original absent | `stopped_guest` in `platform/full/scenario.py`; `check_original_absence` and the `original-absence-*.json` receipt in `infra/nixos/rehearsal_services.py` | Each original guest's QEMU PID and start time are absent before its disk is retired; on Hetzner, absence receipts for the original servers and addresses (three reads), baseline preserved, replacement IDs disjoint | Guest absence: VM rehearsal (synthetic data). Provider absence: also on temporary Hetzner hosts once (synthetic data; the controller deleted run-owned servers it created; no production fence of an unreachable host). Fencing a host you cannot reach, or one that comes back: not exercised anywhere |
+| 3. Cut a returning original off the repository (rotate SFTP key and password) | none | none | Repository password rotation: VM rehearsal (synthetic data) in the production VM check, for the running host only. SFTP key rotation and use as a fence: not exercised anywhere |
 | 4. `host create --replace`, `rekey`, `check` | "back up, destroy the host, re-key from escrow" subtest, `platform/production/test.nix` | Values identical after re-key (hash), recipients exactly the new host and escrow, the retired key cannot decrypt, `push` refused before `rekey` | VM rehearsal (synthetic data), app role only. Relay role: not exercised anywhere. Lease 5 did not use this path (operator-supplied inputs on the rehearsal profile) |
 | 5. Install and first boot | `first_boot_without_secrets` in `test.nix`; on Hetzner `infra/nixos/rescue_install.py` | Host runs the staged key, no secrets, writers inactive, boot gate closed | First boot gated: VM rehearsal (synthetic data). Installing the production profile on a provider: not exercised anywhere (lease 5 installed the rehearsal profile) |
 | 6. `push`, `verify`, replacement guards | "replacement: new key, push, guards, restore" subtest, `test.nix` | `verify` PASS; `adopt --new` refused by the marker and, with the marker removed, by existing snapshots; the refused attempts initialise nothing | VM rehearsal (synthetic data), app role only. Relay replacement: not exercised anywhere |
 | 7. Snapshot list | `check_snapshots` in `rehearsal_services.py`; the snapshot choice in `test.nix` | Exactly one snapshot per host, distinct valid IDs | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; builder-directory repository, not a Storage Box or B2 account). A real Storage Box: not exercised anywhere |
 | 8. Full repository read | `offhost_verifier` in `rehearsal_services.py`; `fullEncryptedCheck` in `scenario.py` | `restic check --read-data` passes; the repository `config` is not parseable (encrypted); after restore the snapshot list and config hash equal those recorded before. Run by the operator side, not on the replacement host; the VM sets the check to 100 percent where production defaults to 5 percent | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data) |
-| 9. Restore and reconcile | `RESTORE` in `rehearsal_services.py`; `fresh_restore` in `scenario.py`; subtest in `test.nix` | `RECONCILIATION OK` in `reconciliation.txt`; database counts, file hashes, SQLite integrity; the failure path (damaged dump, tampered file) is in `platform/backup-test.nix`, not in a promotion | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data). Differences: the rehearsal profile restores into `/var/lib/rehearsal-recovery`; the production check uses `/var/lib/terrace-restore`; data is a few hundred kilobytes to a few megabytes; time and size on real data unmeasured |
+| 9. Restore and reconcile | `RESTORE` in `rehearsal_services.py`; `fresh_restore` in `scenario.py`; subtest in `test.nix` | `RECONCILIATION OK` in `reconciliation.txt`; database counts, file hashes, SQLite integrity; the failure path (damaged dump, tampered file) is in `platform/backup-test.nix`, not in a promotion | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data). Differences: the rehearsal profile restores into `/var/lib/rehearsal-recovery`; the production check uses `/var/lib/terrace-restore`; the data is small (the backup VM test's dataset is a few hundred kilobytes, [backups](backups.md#what-the-vm-test-proves-and-what-it-does-not); the repository does not state the all-services rehearsal's data volume); time and size on real data unmeasured |
 | 10. Writers off | `inactive` in `rehearsal_services.py`; `assert_blank_writers` in `scenario.py`; `writers_inactive` in `test.nix` | Units inactive with no main or control PID; ports closed; target inactive | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile) |
-| 11. Copy file sets | `COPY_RESTORED` in `rehearsal_services.py`; `fresh_restore` in `scenario.py`; copy loop in `test.nix` | Target empty and not a link (K3s server directory: exactly the one manifest skeleton); outbox bytes, owner and modes equal the original's; media hashes equal | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile copies more paths than production). Equality is checked against a signature taken from the live original just before quiesce, which a lost original cannot give |
+| 11. Copy file sets | `COPY_RESTORED` in `rehearsal_services.py`; `fresh_restore` in `scenario.py`; copy loop in `test.nix` | Target empty and not a link (K3s server directory: exactly the one manifest skeleton); outbox bytes, owner and modes equal the original's; media hashes equal | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile copies more paths than production). Equality is checked against a signature taken from the original after its writers were stopped and while it was still alive (`original()` in `rehearsal_services.py`, `test.nix`), which a lost original cannot give |
 | 12. PostgreSQL cluster in place | `ADOPT_POSTGRES` in `rehearsal_services.py`; lines after `fresh_restore` in `scenario.py`; copy in `test.nix` | Source bootstrap identity preserved; no `terrace-restore` role; native HBA and `fsync` on; restore OS user cannot connect; app roles log in but cannot assume `postgres`; role, membership and setting fingerprints equal; Windmill role boundary | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile). The production VM check copies the cluster and lets adoption start it but runs none of these role checks. Loading a database into a running, populated cluster: not exercised anywhere |
 | 13. Headscale keys and database before first start | `relay-state-adoption` and `sqlite-adoption` in `rehearsal_services.py`; `restore-relay` in `scenario.py` | Key hashes equal the original's; user list equal; `PRAGMA integrity_check` ok; relay health through HTTPS; with `--relay-peers`, all three client identities (node ID, key, address) return without enrolling again | Keys, database and users: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile; "identity and private HTTPS unchanged"). Client reconnection after restore: VM rehearsal (synthetic data) only (lease 5 ran no peer checks). The production relay role replaced and adopted with `--restored`: not exercised anywhere. The relay's public name and address changing: not exercised anywhere (guests used `.invalid` names on a private test network or a loopback forward) |
 | 14. Database role checks | `ADOPT_POSTGRES`, `WIND_ROLES` | as step 12 | as step 12 |
 | 15. `adopt --restored` | "replacement" subtest in `test.nix`, `terrace-production` in `platform/production/base.nix` | Refused with no reconciled restore; refused for `--new` on a restored replacement; adoption succeeds; replacement marker gone; the next `push` clears the store's marker | VM rehearsal (synthetic data), app role only; relay and lease 5: not exercised anywhere (the rehearsal profile has no adoption gate; `bootstrap_app` starts services directly) |
-| 16. CMS migration gate | `BOOTSTRAP_APP` in `rehearsal_services.py` (`terrace-cms-migrate.service`); `bootstrap_app` in `scenario.py`; `test.nix` | Ledger and the whole signature (realm, users, migrations, outbox, applications, roles, media) equal before and after; the replacement runs with the delivered secret | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Production release pair differing from the original's: not exercised anywhere |
+| 16. CMS migration gate | `BOOTSTRAP_APP` in `rehearsal_services.py` (`terrace-cms-migrate.service`); `bootstrap_app` in `scenario.py`; `test.nix` | Rehearsals: the restored database's signature equals the original's, compared before the migration runs (`replacement()` in `rehearsal_services.py`, the signature check before `recoveredBootstrapApplication` in `scenario.py`); afterwards only the protocol assertions run. Production VM check: the whole signature (realm, users, migrations, outbox, applications, roles, media) compared before and after the migration and start, and the replacement runs with the delivered secret | Restored-database signature equals the original's: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Ledger and signature unchanged across the migration gate: VM rehearsal (synthetic data), production VM check only. A production release pair differing from the original's: not exercised anywhere |
 | 17. Identity | signature in `test.nix` and `app_signature`; `documenso_recovery_access` in `scenario.py`; `platform/identity-restore-test.nix` | Realm ID, admin-events flags, user list equal; 198 protocol assertions with real single sign-on after restore; recovery administrators of the apps authenticate while Keycloak is stopped; issuer and public signing keys continue (separate drill) | VM rehearsal (synthetic data); the 198 assertions after restore also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Real accounts, sessions and tokens after the move, and break-glass after a restore: not exercised anywhere |
 | 18. Documenso | `BOOTSTRAP_APP`; `documenso_browser('verify')`, `app_signature` in `scenario.py` | Same unsigned and signed PDF, decrypted 2FA data, input hashes, account hash, one completed signing request | VM rehearsal (synthetic data) for the full checks. On temporary Hetzner hosts once: migrated, bootstrapped, started, health-checked only. Production profile: refused, not exercised anywhere |
 | 18. Windmill | `WIND_ROLES`, `START_APPLICATIONS`; `windmill_browser('verify')` in `scenario.py` | Restored private variable decrypts, original script, job and result read, a new job runs, role boundaries | VM rehearsal (synthetic data). Hetzner once: role boundary checked, server and worker started, `/api/version` answers and the worker is active; liveness only. The key constraint: nothing changes any key, and no test changes one; location of the key not determined. Production profile: not exercised anywhere |
 | 18. Vaultwarden | `START_APPLICATIONS`; `vault_browser('restore')`, `vault_attachments('verify')` | Same two vault items and attachment bytes decrypt for a retained user device; the server-side copy of master passwords is absent | VM rehearsal (synthetic data). Hetzner once: migrated, started, bootstrap unit run, `/alive` answers; liveness only. Production profile: not exercised anywhere |
 | 19. TLS and CA | `install_runtime` and `INSTALL_INPUT` in `rehearsal_services.py`; CA by store path in `scenario.py`; `platform/production/tls-test.nix`; manual mode in `test.nix` | Rehearsal: operator supplies CA, certificate, key and repository password again, each checked by digest; served chain verifies. Production VMs: manual `tls/*` re-delivered by `push`; ACME state not in the backup and a restored host registers a new account and gets a new certificate from a local test ACME server | Re-supplied by operator tooling: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; **not restored from backup**). Manual and local-ACME replacement: VM rehearsal (synthetic data). A public CA, real DNS, a real first issuance: not exercised anywhere |
 | 20. Health checks | `protocol` (198 assertions) and `lifecycle` in `rehearsal_services.py`; `check_app` in `scenario.py`; `terrace-tls check` in `tls-test.nix` | Native HTTPS SSO, roles, publication, privacy; member lifecycle before and after | VM rehearsal (synthetic data); the 198 assertions and lifecycle also on temporary Hetzner hosts once (synthetic data). These scripts exist only in the rehearsal harness; the production host has `systemctl --failed`, `terrace-tls check` and `terrace-secrets verify` |
-| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` | Backup succeeds; freshness unit fails before it and passes after; the restore did not bring the old host's backup status | VM rehearsal (synthetic data), local repository. The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Retention across the promotion, same-repository continuity and an original that comes back: not exercised anywhere |
+| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` (about line 738); the freshness assertions for a first adopted app host at about lines 434-436 | Replacement: the backup service succeeds into the same repository under the same host name and the freshness unit then passes. First adopted app host (not the replacement): the freshness unit fails before its first backup and passes after. "The restore did not bring the old host's backup status" is a code comment there, not an assertion. Nothing asserts the snapshot series or retention across the promotion | VM rehearsal (synthetic data), local repository, for the backup itself. The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Retention and pruning across a promotion, the freshness behaviour on a replacement, backup timers armed by adoption running before the checks, and an original that comes back: not exercised anywhere |
 | 21. Declared in service, DNS cut-over | none (every rehearsal ends by stopping all guests) | none | not exercised anywhere |
 
 ## 4. What a production promotion needs that nothing has exercised
@@ -606,8 +719,8 @@ network).
   needs space for the restored files and a second copy of the cluster in the
   restore directory before they are copied into place (reading the scripts;
   nobody has measured the disk needed). The restore directory also keeps plaintext
-  dumps and role password hashes on the root disk; when and how to remove it is
-  **not determined from the repository**.
+  dumps and role password hashes on the root disk; removing a failed one is covered in step 9 (READ, not tried), but when to
+  remove a successful one is **not determined from the repository**.
 - **Member sessions and tokens after the move.** Sessions live in the restored
   database and the signing keys come back with it, but no rehearsal has a populated
   realm, an issued session or a token that must survive. Documenso revokes sessions
@@ -615,6 +728,36 @@ network).
 - **Mail.** No mail transport is built (G-20). The restored outbox holds live
   invitation links; both a promoted replacement and a returning original would
   hold them. Nothing tests a duplicate or lost message.
+- **Erasure replay.** A snapshot older than a member's erasure brings that
+  member's personal data back: their application and member rows in the CMS
+  database, their Keycloak account, and any invitation file in the outbox. Nothing
+  re-applies the erasure. The website's erasure is an administrator action on the
+  live data followed by the sweep ([website host](website-host.md#member-lifecycle-settings-outbox-and-sweep)),
+  and the sweep acts on the lifecycle state it finds, not on a ledger of erasures
+  made after the snapshot. I found no erasure ledger documented outside the
+  restored data (the operator directory holds roster reports, is in no backup, and
+  is not an erasure record), so where such a record would live is **not determined
+  from the repository**. Retention also keeps erased data in older snapshots for
+  months (keep-daily 7, weekly 4, monthly 6), which AGENTS.md's member-privacy
+  rules make a question for the owner. What the operator must do: before the
+  replacement serves members (before the DNS cut-over of D5), obtain from the owner
+  a list of erasures made since the snapshot's time, from records kept outside this
+  system, re-apply each through the administrator erasure and run
+  `systemctl start terrace-cms-sweep.service`. Add this to D2: the owner decides
+  whether serving may start without that list. No rehearsal tests it.
+- **The original's own timers.** After step 2 the original is quiesced, not fenced;
+  its backup, sweep and freshness timers stay armed and return on any reboot, and
+  its backup timer could prune the repository you restore from (step 2 stops them
+  until the next boot; unrehearsed).
+- **A returning original pruning the chosen snapshot mid-restore**: see step 21;
+  whether restic's repository locks stop it is **not determined from the repository**.
+- **Public names changing and Keycloak.** Keycloak's issuer follows the host name.
+  The restored realm keeps its old client redirect addresses (startup import skips
+  an existing realm), and the app's configured issuer and origins derive from the
+  new profile hostnames. If public names change, tokens bound to the old issuer stop
+  validating and the realm needs `terrace-identity-admin realm plan` and `realm
+  apply` ([identity administration](identity-admin.md)); neither is exercised after
+  a restore, or with changed names.
 - **The original coming back after promotion.** Same repository, same credentials,
   possibly the same host name, the same Headscale keys and the same invitation
   tokens. No test boots a retired original into a promoted pair.
