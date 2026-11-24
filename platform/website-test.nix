@@ -297,6 +297,13 @@ in {
         def summary(out):
             start = out.find("\n{\n") + 1 if not out.startswith("{") else 0
             return json.loads(out[start:])
+        def background(name, args):
+            # A tool run that outlives this command: its own transient unit (not a shell job), output and exit status in files.
+            base = "/var/lib/website-test-tool/" + name
+            source.succeed("install -d -m 0700 /var/lib/website-test-tool && rm -f " + base + ".*")
+            script = "/run/current-system/sw/bin/terrace-cms-tool " + " ".join(shlex.quote(a) for a in args) + f" >{base}.out 2>{base}.err; echo $? >{base}.rc"
+            source.succeed(f"systemd-run --quiet --collect --unit=website-test-{name} ${pkgs.bash}/bin/bash -c " + shlex.quote(script))
+            return base
         def counts():
             return {name: sql(source, query) for name, query in [
                 ("applications", "select count(*) from member_applications"), ("invitations", "select count(*) from member_invitations"),
@@ -407,7 +414,7 @@ in {
                                 + " --data " + shlex.quote(json.dumps({"name": "Synthetic Locked Form", "affiliation": "alumni", "contactEmail": held})) + " http://127.0.0.1:13048/api/lifecycle/apply").split()
         assert answer[0] == "503" and float(answer[1]) < 2.5, answer
         source.succeed("jq -e '. == {\"error\":\"Unavailable.\"}' /tmp/apply.json >/dev/null")
-        source.succeed("(terrace-cms-tool roster-invite apply --file ${operator}/locked.csv --operator operator@terrace.invalid --plan-sha256 " + locked_plan["planSha256"] + " --confirm-production >/tmp/locked.out 2>/tmp/locked.err; echo $? >/tmp/locked.rc) >/dev/null 2>&1 &")
+        locked_run = background("locked", ["roster-invite", "apply", "--file", "${operator}/locked.csv", "--operator", "operator@terrace.invalid", "--plan-sha256", locked_plan["planSha256"], "--confirm-production"])
         # Sample pg_locks: from the first sample showing the tool's backend waiting on the held key to the first that does not.
         first: float | None = None
         last: float | None = None
@@ -418,13 +425,13 @@ in {
             elif first is not None:
                 last = now
                 break
-            if source.execute("test -e /tmp/locked.rc")[0] == 0:
+            if source.execute(f"test -e {locked_run}.rc")[0] == 0:
                 break
         assert first is not None and last is not None, "the tool never waited on the held lock"
         waited = last - first
-        source.wait_until_succeeds("test -s /tmp/locked.rc", timeout=60)
-        assert source.succeed("cat /tmp/locked.rc").strip() == "1"
-        locked = summary(source.succeed("cat /tmp/locked.out"))
+        source.wait_until_succeeds(f"test -s {locked_run}.rc", timeout=60)
+        assert source.succeed(f"cat {locked_run}.rc").strip() == "1"
+        locked = summary(source.succeed(f"cat {locked_run}.out"))
         assert locked["failure"] == "address-locked" and locked["counts"]["created"] == 0 and locked["counts"]["failed"] == 1, locked
         assert sql(source, f"select count(*) from member_applications where contact_email = '{held}'") == "0"
         assert 0.1 <= waited < 2.0, f"lock wait {waited:.2f}s with LIFECYCLE_LOCK_TIMEOUT_MS=500"
@@ -433,7 +440,7 @@ in {
 
         # The transient unit, frozen while it runs: the CMS account and the CMS units' own settings, and no secret value in its
         # properties (as root or as another user) or in any process's arguments.
-        source.succeed("(terrace-cms-tool roster-invite dry-run --file " + shlex.quote(roster) + " --operator operator@terrace.invalid --report " + report() + " >/tmp/frozen.out 2>&1; echo $? >/tmp/frozen.rc) >/dev/null 2>&1 &")
+        frozen_run = background("frozen", ["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])
         source.wait_until_succeeds("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | grep -q .", timeout=30)
         unit = source.succeed("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | cut -d' ' -f1").strip()
         source.succeed(f"systemctl freeze {unit}")
@@ -443,8 +450,8 @@ in {
         tool_props, cms_props = props(unit), props("terrace-cms.service")
         assert tool_props == cms_props and tool_props["User"] == "terrace_cms" and tool_props["EnvironmentFiles"].startswith("${inputs}/cms.env"), (tool_props, cms_props)
         source.succeed(f"systemctl thaw {unit}")
-        source.wait_until_succeeds("test -s /tmp/frozen.rc", timeout=60)
-        assert source.succeed("cat /tmp/frozen.rc").strip() == "0" and summary(source.succeed("cat /tmp/frozen.out"))["mode"] == "dry-run"
+        source.wait_until_succeeds(f"test -s {frozen_run}.rc", timeout=60)
+        assert source.succeed(f"cat {frozen_run}.rc").strip() == "0" and summary(source.succeed(f"cat {frozen_run}.out"))["mode"] == "dry-run"
         source.wait_until_fails(f"systemctl is-active --quiet {unit}", timeout=30)
         # No secret value in any journal, including the tools' namespace.
         logs = source.succeed("journalctl --no-pager -o json; journalctl --namespace=terrace-apps --no-pager -o json")
