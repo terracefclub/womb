@@ -75,14 +75,23 @@ marked done.
   key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
 - Done (production safeguards): the first certificate's public key must be the
   key's (`tls_pair_problem`, OpenSSL on stdin). `set` warns while the stored pair
-  does not match (one half is set at a time, so it cannot refuse); the host's
-  `install` refuses a mismatched pair before anything is installed or restarted
-  (unit tests with stand-in and real OpenSSL; production VM: push refused, nginx
-  and the served certificate unchanged, then the matching pair delivered).
+  does not match (one half is set at a time, so it cannot refuse); `push` refuses
+  it before sending when `SOPS_AGE_KEY_FILE` lets it decrypt the store (otherwise
+  it prints a note); the host's `install` refuses a mismatched pair before anything
+  is installed or restarted (unit tests with stand-in and real OpenSSL, RSA, EC and
+  Ed25519; production VM: push refused before sending, and by the host's install
+  when pushed without an identity, nginx and the served certificate unchanged, then
+  the matching pair delivered). Left: a host still running an older
+  `terrace-secrets` has no install check; `check` does not decrypt and so does not
+  check the pair; possible false refusals of a valid pair for an RSASSA-PSS
+  certificate or an EC key with explicit curve parameters (not tested;
+  [secrets](secrets.md)).
 - Done (production safeguards): `--finish --only-current` without `--remove` lists
   every key and removes nothing; `--remove KEYID` must name exactly each key it
-  removes (unit tests; production VM). Left as it was: `--finish --keep` still
-  removes every non-current key not kept, without listing them first.
+  removes (unit tests; production VM). `--finish --keep PREFIX` refuses, with the
+  key list and before removing anything, a prefix that matches no key or more than
+  one (a typo would otherwise have removed the key meant to be kept; unit tests).
+  It still removes every other non-current key without listing it first.
 - Decide and document: where Windmill's encryption key lives and how it is delivered;
   the exact way to deploy a changed private host module (escrow recipient, operator
   keys); how to compute the Hetzner `tokenSha256` pin.
@@ -103,14 +112,24 @@ None of these was done in that pull request; the production safeguards follow-up
   "Drill to add" section. Until then it is written from the rehearsals and has not
   been run as written.
 - Done (production safeguards; decision: leave them off): `adopt --restored` holds
-  the backup, check, freshness and (app) sweep timers (`restoreHeldTimers`, a
-  `ConditionPathExists=!` on `/var/lib/terrace-production/timers-held`, written
-  before the target starts, so a resumed adoption and a reboot do not arm them) and
-  names `terrace-production arm-timers`, which arms them, says which, and is
-  idempotent. A plain adoption is unchanged. Production VM: both paths, a failed and
-  resumed restored adoption. Not exercised: the relay's held timers (no relay
-  replacement in the VM). The procedure now arms the sweep at step 21 with the
-  backups, not at D5.
+  the backup, check and freshness timers (`restoreHeldTimers`) and on the app the
+  sweep (`restoreServiceHeldTimers`), each group by a `ConditionPathExists=!` on its
+  own marker under `/var/lib/terrace-production/`, written before the target
+  starts, so a resumed adoption and a reboot do not arm them. `terrace-production
+  arm-timers` arms the backup timers (procedure step 21, after a backup by hand);
+  `arm-timers --in-service` arms the sweep (D5, after the erasure replay); both say
+  what they armed and what is still held, and are idempotent; `status` prints one
+  line per held group. A plain adoption is unchanged. Production VM: both paths, a
+  failed and resumed restored adoption, both stages with a reboot between them, and
+  the relay's `--in-service` answer. Not exercised: a restored relay's held timers
+  (no relay replacement in the VM). No unit tests: `terrace-production` is a shell
+  script inside `platform/production/base.nix` with no stub harness.
+- A restored host whose timers are never armed takes no scheduled backup and
+  nothing says so: the hold markers never expire, the freshness timer that would
+  report a missing backup is itself held, and only `terrace-production status`
+  shows the hold. Belongs to the alerting gap (G-23); not built here.
+  `docs/host-updates.md` describes a reboot of an adopted host as re-arming every
+  writer timer, which is not true for a restored host whose timers are still held.
 - Decide and document: the production website backup set is the `terrace_cms`
   database, the media directory (`/var/lib/terrace-cms-media`) and the outbox
   (`/var/lib/terrace-cms-outbox`), plus the `keycloak` database. It does not
@@ -394,9 +413,10 @@ known to affect a deployed host (none exists).
   replaced. A link or non-regular file is refused before it is opened; the regular
   file is opened without truncation, locked, then checked through the descriptor
   (same inode as the path, owned by root); a wider mode is narrowed to `0600` under
-  the lock; anything else is refused with exit 72. Unit tests fail against the
-  earlier script; the website VM proof asserts the narrowing on the same inode and
-  the refusal of a foreign owner and of a link.
+  the lock; anything else is refused with exit 72. Unit tests (Linux only, they need
+  GNU `stat` and `/dev/fd`; a stub `stat` drives the foreign-owner and swapped-inode
+  branches) fail against the earlier script; the website VM proof asserts the
+  narrowing on the same inode and the refusal of a foreign owner and of a link.
 - Done (production safeguards): the website VM proof requests sweep, CMS and website
   starts while a slowed migration runs, asserts that each stays inactive with its
   start job waiting, and that each runs after the migration ended. Still not tested:
