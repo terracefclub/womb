@@ -454,9 +454,9 @@ in {
           ok(app.succeed("systemctl is-enabled terrace-cms-sweep.timer terrace-backup.timer").split() == ["enabled", "enabled"], "sweep and backup timers enabled")
           ok(app.succeed("systemctl is-active terrace-cms-sweep.timer terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer").split() == ["active"] * 4, "sweep and backup timers active")
           # A plain adoption holds nothing back: no hold marker, and arm-timers has nothing to arm.
-          app.fail("test -e /var/lib/terrace-production/timers-held")
+          app.fail("test -e /var/lib/terrace-production/timers-held || test -e /var/lib/terrace-production/service-timers-held")
           ok("timers held" not in app.succeed("terrace-production status"), "adopt --new: status reports no held timers")
-          ok(app.succeed("terrace-production arm-timers").strip() == "Already armed: every writer timer is active.", "adopt --new: arm-timers finds every timer armed")
+          ok(app.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", "Every writer timer is active now and at every boot."], "adopt --new: arm-timers finds every timer armed")
 
       with subtest("first backup: fails visibly until the repository is initialised, then succeeds"):
           app.fail("systemctl start terrace-backup.service", timeout=300)
@@ -690,6 +690,9 @@ in {
           ok(any(line.endswith(":3478") for line in relay_listeners if line.startswith("udp ")), "relay STUN listener")
           relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
           ok(relay.succeed("systemctl show terrace-backup.service -p Result --value").strip() == "success", "relay backup")
+          # The relay has no sweep: the in-service stage says so and does not fail.
+          ok(relay.succeed("terrace-production arm-timers --in-service").strip().splitlines() == ["Already armed: nothing to arm.", "This role holds no timer until service (it has no sweep).", "Every writer timer is active now and at every boot."],
+             "relay: arm-timers --in-service has nothing to hold and says so")
           relay.shutdown()
 
       with subtest("back up, destroy the host, re-key from escrow for a new host key"):
@@ -756,9 +759,10 @@ in {
           app.succeed("install -d -m 0700 -o postgres -g postgres " + pg_dir + " && cp -a " + RESTORE + "/pgdata/. " + pg_dir + "/ && chown -R postgres:postgres " + pg_dir)
           refused = app.fail("terrace-production adopt --new 2>&1")
           ok("delivered as a replacement" in refused, "adopt --new refused on a restored host (replacement marker)")
-          held = ["terrace-cms-sweep.timer", "terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
-          def timers_held(label):
-              for unit in held:
+          backup_held = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
+          service_held = ["terrace-cms-sweep.timer"]
+          def timers_held(label, units=backup_held + service_held):
+              for unit in units:
                   ok((unit_state(unit, "ActiveState"), unit_state(unit, "ConditionResult")) in [("inactive", "no"), ("inactive", "")], f"{label}: {unit} held")
           # A first adoption that fails after the target started (nginx cannot bind 443) leaves the held timers off ...
           app.succeed("systemd-run --unit=rehearsal-block-443-restored ${pkgs.python3}/bin/python3 -m http.server 443 --bind 0.0.0.0")
@@ -766,12 +770,16 @@ in {
           refused = app.fail("terrace-production adopt --restored 2>&1")
           ok("not adopted yet" in refused and "nginx.service" in refused and ".timer" not in refused, "a failed restored adoption names nginx, not the held timers")
           timers_held("failed restored adoption")
-          ok("timers held after a restored adoption" in app.succeed("terrace-production status"), "status reports the held timers")
+          status = app.succeed("terrace-production status")
+          ok("timers held after a restored adoption: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer" in status
+             and "timers held until the replacement is declared in service: terrace-cms-sweep.timer" in status, "status reports both held groups")
           app.succeed("systemctl stop rehearsal-block-443-restored.service")
           # ... and so does the resumed one, which starts the target again.
           out = app.succeed("terrace-production adopt --restored")
-          ok("Held until you have verified the restored services: terrace-cms-sweep.timer terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer" in out
-             and "Arm them with: terrace-production arm-timers" in out, "adopt --restored names the held timers and the arming command")
+          ok("Held until you have verified the restored services: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer" in out
+             and "Arm them with: terrace-production arm-timers" in out
+             and "Held until the replacement is declared in service, after any erasure replay: terrace-cms-sweep.timer" in out
+             and "Arm it then with: terrace-production arm-timers --in-service" in out, "adopt --restored names both held groups and their arming commands")
           timers_held("resumed restored adoption")
           ok(unit_state("terrace-identity-health.timer", "ActiveState") == "active", "adopt --restored arms the identity health timer")
           # A start of a held timer (as the target's at boot) is skipped while the hold exists.
@@ -791,12 +799,34 @@ in {
           ok(app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip() == rotated, "the rotated intake value survived the re-key")
           for unit in ["terrace-cms", "terrace-web"]:
               ok(env_matches(unit, "/run/secrets/website/lifecycle-intake") == "same", f"replacement {unit} runs with the delivered value")
-          # The restored services are verified: one explicit command arms the held timers, and says which.
-          out = app.succeed("terrace-production arm-timers").strip()
-          ok(out == "Armed: " + " ".join(held) + ". Every writer timer is active now and at every boot.", "arm-timers names what it armed: " + out)
-          ok(app.succeed("systemctl is-active " + " ".join(held)).split() == ["active"] * 4, "held timers active after arm-timers")
+          # The restored services are verified: the first backup by hand (procedure step 21), then the backup timers are armed
+          # and the sweep stays held.
+          app.succeed("systemctl start terrace-backup.service", timeout=600)
+          ok(unit_state("terrace-backup.service", "Result") == "success", "first backup of the replacement by hand")
+          still = "Still held until the replacement is declared in service: terrace-cms-sweep.timer. Arm with: terrace-production arm-timers --in-service"
+          out = app.succeed("terrace-production arm-timers").strip().splitlines()
+          ok(out == ["Armed: " + " ".join(backup_held) + ".", still], f"arm-timers arms the backup timers and names the held sweep: {out}")
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held)).split() == ["active"] * 3, "backup timers active after arm-timers")
+          timers_held("after arm-timers", service_held)
           app.fail("test -e /var/lib/terrace-production/timers-held")
-          ok(app.succeed("terrace-production arm-timers").strip() == "Already armed: every writer timer is active.", "arm-timers is idempotent")
+          ok(app.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", still], "arm-timers is idempotent")
+          # A reboot between the two stages keeps the backup timers armed and the sweep held.
+          app.shutdown()
+          app.start()
+          app.wait_for_unit("multi-user.target")
+          app.wait_for_unit("keycloak.service", timeout=360)
+          app.wait_for_unit("terrace-cms.service", timeout=240)
+          app.wait_for_unit("terrace-web.service", timeout=240)
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held)).split() == ["active"] * 3, "after a reboot: backup timers armed")
+          timers_held("after a reboot", service_held)
+          ok("timers held until the replacement is declared in service: terrace-cms-sweep.timer" in app.succeed("terrace-production status"), "after a reboot: status reports the held sweep")
+          # Declared in service (after any erasure replay): the second stage arms the sweep.
+          out = app.succeed("terrace-production arm-timers --in-service").strip().splitlines()
+          ok(out == ["Armed: terrace-cms-sweep.timer.", "Every writer timer is active now and at every boot."], f"arm-timers --in-service arms the sweep: {out}")
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held + service_held)).split() == ["active"] * 4, "every held timer active")
+          app.fail("test -e /var/lib/terrace-production/service-timers-held")
+          ok("timers held" not in app.succeed("terrace-production status"), "status reports nothing held")
+          ok(app.succeed("terrace-production arm-timers --in-service").strip().splitlines() == ["Already armed: nothing to arm.", "Every writer timer is active now and at every boot."], "arm-timers --in-service is idempotent")
           lifecycle_steps("replacement", LIFECYCLE_REPLACEMENT_STEPS)
           verify(app)
           modes(app)

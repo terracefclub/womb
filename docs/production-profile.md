@@ -188,22 +188,33 @@ host once, explicitly:
 - `terrace-production adopt --restored` refuses unless
   `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
   restored state is in place; it then clears the replacement marker. It starts
-  the writers but **leaves the backup, backup check, backup freshness and (on the
-  app) sweep timers off** (`restoreHeldTimers`): before anything starts it writes
-  `/var/lib/terrace-production/timers-held`, and those timers carry
-  `ConditionPathExists=!` on that file, so every start of the target (this
-  adoption, a resumed one, every boot) skips them, and the adoption's completeness
-  check does not wait for them. A scheduled backup ends in `forget --prune`
-  against the repository the restore came from, and the sweep acts on restored
-  data, so they wait until the operator has verified the restored services. The
-  output names them and the one command that arms them:
-  `terrace-production arm-timers`. It needs an adopted host with the target
-  active, removes the hold, starts every writer timer that is not active, prints
-  `Armed: <timers>.` (or `Already armed: every writer timer is active.` when there
-  is nothing to do, so it can be repeated) and fails naming any timer that is
-  still not active. Other writer timers (the identity health check, the TLS
-  expiry check and renewal, the temporary-administrator check) are armed by the
-  adoption as before. `terrace-production status` says when timers are held.
+  the writers but **leaves the backup, backup check and backup freshness timers
+  off** (`restoreHeldTimers`), and on the app **the sweep timer too**
+  (`restoreServiceHeldTimers`). Before anything starts it writes
+  `/var/lib/terrace-production/timers-held` and, on the app,
+  `/var/lib/terrace-production/service-timers-held`; each held timer carries
+  `ConditionPathExists=!` on its group's file, so every start of the target (this
+  adoption, a resumed one, every boot) skips it, and the adoption's completeness
+  check does not wait for it. A scheduled backup ends in `forget --prune` against
+  the repository the restore came from, so the backups wait until the operator has
+  verified the restored services; the sweep acts on restored data, so it waits until
+  the replacement is declared in service, after any erasure replay. The output names
+  each group and its command. `terrace-production arm-timers` needs an adopted host
+  with the target active, removes the backup hold, starts every writer timer that
+  is neither active nor still held, prints `Armed: <timers>.` (or `Already armed:
+  nothing to arm.`, so it can be repeated), then either names the timers still held
+  until service or says `Every writer timer is active now and at every boot.`, and
+  fails naming any timer that did not become active. `terrace-production
+  arm-timers --in-service` also removes the sweep hold and arms the sweep; on the
+  relay, which has no sweep, it says so and does not fail. `terrace-production
+  status` prints one line per held group. **Nothing else reports a held timer**:
+  the markers never expire and the freshness timer that would report a missing
+  backup is held too, so a restored host on which `arm-timers` is never run takes
+  no scheduled backup and nothing alerts ([restore promotion](restore-promotion.md),
+  step 21). The other writer timers (`writerTimers`: the identity health check in
+  `app.nix`, the TLS expiry check and, in ACME mode, renewal added by `tls.nix`, the
+  temporary-administrator check added by `identity-admin.nix`) are armed by the
+  adoption as before.
   A plain `adopt --new` holds nothing back.
 
 Each host is adopted once. Both commands verify the secrets, record
@@ -265,8 +276,10 @@ follows the steps above (its installer stand-in stages the host key only).
    `/etc/rehearsal-pg-directory`, a file only the test harness provides (the
    production VM check's exact commands are in its "replacement" subtest). Then
    `terrace-production adopt --restored` (the backup and sweep timers stay off),
-   the migration action (the ledger must stay unchanged), the two services, and
-   once the restored services are verified `terrace-production arm-timers`.
+   the migration action (the ledger must stay unchanged), the two services, once
+   the restored services are verified a backup by hand and `terrace-production
+   arm-timers`, and once the replacement is declared in service
+   `terrace-production arm-timers --in-service`.
 
 Promoting a restore into service on real data still needs the owner-approved
 procedure (G-22); this rehearsal is its technical basis.
