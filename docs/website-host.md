@@ -1,5 +1,7 @@
 # Optional native website host
 
+> **Note, 2026-11-24.** Re-pinned to website `dev` `dd1aef7` (website PRs #23 and #24: the CMS bundle now ships the operator tools `bin/roster-invite` and `bin/wp-import`). No migration and no realm producer changed. The module adds `terrace-cms-tool`, the root-only way to run them as the CMS account, an operator directory outside every backup set, and the `lifecycleLockTimeoutMs` option (see [Operator tools](#operator-tools-terrace-cms-tool)).
+
 > **Note, 2026-11-23.** Re-pinned to website `dev` `eab4189` (website PRs #19 to #22: bulk roster onboarding, review follow-ups, realm admin events). The ledger now has twelve migrations (adds `20261119_165021_roster_journal`). Nothing new to wire: the roster tool is not in the bundle and its journal is ordinary database state (see [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep)); the realm producer's hash changed in `platform/identity-contract.json`.
 
 > **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18, including the packaged CMS `bin/sweep`). The ledger now has eleven migrations, recorded in `platform/website-release.json` and checked in order by the VM test. The module now supplies the member-lifecycle settings listed under [Member lifecycle](#member-lifecycle-settings-outbox-and-sweep).
@@ -18,11 +20,13 @@ remain disabled in actual host profiles; CDN activation remains separate.
 ## Accepted inputs
 
 `platform/website-release.json` pins the exact secret-free Linux x86-64 glibc
-archives from TFC source `eab41891f6d68ea000f86148d086daf737f1216e` (website `dev`, PR #22).
+archives from TFC source `dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191` (website `dev`, PR #24).
 `website-release.nix` checks the raw archive SHA256, source/runtime manifest and
 every packaged file hash before producing immutable Nix packages. The archive hash
 must match before that archive is copied into the Nix store. It uses local retained
-archives, not expiring CI links. Node24.21.0 is required; Bun,
+archives, not expiring CI links. The website archives are not byte-reproducible
+(two builds of one commit differ in build-ID files and chunk names), so the pin is
+one kept build: keep those exact files; a rebuild of the same commit will not match. Node24.21.0 is required; Bun,
 package installation, source and builds are absent from runtime services.
 
 Retain the web/CMS pair, manifests and checksum index independently of expiring
@@ -33,8 +37,8 @@ Never put environment files, credentials, uploads or a database into a bundle.
 
 Import `platform/website.nix` or `nixosModules.website`. A reviewed host can
 construct `release = import ./platform/website-release.nix { inherit pkgs;
-webArchive = "/protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz";
-cmsArchive = "/protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz"; };`
+webArchive = "/protected/releases/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz";
+cmsArchive = "/protected/releases/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz"; };`
 and set `terrace.website.webPackage = release.web`, `cmsPackage = release.cms`,
 `revision = release.revision` and `enable = true`. This is an integration
 example, not an enabled host configuration.
@@ -111,10 +115,12 @@ runtime input cannot redirect them (as with `DATABASE_URI` and `CMS_MEDIA_DIR`):
 
 Optional retention placeholders (`LIFECYCLE_APPLICATION_DAYS`,
 `LIFECYCLE_INVITATION_DAYS`, `LIFECYCLE_GRACE_DAYS`) may be added to `cms.env`;
-their defaults apply otherwise. Since website `eab4189` the CMS also reads an
-optional `LIFECYCLE_LOCK_TIMEOUT_MS` (how long the public apply form and the bulk
-roster tool wait for the per-address lock, 100 to 10000, default 3000); Womb does
-not set it and no VM proof uses another value. Everything else in the website's production
+their defaults apply otherwise. The CMS also reads an optional
+`LIFECYCLE_LOCK_TIMEOUT_MS` (how long the public apply form and the bulk roster
+tool wait for the per-address lock). The module owns it as
+`lifecycleLockTimeoutMs` (100 to 10000, unset by default, which keeps the CMS
+default of 3000 ms) and exports it to the CMS, its sweep and the operator tools.
+The website VM proof sets 500 and holds the lock (see below). Everything else in the website's production
 configuration table (`docs/member-lifecycle.md` in the website repository)
 is unchanged and delivered through the same protected files.
 
@@ -123,16 +129,6 @@ writes its mirror files `0600`. It holds live one-time invitation links, so it i
 included in backups with the database (`extraPaths.website-outbox`) and is not
 readable by the website account. Read it as root on the host; there is no mail
 transport yet.
-
-Website `eab4189` adds an opt-in bulk roster tool (`roster:invite`, website
-`docs/member-lifecycle.md`, "Bulk roster onboarding"). It is not in the release
-bundle: running it needs a source checkout with Bun and the host's real CMS
-environment, which this module does not provide, so Womb has no supported way to
-run it yet. What it writes is ordinary CMS state: its journal (`roster_runs`,
-`roster_run_items`, from migration `20261119_165021_roster_journal`) is in the
-database, and its invitation files are the same outbox mirror files an approval
-writes, so both are covered by the existing backup and restore. It needs no
-setting, timer or gateway rule.
 
 `terrace-cms-sweep.service` runs the bundle's `bin/sweep` (without
 `--purge-moderated`) as the CMS account with the same environment file, guards
@@ -145,8 +141,12 @@ every administrator-initiated erasure:
 systemctl start terrace-cms-sweep.service
 ```
 
-A sweep requested while an explicit migration runs waits for it (and is skipped
-if one is still active when it starts); starting a migration stops a running sweep,
+A sweep requested while an explicit migration runs normally waits for it (and is
+skipped if one is still active when it starts). There is one exception: the
+migration's first step stops the sweep unit, so a sweep requested in the few
+milliseconds between the migration becoming `activating` and that step is
+cancelled rather than queued; the next timer run (or a manual start) does the
+work. Starting a migration stops a running sweep,
 which is idempotent and retried (website `680ad56`:
 `cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
 writes every mirror file to a private temporary file and renames it into place,
@@ -160,6 +160,148 @@ to new hosts. NixOS does not renumber existing users: a host that already has th
 accounts with allocated numbers needs a planned renumbering (stop the services,
 change the IDs, `chown` their state) before adopting the static values, and backups
 taken before the change still carry the old numbers. No such host exists yet.
+
+## Operator tools: `terrace-cms-tool`
+
+The CMS bundle ships two operator command lines (website
+`tools/release/README.md`, "Operator tools"): `bin/roster-invite`, the opt-in
+bulk roster onboarding (website `docs/member-lifecycle.md`, "Bulk roster
+onboarding"), and `bin/wp-import`, the WordPress import applier (website
+`docs/wordpress-import.md`). The module installs one root-only command that runs
+them as the CMS account:
+
+```sh
+terrace-cms-tool roster-invite|wp-import ARGS...
+```
+
+It starts a transient systemd unit whose properties are generated from the same
+attribute set as the CMS units (account, hardening, memory and CPU limits, log
+namespace, working directory, `EnvironmentFile=` naming the protected `cms.env`),
+plus write access to the operator directory below. Inside it the CMS identity
+guard and migration gate run, the module's settings are exported exactly as for
+`bin/start` and `bin/sweep`, and the tool gets its arguments unchanged. Output
+and exit status come back to the caller. The environment file is only named:
+systemd reads it before dropping privileges, and the wrapper never sources,
+copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
+missing or unknown tool (64), another tool run (73) and a running migration (75).
+Its logic is `platform/cms-tool.sh` (unit tests:
+`python3 -B tests/platform/test_cms_tool.py -v`).
+
+**One at a time, in the foreground.** The wrapper holds a lock
+(`/run/terrace-cms-tool.lock`) from its checks until the tool ends, and refuses
+while any `terrace-cms-tool-*` unit is still active, naming it (exit 73). Run the
+tools one at a time, in the foreground of an SSH session (or in `tmux`/`screen`),
+and do not start the wrapper as a background job with an open standard input
+(no proof exercises that). A dropped session kills the wrapper but not the
+tool's unit: it keeps running until it ends or reaches its bound, and while it
+runs the next wrapper and every migration refuse. A migration started at the very
+moment a wrapper starts can still pass both checks (a window of milliseconds).
+
+**Run-time bound.** Each tool unit has `RuntimeMaxSec` from
+`operatorToolMaxSeconds` (60 to 86400, default 3600). The website VM's runs take
+seconds; a roster apply handles at most 200 rows and the real WordPress plan
+about 245 items, so an hour leaves wide room while still freeing an orphaned or
+hung run. In the website VM a tool stopped at the bound made the wrapper exit 1
+(the unit's journal says `Failed with result 'timeout'`), and one killed by
+`SIGKILL` made it exit 255 (`Failed with result 'signal'`); the tool's own exit
+statuses (0, or 1 for a refusal or a failed row) come back unchanged. A tool
+stopped at the bound (or by a signal) ends where it was:
+- roster `apply`: rows committed before the stop stay, journaled, with their
+  link files; the run stays `running` until it has been idle for 30 minutes,
+  after which the next apply or a rollback marks it failed. Roll it back with
+  `roster-invite rollback --run RUN_ID ... --confirm-production` (a failed run can
+  be rolled back), or dry-run the file again and apply what is left;
+- importer `apply` or `publish`: the run ledger stays `running`; roll it back
+  once it has been idle for an hour with `wp-import rollback --run RUN_ID
+  --take-over-stale ...` (or sooner with `--stale-after-minutes N`), then apply
+  again.
+
+**Inputs and reports.** The tools read only owner-only files of the account
+that runs them, outside any Git checkout, by absolute path. Put them in the
+module's `operatorDirectory` (default `/var/lib/terrace-cms-operator`, `0700`,
+CMS account), and purge it when the run is over:
+
+```sh
+install -o terrace_cms -g terrace_cms -m 0600 roster.csv /var/lib/terrace-cms-operator/roster.csv
+find /var/lib/terrace-cms-operator -mindepth 1 -delete      # after the run
+```
+
+**Command lines on a host** (`OP` is the operator's administrator email; the
+plan hash comes from the dry run's output):
+
+```sh
+D=/var/lib/terrace-cms-operator
+terrace-cms-tool roster-invite dry-run --file $D/roster.csv --operator OP --report $D/roster-dry-run.json
+terrace-cms-tool roster-invite apply --file $D/roster.csv --operator OP --plan-sha256 PLAN_SHA256 --report $D/roster-apply.json --confirm-production
+terrace-cms-tool roster-invite rollback --run RUN_ID --operator OP --report $D/roster-rollback.json --confirm-production
+terrace-cms-tool wp-import dry-run --plan $D/wp-import-plan.json --report $D/import-dry-run.json --allow-nonlocal-database
+terrace-cms-tool wp-import apply --plan $D/wp-import-plan.json --report $D/import-apply.json --allow-nonlocal-database --confirm-production
+terrace-cms-tool wp-import rollback --run RUN_ID --report $D/import-rollback.json --allow-nonlocal-database --confirm-production
+```
+
+Both flags stay explicit operator choices; the wrapper adds neither. The host's
+`DATABASE_URI` (`postgresql://terrace_cms@/terrace_cms?host=...`) names a user
+with an empty host, which the tools' local-database check does not parse, so it
+counts as not local: the importer refuses every command without
+`--allow-nonlocal-database`, and both tools treat the database as production, so
+every write also needs `--confirm-production`. Take a verified backup before an
+importer apply or a roster apply, as for a migration.
+
+**When a tool is still running.** A migration refuses to start while a
+`terrace-cms-tool-*` unit is active, but only after `Conflicts=` has already
+stopped `terrace-cms.service` and `terrace-web.service` (and a running sweep):
+the site is down until you finish the steps below. `systemctl start` only says
+that the unit failed; the reason is in the apps journal namespace. Before
+deploying, check that no tool is running (no output means none):
+
+```sh
+systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
+```
+
+If a migration was refused (or a tool unit was left behind), read the reason,
+stop the tool unit, then migrate and start the services again (the website VM
+proof runs exactly these commands):
+
+```sh
+journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager
+systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'
+systemctl stop 'terrace-cms-tool-*'
+systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service
+systemctl start terrace-cms-migrate.service
+systemctl start terrace-cms.service terrace-web.service
+```
+
+Stopping a tool unit stops the tool where it was (see the run-time bound above
+for what that leaves and how to roll it back).
+
+**Output, arguments and who sees them.** The tools' output (counts, hashes and
+fixed refusal text; reports go to files) and their exit status reach only the
+caller's terminal: with `--pipe` nothing of it is written to any journal, and the
+unit has a fixed description, so its command line is not in systemd's start and
+stop messages either (the website VM proof checks both). While a tool runs, its
+command line, which carries the operator's email and file paths, is visible to
+every local user through `ps`, `systemctl status`, `systemctl show` and
+`systemctl cat` (checked in the website VM as `nobody`). On a production host
+the only local accounts are the operators' and the services' own, but do not put
+anything confidential in arguments: personal data belongs in the files.
+
+**What is backed up.** The tools' database rows (the roster journal
+`roster_runs` and `roster_run_items`, applications, invitations, outbox rows,
+imported documents and the import run ledger) are ordinary CMS rows in the
+database backup. The roster tool's invitation link files are written to the
+lifecycle outbox (`outboxDirectory`), which is in the backup set
+(`extraPaths.website-outbox`) and restored with the database. The operator
+directory is in no backup set, by design: it holds personal data the operator
+supplies and keeps elsewhere, and a module assertion refuses a configuration that
+puts it inside, around or at a backup path.
+
+**Proven where.** In VM proofs only (below and in the production profile
+proof); nothing has been run on a real host or against a provider. The website VM
+switches the protected `cms.env` to a public-profile variant (same secrets) for
+the tools' writes while the running CMS server stays on the proof's loopback
+profile; the public profile's server path is proven by the HTTPS gateway check,
+and the tools under the real sops-rendered environment only by the production
+profile proof's dry run.
 
 ## Health, private logs and capacity
 
@@ -240,8 +382,8 @@ On the x86-64 Linux builder, under the shared queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-check \
-  /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz
+  /protected/releases/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz
 ```
 
 This separate check accepts local hash-pinned artifacts so ordinary flake
@@ -261,6 +403,56 @@ real timer unit fires it (a backdated persistent stamp makes it catch up), and
 restores the outbox with identical bytes, owner and modes. It measures migration, backup,
 check, restore and recovered HTTP verification, plus source cgroup peaks.
 Only synthetic, user-free fixtures are used; no real provider/email call.
+
+Through `terrace-cms-tool` it also runs both operator tools as the CMS account, with
+the protected file switched to a public-profile variant for the writes (same
+secrets; the original is put back byte for byte): the wrapper refuses a non-root
+caller, an unknown tool, a closed migration gate and a running migration, and a
+migration refuses to start under a running tool; a path with a space and an
+option-like argument reach the tool unchanged and exit statuses come back. Roster:
+the default dry run writes nothing, a write without `--confirm-production` is
+refused, the apply writes the journal (`completed`, two items), two approved
+applications with pending invitations and two link files (`0600`, CMS account) with
+the public origin, a re-run is a no-op and rollback revokes both. Importer (the
+website's synthetic fixture plan): refused without `--allow-nonlocal-database`, the
+dry run writes nothing, an apply without `--confirm-production` is refused, the
+confirmed apply creates the planned documents, a re-apply skips them all and
+rollback deletes the documents and redirects it created. With
+`lifecycleLockTimeoutMs = 500` and the address lock held, the public apply endpoint
+answers 503 within the bound and a roster row waits about half a second, then stops
+with `address-locked` and stores nothing. A frozen run's transient unit has the CMS
+unit's account and settings, and no synthetic secret value appears in its
+properties (as root or another user), any process's arguments or any journal. The
+backup snapshot contains the outbox and not the operator directory, which is then
+purged; the roster journal rows come back from the restore.
+
+Since the PR 68 review the proof also covers: dry runs leave the outbox and
+upload directories byte-identical and add only their own report to the operator
+directory; one wrapper at a time (the second is refused by the lock, and after
+the first wrapper is killed, as by a dropped session, its unit keeps running and
+the next wrapper names it); a migration started then is refused with the reason
+in the apps journal while the CMS and website are already stopped, and the
+recovery commands above bring them back; a tool killed by a signal and one
+stopped at a 60-second `operatorToolMaxSeconds` (exit statuses above); the run
+time bound is set on the unit; neither the tools' output nor their arguments
+appear in any journal entry; and the restore comparison now includes
+applications, invitations, the import ledger and journal, pages, posts and
+redirects (the imported documents and redirects were rolled back earlier in the
+proof, so those last three compare their remaining rows).
+
+Verified again 2026-11-24 at Womb `e7403a5` after the review (fresh result,
+04:02 to 04:08 Pacific): 39 CMS tables; roster lock wait 0.50 s at 500 ms,
+public apply 503 in 0.55 s; migration 5.32 s, encrypted backup 7.73 s, complete
+check 5.00 s, restore 4.11 s, recovered HTTP verification 10.42 s. The Documenso
+and Vaultwarden functional proofs were not rerun for this re-pin: their
+derivations equal ones that passed before (Womb PR 64), so they carry over.
+
+Verified 2026-11-24 on the shared Linux builder with the kept `dd1aef7` build
+(web `1a4e07f7…bd12`, CMS `8929443f…2a4c`) at Womb `3f4bc9e` (fresh result): 39
+CMS tables and the twelve-migration ledger; roster lock wait 0.52 s at 500 ms,
+public apply 503 in 0.56 s; migration 4.99 s, encrypted backup 9.08 s, complete
+repository check 5.41 s, restore 4.85 s, recovered HTTP verification 11.20 s;
+source cgroup peaks 82.1 MiB CMS, 47.1 MiB website, 128.3 MiB PostgreSQL.
 
 Verified 2026-11-23 on the shared Linux builder with the `eab4189` bundles (05:26
 to 05:30 Pacific, fresh result): the two-guest test passed with 39 actual

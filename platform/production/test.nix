@@ -436,6 +436,20 @@ in {
                                     ("terrace-web", "CMS_PUBLIC_ORIGIN", "https://cms.terrace.invalid"), ("terrace-web", "ADDRESS_HEADER", "X-Forwarded-For")]:
               app.succeed(f"pid=$(systemctl show {unit}.service -p MainPID --value) && tr '\\0' '\\n' </proc/$pid/environ | grep -qx {name}={value}")
           ok(True, "lifecycle settings forced by the module")
+          # The packaged operator tools through terrace-cms-tool, with the CMS environment sops renders on ramfs: one roster
+          # dry run as the CMS account (a synthetic administrator named as operator, removed again; the dry run writes nothing).
+          sql("insert into users(display_name,role,email) values ('Synthetic operator','admin','operator@terrace.invalid')")
+          app.succeed("printf 'name,affiliation,class_year,contact_email\\nSynthetic Alumna,alumni,2004,prod-roster@terrace.invalid\\n' >/root/roster.csv"
+                      " && install -o terrace_cms -g terrace_cms -m 0600 /root/roster.csv /var/lib/terrace-cms-operator/roster.csv && rm /root/roster.csv")
+          rows = lambda: sql("select (select count(*) from member_applications) || ':' || (select count(*) from roster_runs) || ':' || (select count(*) from message_outbox)")
+          before_rows = rows()
+          out = app.succeed("terrace-cms-tool roster-invite dry-run --file /var/lib/terrace-cms-operator/roster.csv --operator operator@terrace.invalid --report /var/lib/terrace-cms-operator/dry-run.json 2>/dev/null")
+          dry = json.loads(out if out.startswith("{") else out[out.find("\n{\n") + 1:])
+          ok(dry["mode"] == "dry-run" and dry["counts"]["create"] == 1 and dry["databaseIdentity"].startswith("terrace_cms:"), "terrace-cms-tool roster dry run with the sops-rendered CMS environment")
+          ok(rows() == before_rows and app.succeed("stat -c %U:%a /var/lib/terrace-cms-operator/dry-run.json").strip() == "terrace_cms:600", "the dry run wrote nothing but its private report")
+          ok(app.fail("runuser -u nobody -- terrace-cms-tool roster-invite --surprise 2>&1").strip() == "terrace-cms-tool must run as root.", "terrace-cms-tool refuses a non-root caller")
+          sql("delete from users where email = 'operator@terrace.invalid'")
+          app.succeed("find /var/lib/terrace-cms-operator -mindepth 1 -delete")
           lifecycle_steps("original", LIFECYCLE_ORIGINAL_STEPS)
           ok(app.succeed("systemctl is-enabled terrace-cms-sweep.timer terrace-backup.timer").split() == ["enabled", "enabled"], "sweep and backup timers enabled")
           ok(app.succeed("systemctl is-active terrace-cms-sweep.timer terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer").split() == ["active"] * 4, "sweep and backup timers active")

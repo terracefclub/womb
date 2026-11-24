@@ -1,0 +1,1302 @@
+{
+ "schemaVersion": 2,
+ "kind": "wp-import-plan",
+ "sourceSha256": "e2996bd6f52089431270872563df4518053e71c416e30d0a40b6f01c77400598",
+ "sourceBytes": 43178,
+ "policy": {
+  "mediaBytes": "not-downloaded-references-only",
+  "gravityEntries": "excluded",
+  "defaultStatus": "draft",
+  "authorAccounts": "no-automatic-provisioning",
+  "networkFetches": 0
+ },
+ "docs": [
+  {
+   "ordinal": 21,
+   "wpId": 3001,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3001,
+    "wpGuid": "https://princetonterraceclub.org/?p=3001",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Fall issue cover",
+    "caption": "Cover caption",
+    "public": false,
+    "mimeType": "image/jpeg",
+    "width": 800,
+    "height": 600,
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/fall-cover.jpg",
+    "sourceFile": "2024/03/fall-cover.jpg"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "ef4b63d9bd64f804b0f0e0b2793fbf32917875bf8d72a7941159dc30708d33cf",
+   "targetHash": "e39214e3cff6b48ed911ebee8761960019b81e153ca038a5bc4d8d75d42cc9cb"
+  },
+  {
+   "ordinal": 22,
+   "wpId": 3002,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3002,
+    "wpGuid": "https://princetonterraceclub.org/?p=3002",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Fall 2024 PDF",
+    "public": false,
+    "mimeType": "application/pdf",
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/fall-2024.pdf",
+    "sourceFile": "2024/03/fall-2024.pdf",
+    "wpReviewFlags": [
+     "alt-missing"
+    ]
+   },
+   "refs": {},
+   "flags": [
+    "alt-missing"
+   ],
+   "sourceHash": "f986295e3243ccce346b98fda48170bbce71a2a9df0698d0f64a8a666d57fe12",
+   "targetHash": "7621543029832ba2b357f201eaed051c334e99e96d8382bd447444a24b3d55b6"
+  },
+  {
+   "ordinal": 23,
+   "wpId": 3003,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3003,
+    "wpGuid": "https://princetonterraceclub.org/?p=3003",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Story photo",
+    "public": false,
+    "mimeType": "image/png",
+    "width": 1200,
+    "height": 900,
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/story-photo.png",
+    "sourceFile": "2024/03/story-photo.png",
+    "wpReviewFlags": [
+     "alt-missing"
+    ]
+   },
+   "refs": {},
+   "flags": [
+    "alt-missing"
+   ],
+   "sourceHash": "5333a66297ae8f52ef3a4a52586981f37497979ebeb09437d61250762d79c93a",
+   "targetHash": "73bae7a7963f0e2ff48fb90fc726677b431d6eac8708990fb45d6bb777a05e8c"
+  },
+  {
+   "ordinal": 24,
+   "wpId": 3004,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3004,
+    "wpGuid": "https://princetonterraceclub.org/?p=3004",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Orphan image",
+    "public": false,
+    "mimeType": "image/webp",
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/orphan.webp",
+    "wpReviewFlags": [
+     "alt-missing",
+     "attachment-without-parent"
+    ]
+   },
+   "refs": {},
+   "flags": [
+    "alt-missing",
+    "attachment-without-parent"
+   ],
+   "sourceHash": "b023d24ae7f0df3d3c355c02e3873c44e11f686e9e72875d20b1fdd10527b2de",
+   "targetHash": "7be59e09689bc607f475b1447a3f390451a3796f2924e16645b1088bbce01a74"
+  },
+  {
+   "ordinal": 26,
+   "wpId": 3006,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3006,
+    "wpGuid": "https://princetonterraceclub.org/?p=3006",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Open mic poster",
+    "public": false,
+    "mimeType": "image/jpeg",
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/poster.jpg"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "dec82ad3d09b7e1223c83241a0d113fb82450268397e7801d3fa02371c6b772a",
+   "targetHash": "4b7db51fa68274cbbabce5ec5be295ed55602a6dd329e2d95b515e52d6c24969"
+  },
+  {
+   "ordinal": 27,
+   "wpId": 3007,
+   "collection": "media",
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "desiredStatus": "inherit",
+   "publishEligible": false,
+   "data": {
+    "wpId": 3007,
+    "wpGuid": "https://princetonterraceclub.org/?p=3007",
+    "wpStatus": "inherit",
+    "wpPasswordProtected": false,
+    "alt": "Odd file",
+    "public": false,
+    "mimeType": "application/octet-stream",
+    "sourceUrl": "https://princetonterraceclub.org/wp-content/uploads/2024/03/odd.xyz",
+    "wpReviewFlags": [
+     "alt-missing",
+     "attachment-without-parent",
+     "mime-unknown"
+    ]
+   },
+   "refs": {},
+   "flags": [
+    "alt-missing",
+    "attachment-without-parent",
+    "mime-unknown"
+   ],
+   "sourceHash": "5ca05b4bc3794aebf6494d85b3e8c2237d0a654811f85eb4f0dcd85ed6264271",
+   "targetHash": "13296223b13391c03a509a3ec3a4e86bf2231180949b7e3a3853eb6f316967d2"
+  },
+  {
+   "ordinal": 29,
+   "wpId": 4001,
+   "collection": "events",
+   "sourceType": "tribe_events",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 4001,
+    "wpGuid": "https://princetonterraceclub.org/?p=4001",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "media-bytes-pending"
+    ],
+    "title": "Fixture Open Mic",
+    "summary": "An invented open mic.",
+    "startsAt": "2030-01-19T00:00:00.000Z",
+    "endsAt": "2030-01-19T03:00:00.000Z",
+    "category": "music",
+    "locationName": "Fixture Hall",
+    "locationAddress": "1 Example Way, Exampleton, NJ, 00000",
+    "organizerName": "Fixture Committee",
+    "timezone": "America/New_York",
+    "allDay": false,
+    "startsAtLocal": "2030-01-18 19:00:00",
+    "endsAtLocal": "2030-01-18 22:00:00",
+    "body": "An invented open mic.",
+    "slug": "fixture-open-mic"
+   },
+   "refs": {
+    "coverImage": 3006
+   },
+   "flags": [
+    "media-bytes-pending"
+   ],
+   "sourceHash": "50ed8e363265917d934aa7bbc403eec7aad9190357a26e567aecee466fb3d26d",
+   "targetHash": "45c2b70c8d2a6d86fffd23d47d6fab3eef7eb8f5a95e638e9bf0d27c86abb444"
+  },
+  {
+   "ordinal": 30,
+   "wpId": 4002,
+   "collection": "events",
+   "sourceType": "tribe_events",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 4002,
+    "wpGuid": "https://princetonterraceclub.org/?p=4002",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "event-timezone-review"
+    ],
+    "title": "Fixture Dinner",
+    "summary": "An invented dinner.",
+    "startsAt": "2030-06-01T22:00:00.000Z",
+    "endsAt": "2030-06-02T01:00:00.000Z",
+    "category": "food",
+    "locationName": "Fixture Hall",
+    "locationAddress": "1 Example Way, Exampleton, NJ, 00000",
+    "organizerName": "Fixture Committee",
+    "timezone": "UTC-4",
+    "allDay": false,
+    "startsAtLocal": "2030-06-01 18:00:00",
+    "endsAtLocal": "2030-06-01 21:00:00",
+    "body": "An invented dinner.",
+    "slug": "fixture-dinner"
+   },
+   "refs": {},
+   "flags": [
+    "event-timezone-review"
+   ],
+   "sourceHash": "7debb02db49b885fd0b65a69e988762c7623800125bc546cb1efde5822117fb4",
+   "targetHash": "da40d95fce0b7ecf788648f921ca1b83e1aaf9696b567ada953d14ab51f39d61"
+  },
+  {
+   "ordinal": 32,
+   "wpId": 4004,
+   "collection": "events",
+   "sourceType": "tribe_events",
+   "sourceStatus": "pending",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 4004,
+    "wpGuid": "https://princetonterraceclub.org/?p=4004",
+    "wpStatus": "pending",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "event-category-defaulted",
+     "event-date-review",
+     "event-venue-missing"
+    ],
+    "title": "Local Only Event",
+    "summary": "Local times only.",
+    "startsAt": "2030-07-04T16:00:00.000Z",
+    "endsAt": "2030-07-04T18:00:00.000Z",
+    "category": "community",
+    "locationName": "Location to be confirmed",
+    "timezone": "America/New_York",
+    "allDay": false,
+    "startsAtLocal": "2030-07-04 12:00:00",
+    "endsAtLocal": "2030-07-04 14:00:00",
+    "body": "Local times only.",
+    "slug": "local-only-event"
+   },
+   "refs": {},
+   "flags": [
+    "event-category-defaulted",
+    "event-date-review",
+    "event-venue-missing"
+   ],
+   "sourceHash": "9407b872bc8203b679cb298137180add15603a116212260c62964f49dde2ba55",
+   "targetHash": "ddd7e9ff3c6eb8fdb46cc722dc243587441df7a85392a9be5f659786d685da3f"
+  },
+  {
+   "ordinal": 33,
+   "wpId": 4005,
+   "collection": "events",
+   "sourceType": "tribe_events",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 4005,
+    "wpGuid": "https://princetonterraceclub.org/?p=4005",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "All Day Fair",
+    "summary": "All day.",
+    "startsAt": "2030-09-10T04:00:00.000Z",
+    "endsAt": "2030-09-11T03:59:59.000Z",
+    "category": "community",
+    "locationName": "Fixture Hall",
+    "locationAddress": "1 Example Way, Exampleton, NJ, 00000",
+    "organizerName": "Fixture Committee",
+    "timezone": "America/New_York",
+    "allDay": true,
+    "startsAtLocal": "2030-09-10 00:00:00",
+    "endsAtLocal": "2030-09-10 23:59:59",
+    "body": "All day.",
+    "slug": "all-day-fair"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "14b4c6170e031226fc4e2ca226e426ff1abfb7429f3414896b91f0624ffb0656",
+   "targetHash": "5ae89180bfd3f5346375fa331e917cd9fd945d5e486792e032b903b51aad5cfa"
+  },
+  {
+   "ordinal": 34,
+   "wpId": 4006,
+   "collection": "events",
+   "sourceType": "tribe_events",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 4006,
+    "wpGuid": "https://princetonterraceclub.org/?p=4006",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "event-category-defaulted",
+     "event-end-invalid"
+    ],
+    "title": "Backwards Event",
+    "summary": "End before start.",
+    "startsAt": "2030-10-02T00:00:00.000Z",
+    "category": "community",
+    "locationName": "Fixture Hall",
+    "locationAddress": "1 Example Way, Exampleton, NJ, 00000",
+    "organizerName": "Fixture Committee",
+    "timezone": "America/New_York",
+    "allDay": false,
+    "startsAtLocal": "2030-10-01 20:00:00",
+    "endsAtLocal": "2030-10-01 19:00:00",
+    "body": "End before start.",
+    "slug": "backwards-event"
+   },
+   "refs": {},
+   "flags": [
+    "event-category-defaulted",
+    "event-end-invalid"
+   ],
+   "sourceHash": "bd9d9ccf94c1bdc83be898d86a8100c29de85e333b8903c58c7365cc5f042d76",
+   "targetHash": "67f0f26595794b1bf28ff5e77e4496eb4959216fb55175ceb912bafd8ae8a0df"
+  },
+  {
+   "ordinal": 7,
+   "wpId": 2001,
+   "collection": "newsletters",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2001,
+    "wpGuid": "https://princetonterraceclub.org/?p=2001",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "media-bytes-pending"
+    ],
+    "title": "Fall Newsletter 2024",
+    "issueDate": "2024-10-01T13:00:00.000Z",
+    "summary": "Read the issue.",
+    "slug": "fall-newsletter-2024"
+   },
+   "refs": {
+    "issuePdf": 3002,
+    "coverImage": 3001
+   },
+   "flags": [
+    "media-bytes-pending"
+   ],
+   "sourceHash": "1bf9251fe756163bc162a7b83532c3506df0a5bad8c001d2abb4891ab38d347b",
+   "targetHash": "59b1af7e14db597ce1a1cf10e5eecb303d14763dd79abaf3d1ae5d30a108ea48"
+  },
+  {
+   "ordinal": 8,
+   "wpId": 2002,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 2002,
+    "wpGuid": "https://princetonterraceclub.org/?p=2002",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "newsletter-without-pdf-evidence"
+    ],
+    "title": "Winter Newsletter Notes",
+    "bodyHtml": "<p>Notes with no PDF evidence. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-12-01T14:00:00.000Z",
+    "categories": [
+     "newsletter"
+    ],
+    "tags": [],
+    "slug": "winter-newsletter"
+   },
+   "refs": {},
+   "flags": [
+    "newsletter-without-pdf-evidence"
+   ],
+   "sourceHash": "b6986299fb8e2cac1b0fbfd4563c1c56404a6d033f18d5c2c834083202fe601c",
+   "targetHash": "9f02d729b28ddc3269f8379798dd532e52aa7ad706410bd2c5e981c22eda624b"
+  },
+  {
+   "ordinal": 9,
+   "wpId": 2003,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2003,
+    "wpGuid": "https://princetonterraceclub.org/?p=2003",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body",
+     "unsafe-html-stripped"
+    ],
+    "title": "A Club Story",
+    "excerpt": "A short invented story.",
+    "bodyHtml": "<p>Hello <strong>world</strong> bad <img src=\"x\" alt=\"\"> <a href=\"https://example.invalid/ok\" rel=\"noopener noreferrer\">ok</a></p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [
+     "stories"
+    ],
+    "tags": [],
+    "slug": "club-story"
+   },
+   "refs": {
+    "featuredMedia": 3003
+   },
+   "flags": [
+    "empty-body",
+    "unsafe-html-stripped"
+   ],
+   "sourceHash": "ec8c30b3ac20bc1f227e6d85c92aa39166895ce94c25657a17ad4da69c96eb0e",
+   "targetHash": "3d90bd03f372e8187633e90da3be7f404ba7a215884c48e1890d6e649bcb622f"
+  },
+  {
+   "ordinal": 10,
+   "wpId": 2004,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 2004,
+    "wpGuid": "https://princetonterraceclub.org/?p=2004",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "slug-deduplicated"
+    ],
+    "title": "A Club Story",
+    "bodyHtml": "<p>Same slug as another post. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-04-02T14:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "club-story-2004"
+   },
+   "refs": {},
+   "flags": [
+    "slug-deduplicated"
+   ],
+   "sourceHash": "91054e22035231ba5a64e10fdbddfc4c1837be1793e860efdfadcaa12256b07e",
+   "targetHash": "ac9c2be41544c0bf4a7bfc17a68e156baf6002b53536f918d3a35afc315b17bf"
+  },
+  {
+   "ordinal": 11,
+   "wpId": 2005,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "draft",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2005,
+    "wpGuid": "https://princetonterraceclub.org/?p=2005",
+    "wpStatus": "draft",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Draft Story",
+    "bodyHtml": "<p>Draft.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "draft-story"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "1d00da688196eb496512b65e69dc8d150b40e02c524ad393cfd94d44724b17d4",
+   "targetHash": "5a9114f2ba41c3f5610f2fef87bbc75df5e5e6d8d3602127372ec2aa8751c9b7"
+  },
+  {
+   "ordinal": 12,
+   "wpId": 2006,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "pending",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2006,
+    "wpGuid": "https://princetonterraceclub.org/?p=2006",
+    "wpStatus": "pending",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Pending Story",
+    "bodyHtml": "<p>Pending.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "pending-story"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "896b5afa97c40c27fbdc9ff804eaecf7b5261eb6e402bbcca386604442725c7c",
+   "targetHash": "adae289d709a2ee2f3bf80f6bb7c62cc546cb40ea0e2528d0be92029287ac6ef"
+  },
+  {
+   "ordinal": 13,
+   "wpId": 2007,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "private",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2007,
+    "wpGuid": "https://princetonterraceclub.org/?p=2007",
+    "wpStatus": "private",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Private Story",
+    "bodyHtml": "<p>Private.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "private-story"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "75dbe3ba058ae8e2f8aec8ff52ced8b9e6663b222f0d3643e8625569bffbe92d",
+   "targetHash": "738628a92e7339d140212c546d45ffa97aa92c9e122f7ba4fb8084a5224b7491"
+  },
+  {
+   "ordinal": 14,
+   "wpId": 2008,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "future",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 2008,
+    "wpGuid": "https://princetonterraceclub.org/?p=2008",
+    "wpStatus": "future",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Future Story",
+    "bodyHtml": "<p>Scheduled.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "future-story"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "3c1dcb392fd4e76d00d7b99ac1bd814b0d4d34bda5d96ce2549fd71526c98a54",
+   "targetHash": "f557a378f509139b3519c9f180d5bf13b64d99d6ab6d6b655319b67ba323dfa3"
+  },
+  {
+   "ordinal": 18,
+   "wpId": 2012,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 2012,
+    "wpGuid": "https://princetonterraceclub.org/?p=2012",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "Query Link Story",
+    "bodyHtml": "<p>No pretty permalink. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "query-link-story"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "d8b39e6c1f75b37bac6818b771346fdd18a90f42d8c29cfd8b219d5896c5430f",
+   "targetHash": "1981ac8a7ab585c28a459a68a777437647eecfa163b3a5dbb790e5e51d1c27ac"
+  },
+  {
+   "ordinal": 19,
+   "wpId": 2013,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 2013,
+    "wpGuid": "https://princetonterraceclub.org/?p=2013",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "Foreign Link Story",
+    "bodyHtml": "<p>Other host. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "foreign-link-story"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "1ec2180d97efd2772c2560004bc1417e77ad51b7196495e13c5d7892a123ee47",
+   "targetHash": "62b2dfa40da1595da39710fde58f99d9432124cbe465f69659a2b7f92657d8fd"
+  },
+  {
+   "ordinal": 20,
+   "wpId": 2014,
+   "collection": "posts",
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 2014,
+    "wpGuid": "https://princetonterraceclub.org/?p=2014",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "Dotted Path Story",
+    "bodyHtml": "<p>Path has a dot. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "slug": "dotted"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "d36ecec646a87cae6e083733e33302ff6c950b6978e36a9736141fdffc3faf7a",
+   "targetHash": "a16c33949c3472510bedfed8298f9b5f0b2054930f6b5090dca96172a18f25e6"
+  },
+  {
+   "ordinal": 1,
+   "wpId": 1001,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 1001,
+    "wpGuid": "https://princetonterraceclub.org/?p=1001",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "About the Synthetic Club",
+    "bodyHtml": "<p>Welcome to the fixture club.</p>\n<p>This page is served in place. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "menuOrder": 0,
+    "slug": "about"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "a35147e945fbd145cf55c4123d75f84fe981dd93792b6b407a373f5ecc21ea6c",
+   "targetHash": "04eb105360e1ae093b93d5c99b4b1ce5e035a6511e8fd2356621fbeebd7f60f1"
+  },
+  {
+   "ordinal": 2,
+   "wpId": 1002,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 1002,
+    "wpGuid": "https://princetonterraceclub.org/?p=1002",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "builder-code-dropped",
+     "divi-layout-review",
+     "empty-body",
+     "form-shortcode-dropped",
+     "unresolved-links",
+     "unsafe-html-stripped"
+    ],
+    "title": "Membership Dues",
+    "bodyHtml": "<p>Dues are <strong>invented</strong> for tests.</p><p><a href=\"https://example.invalid/pay\" rel=\"noopener noreferrer\">Pay &amp; Join</a></p><img src=\"https://princetonterraceclub.org/wp-content/uploads/2024/03/hall.jpg\" alt=\"Fixture hall\">",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "seoTitle": "Dues | Fixture",
+    "seoDescription": "How dues work in the fixture.",
+    "menuOrder": 0,
+    "slug": "dues"
+   },
+   "refs": {},
+   "flags": [
+    "builder-code-dropped",
+    "divi-layout-review",
+    "empty-body",
+    "form-shortcode-dropped",
+    "unresolved-links",
+    "unsafe-html-stripped"
+   ],
+   "sourceHash": "42aa7381c6abe8264222938843e60b5f7e36bcc9d4e43710d452823b30b95638",
+   "targetHash": "60d922a0dcf9b4d7926571fc1e4e873456a6967622f245bec4fed01100945524"
+  },
+  {
+   "ordinal": 3,
+   "wpId": 1003,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "draft",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 1003,
+    "wpGuid": "https://princetonterraceclub.org/?p=1003",
+    "wpStatus": "draft",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Draft Page",
+    "bodyHtml": "<p>Not ready.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "menuOrder": 0,
+    "slug": "draft-page"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "8dcd8a30920317bb2052d4a032830481290f91cceb4b91cffa322fbcb834d528",
+   "targetHash": "23102e6c2c20162634d484057fe8f23cdbbbc4aef19a0fdd9ab7539b8ce106c8"
+  },
+  {
+   "ordinal": 4,
+   "wpId": 1004,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "desiredStatus": "draft",
+   "publishEligible": false,
+   "data": {
+    "wpId": 1004,
+    "wpGuid": "https://princetonterraceclub.org/?p=1004",
+    "wpStatus": "publish",
+    "wpPasswordProtected": true,
+    "wpReviewFlags": [
+     "empty-body"
+    ],
+    "title": "Members Only Page",
+    "bodyHtml": "<p>Hidden behind a password.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "menuOrder": 0,
+    "slug": "members-only"
+   },
+   "refs": {},
+   "flags": [
+    "empty-body"
+   ],
+   "sourceHash": "8b054619173fcfab5b1875e87289eff23d17fe4fab72f8703fd3f2d9fdd6db25",
+   "targetHash": "8492f643236b5831fa003924ffcf49b1775fcfcf828a0b660b8d51027eac2735"
+  },
+  {
+   "ordinal": 5,
+   "wpId": 1005,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 1005,
+    "wpGuid": "https://princetonterraceclub.org/?p=1005",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "wpReviewFlags": [
+     "date-missing"
+    ],
+    "title": "Undated Page",
+    "bodyHtml": "<p>No date recorded. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "categories": [],
+    "tags": [],
+    "menuOrder": 0,
+    "slug": "undated"
+   },
+   "refs": {},
+   "flags": [
+    "date-missing"
+   ],
+   "sourceHash": "39c1acc074b4e9a01b4ae01fe0699e069cf7f2d25491141eb81ae78d316d2cc6",
+   "targetHash": "0c7dd74cf6e44a770957cf6b746377894d57eef81da1b578334223908af3aca1"
+  },
+  {
+   "ordinal": 6,
+   "wpId": 1006,
+   "collection": "pages",
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 1006,
+    "wpGuid": "https://princetonterraceclub.org/?p=1006",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "Child Page",
+    "bodyHtml": "<p>Child of about. Synthetic filler for the fixture: invented club news with enough plain text that the page is not a near-empty body, so quality gates can tell real content from a bare heading. It names nobody and describes nothing real.</p>",
+    "authorName": "Fixture Author One",
+    "publishedAt": "2024-03-05T15:00:00.000Z",
+    "categories": [],
+    "tags": [],
+    "parentWpId": 1001,
+    "menuOrder": 0,
+    "slug": "history"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "209a19ebbcad10bf6ac1338630e1fb053360d1ab8e44e606db3557aab2a1a052",
+   "targetHash": "6e18d46d508d4959977f6e3889dfb38d266e0ef7fcd9dd4af36fdf4a6eb40a17"
+  },
+  {
+   "ordinal": 37,
+   "wpId": 6001,
+   "collection": "initiatives",
+   "sourceType": "project",
+   "sourceStatus": "publish",
+   "desiredStatus": "published",
+   "publishEligible": true,
+   "data": {
+    "wpId": 6001,
+    "wpGuid": "https://princetonterraceclub.org/?p=6001",
+    "wpStatus": "publish",
+    "wpPasswordProtected": false,
+    "title": "Fixture Initiative",
+    "summary": "Initiative summary.",
+    "body": "An invented initiative.",
+    "slug": "fixture-initiative"
+   },
+   "refs": {},
+   "flags": [],
+   "sourceHash": "cb3fb07fa18202fd2ae4548634e8444b7a824090971c96fb9661d6f526fa92e5",
+   "targetHash": "973a845911355dff528671422c27cdfc8566be88812aad24575632db6590558a"
+  }
+ ],
+ "redirects": [
+  {
+   "ordinal": 1,
+   "wpId": 1001,
+   "collection": "pages",
+   "sourcePath": "/about",
+   "destination": "/about",
+   "mode": "served-in-place"
+  },
+  {
+   "ordinal": 2,
+   "wpId": 1002,
+   "collection": "pages",
+   "sourcePath": "/membership/dues",
+   "destination": "/pages/dues",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 5,
+   "wpId": 1005,
+   "collection": "pages",
+   "sourcePath": "/undated",
+   "destination": "/pages/undated",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 6,
+   "wpId": 1006,
+   "collection": "pages",
+   "sourcePath": "/about/history",
+   "destination": "/pages/history",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 7,
+   "wpId": 2001,
+   "collection": "newsletters",
+   "sourcePath": "/fall-newsletter-2024",
+   "destination": "/newsletter/fall-newsletter-2024",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 8,
+   "wpId": 2002,
+   "collection": "posts",
+   "sourcePath": "/winter-newsletter",
+   "destination": "/news/winter-newsletter",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 9,
+   "wpId": 2003,
+   "collection": "posts",
+   "sourcePath": "/2024/03/club-story",
+   "destination": "/news/club-story",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 10,
+   "wpId": 2004,
+   "collection": "posts",
+   "sourcePath": "/2024/04/club-story",
+   "destination": "/news/club-story-2004",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 29,
+   "wpId": 4001,
+   "collection": "events",
+   "sourcePath": "/event/fixture-open-mic",
+   "destination": "/events/fixture-open-mic",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 30,
+   "wpId": 4002,
+   "collection": "events",
+   "sourcePath": "/event/fixture-dinner",
+   "destination": "/events/fixture-dinner",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 33,
+   "wpId": 4005,
+   "collection": "events",
+   "sourcePath": "/event/all-day-fair",
+   "destination": "/events/all-day-fair",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 34,
+   "wpId": 4006,
+   "collection": "events",
+   "sourcePath": "/event/backwards-event",
+   "destination": "/events/backwards-event",
+   "mode": "redirect"
+  },
+  {
+   "ordinal": 37,
+   "wpId": 6001,
+   "collection": "initiatives",
+   "sourcePath": "/project/fixture-initiative",
+   "destination": "/initiatives",
+   "mode": "redirect"
+  }
+ ],
+ "unmapped": [
+  {
+   "ordinal": 15,
+   "sourceType": "post",
+   "sourceStatus": "trash",
+   "scope": "record",
+   "reason": "trashed"
+  },
+  {
+   "ordinal": 16,
+   "sourceType": "post",
+   "sourceStatus": "auto-draft",
+   "scope": "record",
+   "reason": "auto-draft"
+  },
+  {
+   "ordinal": 17,
+   "sourceType": "revision",
+   "sourceStatus": "inherit",
+   "scope": "record",
+   "reason": "revision"
+  },
+  {
+   "ordinal": 18,
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "scope": "redirect",
+   "reason": "redirect-query-or-fragment-route"
+  },
+  {
+   "ordinal": 19,
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "scope": "redirect",
+   "reason": "redirect-foreign-origin"
+  },
+  {
+   "ordinal": 20,
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "scope": "redirect",
+   "reason": "redirect-unrepresentable-path"
+  },
+  {
+   "ordinal": 25,
+   "sourceType": "attachment",
+   "sourceStatus": "inherit",
+   "scope": "record",
+   "reason": "attachment-url-missing-or-unsafe"
+  },
+  {
+   "ordinal": 28,
+   "sourceType": "attachment",
+   "sourceStatus": "trash",
+   "scope": "record",
+   "reason": "non-content-status"
+  },
+  {
+   "ordinal": 31,
+   "sourceType": "tribe_events",
+   "sourceStatus": "draft",
+   "scope": "record",
+   "reason": "event-missing-or-unconvertible-start"
+  },
+  {
+   "ordinal": 35,
+   "sourceType": "tribe_venue",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "embedded-in-events-not-standalone"
+  },
+  {
+   "ordinal": 36,
+   "sourceType": "tribe_organizer",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "embedded-in-events-not-standalone"
+  },
+  {
+   "ordinal": 38,
+   "sourceType": "nav_menu_item",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "menus-need-database-backup-or-review"
+  },
+  {
+   "ordinal": 39,
+   "sourceType": "et_pb_layout",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "divi-layout-library-not-imported"
+  },
+  {
+   "ordinal": 40,
+   "sourceType": "custom_css",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "theme-styles-not-imported"
+  },
+  {
+   "ordinal": 41,
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "invalid-or-duplicate-id"
+  },
+  {
+   "ordinal": 42,
+   "sourceType": "page",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "invalid-or-duplicate-id"
+  },
+  {
+   "ordinal": 43,
+   "sourceType": "post",
+   "sourceStatus": "publish",
+   "scope": "record",
+   "reason": "invalid-or-duplicate-id"
+  }
+ ],
+ "summary": {
+  "sourceItems": 43,
+  "publishStatusContentWithoutPassword": 18,
+  "bySourceType": {
+   "attachment": {
+    "total": 8,
+    "inherit": 7,
+    "trash": 1
+   },
+   "custom_css": {
+    "total": 1,
+    "publish": 1
+   },
+   "et_pb_layout": {
+    "total": 1,
+    "publish": 1
+   },
+   "nav_menu_item": {
+    "total": 1,
+    "publish": 1
+   },
+   "page": {
+    "total": 7,
+    "publish": 6,
+    "draft": 1
+   },
+   "post": {
+    "total": 15,
+    "publish": 9,
+    "draft": 1,
+    "pending": 1,
+    "private": 1,
+    "future": 1,
+    "trash": 1,
+    "auto-draft": 1
+   },
+   "project": {
+    "total": 1,
+    "publish": 1
+   },
+   "revision": {
+    "total": 1,
+    "inherit": 1
+   },
+   "tribe_events": {
+    "total": 6,
+    "publish": 4,
+    "draft": 1,
+    "pending": 1
+   },
+   "tribe_organizer": {
+    "total": 1,
+    "publish": 1
+   },
+   "tribe_venue": {
+    "total": 1,
+    "publish": 1
+   }
+  },
+  "mappedByCollection": {
+   "events": 5,
+   "initiatives": 1,
+   "media": 6,
+   "newsletters": 1,
+   "pages": 6,
+   "posts": 10
+  },
+  "mappedBySourceType": {
+   "attachment": 6,
+   "page": 6,
+   "post": 11,
+   "project": 1,
+   "tribe_events": 5
+  },
+  "publishEligibleDocuments": 10,
+  "reviewFlags": {
+   "alt-missing": 4,
+   "attachment-without-parent": 2,
+   "builder-code-dropped": 1,
+   "date-missing": 1,
+   "divi-layout-review": 1,
+   "empty-body": 8,
+   "event-category-defaulted": 2,
+   "event-date-review": 1,
+   "event-end-invalid": 1,
+   "event-timezone-review": 1,
+   "event-venue-missing": 1,
+   "form-shortcode-dropped": 1,
+   "media-bytes-pending": 2,
+   "mime-unknown": 1,
+   "newsletter-without-pdf-evidence": 1,
+   "slug-deduplicated": 1,
+   "unresolved-links": 1,
+   "unsafe-html-stripped": 2
+  },
+  "unmappedByReason": {
+   "record:attachment-url-missing-or-unsafe": 1,
+   "record:auto-draft": 1,
+   "record:divi-layout-library-not-imported": 1,
+   "record:embedded-in-events-not-standalone": 2,
+   "record:event-missing-or-unconvertible-start": 1,
+   "record:invalid-or-duplicate-id": 3,
+   "record:menus-need-database-backup-or-review": 1,
+   "record:non-content-status": 1,
+   "record:revision": 1,
+   "record:theme-styles-not-imported": 1,
+   "record:trashed": 1,
+   "redirect:redirect-foreign-origin": 1,
+   "redirect:redirect-query-or-fragment-route": 1,
+   "redirect:redirect-unrepresentable-path": 1
+  },
+  "redirects": {
+   "total": 13,
+   "redirect": 12,
+   "servedInPlace": 1,
+   "publishCandidatesWithoutRedirect": 6
+  },
+  "extensions": {
+   "mediaBytes": "todo-kinsta-zip",
+   "menus": "todo-kinsta-zip",
+   "pluginSettings": "todo-kinsta-zip",
+   "uploadLinkRewrite": "todo-kinsta-zip"
+  },
+  "contentGates": {
+   "minBodyTextChars": 200,
+   "leftoverShortcodeNames": {},
+   "reviewsApplied": 0,
+   "reviewsUnmatched": 0
+  },
+  "links": {
+   "documentsWithFindings": 1,
+   "unresolvedInternalTargets": [],
+   "oldSiteUploadLinks": [
+    "/wp-content/uploads/2024/03/hall.jpg"
+   ],
+   "perDocument": [
+    {
+     "ordinal": 2,
+     "unresolved": 0,
+     "uploads": 1,
+     "uploadImages": 1
+    }
+   ]
+  }
+ },
+ "planSha256": "a61d8325cfff9898b7560993ab4ebce7bb547355f958d31818368f7eccfeef42"
+}

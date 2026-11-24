@@ -6,6 +6,8 @@
   inputs = "/var/lib/terrace-website-inputs";
   media = "/var/lib/terrace-cms-media";
   outbox = "/var/lib/terrace-cms-outbox";
+  operator = "/var/lib/terrace-cms-operator";
+  importPlan = ./website-fixtures/wp-import-plan.synthetic.json;
   secrets = "/var/lib/website-backup-secrets";
   restored = "/var/lib/terrace-website-recovery";
   repository = "/home/restic/website-repository";
@@ -27,6 +29,10 @@
       webPackage = release.web;
       cmsPackage = release.cms;
       revision = release.revision;
+      # A non-default per-address lock wait (CMS default 3000 ms), proven below with a held lock.
+      lifecycleLockTimeoutMs = 500;
+      # The smallest run-time bound, so the proof can wait for it (every real tool run here takes seconds).
+      operatorToolMaxSeconds = 60;
     };
     terrace.backup = {
       enable = true;
@@ -167,7 +173,8 @@ in {
 
     def data_signature(machine, isolated=False):
         return {table: sql(machine, f"select md5(string_agg(to_jsonb(t)::text, chr(10) order by to_jsonb(t)::text)) from {table} t", isolated)
-                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox", "roster_runs", "roster_run_items"]}
+                for table in ["events", "_events_v", "media", "users", "members", "payload_migrations", "message_outbox", "roster_runs", "roster_run_items",
+                              "member_applications", "member_invitations", "wp_import_runs", "wp_import_journal", "pages", "posts", "redirects"]}
 
     def assert_content(machine):
         docs = api(machine, "/api/events?limit=10&draft=true")["docs"]
@@ -283,6 +290,267 @@ in {
         sweep = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,ExecMainStartTimestampMonotonic").splitlines())
         assert sweep["Result"] == "success" and sweep["ExecMainStatus"] == "0" and int(sweep["ExecMainStartTimestampMonotonic"]) > int(migrated["ExecMainExitTimestampMonotonic"]), sweep
         source.succeed("rm /run/website-test-slow-migration && systemctl start terrace-cms.service terrace-web.service")
+
+    with subtest("operator tools through terrace-cms-tool: roster and importer as the CMS account, refusals, lock wait, no secret exposure"):
+        def tool(args, expect=0):
+            rc, out = source.execute("terrace-cms-tool " + " ".join(shlex.quote(a) for a in args) + " 2>/tmp/tool.err")
+            err = source.succeed("cat /tmp/tool.err")
+            assert rc == expect, (args, rc, out[-2000:], err[-2000:])
+            return out, err
+        def summary(out):
+            start = out.find("\n{\n") + 1 if not out.startswith("{") else 0
+            return json.loads(out[start:])
+        def background(name, args):
+            # A tool run that outlives this command: its own transient unit (not a shell job), output and exit status in files.
+            base = "/var/lib/website-test-tool/" + name
+            source.succeed("install -d -m 0700 /var/lib/website-test-tool && rm -f " + base + ".*")
+            script = "/run/current-system/sw/bin/terrace-cms-tool " + " ".join(shlex.quote(a) for a in args) + f" >{base}.out 2>{base}.err; echo $? >{base}.rc"
+            source.succeed(f"systemd-run --quiet --collect --unit=website-test-{name} --description='website test {name}' ${pkgs.bash}/bin/bash -c " + shlex.quote(script))
+            return base
+        def files(directory):
+            # Every file and its hash (names may contain spaces).
+            return source.succeed(f"cd {directory} && find . -type f -print0 | sort -z | xargs -0 -r sha256sum")
+        def directories():
+            return {name: files(path) for name, path in [("outbox", "${outbox}"), ("media", "${media}"), ("operator", "${operator}")]}
+        def written_only_report(before, after, report_path):
+            # A dry run leaves the outbox and uploads byte-identical; in the operator directory it adds exactly its own report.
+            added = sorted(set(after["operator"].splitlines()) - set(before["operator"].splitlines()))
+            assert after["outbox"] == before["outbox"] and after["media"] == before["media"], "a dry run changed the outbox or uploads"
+            assert set(before["operator"].splitlines()) <= set(after["operator"].splitlines()) and len(added) == 1 and added[0].endswith("./" + report_path.rsplit("/", 1)[1]), added
+        def counts():
+            return {name: sql(source, query) for name, query in [
+                ("applications", "select count(*) from member_applications"), ("invitations", "select count(*) from member_invitations"),
+                ("outbox", "select count(*) from message_outbox"), ("runs", "select count(*) from roster_runs"), ("items", "select count(*) from roster_run_items"),
+                ("import_runs", "select count(*) from wp_import_runs"), ("pages", "select count(*) from pages"), ("posts", "select count(*) from posts"), ("redirects", "select count(*) from redirects")]}
+        secrets = [line.split("=", 1)[1] for line in source.succeed("cat ${inputs}/cms.env").splitlines() if line.split("=", 1)[0] in ("PAYLOAD_SECRET", "LIFECYCLE_INTAKE_SECRET", "CMS_AUTH_CLIENT_SECRET", "MEMBER_AUTH_INTROSPECTION_SECRET")]
+        assert len(secrets) == 4 and all(len(value) == 64 for value in secrets)
+        assert source.succeed("stat -c %U:%G:%a ${operator}").strip() == "terrace_cms:terrace_cms:700"
+        # A synthetic administrator to name as --operator (attribution only; no password, no sign-in).
+        sql(source, "insert into users(display_name,role,email) values ('Synthetic operator','admin','operator@terrace.invalid')")
+        roster = "${operator}/roster file.csv"
+        source.succeed("printf 'name,affiliation,class_year,contact_email\nSynthetic Alumna,alumni,2004,roster-alumna@terrace.invalid\nSynthetic Member,current-member,,roster-member@terrace.invalid\n' >/root/roster.csv"
+                       " && install -o terrace_cms -g terrace_cms -m 0600 /root/roster.csv " + shlex.quote(roster) + " && rm /root/roster.csv")
+        reports = iter(range(100))
+        report = lambda: f"${operator}/report-{next(reports)}.json"
+
+        # Wrapper boundary: root only, known tools only, a migration in progress or a closed gate refuses, arguments unchanged, exit status propagated.
+        assert source.fail("runuser -u nobody -- terrace-cms-tool roster-invite --surprise 2>&1").strip() == "terrace-cms-tool must run as root."
+        rc, out = source.execute("terrace-cms-tool roster-inviter 2>&1")
+        assert rc == 64 and out.startswith("Usage: terrace-cms-tool roster-invite|wp-import"), (rc, out)
+        out, err = tool(["roster-invite", "--surprise"], expect=1)
+        assert out == "" and err.startswith("Usage: roster-invite.ts"), err
+        out, err = tool(["wp-import", "--surprise"], expect=1)
+        assert out == "" and err.startswith("Usage: wp-import.ts"), err
+        rows_before = counts()
+        dirs_before = directories()
+        # A path with a space and an option-like argument reach the tool unchanged; the default command is a dry run.
+        dry_report = report()
+        dry = summary(tool(["roster-invite", "--file", roster, "--operator", "operator@terrace.invalid", "--report", dry_report, "--reinvite-lapsed"])[0])
+        assert dry["mode"] == "dry-run" and dry["reinviteLapsed"] is True and dry["counts"] == {"rows": 2, "create": 2, "reject": 0, "skip": 0, "deferred": 0}, dry
+        assert counts() == rows_before
+        written_only_report(dirs_before, directories(), dry_report)
+        source.succeed("mv /var/lib/terrace-cms/migrated-revision /root/migrated-revision")
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=1)
+        assert "CMS migration gate is closed" in err, err
+        source.succeed("mv /root/migrated-revision /var/lib/terrace-cms/migrated-revision")
+        source.succeed("touch /run/website-test-slow-migration && systemctl start --no-block terrace-cms-migrate.service")
+        source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx activating", timeout=30)
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=75)
+        assert err.strip() == "A CMS migration is in progress; run the tool after it has finished.", err
+        source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx inactive", timeout=120)
+        # Each migration stops the CMS and website; their start limit (3 in 10 minutes) is not under test here.
+        source.succeed("rm /run/website-test-slow-migration && systemctl reset-failed terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
+        # A migration refuses to start under a running operator tool (a unit with the tools' name prefix stands in for one).
+        source.succeed("systemd-run --unit=terrace-cms-tool-probe ${pkgs.coreutils}/bin/sleep 60")
+        source.fail("systemctl start terrace-cms-migrate.service")
+        source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
+        assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+
+        # The writes run in the public profile, as on a production host: swap in a public variant of the protected file (same
+        # secrets) now that the migration checks are done (the CMS keeps running as started), and put the original back byte for byte afterwards.
+        original_cms_env = source.succeed("sha256sum ${inputs}/cms.env").split()[0]
+        source.succeed("cp -a ${inputs}/cms.env /root/cms.env.loopback && chmod 0600 ${inputs}/cms.env"
+                       " && sed -i -e 's|^CMS_ORIGIN=.*|CMS_ORIGIN=https://editor.terrace.invalid|' -e 's|_ISSUER=.*|_ISSUER=https://identity.terrace.invalid/realms/terrace|' ${inputs}/cms.env"
+                       " && printf 'CMS_PUBLIC_DEPLOYMENT=1\nLIFECYCLE_PUBLIC_ORIGIN=https://web.terrace.invalid\n' >>${inputs}/cms.env && chmod 0400 ${inputs}/cms.env")
+        # Roster: a write needs --confirm-production (the host's database counts as a production target); then apply, no-op, rollback.
+        plan = summary(tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])[0])
+        out, err = tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"]], expect=1)
+        assert err.strip() == "This is a production target. Pass --confirm-production." and counts() == rows_before, err
+        files_before = set(source.succeed("ls ${outbox}").split())
+        applied = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"], "--report", report(), "--confirm-production"])[0])
+        assert applied["counts"]["created"] == 2 and applied["counts"]["failed"] == 0, applied
+        assert sql(source, f"select r.status || ':' || count(i.id) from roster_runs r join roster_run_items i on i.run_id = r.id where r.run_id = '{applied['runId']}' group by r.status") == "completed:2"
+        assert sql(source, "select count(*) from member_invitations i join member_applications a on a.id = i.application_id where a.contact_email like 'roster-%@terrace.invalid' and i.status = 'pending'") == "2"
+        links = sorted(set(source.succeed("ls ${outbox}").split()) - files_before)
+        assert len(links) == 2, links
+        assert source.succeed("cd ${outbox} && stat -c %U:%G:%a " + " ".join(links)).split() == ["terrace_cms:terrace_cms:600"] * 2
+        for name in links:
+            source.succeed(f"jq -e '.body | test(\"https://web.terrace.invalid/join/\")' ${outbox}/{name} >/dev/null")
+        after_apply = counts()
+        again = summary(tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])[0])
+        assert again["counts"]["create"] == 0 and again["counts"]["skip"] == 2, again
+        noop = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", again["planSha256"], "--confirm-production"])[0])
+        assert noop["runId"] is None and noop["counts"]["created"] == 0 and counts() == after_apply, noop
+        back = summary(tool(["roster-invite", "rollback", "--run", applied["runId"], "--operator", "operator@terrace.invalid", "--confirm-production"])[0])
+        assert back["ok"] is True and back["revoked"] == 2 and back["withdrawn"] == 2, back
+        assert sql(source, f"select status from roster_runs where run_id = '{applied['runId']}'") == "rolled-back"
+
+        # Importer: on this host it needs --allow-nonlocal-database (the module's DATABASE_URI form is not "local" to it) and,
+        # for writes, --confirm-production. Neither is added by the wrapper.
+        source.succeed("install -o terrace_cms -g terrace_cms -m 0600 ${importPlan} ${operator}/plan.json")
+        plan_file = "${operator}/plan.json"
+        rows_before = counts()
+        out, err = tool(["wp-import", "dry-run", "--plan", plan_file], expect=1)
+        assert err.strip() == "The database is not local. Pass --allow-nonlocal-database only for an approved target.", err
+        dirs_before = directories()
+        dry_report = report()
+        dry = summary(tool(["wp-import", "dry-run", "--plan", plan_file, "--report", dry_report, "--allow-nonlocal-database"])[0])
+        assert dry["mode"] == "dry-run" and dry["counts"]["failed"] == 0 and dry["counts"]["created"] > 0 and counts() == rows_before, dry
+        written_only_report(dirs_before, directories(), dry_report)
+        out, err = tool(["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-host-1", "--allow-nonlocal-database"], expect=1)
+        assert err.strip().startswith("The database is a production target") and "--confirm-production" in err and counts() == rows_before, err
+        imported = summary(tool(["wp-import", "apply", "--plan", plan_file, "--run-id", "wpimport-host-1", "--report", report(), "--allow-nonlocal-database", "--confirm-production"])[0])
+        assert imported["counts"]["created"] == dry["counts"]["created"] and imported["counts"]["failed"] == 0, imported
+        after_import = counts()
+        assert after_import["import_runs"] == str(int(rows_before["import_runs"]) + 1)
+        reapplied = summary(tool(["wp-import", "apply", "--plan", plan_file, "--report", report(), "--allow-nonlocal-database", "--confirm-production"])[0])
+        assert reapplied["counts"]["created"] == 0 and reapplied["counts"]["updated"] == 0 and reapplied["counts"]["skipped"] == imported["counts"]["created"], reapplied
+        assert {k: v for k, v in counts().items() if k != "import_runs"} == {k: v for k, v in after_import.items() if k != "import_runs"}
+        undone = summary(tool(["wp-import", "rollback", "--run", "wpimport-host-1", "--report", report(), "--allow-nonlocal-database", "--confirm-production"])[0])
+        assert undone["ok"] is True and undone["deleted"] == imported["counts"]["created"] + imported["counts"]["redirects"]["created"], undone
+        assert {k: v for k, v in counts().items() if k not in ("import_runs",)} == {k: v for k, v in rows_before.items() if k not in ("import_runs",)}
+
+        # LIFECYCLE_LOCK_TIMEOUT_MS=500 (module option): with the address lock held, the public apply endpoint answers 503 within the bound
+        # and a roster row waits about half a second, then stops with address-locked and stores nothing.
+        held = "roster-locked@terrace.invalid"
+        source.succeed("printf 'name,affiliation,class_year,contact_email\nSynthetic Locked,alumni,2004," + held + "\n' >/root/locked.csv && install -o terrace_cms -g terrace_cms -m 0600 /root/locked.csv ${operator}/locked.csv && rm /root/locked.csv")
+        locked_plan = summary(tool(["roster-invite", "dry-run", "--file", "${operator}/locked.csv", "--operator", "operator@terrace.invalid", "--report", report()])[0])
+        source.succeed("systemd-run --unit=website-test-lock-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote(f"begin; select pg_advisory_xact_lock(hashtextextended('terrace-application-email:{held}', 0)); select pg_sleep(60); commit"))
+        waiting_sql = "select count(*) from pg_locks w join pg_locks h on h.locktype = 'advisory' and h.granted and w.classid = h.classid and w.objid = h.objid and w.objsubid = h.objsubid and h.pid <> w.pid where w.locktype = 'advisory' and not w.granted"
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where locktype = 'advisory' and granted\") -ge 1", timeout=30)
+        intake = [line.split("=", 1)[1] for line in source.succeed("cat ${inputs}/cms.env").splitlines() if line.startswith("LIFECYCLE_INTAKE_SECRET=")][0]
+        answer = source.succeed("curl --silent --max-time 10 --output /tmp/apply.json --write-out '%{http_code} %{time_total}' -H 'content-type: application/json' -H " + shlex.quote("x-terrace-intake: " + intake)
+                                + " --data " + shlex.quote(json.dumps({"name": "Synthetic Locked Form", "affiliation": "alumni", "contactEmail": held})) + " http://127.0.0.1:13048/api/lifecycle/apply").split()
+        assert answer[0] == "503" and float(answer[1]) < 2.5, answer
+        source.succeed("jq -e '. == {\"error\":\"Unavailable.\"}' /tmp/apply.json >/dev/null")
+        locked_run = background("locked", ["roster-invite", "apply", "--file", "${operator}/locked.csv", "--operator", "operator@terrace.invalid", "--plan-sha256", locked_plan["planSha256"], "--confirm-production"])
+        # Sample pg_locks: from the first sample showing the tool's backend waiting on the held key to the first that does not.
+        first: float | None = None
+        last: float | None = None
+        for _ in range(1200):
+            now = time.monotonic()
+            if int(sql(source, waiting_sql) or "0") > 0:
+                first = first or now
+            elif first is not None:
+                last = now
+                break
+            if source.execute(f"test -e {locked_run}.rc")[0] == 0:
+                break
+        assert first is not None and last is not None, "the tool never waited on the held lock"
+        waited = last - first
+        source.wait_until_succeeds(f"test -s {locked_run}.rc", timeout=60)
+        assert source.succeed(f"cat {locked_run}.rc").strip() == "1"
+        locked = summary(source.succeed(f"cat {locked_run}.out"))
+        assert locked["failure"] == "address-locked" and locked["counts"]["created"] == 0 and locked["counts"]["failed"] == 1, locked
+        assert sql(source, f"select count(*) from member_applications where contact_email = '{held}'") == "0"
+        assert 0.1 <= waited < 2.0, f"lock wait {waited:.2f}s with LIFECYCLE_LOCK_TIMEOUT_MS=500"
+        print(f"roster lock wait with LIFECYCLE_LOCK_TIMEOUT_MS=500: {waited:.2f}s; public apply answered {answer[0]} in {answer[1]}s")
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-lock-holder.service", timeout=30)
+
+        # The transient unit, frozen while it runs: the CMS account and the CMS units' own settings, and no secret value in its
+        # properties (as root or as another user) or in any process's arguments.
+        frozen_run = background("frozen", ["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])
+        source.wait_until_succeeds("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | grep -q .", timeout=30)
+        unit = source.succeed("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | cut -d' ' -f1").strip()
+        source.succeed(f"systemctl freeze {unit}")
+        shown = source.succeed(f"systemctl show {unit}") + source.succeed(f"runuser -u nobody -- systemctl show {unit}") + source.succeed("ps -eo args")
+        assert "terrace-cms-tool-run roster-invite dry-run" in shown and not any(value in shown for value in secrets), "secret value in unit properties or arguments"
+        props = lambda name: dict(line.split("=", 1) for line in source.succeed(f"systemctl show {name} -p User,Group,UMask,ProtectSystem,ProtectHome,NoNewPrivileges,PrivateTmp,PrivateDevices,RestrictAddressFamilies,MemoryHigh,MemoryMax,CPUQuotaPerSecUSec,TasksMax,LogNamespace,WorkingDirectory,EnvironmentFiles").splitlines())
+        tool_props, cms_props = props(unit), props("terrace-cms.service")
+        assert tool_props == cms_props and tool_props["User"] == "terrace_cms" and tool_props["EnvironmentFiles"].startswith("${inputs}/cms.env"), (tool_props, cms_props)
+        assert source.succeed(f"systemctl show {unit} -p RuntimeMaxUSec --value").strip() == "1min"
+        # What another local user can see of a running tool (recorded, then documented): argv carries the operator's email and file paths.
+        seen = {view: "operator@terrace.invalid" in source.execute(f"runuser -u nobody -- {command} 2>&1")[1] and source.execute(f"runuser -u nobody -- {command} >/dev/null 2>&1")[0] == 0
+                for view, command in [("ps", "ps -eo args"), ("status", f"systemctl status --no-pager {unit}"), ("show", f"systemctl show {unit}"), ("cat", f"systemctl cat --no-pager {unit}")]}
+        print("TOOL-VISIBILITY " + json.dumps(seen))
+        assert not any(value in source.execute(f"runuser -u nobody -- systemctl cat --no-pager {unit} 2>&1")[1] for value in secrets)
+        source.succeed(f"systemctl thaw {unit}")
+        source.wait_until_succeeds(f"test -s {frozen_run}.rc", timeout=60)
+        assert source.succeed(f"cat {frozen_run}.rc").strip() == "0" and summary(source.succeed(f"cat {frozen_run}.out"))["mode"] == "dry-run"
+        source.wait_until_fails(f"systemctl is-active --quiet {unit}", timeout=30)
+        # No secret value in any journal, including the tools' namespace.
+        logs = source.succeed("journalctl --no-pager -o json; journalctl --namespace=terrace-apps --no-pager -o json")
+        assert len(logs) > 1000 and not any(value in logs for value in secrets), "secret value in a journal"
+        # Nor the tools' own output (stdout and stderr go to the caller through --pipe): the roster file's hash is printed by the
+        # tool only, and the two refusals only on its stderr. Nor their arguments: the fixed unit description keeps the command
+        # line (operator email, file paths, plan hash) out of systemd's start and stop messages.
+        # Checked per entry: every entry's message, and every field of the tool units' own entries. Not the _CMDLINE of
+        # unrelated processes: this harness's own psql and runuser command lines (which name the synthetic operator) are logged there.
+        entries = [json.loads(line) for line in logs.splitlines() if line.startswith("{")]
+        def text(value):
+            return value if isinstance(value, str) else json.dumps(value)
+        tool_entries = [entry for entry in entries if any(text(entry.get(field, "")).startswith("terrace-cms-tool-") for field in ("_SYSTEMD_UNIT", "UNIT", "USER_UNIT"))]
+        for marker in [plan["fileSha256"], "Usage: roster-invite.ts", "This is a production target", "operator@terrace.invalid", plan["planSha256"], "roster file.csv"]:
+            found = [entry for entry in entries if marker in text(entry.get("MESSAGE", ""))] + [entry for entry in tool_entries if marker in json.dumps(entry)]
+            assert not found, "tool output or argument in a journal: " + marker + " " + json.dumps([{key: entry.get(key) for key in ("MESSAGE", "_COMM", "SYSLOG_IDENTIFIER", "_SYSTEMD_UNIT", "UNIT")} for entry in found[:3]])
+        assert len(tool_entries) > 0 and any("Terrace CMS operator tool (roster-invite)" in text(entry.get("MESSAGE", "")) for entry in entries)
+        # Inputs and reports stay in the operator directory, which no backup includes (checked against the snapshot below); purge it.
+        names = source.succeed("ls ${operator}").strip().split("\n")
+        assert {"locked.csv", "plan.json", "roster file.csv"} <= set(names) and all(name in ("locked.csv", "plan.json", "roster file.csv") or (name.startswith("report-") and name.endswith(".json")) for name in names), names
+        assert source.succeed("cd ${operator} && stat -c %U:%a -- *").split() == ["terrace_cms:600"] * len(names)
+        operator_files = source.succeed("find ${operator} -type f | wc -l").strip()
+        source.succeed("cp -a /root/cms.env.loopback ${inputs}/cms.env && rm /root/cms.env.loopback")
+        assert source.succeed("sha256sum ${inputs}/cms.env").split()[0] == original_cms_env
+
+        # A tool that does not end (a dry run blocked on a held table lock stands in for a hung or orphaned run).
+        source.succeed("systemd-run --unit=website-test-table-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
+        def hung(name):
+            run = background(name, ["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])
+            source.wait_until_succeeds("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | grep -q .", timeout=30)
+            return run, source.succeed("systemctl list-units --plain --no-legend 'terrace-cms-tool-roster-invite-*' | cut -d' ' -f1").strip()
+        rc_and_result = lambda run, name: (source.succeed(f"cat {run}.rc").strip(), source.succeed(f"journalctl --no-pager -u {name} -o cat | grep -o \"Failed with result '[a-z-]*'\" | tail -n 1").strip())
+        # One at a time: while a wrapper runs, another is refused by its lock.
+        first, first_unit = hung("hung-first")
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=73)
+        assert err.strip() == "Another terrace-cms-tool run is starting or running; run the tools one at a time.", err
+        # A dropped session: the wrapper dies, its tool unit keeps running, and the next wrapper names that unit.
+        source.succeed("systemctl kill --signal=SIGKILL website-test-hung-first.service")
+        source.wait_until_fails("systemctl is-active --quiet website-test-hung-first.service", timeout=30)
+        source.succeed(f"systemctl is-active --quiet {first_unit}")
+        out, err = tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()], expect=73)
+        assert err.strip() == f"An operator tool unit is still active: {first_unit}. Wait for it, or stop it: systemctl stop 'terrace-cms-tool-*'", err
+        # A migration started now is refused, but only after Conflicts= has stopped the CMS and the website: the site is down.
+        source.fail("systemctl start terrace-cms-migrate.service")
+        reason = source.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -o cat --no-pager")
+        assert f"A CMS operator tool is running ({first_unit} ); start the migration after it has finished." in reason, reason[-1500:]
+        for service in ["terrace-cms", "terrace-web"]:
+            source.fail(f"systemctl is-active --quiet {service}.service")
+        assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+        # The documented way out (docs/website-host.md, "When a tool is still running"), command for command.
+        listed = source.succeed("systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'")
+        assert listed.split()[0] == first_unit, listed
+        source.succeed("systemctl stop 'terrace-cms-tool-*'")
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder.service", timeout=30)
+        source.succeed("systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service")
+        source.succeed("systemctl start terrace-cms-migrate.service")
+        source.succeed("systemctl start terrace-cms.service terrace-web.service")
+        assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+        assert_content(source)
+        # Exit statuses: a tool unit killed by a signal, and one stopped at the run-time bound (60 s here).
+        source.succeed("systemd-run --unit=website-test-table-holder-2 -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
+        killed, killed_unit = hung("hung-killed")
+        source.succeed(f"systemctl kill --signal=SIGKILL {killed_unit}")
+        source.wait_until_succeeds(f"test -s {killed}.rc", timeout=60)
+        bounded, bounded_unit = hung("hung-bounded")
+        source.wait_until_succeeds(f"test -s {bounded}.rc", timeout=120)
+        exits = {"signal": rc_and_result(killed, killed_unit), "bound": rc_and_result(bounded, bounded_unit)}
+        print("TOOL-EXIT " + json.dumps(exits))
+        assert exits["signal"][0] != "0" and exits["bound"][0] != "0" and exits["bound"][1] == "Failed with result 'timeout'", exits
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder-2.service", timeout=30)
+        for service in ["terrace-cms", "terrace-web"]:
+            source.succeed(f"systemctl is-active --quiet {service}.service")
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
 
         source_pids = source.succeed("systemctl show terrace-cms.service terrace-web.service -p MainPID --value").strip()
@@ -303,6 +571,11 @@ in {
         assert len(snapshots) == 1
         snapshot = snapshots[0]["id"]
         recovery.fail("jq . ${repository}/config >/dev/null 2>&1")
+        # The operator directory (personal-data inputs and reports) is not in the backup; the outbox with the link files is.
+        listed = source.succeed(f"terrace-backup restic primary ls {snapshot} 2>/dev/null")
+        assert "${operator}" not in listed and "${outbox}/" in listed, "backup coverage of operator and outbox directories"
+        assert int(operator_files) > 0
+        source.succeed("find ${operator} -mindepth 1 -delete && test -z \"$(ls -A ${operator})\"")
         assert data_signature(source) == before_rows
 
     with subtest("recover database, uploads and runtime inputs into disposable guest"):
@@ -319,7 +592,9 @@ in {
         # (this guest otherwise allocates its system accounts in a different order).
         for machine in [source, recovery]:
             assert machine.succeed("id -u terrace_cms && id -g terrace_cms").split() == ["44121", "44121"]
-        assert recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split() == ["terrace_cms:700", "terrace_cms:600"]
+        # The sweep's file and the roster tool's link files: the directory and every file keep the CMS account and private modes.
+        outbox_modes = recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split()
+        assert outbox_modes[0] == "terrace_cms:700" and len(outbox_modes) == 1 + len(before_outbox.splitlines()) and set(outbox_modes[1:]) == {"terrace_cms:600"}, outbox_modes
         # Behaviour, not just owners: the CMS account reads a restored mirror file and writes beside it.
         recovery.succeed("runuser -u terrace_cms -- sh -c 'cat ${outbox}/*.json >/dev/null && umask 077 && echo probe >${outbox}/restore-write-probe && rm ${outbox}/restore-write-probe'")
         assert recovery.succeed("cd ${inputs} && sha256sum *.env 2>/dev/null").strip() == before_inputs

@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -380,9 +380,9 @@ install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
 direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
   --output $HOME/terrace-work/full-rehearsal-output \
-  --webArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --cmsArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --tfcSource $HOME/terrace-work/website-bundle-eab4189
+  --webArchive $HOME/terrace-work/website-bundle-dd1aef7-output/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-dd1aef7-output/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-dd1aef7
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted
@@ -435,6 +435,51 @@ into the restored outbox; the invitation files still name the applicants),
 `sweep` by the real timer, and `redaction` (both invitations redacted, two
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
+
+### Observed rehearsals after the PR 68 review — November 24, 2026 (Pacific)
+
+Womb `e7403a5` (operator tools serialised and bounded, backup-path check
+normalised, fixed unit description; same kept `dd1aef7` build). The website module
+changed, so every driver derivation changed again and all five ran once more, one
+at a time, each purged with the ordinary command at once. As before, they do not
+run the operator tools.
+
+| Flags | Run | Time | Scenario | Result |
+| --- | --- | --- | --- | --- |
+| `--all-services` | `b72d148d` | 05:48 to 06:18 | 1706.80 s | passed: 198 HTTPS protocol assertions in each of the three phases |
+| (default) | `03fefb94` | 06:18 to 06:28 | 551.29 s | passed |
+| `--documenso` | `dd0ed6e0` | 06:28 to 06:43 | 836.96 s | passed |
+| `--documenso-signing` | `24dd7242` | 06:43 to 06:59 | 889.23 s | passed |
+| `--relay-peers` | `43e45186` | 06:59 to 07:10 | 599.94 s | passed |
+
+Every receipt is complete with all owned compute off and no check false; each
+purge left `syntheticStatePurged` true and the scratch directory empty. Evidence on
+the build machine in `cms-tools-evidence-e7403a5/`.
+
+### Observed rehearsals with website `dd1aef7` and the operator tools — November 24, 2026 (Pacific)
+
+Womb `3f4bc9e` (re-pin to the kept `dd1aef7` build: web `1a4e07f7…bd12`, CMS
+`8929443f…2a4c`; `terrace-cms-tool`), output on the build machine's
+non-snapshotted scratch dataset, one run at a time, each purged with the ordinary
+command as soon as it ended. Every variant composes the website with the pinned
+release, so the re-pin changed all five driver derivations and all five ran once.
+The rehearsals do not run the operator tools; the website and production VM
+proofs do ([website host](website-host.md#operator-tools-terrace-cms-tool)).
+
+| Flags | Run | Time | Scenario | Result |
+| --- | --- | --- | --- | --- |
+| `--all-services` | `9c0164ad` | 01:41 to 02:11 | 1735.81 s | passed: 198 HTTPS protocol assertions in each of the three phases, every receipt check true |
+| (default) | `f2f9e504` | 02:11 to 02:22 | 553.57 s | passed |
+| `--documenso` | `4621a7f4` | 02:22 to 02:36 | 826.16 s | passed |
+| `--documenso-signing` | `b3c35eb0` | 02:36 to 02:52 | 891.50 s | passed |
+| `--relay-peers` | `444bfb5e` | 02:52 to 03:03 | 603.36 s | passed |
+
+Every receipt is complete with all owned compute off, no check false, and 198
+HTTPS protocol assertions in each phase; each purge left `syntheticStatePurged`
+true and the scratch directory empty. One invocation before these was rejected
+before it created a run (its output directory did not exist yet); nothing was
+started or written. Evidence on the build machine in
+`cms-tools-evidence-3f4bc9e/`.
 
 ### Observed driver variants and failed-run purges at the verification sweep — November 23, 2026 (Pacific)
 
