@@ -35,6 +35,7 @@ its configuration remains local to this worktree.
 - [Architecture, inventory, and decisions](docs/revival.md)
 - [Incremental delivery and acceptance criteria](docs/backlog.md)
 - [Migration and recovery requirements](docs/migration.md)
+- [Restore promotion: putting a recovery into service (written from the rehearsals, not drilled)](docs/restore-promotion.md)
 - [Access and physical-hardware prerequisites](docs/manual-steps.md)
 - [Owner runbook: every step from seeing it work to cutover, with proven status and gaps](docs/owner-runbook.md)
 - [Contributor rules](AGENTS.md)

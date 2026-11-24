@@ -58,6 +58,12 @@ in progress, review, and external dependency. Keep evidence in the linked MR.
 Small review findings that did not block a merge. Each is open work, not a defect
 known to affect a deployed host (none exists).
 
+- Drill the written [restore promotion](restore-promotion.md) procedure in a VM
+  (G-22): run its commands verbatim on the production profile for both roles with
+  the original disks destroyed, and add the assertions listed in its "Drill to
+  add" section. Until then the procedure is written from the rehearsals and has
+  not been run as written.
+
 - `terrace-tls prepare-acme` inspects only the first stored certificate
   directory entry (`platform/production/tls.nix`; [TLS](tls.md)). Done since
   (verification sweep): a mistyped `--overwrite` (any argument other than

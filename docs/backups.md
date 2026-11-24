@@ -237,7 +237,9 @@ ownership come from the restored schema; the VM test additionally asserts them.
 The script does not put recovered data into service. Promoting a recovery
 (copying media back, loading the databases into the production cluster, restoring
 Headscale's keys before its first start so clients keep their network identity) is
-a manual, owner-approved step to be written and drilled once real hosts exist.
+a manual, owner-approved step. [Restore promotion](restore-promotion.md) writes
+it down from the rehearsals' behaviour; it has not been drilled as a written
+procedure and has never been run with real data or on a production host.
 Never restore over a live host to "test".
 
 ## What the VM test proves, and what it does not
