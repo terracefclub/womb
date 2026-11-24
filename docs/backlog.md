@@ -53,6 +53,34 @@ Issue descriptions: problem, intended behavior, acceptance criteria. Labels:
 `platform`, `website`, `migration`, `integrations`, `community`. Distinguish ready,
 in progress, review, and external dependency. Keep evidence in the linked MR.
 
+## Credential rotation follow-ups (G-37), recorded 2026-11-24
+
+From the written [credential rotation](credential-rotation.md) document. None is done
+in that pull request.
+
+- Docs correction: `platform/production/inventory.json` says for
+  `identity/database-password` "`apply` ... then push"; the code reads the delivered
+  file, so `push` comes first (`cmd_host_apply`; `docs/secrets.md` and the production
+  VM check have the right order). `docs/identity-host.md` still says rotating the
+  database password needs a separately reviewed transaction, which the production
+  profile now has (`terrace-secrets apply`). The owner runbook's 9.9 gap text omits
+  that database and repository password rotation exist for production hosts.
+- Code: Windmill `adminPassword` cannot be changed after the first bootstrap
+  (`platform/windmill/bootstrap.ts` logs in with it, falls back only to the factory
+  password); add a rotation path and a VM assertion.
+- Code: `terrace-secrets apply --finish` removes whatever restic key is not the one
+  the host's delivered file opens; run before `push` it removes the new key. Refuse
+  it unless the delivered file is the newest store value, or document and test it.
+- Code: no `client-secret sync` for the Documenso, Windmill and Vaultwarden OIDC
+  clients (only the four production clients), no rotation of Headscale keys, host SSH
+  key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
+- Decide and document: where Windmill's encryption key lives and how it is delivered;
+  the exact way to deploy a changed private host module (escrow recipient, operator
+  keys); how to compute the Hetzner `tokenSha256` pin.
+- Tests: old-credential-rejected assertions for the database and repository password
+  rotations, the SFTP key rotation, `escrow replace`, and the compromise drills listed
+  in the document.
+
 ## Restore promotion follow-ups (G-22), recorded 2026-11-24
 
 From the review of the written [restore promotion](restore-promotion.md) procedure.

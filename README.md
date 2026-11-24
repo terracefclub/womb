@@ -36,6 +36,7 @@ its configuration remains local to this worktree.
 - [Incremental delivery and acceptance criteria](docs/backlog.md)
 - [Migration and recovery requirements](docs/migration.md)
 - [Restore promotion: putting a recovery into service (written from the rehearsals, not drilled)](docs/restore-promotion.md)
+- [Credential rotation: inventory and procedures (written from the code, not drilled)](docs/credential-rotation.md)
 - [Access and physical-hardware prerequisites](docs/manual-steps.md)
 - [Owner runbook: every step from seeing it work to cutover, with proven status and gaps](docs/owner-runbook.md)
 - [Contributor rules](AGENTS.md)
