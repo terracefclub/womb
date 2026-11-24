@@ -1,8 +1,8 @@
 {
-  "revision": "eab41891f6d68ea000f86148d086daf737f1216e",
+  "revision": "dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191",
   "node": "24.21.0",
-  "web": "ba124c4b35b35671d53035ebf7ada09192b7bf9dcf5de02ee66c201ced10f0e2",
-  "cms": "66e6c0431181fc36675ae7164959b8ebe300a0ec30c0bc3693fa95ce3feac7f6",
+  "web": "1a4e07f790ec16ebd133479699095ea12d3b8f91bc092a57542c2db70d69bd12",
+  "cms": "8929443f1607fbb3d26698475d111f00b2b3d993f8eae54be0c6ba12ac032a4c",
   "migrations": [
     "20261028_080047",
     "20261029_053207",

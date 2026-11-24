@@ -26,8 +26,8 @@ dot and hyphen:
 install -d -m 0700 /absolute/private/terrace-rehearsals
 direnv exec . env BUILD_LOCK=/absolute/shared-heavy.lock ./platform/full-rehearsal run \
   --output /absolute/private/terrace-rehearsals \
-  --webArchive /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --cmsArchive /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
+  --webArchive /protected/releases/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --cmsArchive /protected/releases/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
   --tfcSource /path/to/reviewed/tfc-checkout
 ```
 
@@ -380,9 +380,9 @@ install -d -m 0700 $HOME/terrace-work/full-rehearsal-output
 direnv exec . env BUILD_LOCK=$HOME/.falcon-heavy.lock \
   ./platform/full-rehearsal run --all-services \
   --output $HOME/terrace-work/full-rehearsal-output \
-  --webArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --cmsArchive $HOME/terrace-work/website-bundle-eab4189-output/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  --tfcSource $HOME/terrace-work/website-bundle-eab4189
+  --webArchive $HOME/terrace-work/website-bundle-dd1aef7-output/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --cmsArchive $HOME/terrace-work/website-bundle-dd1aef7-output/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  --tfcSource $HOME/terrace-work/website-bundle-dd1aef7
 ```
 
 Successful `run` stops all owned compute and preserves its disks, encrypted

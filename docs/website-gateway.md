@@ -1,5 +1,7 @@
 # Optional HTTPS origin gateway
 
+> **Note, 2026-11-24.** Re-pinned to website `dev` `dd1aef7` (operator tools in the CMS bundle; no gateway, realm or migration change).
+
 > **Note, 2026-11-23.** Re-pinned to website `dev` `eab4189` (website PRs #19 to #22). The gateway's runtime realm now comes from a producer that declares admin events on with details off, which the hosting policy accepts. No gateway rule changed.
 
 > **Note, 2026-11-19.** Re-pinned to website `dev` `680ad56` (website PRs #14 to #18: lifecycle linking, packaged `bin/sweep`, release-proof fixes and no-script form status). The gateway now supplies the lifecycle origins and the client-address pairing below, and the check exercises the member lifecycle end to end.
@@ -49,7 +51,7 @@ of their native modules.
 
 ## Disposable actual-bundle proof
 
-The check consumes the pinned `eab4189` web/CMS archives and **only three
+The check consumes the pinned `dd1aef7` web/CMS archives and **only three
 hash-pinned, secret-free source files** from that TFC revision: the realm
 generator, shared client/role contract and pure production-input validator.
 Their hashes are checked before Nix-store copying; the source checkout and its
@@ -60,9 +62,9 @@ On the x86-64 Linux builder, under the shared heavy-job queue:
 
 ```sh
 BUILD_LOCK=/path/to/shared-heavy.lock platform/website-gateway-check \
-  /protected/releases/terrace-web-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  /protected/releases/terrace-cms-eab41891f6d68ea000f86148d086daf737f1216e-linux-x64-gnu.tar.gz \
-  /source/tfc-at-eab41891f6d68ea000f86148d086daf737f1216e
+  /protected/releases/terrace-web-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  /protected/releases/terrace-cms-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191-linux-x64-gnu.tar.gz \
+  /source/tfc-at-dd1aef7a06ddfa2a31a7cd215afe0f6f10b23191
 ```
 
 Two guests contain the actual immutable app pair and native PostgreSQL/Keycloak.

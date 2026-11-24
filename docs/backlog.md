@@ -240,7 +240,7 @@ known to affect a deployed host (none exists).
   does not: that an output which references the certificate holds no copy of its bytes as
   well (that rests on reading the sources), and it was not rerun with the
   certificate rebuilt under a new key (PR 61 ran the identity proof that way).
-- The pinned website release (`eab4189`) declares admin events for the
+- The pinned website release (`dd1aef7`, realm producer unchanged since `eab4189`) declares admin events for the
   `terrace` realm (`adminEventsEnabled: true`, details off); first import and
   reconciliation of an older realm are proven in the VM. Remaining on a real
   host: run `realm plan` and `realm apply` once after deploying the re-pinned

@@ -336,7 +336,7 @@ attributes or other personal data.
   either direction is planned and applied like any other realm setting (an
   ordinary realm update, the same path as the other scalar settings). If the
   artifact does not declare them, reconciliation neither changes nor refuses
-  anything about them. The pinned website release (`eab4189`) declares them
+  anything about them. The pinned website release (`dd1aef7`; its realm producer is byte-identical to `eab4189`'s) declares them
   (`adminEventsEnabled: true`, `adminEventsDetailsEnabled: false`), so a new
   realm is imported with admin events on and details off, and a realm created
   from an earlier release (which did not declare them) gets them at the next
