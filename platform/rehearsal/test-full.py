@@ -511,6 +511,39 @@ class FailedRunPurge(unittest.TestCase):
         with patch.object(full, 'fingerprint', side_effect=PermissionError()):
             self.refused(r'^cannot tell whether the controller in controller\.json is running$')
 
+    def test_an_unexpected_process_state_line_refuses(self):
+        # The real fingerprint() on a /proc/PID/stat line without its fields raises IndexError: a refusal, not a crash.
+        import host
+        real = host.Path.read_text
+        for line in ['4242 (python3) S 1', '4242 python3 S 1 2 3', '']:
+            def read_text(path, *args, **kwargs):
+                return line if str(path) == '/proc/4242/stat' else real(path, *args, **kwargs)
+            with self.subTest(line=line), patch.object(full, 'fingerprint', host.fingerprint), \
+                    patch.object(host.Path, 'read_text', read_text):
+                self.refused(r'^cannot tell whether the controller in controller\.json is running$')
+
+    def test_a_controller_record_too_deep_to_read_refuses(self):
+        # The patched part raises RecursionError where a real one would surface (private_json) and is the only
+        # part that exercises the `except RecursionError` clause; a natural RecursionError from the json module is
+        # not exercised here. On the dev shell's Python the real records below parse, and are refused as not a
+        # controller record (not a JSON object, or no run id).
+        real = full.private_json
+        def too_deep(path, *args, **kwargs):
+            if Path(path).name == 'controller.json':
+                raise RecursionError('maximum recursion depth exceeded while decoding a JSON array')
+            return real(path, *args, **kwargs)
+        with patch.object(full, 'private_json', too_deep):
+            self.refused(r'^malformed controller record controller\.json$')
+        # The same with real records within the 4096-byte limit.
+        for text in ['[' * 2040 + ']' * 2040, '{"a":' * 680 + '1' + '}' * 680]:
+            self.assertLessEqual(len(text), 4096)
+            (self.run / 'controller.json').unlink()
+            fd = os.open(self.run / 'controller.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(text)
+            with self.subTest(depth=text[:2]):
+                self.refused(r'^malformed controller record controller\.json$')
+
     def test_running_guests_or_unit_preserve_everything(self):
         with patch.object(full, 'unit_off', return_value=False), self.assertRaises(ValueError):
             full.purge(self.run, True, failed=True)

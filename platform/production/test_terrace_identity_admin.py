@@ -502,7 +502,11 @@ class FirstAdminAndBreakGlassTest(unittest.TestCase):
         return out.getvalue()
 
     def test_first_admin_creates_proves_and_removes_the_bootstrap_account(self):
+        self.assertEqual(self.master.hardening(), (False, False))
         self.assertIn("ready", self.first_admin())
+        # The success path itself turns the master realm's hardening on (not only a later login).
+        self.assertEqual(self.master.hardening(), (True, True))
+        self.assertEqual(self.master.realm["failureFactor"], 5)
         self.assertEqual(sorted(self.master.users), ["ops-a"])
         admin = self.master.users["ops-a"]
         self.assertEqual((admin["roles"], admin["label"]), (["admin"], tool.INITIAL_LABEL))
@@ -574,6 +578,24 @@ class FirstAdminAndBreakGlassTest(unittest.TestCase):
                 contextlib.redirect_stdout(out):
             tool.login(self.config, args)
         self.assertEqual(out.getvalue(), "")
+
+    def test_a_dry_run_reports_missing_hardening_and_changes_nothing(self):
+        self.master.add("ops-a", "chosen-password-1", roles=["admin"])
+        self.assertEqual(self.master.hardening(), (False, False))
+        args = tool.parser().parse_args(["admin", "disable", "--admin", "ops-a", "--username", "ops-b", "--password-stdin", "--dry-run"])
+        self.assertTrue(tool.mutating(args))
+        out = io.StringIO()
+        with mock.patch.object(tool, "HARDEN", [True]), mock.patch.object(tool, "read_passwords", lambda a, p: ["chosen-password-1"]), \
+                contextlib.redirect_stdout(out):
+            tool.login(self.config, args)
+        self.assertEqual(self.master.hardening(), (False, False))
+        self.assertIn("without --dry-run this would turn on: brute-force protection, admin events", out.getvalue())
+        # The same login without --dry-run turns it on.
+        args = tool.parser().parse_args(["admin", "disable", "--admin", "ops-a", "--username", "ops-b", "--password-stdin"])
+        with mock.patch.object(tool, "HARDEN", [True]), mock.patch.object(tool, "read_passwords", lambda a, p: ["chosen-password-1"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            tool.login(self.config, args)
+        self.assertEqual(self.master.hardening(), (True, True))
 
     def test_already_done_warns_when_hardening_is_incomplete(self):
         self.master.add("ops-a", "x" * 20, roles=["admin"])

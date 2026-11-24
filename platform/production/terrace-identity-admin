@@ -392,11 +392,17 @@ def login(config, args, allow_initial=False):
             raise Refused(f"{admin} still has an initial password; run `terrace-identity-admin password --admin {admin}` first")
     if HARDEN:
         # Converge the master realm's hardening whenever an administrator signs in for a state change
-        # (first-admin may have been interrupted before it applied it).
-        changed = secure_master(api)
-        if changed:
-            audit("master-secure", "master/brute-force+events", "done", admin)
-            print(f"Master realm hardening was incomplete; turned on: {', '.join(changed)}.")
+        # (first-admin may have been interrupted before it applied it). A dry run changes nothing: it says so.
+        if getattr(args, "dry_run", False):
+            missing = secure_master(api, apply=False)
+            if missing:
+                audit("master-secure", "master/brute-force+events", "dry-run", admin)
+                print(f"Master realm hardening is incomplete; without --dry-run this would turn on: {', '.join(missing)}.")
+        else:
+            changed = secure_master(api)
+            if changed:
+                audit("master-secure", "master/brute-force+events", "done", admin)
+                print(f"Master realm hardening was incomplete; turned on: {', '.join(changed)}.")
     return api
 
 
@@ -584,20 +590,23 @@ MASTER_BRUTE_FORCE = {"bruteForceProtected": True, "permanentLockout": False, "f
 MASTER_EVENTS = {"adminEventsEnabled": True, "adminEventsDetailsEnabled": False}
 
 
-def secure_master(api):
+def secure_master(api, apply=True):
     """Master realm: brute-force protection for administrator passwords (any local process can attempt
     a password grant on the loopback backend) and admin events without representations. Idempotent;
-    returns what it changed (empty when already in place)."""
+    returns what it changed (empty when already in place). With apply=False it only reads, and returns
+    what it would change."""
     changed = []
     realm = api.get("master")
     if any(realm.get(key) != value for key, value in MASTER_BRUTE_FORCE.items()):
-        realm.update(MASTER_BRUTE_FORCE)
-        api.call("PUT", "master", realm)
+        if apply:
+            realm.update(MASTER_BRUTE_FORCE)
+            api.call("PUT", "master", realm)
         changed.append("brute-force protection")
     events = api.get("master/events/config")
     if any(events.get(key) != value for key, value in MASTER_EVENTS.items()):
-        events.update(MASTER_EVENTS)
-        api.call("PUT", "master/events/config", events)
+        if apply:
+            events.update(MASTER_EVENTS)
+            api.call("PUT", "master/events/config", events)
         changed.append("admin events")
     return changed
 

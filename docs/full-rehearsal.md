@@ -209,8 +209,9 @@ off with no tagged guest, and whose controller has exited: the run records the
 controller's process id and start time in `controller.json` (and, once guests
 start, `control.json`); it checks every record present and refuses, printing
 a fixed reason, when there is none, when one is malformed (a link, not private,
-not a JSON object, a wrong run id) or when one names a process that is still
-running. A process that has exited counts as gone, also when it exits while
+not a JSON object, nested too deeply to read, a wrong run id), when the named
+process's state cannot be read or parsed, or when one names a process that is
+still running. A process that has exited counts as gone, also when it exits while
 being checked. It removes the same things (`state/` with the disks, `retained/`,
 `escrow/`, the recorded runtime directory when one was recorded, a leftover
 `driver-root` link, never following a link out of the run) and keeps
@@ -434,6 +435,48 @@ into the restored outbox; the invitation files still name the applicants),
 `sweep` by the real timer, and `redaction` (both invitations redacted, two
 erasure confirmations, every file `0600` and owned by the CMS account). The
 receipt records each step's seconds.
+
+### Observed driver variants and failed-run purges at the verification sweep — November 23, 2026 (Pacific)
+
+Womb `ede1f07`, website `eab4189`, output on the build machine's
+non-snapshotted scratch dataset, one run at a time, each purged before the
+next. PR 64 changed every driver variant's derivation and only `--all-services`
+had run since; these four runs cover the others. Their driver derivations at
+`ede1f07` are identical to trunk `427b464` and to PR 64's reviewed code; the
+`--all-services` driver is identical to the one run `1f051756` passed, so it
+was not run again.
+
+| Flags | Run | Time | Scenario | Result |
+| --- | --- | --- | --- | --- |
+| (default) | `aa53c6c1` | 17:28 to 17:38 | 552.36 s | passed |
+| `--documenso` | `cef2ad64` | 17:38 to 17:53 | 813.78 s | passed |
+| `--documenso-signing` | `a7104cbb` | 17:53 to 18:09 | 861.66 s | passed |
+| `--relay-peers` | `23beaa26` | 18:09 to 18:20 | 593.09 s | passed |
+
+Each passed run had 198 HTTPS protocol assertions in the original and the
+restored phase and every receipt check true, and was purged with the ordinary
+command. An earlier default run in the failed-run exercise below (`15489aa2`)
+finished before it was due to be stopped and also passed (scenario 559.4 s).
+
+`purge --failed` was used on two real incomplete default runs (`e5d6ad2a`,
+`c512e778`), left so by killing the controller by its recorded process id
+while the guests ran; `c512e778` was in its restored phase, with retired
+original disks, the exported repository and escrow and a `driver-root` link.
+While the driver was building, `--failed` refused with "the controller in
+controller.json is still running"; with guests up, with "the run unit or a
+tagged guest is still running"; the ordinary form refused throughout. The
+guardian stopped every guest within a second of the controller's death
+(the unit exited 143 then); `--failed` then removed `state/`, `retained/`,
+`escrow/`, the runtime directory and the `driver-root` link, kept the logs,
+`evidence/` and the receipt (`syntheticStatePurged`, `purgedIncomplete`), and no
+unit, tagged guest or controller of the run remained. For `c512e778` (about
+851 MiB of allocated state) free space on the scratch dataset was 1.08 GB higher
+just after the purge than while it ran, and 1.18 GB higher 60 s later. Evidence
+on the build machine in `verification-sweep-evidence-ede1f07/`.
+
+Limits: each variant ran once, so this shows no failure rate; and a `--failed`
+refusal during the unit's stop window after the controller dies was never
+observed (the guardian's shutdown finished before a second purge could start).
 
 ### Observed all-services rehearsals at the proof follow-ups — November 23, 2026 (Pacific)
 

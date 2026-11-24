@@ -115,6 +115,8 @@ escrowed `identity/bootstrap-admin-password`, delivered once at run time.
    protection and admin events) is applied by `first-admin` and, idempotently,
    at the administrator login of every state-changing command, so that remedy
    also completes it (`Master realm hardening was incomplete; turned on: ...`).
+   A `--dry-run` never changes it; it says what the real run would turn on
+   (`... without --dry-run this would turn on: ...`).
    `status` shows whether it is on; `first-admin` says `WARNING` on its
    `Already done` path if it is not; and the timer-driven check fails while it
    is off and a named administrator exists. If the

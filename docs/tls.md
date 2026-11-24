@@ -287,10 +287,17 @@ journalctl -u acme-order-renew-<name>.service
 ```
 
 `status` makes one TLS handshake per public name for its "served now" lines,
-each bounded to 5 seconds (the check itself allows 30), so a hung listener
-delays it by at most 5 seconds per name (15 on the app host, 5 on the relay) and
-is reported as `no answer from 127.0.0.1:443 within 5 s`. A failing check is
-only reported there: it never changes the exit status of `status`.
+each bounded to 5 seconds (it runs `terrace-tls-check --status`); the check
+itself, from its timer or `terrace-tls check`, always allows 30 seconds per name.
+Neither bound is read from the environment, so an exported variable cannot
+shorten or break them. A hung listener therefore delays `status` by at most
+about 5 seconds per public name of the host, and each such name is reported as
+`no answer from 127.0.0.1:443 within 5 s`. The names are the host's
+`publicHostnames`, printed on the first line of `status`: today three on the app
+host (the website, CMS and identity hostnames, set in
+`platform/production/app.nix`), so about 15 seconds, and one on the relay (its
+hostname, set in `platform/production/relay.nix`), so about 5. A failing check
+is only reported there: it never changes the exit status of `status`.
 `terrace-tls check` exits 1 when any name fails.
 
 If `terrace-tls check` says `certificate is not yet valid`, the host's clock is
@@ -334,7 +341,8 @@ an earlier `prepare-acme`, a copy of a manual key), unencrypted. Remove it with
 `sudo rm -rf /var/lib/acme` once the host stays on the manual mode. Going back
 to ACME later: if it still holds a valid ACME certificate, deploying ACME serves
 that one and `prepare-acme` refuses to overwrite it unless given
-`--overwrite`. The VM proof does this switch and back on the relay.
+`--overwrite` (any other argument is a usage error, so a mistyped option never
+proceeds as if none were given). The VM proof does this switch and back on the relay.
 
 ## Verification
 
