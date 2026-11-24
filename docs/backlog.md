@@ -1,6 +1,6 @@
 # Delivery backlog
 
-Updated 2026-11-20. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
+Updated 2026-11-23. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
 GitLab issue, merge-request and milestone links below are the historical audit trail ([Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1),
 [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1), both historical). GitLab `!N` numbers are not
 GitHub PR numbers; see [migration and mirroring](github-migration.md). The step-by-step owner view, with proof status and open gaps,
@@ -59,14 +59,18 @@ Small review findings that did not block a merge. Each is open work, not a defec
 known to affect a deployed host (none exists).
 
 - `terrace-tls prepare-acme` inspects only the first stored certificate
-  directory entry, and silently ignores a mistyped `--overwrite` when no valid
-  certificate exists (`platform/production/tls.nix`; [TLS](tls.md)).
+  directory entry (`platform/production/tls.nix`; [TLS](tls.md)). Done since
+  (verification sweep): a mistyped `--overwrite` (any argument other than
+  `--overwrite`) is a usage error before any change, asserted in the TLS VM
+  proof on the relay.
 - `terrace-identity-admin` ([identity administration](identity-admin.md)): a
-  `--dry-run` can turn on master-realm hardening; a failure of the hardening
-  step aborts the command that triggered it (no lockout, because
-  `break-glass begin` needs no login); the `first-admin` success path's
-  hardening call and the timer's hardening-off branch have unit or VM coverage
-  gaps.
+  failure of the hardening step aborts the command that triggered it (no
+  lockout, because `break-glass begin` needs no login); the timer's
+  hardening-off branch has a unit test but no VM assertion. Done since
+  (verification sweep): a `--dry-run` no longer turns master-realm hardening
+  on, it says what the real run would turn on (unit test; it fails against the
+  earlier code); the unit test of `first-admin`'s success path now asserts that
+  it turns hardening on (removing that call left the earlier suite green).
 - The production VM proof's early trust guard (`trust_consistent`) runs on the
   app only, not the relay, and its fingerprint comparison is nearly
   tautological. The proof also no longer exercises the expiry check's default
@@ -132,11 +136,29 @@ known to affect a deployed host (none exists).
   checks plus: the receipt must not be complete, and the run's controller
   (`controller.json` or `control.json`, process id and start time) must have
   exited ([full rehearsal](full-rehearsal.md)). Unit tests for the success and
-  each refusal in `platform/rehearsal/test-full.py` (evidence in `proof-followups-evidence-f0c35bd/`). Not yet
-  used on a real failed run: the rehearsals since passed and were purged with
-  the ordinary command. A run that failed before
-  either record existed (older runs that died before their guests started) is
-  still removed by hand.
+  each refusal in `platform/rehearsal/test-full.py` (evidence in `proof-followups-evidence-f0c35bd/`).
+  Used on real incomplete runs since (verification sweep, 2026-11-23, default
+  variant at Womb `ede1f07`, output on the scratch dataset): runs `e5d6ad2a`
+  and `c512e778` were left incomplete by killing their controller (SIGKILL, by
+  its recorded process id) while their guests ran, the second in the restored
+  phase with retired original disks, the exported repository and escrow and a
+  `driver-root` link present. On both, during the driver build `--failed`
+  refused with "the controller in controller.json is still running", and with
+  guests up with "the run unit or a tagged guest is still running"; the
+  ordinary form refused throughout. The guardian stopped the guests within
+  a second of the controller's death, and `--failed` then removed
+  `state/`, `retained/`, `escrow/`, the runtime directory and the `driver-root`
+  link, kept the logs, `evidence/` and the receipt (marked
+  `purgedIncomplete`); no unit, tagged guest or controller remained, and about
+  1.2 GB came back on the scratch dataset for `c512e778`. Not seen on a real
+  run: a refusal while the unit is still stopping after the controller died
+  (the shutdown was faster than a second purge could start). Also since:
+  explicit refusals, with a reason, for an unparsable `/proc` stat line and a
+  controller record nested too deeply to read (both were safe, with the
+  generic message). A run that failed before either record existed (older runs
+  that died before their guests started; today the controller record is
+  written right after the run directory, so only a death in between leaves
+  none) is still removed by hand; that case was not produced.
 - Fixed (cause most likely, not directly observed): the TLS VM proof
   (`platform/production/tls-test.nix`) failed once on 2026-11-20 at "relay:
   first boot with the CA unreachable is safe and visible; issuance once it is
@@ -197,12 +219,23 @@ known to affect a deployed host (none exists).
   keep doing so with a bundle assembled at boot inside the guest from the public
   roots and the CA's store path (`platform/test-system-trust.nix`), not a cached
   `security.pki` copy.
-- The identity proof's "no copy" scan (every output built from its certificate
-  must reference it at run time) never completed in PR 61's evidence: the first
-  attempt passed a stale `.drv` path, and at the final head the certificate output
-  had already been garbage-collected before the scan. The identity proof itself
-  passed, including once with the certificate rebuilt under a new key. Redo the
-  scan right after an identity run while its outputs are still in the store.
+- Done: the identity proof's "no copy" scan (every output built from its
+  certificate must reference it at run time). It never completed in PR 61's
+  evidence: the first attempt passed a stale `.drv` path and an empty
+  certificate path, and at the final head the certificate output had been
+  garbage-collected before the scan, so there was nothing to scan. The scan is
+  now a committed tool, `platform/test-trust-scan.py`, which can first build
+  the certificate and every output built from it (not the VM run), so nothing
+  is left unchecked ([identity host](identity-host.md#test-certificate-no-copy)).
+  At Womb `ede1f07` (2026-11-23, identity check derivation unchanged from
+  trunk): 13 derivations are built from the certificate; all 12 of their
+  outputs other than the test result reference it, none without a reference,
+  none unchecked (evidence `verification-sweep-evidence-ede1f07/head-ede1f07/identity-scan.*`).
+  What this establishes: no output built from the certificate drops its store
+  reference, so none can be a cached copy split from the key. What it does not:
+  that an output which references the certificate holds no copy of its bytes as
+  well (that rests on reading the sources), and it was not rerun with the
+  certificate rebuilt under a new key (PR 61 ran the identity proof that way).
 - The pinned website release (`eab4189`) declares admin events for the
   `terrace` realm (`adminEventsEnabled: true`, details off); first import and
   reconciliation of an older realm are proven in the VM. Remaining on a real
@@ -217,3 +250,25 @@ known to affect a deployed host (none exists).
   rows and are covered by the database backup (the website check restores a
   synthetic journal row). The optional `LIFECYCLE_LOCK_TIMEOUT_MS` (per-address
   lock wait, default 3000 ms) is not set by Womb and is untested at other values.
+
+## Follow-ups from the proof follow-ups review (PR 64), done in the verification sweep
+
+- `terrace-tls check` took its 30 s handshake bound from `TLS_CHECK_TIMEOUT` in
+  the caller's environment (an exported value could shorten or break it; it
+  failed closed). The bound now comes from the script only: 30 s, or 5 s with
+  `--status`, which only `terrace-tls status` passes; an unknown argument is a
+  usage error. Unit tests (`tests/platform/test_tls_check.py`) fail against
+  the earlier script; the TLS VM proof passed at `ede1f07` (148 assertions).
+- `purge --failed`: an unexpected `/proc` stat line (IndexError) and a
+  controller record nested too deeply to read (RecursionError on Pythons whose
+  JSON reader counts recursion) are now refusals with a reason; both were safe
+  before (nothing deleted, generic message). Unit tests fail against the
+  earlier code.
+- [TLS](tls.md) states the `status` delay per public name, with today's counts
+  (three names on the app host, one on the relay) and where the names are set.
+- Driver variants: PR 64 changed every variant's derivation and only
+  `--all-services` had run. The default, `--documenso`, `--documenso-signing`
+  and `--relay-peers` variants each passed once at `ede1f07`
+  ([full rehearsal](full-rehearsal.md)); their derivations equal PR 64's
+  reviewed code. The `--all-services` driver is unchanged from run `1f051756`
+  and was not rerun. One run per variant does not show any failure rate.

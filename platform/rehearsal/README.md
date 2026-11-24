@@ -79,5 +79,12 @@ it creates the run) or `control.json` (written when the guardian is started) has
 exited, judged by process id and kernel start time. The same run-directory
 checks apply (owner, mode, scope and run id; the run path itself, `state/`,
 `retained/` and `escrow/` must not be links); the logs, `evidence/` and the
-receipt stay. See [the full rehearsal](../../docs/full-rehearsal.md) for the
-command and what it keeps.
+receipt stay. An unreadable or unparsable process state, and a controller
+record nested too deeply to read, are refusals with a reason. See [the full
+rehearsal](../../docs/full-rehearsal.md) for the command and what it keeps.
+
+It has been used on real incomplete runs (2026-11-23, runs `e5d6ad2a` and
+`c512e778`, controller killed by its recorded process id while guests ran):
+it refused while the controller or the guests were alive and removed the run's
+state once the guardian had stopped them; see the
+[backlog](../../docs/backlog.md) entry for what was and was not observed.

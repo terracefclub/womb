@@ -180,7 +180,7 @@ a partial garbage collection could split from the key:
 
 ```sh
 drv=$(nix eval --raw path:./platform#checks.x86_64-linux.identity.drvPath)
-flock "$HOME/.falcon-heavy.lock" python3 -B platform/test-trust-scan.py --build "$drv" terrace-identity-proof-certificate
+flock "$BUILD_LOCK" python3 -B platform/test-trust-scan.py --build "$drv" terrace-identity-proof-certificate
 ```
 
 `--build` realises the certificate and everything built from it except the VM
