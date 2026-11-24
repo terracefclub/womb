@@ -399,7 +399,7 @@ in {
         held = "roster-locked@terrace.invalid"
         source.succeed("printf 'name,affiliation,class_year,contact_email\nSynthetic Locked,alumni,2004," + held + "\n' >/root/locked.csv && install -o terrace_cms -g terrace_cms -m 0600 /root/locked.csv ${operator}/locked.csv && rm /root/locked.csv")
         locked_plan = summary(tool(["roster-invite", "dry-run", "--file", "${operator}/locked.csv", "--operator", "operator@terrace.invalid", "--report", report()])[0])
-        source.succeed("systemd-run --unit=website-test-lock-holder runuser -u postgres -- psql -X -d terrace_cms -c " + shlex.quote(f"begin; select pg_advisory_xact_lock(hashtextextended('terrace-application-email:{held}', 0)); select pg_sleep(60); commit"))
+        source.succeed("systemd-run --unit=website-test-lock-holder -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote(f"begin; select pg_advisory_xact_lock(hashtextextended('terrace-application-email:{held}', 0)); select pg_sleep(60); commit"))
         waiting_sql = "select count(*) from pg_locks w join pg_locks h on h.locktype = 'advisory' and h.granted and w.classid = h.classid and w.objid = h.objid and w.objsubid = h.objsubid and h.pid <> w.pid where w.locktype = 'advisory' and not w.granted"
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where locktype = 'advisory' and granted\") -ge 1", timeout=30)
         intake = [line.split("=", 1)[1] for line in source.succeed("cat ${inputs}/cms.env").splitlines() if line.startswith("LIFECYCLE_INTAKE_SECRET=")][0]
