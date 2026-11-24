@@ -76,6 +76,15 @@ None of these is done in that pull request.
   (`/var/lib/terrace-cms/migrated-revision`), ACME state (`/var/lib/acme`) or the
   operator directory. Decide whether that is intended and document the re-supply
   path for each.
+- Erasure replay: no erasure ledger exists outside the restored database and
+  outbox (website `dd1aef7`, `cms/src/lifecycle/erasure.ts`), and the production
+  gateway has no closed or maintenance state, so a restore from a snapshot older
+  than an erasure cannot re-apply it before public exposure unless the operator
+  uses a manual certificate and a forwarded, name-mapped route that has never been
+  tried on the production profile. Needed: an erasure record kept outside the
+  backed-up data, a way to re-apply erasures before the site is reachable (a closed
+  gateway state or an operator-only listener for the CMS administrator interface),
+  and the realm-side disable for members in the production identity tool.
 - Docs corrections found and not made there: `docs/website-host.md` says the module
   backs up "the entire protected input directory" (only when `inputFiles` is null;
   production sets it); `docs/production-profile.md` "Host replacement" says to copy

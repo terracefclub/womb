@@ -88,12 +88,72 @@ until the owner says go.
 
 | Point | Decision | Needs to be known first |
 | --- | --- | --- |
-| D1, before step 2 | Declare the original dead, or authorise a planned replacement | Why the original cannot be recovered in place; who can power it off |
+| D1, before step 2 (planned) or step 3 (original lost) | Declare the original dead, or authorise a planned replacement | Why the original cannot be recovered in place; who can power it off |
 | D2, after step 7 | Accept the data-loss window | The chosen snapshot's time against now; for the unplanned case, that it was not quiesced; which member erasures were made after the snapshot time (section 4, "Erasure replay") |
 | D3, after step 9 | Go or no-go to touch live paths | The reconciliation report (table names and counts, file counts) looks like the real thing |
+| D2b, before step 15 | Erasure replay and public exposure (see "Erasure replay and the public-exposure conflict" below the table) | The list of erasures since the snapshot, and which of the options there the owner accepts |
 | D4, before step 15 | Go or no-go to start the writers | Steps 10 to 14 done. After step 15 the replacement writes; this document has no tested way back (step 15) |
-| D5, step 21 | Declare the replacement in service, and cut public traffic over | The checks of step 20 and 21 |
+| D5, step 21 | Declare the replacement in service, cut public traffic over, and restart the sweep timer | The checks of steps 20 and 21, and the erasure replay of D2b done |
 | D6, after D5 | Retire the original's disk and state for good | Never earlier. Only the all-services scenario (`platform/full/scenario.py`, `stopped_guest`) keeps the retired original disks; the production VM check and the TLS VM test delete the original disk (`test.nix`, `tls-test.nix`), so a production promotion's retention of the original is your decision, not a rehearsed practice |
+
+### Erasure replay and the public-exposure conflict (D2b)
+
+A snapshot older than a member's erasure brings that person's data back, and
+nothing in the system re-applies the erasure (details in section 4, "Erasure
+replay"). Re-applying it needs the CMS administrator interface on the replacement,
+after the migration gate is open (step 16). The conflict, from the code:
+
+- Adoption (step 15) starts nginx, and the host firewall already allows TCP 443
+  from anywhere (`platform/website-gateway.nix`, `networking.firewall.allowedTCPPorts`;
+  the production app role opens 22 and 443). The gateway has **no maintenance or
+  closed state**: its only refusals are 421 for an unknown host name and the
+  application's own authorisation. From adoption the restored site can be reached
+  by anyone who connects to the replacement's address with the right host name.
+  Public DNS is therefore the practical switch for discovery, not a closed state.
+- In ACME mode the certificate comes only through HTTP-01, which needs each public
+  name to resolve to the replacement already (step 19; DNS-01 is not built,
+  [TLS](tls.md#who-terminates-tls)). So in ACME mode the public names must point at
+  the replacement, and the restored site is publicly reachable by name, before or
+  while the erasures can be applied.
+- How the administrator reaches the CMS before public DNS: the CMS listens on
+  loopback only (port 13048 by default), the gateway serves its host name on 443,
+  and the CMS configuration, its single sign-on issuer and the site origins all use
+  the public host names (`platform/website.nix`, `platform/production/app.nix`).
+  The only documented way to reach such a host without public DNS is the
+  rehearsal's: an SSH loopback forward to 443 plus a local name mapping on the
+  operator machine, trusting the run's private CA ([cloud rehearsal](cloud-rehearsal.md#keep-the-data-and-checks-private),
+  lease 5, synthetic data). Whether a CMS administrator can sign in that way with
+  a production certificate has not been tried; a bare loopback forward to port 13048
+  without the names is **not determined from the repository** to work.
+
+Options, each with its evidence:
+
+1. **Manual certificate mode, public DNS unchanged until the erasures are
+   re-applied.** The operator supplies a certificate valid for all public names
+   (`terrace-secrets set app tls/certificate`, `tls/key`; supported, the default
+   mode, [TLS](tls.md#two-modes)), reaches the replacement by SSH forward and name
+   mapping, re-applies the erasures, and only then moves DNS. If the host is to
+   use ACME afterwards, `terrace-secrets host tls app acme --yes` switches it
+   ([TLS](tls.md#switching-a-live-manual-host-to-acme); proven on the relay only).
+   Evidence: manual mode, VM rehearsal (production VM check); forward and name
+   mapping, also on temporary Hetzner hosts once (rehearsal profile, private CA);
+   the whole sequence on a production profile: not exercised anywhere. Residual
+   exposure: port 443 stays open to anyone using the address and host name.
+2. **ACME mode, accept a window.** DNS goes to the replacement, the certificate is
+   issued, the erasures are re-applied through the public names. Erased people's
+   data is served, or can be, from DNS cut-over until the last erasure completes.
+   Evidence: ACME against a local test server only, VM rehearsal; the window itself:
+   not exercised anywhere.
+3. **Hold the public site closed while DNS points at it.** The repository has no
+   such state. Stopping `nginx.service` would also stop the ACME challenge, which
+   is served by the same nginx. Not supported.
+
+If none of these is acceptable, the repository supports nothing else: until a way
+to re-apply erasures before public exposure exists (the backlog records it), a
+restore from a snapshot older than an erasure cannot be put in service without
+briefly serving, or risking serving, erased data. Accepting that window (option 2,
+or the residual exposure of option 1) or blocking the promotion until it is closed
+is the owner's decision, D2b. Record it with the snapshot time and the erasure list.
 
 ## 2. The procedure
 
@@ -149,8 +209,9 @@ backup could otherwise run between your final backup and the fence, and end in a
 prune of the repository you are about to restore from. Stopping the timers lasts
 until the next boot of the original (see below).
 
-On the original `relay`, stop `nginx.service` and `headscale.service` first and then
-run the same backup (the rehearsal does: `quiesce_relay` in
+On the original `relay`, first stop its backup and check timers too
+(`systemctl stop terrace-backup.timer terrace-backup-check.timer`; the relay has no
+sweep timer), then stop `nginx.service` and `headscale.service` and run the same backup (the rehearsal does: `quiesce_relay` in
 `infra/nixos/rehearsal_services.py`). This disconnects Headscale clients until the
 replacement is up.
 
@@ -446,22 +507,30 @@ clears the store's own replacement marker (asserted in the VM check).
 
 **Adoption arms the backup, check, freshness and sweep timers now, not at step 21**
 (`writerTimers` in `platform/production/app.nix` and `relay.nix`; the target wants
-them, `platform/production/base.nix`). Until your checks pass, a scheduled backup
-(03:15 daily with up to 15 minutes' delay, `Persistent=true`) could back up a
+them, `platform/production/base.nix`). `adopt` arms them when it runs `systemctl start terrace-production.target`, which
+is before its stability wait and before it can report success, so a failed
+adoption that you then resume has already armed them. Until your checks pass, a
+scheduled backup (03:15 daily with up to 15 minutes' delay) could back up a
 replacement whose CMS gate is closed or whose media copy was skipped, and every
 backup run ends in `forget --prune` against the repository the restore came from
 (`platform/backup/backup.sh`; what that can remove is in step 21). The sweep
-timer (03:30 daily, `Persistent=true`) will erase and redact on the restored data
-as soon as the migration gate opens. So, immediately after adoption succeeds:
+timer (03:30 daily) will act on the restored data as soon as the migration gate
+opens: it expires stale invitations, withdraws unreviewed applications and
+completes pending outbox redactions; it never erases a member by itself
+(READ: website `docs/member-lifecycle.md` section 9 at `dd1aef7`). So, as soon as
+you have started `adopt`, whether it succeeded or not:
 
 ```sh
 systemctl stop terrace-backup.timer terrace-cms-sweep.timer
 ```
 
-On the relay only `terrace-backup.timer`. This is not in any rehearsal (not
+On the relay only `terrace-backup.timer` (it has no sweep). This is not in any rehearsal (not
 exercised anywhere); stopping a timer does not stop the writers. A reboot of the
 replacement re-arms them, because the production target wants them again. Start
-them again in step 21 and after D5 respectively.
+them again in step 21 (backup) and at D5 (sweep). Whether a timer started after a
+long stop runs a missed occurrence at once (`Persistent=`) is systemd behaviour that
+this document has not verified: after re-arming, check `systemctl
+list-timers` for the next run times.
 
 **There is no documented way back after this step.** The snapshot still exists in
 the repository and the original's disk exists if you kept it, so a second
@@ -490,10 +559,41 @@ ledger across this step, `test.nix`; see the traceability table). Failed: a chan
 ledger means the replacement runs a different release than the original; stop and
 decide with the owner.
 
-Keep `terrace-cms-sweep.timer` stopped (step 15) until D5. Once the gate is open
-the sweep erases and redacts according to the member lifecycle on whatever the
-snapshot held; the production VM check also stops it while it compares state.
-Before members are served, deal with erasure replay (section 4).
+Keep `terrace-cms-sweep.timer` stopped (step 15) until D5; the production VM check
+also stops it while it compares state.
+
+**Step 16, continued: erasure replay (D2b), only now.** It can start only after the
+gate is open and the CMS is running, and before D5. For each person the owner lists
+as erased since the snapshot's time (READ: website `docs/member-lifecycle.md`
+sections 5 and 8 at `dd1aef7`, `cms/src/lifecycle/erasure.ts`):
+
+1. In the CMS administrator interface, create a **Member offboardings** record for
+   the member. An administrator-initiated erasure is only possible for a member who
+   is already offboarded. A member-initiated erasure (the person's own two-step
+   request) cannot be replayed as such.
+2. Create a **Data requests** record of kind `erasure`. The erasure runs inside that
+   save, in one database transaction: it deletes the profile, mentorship offer,
+   group memberships and stories, anonymises requests, scrubs applications,
+   decision notes and outbox recipients, revokes pending invitations and turns the
+   member row into a tombstone.
+3. Complete the outbox files, because the administrator save cannot redact files
+   itself. The sweep is started by hand while its timer stays stopped:
+
+```sh
+systemctl start terrace-cms-sweep.service
+```
+
+4. Close the realm side: the erased person's Keycloak account must be disabled. The
+   website's own tool for that is `provision-member.ts offboard` (website
+   repository, not in this one). Whether `terrace-identity-admin user disable`
+   covers member accounts is **not determined from the repository**
+   (`docs/identity-admin.md` describes it for editorial site accounts and says
+   member accounts follow the website's provisioning).
+
+Worked: the erasure response or the Data requests record shows counts and no
+`mirror: pending`; the sweep service succeeds. Not exercised anywhere: no
+rehearsal replays an erasure on a restored host (the rehearsals erase two
+synthetic members after their restore, which is a different thing).
 
 **Step 17. Identity (Keycloak).** Nothing is imported over the restored realm:
 Keycloak's startup import creates a missing realm and skips an existing one
@@ -565,7 +665,8 @@ production:
 - ACME mode: the replacement registers a new account and orders a new certificate
   after adoption; until the order succeeds nginx serves a placeholder that clients
   reject. HTTP-01 needs each public name to already resolve to the replacement, so
-  DNS (step 21) and adoption are tied together, and the CA's rate limits apply to retries (`tls.md` quotes Let's Encrypt's published
+  DNS (step 21) and adoption are tied together (and see D2b above for what that
+  does to erasure replay), and the CA's rate limits apply to retries (`tls.md` quotes Let's Encrypt's published
   figure of 5 certificates a week for the same set of names as of its writing; check
   the CA's current page). Worked:
   `terrace-tls status` shows an issued certificate and `terrace-tls check` exits 0.
@@ -582,8 +683,14 @@ terrace-secrets verify
 terrace-backup age
 ```
 
-Worked: no failed units, every public name passes `terrace-tls check`, `verify` passes. `terrace-backup age`
-exits 1 until the first backup of the replacement (step 21 takes it; you stopped the timer in step 15).
+Worked: no failed units except the expected one below, every public name passes
+`terrace-tls check`, `verify` passes. `terrace-backup age` exits 1 until the first
+backup of the replacement (step 21 takes it; you stopped the timer in step 15), and
+for the same reason `terrace-backup-freshness.service` is expected to be **failed**
+("no successful backup recorded") if its hourly timer, which adoption left running,
+has fired since adoption. It clears when step 21 starts it by hand after the first
+backup, or at its next hourly run after that backup (`OnCalendar=hourly`,
+`platform/backup.nix`).
 The rehearsal's functional checks (198 HTTPS protocol assertions, the website
 lifecycle steps, the browser checks) use scripts that only the rehearsal harness
 installs (`/etc/gateway-protocol.py`); no equivalent is installed on a production
@@ -593,7 +700,7 @@ fails later shows only in `systemctl --failed`.
 
 ### Part F. First backup and timers, then declare
 
-**Step 21. Take the first backup by hand, restart the timers, then D5.** Adoption
+**Step 21. Take the first backup by hand, restart the backup timer, then D5 and the sweep timer.** Adoption
 (step 15) already armed the backup, check and freshness timers, and you stopped
 the backup timer there. Their state files on the replacement start empty, so the
 hourly freshness unit fails until one backup succeeds (shown for a newly adopted
@@ -629,8 +736,8 @@ Consequences:
   remove it. If you restored from an older snapshot because the newest was bad, it
   is already not among the newest: one more run can push it out, unless it is the
   kept newest snapshot of its day, week or month. Settings lower than the defaults
-  change this; I could not determine the effect of a changed policy without running
-  it.
+  change this; the effect of a changed policy is **not determined from the
+  repository**.
 - What a backup from a half-restored replacement certainly does is add a snapshot
   that is incomplete (for example an empty media directory) to the group, and
   prune older snapshots outside the windows: the very fallbacks you would use if
@@ -650,9 +757,26 @@ Consequences:
 Never let the original run a backup after promotion.
 
 Only now is the replacement ready to be declared in service. **D5**: the owner
-declares it when steps 15 to 21 passed and public traffic has been moved; only
-then start `terrace-cms-sweep.timer` (`Persistent=true`, so it may run at once). The
-rehearsals end with every guest stopped; none has a "declared in service" point,
+declares it when steps 15 to 21 passed, D2b is settled and public traffic has been
+moved. Only then start the sweep timer, and end the procedure by checking that
+every timer is active again. App host:
+
+```sh
+systemctl start terrace-cms-sweep.timer
+systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer terrace-cms-sweep.timer
+systemctl list-timers
+```
+
+Relay (no sweep timer):
+
+```sh
+systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer
+```
+
+Worked: `active` once per unit named, and `list-timers` shows a next run for each.
+A sweep timer you forget to start stays off for good and raises no alert: no
+alerting exists (G-23), so this check is the only safeguard. Not exercised anywhere.
+The rehearsals end with every guest stopped; none has a "declared in service" point,
 and DNS cut-over, member communication and the retirement of the original (D6) are
 outside every test.
 
@@ -729,22 +853,24 @@ network).
   invitation links; both a promoted replacement and a returning original would
   hold them. Nothing tests a duplicate or lost message.
 - **Erasure replay.** A snapshot older than a member's erasure brings that
-  member's personal data back: their application and member rows in the CMS
-  database, their Keycloak account, and any invitation file in the outbox. Nothing
-  re-applies the erasure. The website's erasure is an administrator action on the
-  live data followed by the sweep ([website host](website-host.md#member-lifecycle-settings-outbox-and-sweep)),
-  and the sweep acts on the lifecycle state it finds, not on a ledger of erasures
-  made after the snapshot. I found no erasure ledger documented outside the
-  restored data (the operator directory holds roster reports, is in no backup, and
-  is not an erasure record), so where such a record would live is **not determined
-  from the repository**. Retention also keeps erased data in older snapshots for
-  months (keep-daily 7, weekly 4, monthly 6), which AGENTS.md's member-privacy
-  rules make a question for the owner. What the operator must do: before the
-  replacement serves members (before the DNS cut-over of D5), obtain from the owner
-  a list of erasures made since the snapshot's time, from records kept outside this
-  system, re-apply each through the administrator erasure and run
-  `systemctl start terrace-cms-sweep.service`. Add this to D2: the owner decides
-  whether serving may start without that list. No rehearsal tests it.
+  member's personal data back: their member, application and profile rows, their
+  Keycloak account (the realm side is a separate manual step at erasure time) and
+  any invitation file in the outbox. Nothing re-applies the erasure. READ in the
+  website source at `dd1aef7` (`docs/member-lifecycle.md` sections 5, 8 and 9,
+  `cms/src/lifecycle/erasure.ts`): an erasure is a database transaction run by the
+  CMS (member-initiated, or an administrator **Data request** for an already
+  offboarded member) that tombstones the member row; the sweep only completes the
+  outbox-file redaction afterwards and never erases anyone itself. So the only
+  record of an erasure is in the restored database (the tombstone) and the outbox;
+  No erasure ledger outside the restored data was found, in this repository or in
+  the website source, so where one would live is **not determined from the
+  repository**. Retention keeps erased data in older snapshots for months
+  (keep-daily 7, weekly 4, monthly 6), which AGENTS.md's member-privacy rules make
+  a question for the owner. What the operator does, in order: D2b decided before
+  adoption; the list of erasures made since the snapshot's time obtained from the
+  owner, from records kept outside this system; replay after the migration gate
+  opens (step 16, continued) and before D5. The ordering conflict with ACME and
+  DNS is set out under D2b. No rehearsal tests it.
 - **The original's own timers.** After step 2 the original is quiesced, not fenced;
   its backup, sweep and freshness timers stay armed and return on any reboot, and
   its backup timer could prune the repository you restore from (step 2 stops them
