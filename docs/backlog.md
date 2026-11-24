@@ -1,6 +1,6 @@
 # Delivery backlog
 
-Updated 2026-11-23. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
+Updated 2026-11-24. GitHub is primary (2026-11-06): current work is tracked in the linked GitHub issues. The
 GitLab issue, merge-request and milestone links below are the historical audit trail ([Womb milestone](https://gitlab.com/terrace/tech/womb/-/milestones/1),
 [website milestone](https://gitlab.com/terrace/tech/tfc-website/-/milestones/1), both historical). GitLab `!N` numbers are not
 GitHub PR numbers; see [migration and mirroring](github-migration.md). The step-by-step owner view, with proof status and open gaps,
@@ -55,53 +55,62 @@ in progress, review, and external dependency. Keep evidence in the linked MR.
 
 ## Credential rotation follow-ups (G-37), recorded 2026-11-24
 
-From the written [credential rotation](credential-rotation.md) document. None is done
-in that pull request.
+From the written [credential rotation](credential-rotation.md) document. None was done
+in that pull request; the production safeguards follow-up (2026-11-24) did the items
+marked done.
 
-- Docs correction: `platform/production/inventory.json` says for
-  `identity/database-password` "`apply` ... then push"; the code reads the delivered
-  file, so `push` comes first (`cmd_host_apply`; `docs/secrets.md` and the production
-  VM check have the right order). `docs/identity-host.md` still says rotating the
-  database password needs a separately reviewed transaction, which the production
-  profile now has (`terrace-secrets apply`). The owner runbook's 9.9 gap text omits
-  that database and repository password rotation exist for production hosts.
+- Done (production safeguards): the inventory's `identity/database-password` text now
+  says push, then `apply`; `docs/identity-host.md` names the production rotation
+  (`terrace-secrets apply`). Left: the owner runbook's 9.9 gap text omits that
+  database and repository password rotation exist for production hosts (the runbook
+  is generated elsewhere).
 - Code: Windmill `adminPassword` cannot be changed after the first bootstrap
   (`platform/windmill/bootstrap.ts` logs in with it, falls back only to the factory
   password); add a rotation path and a VM assertion.
-- Code: `terrace-secrets apply --finish` removes whatever restic key is not the one
-  the host's delivered file opens; run before `push` it removes the new key. Refuse
-  it unless the delivered file is the newest store value, or document and test it.
+- Done (production safeguards): `apply --finish` sends the store value and the host
+  refuses it unless its delivered file holds exactly that value, before restic is
+  asked (unit tests; production VM: refused before `push` with both keys kept).
 - Code: no `client-secret sync` for the Documenso, Windmill and Vaultwarden OIDC
   clients (only the four production clients), no rotation of Headscale keys, host SSH
   key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
-- Code: the production TLS store check validates PEM structure only; it does not
-  verify that the certificate and key match (`terrace-secrets:84-92`), and nginx
-  restarts on push. Add a match check at `set`/`install`.
-- Code: `host-apply --finish` (and `--only-current`) should refuse when the host's
-  delivered password is not the newest store value, and `--only-current` deletes
-  separately added escrow keys; require a `key list` confirmation or an explicit
-  list.
+- Done (production safeguards): the first certificate's public key must be the
+  key's (`tls_pair_problem`, OpenSSL on stdin). `set` warns while the stored pair
+  does not match (one half is set at a time, so it cannot refuse); the host's
+  `install` refuses a mismatched pair before anything is installed or restarted
+  (unit tests with stand-in and real OpenSSL; production VM: push refused, nginx
+  and the served certificate unchanged, then the matching pair delivered).
+- Done (production safeguards): `--finish --only-current` without `--remove` lists
+  every key and removes nothing; `--remove KEYID` must name exactly each key it
+  removes (unit tests; production VM). Left as it was: `--finish --keep` still
+  removes every non-current key not kept, without listing them first.
 - Decide and document: where Windmill's encryption key lives and how it is delivered;
   the exact way to deploy a changed private host module (escrow recipient, operator
   keys); how to compute the Hetzner `tokenSha256` pin.
-- Tests: old-credential-rejected assertions for the database and repository password
-  rotations, the SFTP key rotation, `escrow replace`, and the compromise drills listed
-  in the document.
+- Tests: old-credential-rejected assertions for the SFTP key rotation, `escrow
+  replace`, and the compromise drills listed in the document. Done (production
+  safeguards): the database password (`password authentication failed`) and the
+  repository password (`wrong password`) are refused after their procedures, each
+  with the old value shown to work first as a control.
 
 ## Restore promotion follow-ups (G-22), recorded 2026-11-24
 
 From the review of the written [restore promotion](restore-promotion.md) procedure.
-None of these is done in that pull request.
+None of these was done in that pull request; the production safeguards follow-up
+(2026-11-24) did the items marked done.
 
 - Drill: run the procedure's commands verbatim in a VM on the production profile
   for both roles with the original disks destroyed, and add the assertions in its
   "Drill to add" section. Until then it is written from the rehearsals and has not
   been run as written.
-- Code: `terrace-production adopt` arms the backup, check, freshness and sweep
-  timers (`writerTimers` in `platform/production/app.nix` and `relay.nix`) before
-  the operator has verified the restored services; a scheduled backup ends in
-  `forget --prune` against the repository the restore came from. Decide whether
-  adoption after a restore should leave them off until a second explicit step.
+- Done (production safeguards; decision: leave them off): `adopt --restored` holds
+  the backup, check, freshness and (app) sweep timers (`restoreHeldTimers`, a
+  `ConditionPathExists=!` on `/var/lib/terrace-production/timers-held`, written
+  before the target starts, so a resumed adoption and a reboot do not arm them) and
+  names `terrace-production arm-timers`, which arms them, says which, and is
+  idempotent. A plain adoption is unchanged. Production VM: both paths, a failed and
+  resumed restored adoption. Not exercised: the relay's held timers (no relay
+  replacement in the VM). The procedure now arms the sweep at step 21 with the
+  backups, not at D5.
 - Decide and document: the production website backup set is the `terrace_cms`
   database, the media directory (`/var/lib/terrace-cms-media`) and the outbox
   (`/var/lib/terrace-cms-outbox`), plus the `keycloak` database. It does not
@@ -120,17 +129,15 @@ None of these is done in that pull request.
   backed-up data, a way to re-apply erasures before the site is reachable (a closed
   gateway state or an operator-only listener for the CMS administrator interface),
   and the realm-side disable for members in the production identity tool.
-- Docs corrections found and not made there: `docs/website-host.md` says the module
-  backs up "the entire protected input directory" (only when `inputFiles` is null;
-  production sets it); `docs/production-profile.md` "Host replacement" says to copy
-  the PostgreSQL directory "exactly as" `fresh_restore` does (that function copies
-  file sets only, the cluster copy is separate, and the rehearsals read the data
-  directory from `/etc/rehearsal-pg-directory`, a harness-only file);
-  `docs/secrets.md` says push then `host unstage` while the production VM check
-  unstages first (harmless); `docs/full-rehearsal.md` says "a full repository read
-  check" (the rehearsal profiles set `check.readDataSubset` to 100 percent, the
-  production default is 5 percent); `docs/backups.md` still says four hours to
-  recover where `docs/migration.md` proposes same-day recovery.
+- Docs corrections, done (production safeguards): `docs/website-host.md` (the input
+  directory is backed up only when `inputFiles` is null; the outbox is backed up),
+  `docs/production-profile.md` "Host replacement" (the cluster copy is separate from
+  `fresh_restore`; `/etc/rehearsal-pg-directory` is harness-only), `docs/secrets.md`
+  (the push pins the store's public key, so the order of push and `host unstage`
+  does not matter), `docs/full-rehearsal.md` (its "full" read check is right for the
+  rehearsal, which sets `100%`; it now says production keeps `5%`). Left:
+  `docs/backups.md` now says the two recovery-time proposals (four hours, same day)
+  differ; which applies is an owner decision.
 
 ## Follow-ups recorded 2026-11-20
 
@@ -348,11 +355,10 @@ known to affect a deployed host (none exists).
   (a sweep start requested during the migration leaves it `inactive` with a start
   job waiting, which is kept); only a sweep already running is interrupted, as
   intended. The exact window is not tested; the website VM proof's queued-sweep
-  and running-sweep checks cover the two cases on either side. This does not
-  change when the sweep timer is armed: after a restore, adoption arms it before
-  the operator has verified the services (see "Restore promotion follow-ups"),
-  and a sweep it starts during the post-restore migration now waits for the
-  migration and runs right after it.
+  and running-sweep checks cover the two cases on either side. After a restore
+  the sweep timer stays held until `terrace-production arm-timers` (see "Restore
+  promotion follow-ups"); a sweep started during a migration waits for it and runs
+  right after it.
 - Migrations start with a plain `systemctl start terrace-cms-migrate.service`
   (by hand in the production steps, or from the rehearsal launcher). Since the
   PR 68 round 2 review the unit has no `Conflicts=` on the CMS and website: its
@@ -384,21 +390,21 @@ known to affect a deployed host (none exists).
   recorded by sudo's log, audit `execve` records or root's shell history (none
   tested); the wrapper has not been run as a background job with an open
   standard input.
-- Operator tool lock file, open: a conforming lock file (root, `0600`, regular)
-  is never removed, so the normal case has no race. When the existing file does
-  not conform, two wrappers can both test it before either removes it; each then
-  removes the other's file, creates its own inode and takes its own `flock`, so
-  both pass the lock. The second check (an active `terrace-cms-tool-*` unit, exit
-  73) covers all but a short window. Reachable only when a nonconforming file
-  exists; `/run` is root-only. Fix in the next code change: never remove the
-  file; open it, take the `flock`, then check owner and type through the open
-  descriptor and fix the mode under the lock, refusing if it cannot be fixed (or
-  create it at boot with tmpfiles).
-- No test requests a CMS or website start during a running migration (only a
-  sweep start is tested); the `After=` ordering that makes such a start wait is
-  not proven in a VM. Nor is a migration preflight whose stop of the CMS, website
-  and sweep fails partway ([website host](website-host.md), "When a tool is still
-  running").
+- Done (production safeguards): the operator tool lock file is never removed or
+  replaced. A link or non-regular file is refused before it is opened; the regular
+  file is opened without truncation, locked, then checked through the descriptor
+  (same inode as the path, owned by root); a wider mode is narrowed to `0600` under
+  the lock; anything else is refused with exit 72. Unit tests fail against the
+  earlier script; the website VM proof asserts the narrowing on the same inode and
+  the refusal of a foreign owner and of a link.
+- Done (production safeguards): the website VM proof requests sweep, CMS and website
+  starts while a slowed migration runs, asserts that each stays inactive with its
+  start job waiting, and that each runs after the migration ended. Still not tested:
+  a migration preflight whose stop of the CMS, website and sweep fails partway
+  ([website host](website-host.md), "When a tool is still running").
+- Found and fixed (production safeguards): `docs/website-host.md` still said a sweep
+  requested in the first milliseconds of a migration is cancelled; the preflight
+  has stopped only a running sweep since the PR 68 round 2 review.
 - Operator from a file (website repo, tfc-website): `bin/roster-invite` takes
   the operator's administrator email only as `--operator` on the command line.
   A host with unprivileged interactive users should not run the tools until the
