@@ -15,6 +15,8 @@
   marker = "/var/lib/terrace-production/adopted";
   # The documented restore destination (terrace-backup-restore --dest) and its reconciliation report.
   restoreMarker = "/var/lib/terrace-restore/reconciliation.txt";
+  # Present from `adopt --restored` until `terrace-production arm-timers`: the restore-held timers stay off.
+  holdMarker = "/var/lib/terrace-production/timers-held";
   # Core dumps would put process memory (with secrets) on disk: pipe them to a no-op.
   noCore = "|${pkgs.coreutils}/bin/false";
   portDefinitions = option:
@@ -118,6 +120,8 @@
       writers=(${lib.escapeShellArgs cfg.writers})
       helpers=(${lib.escapeShellArgs cfg.writerHelpers})
       timers=(${lib.escapeShellArgs cfg.writerTimers})
+      held=(${lib.escapeShellArgs cfg.restoreHeldTimers})
+      hold=${holdMarker}
       # A host whose backup repository already holds snapshots of it is a replacement, whatever its disk says.
       # The repository is per role: ANY snapshot in it means this role already has a deployment
       # (also when a replacement was given a different host name).
@@ -157,6 +161,8 @@
           fi
         done
         for unit in "''${timers[@]}"; do
+          # A timer held after a restored adoption is skipped by its start condition until `arm-timers`.
+          [[ -e $hold && " ''${held[*]} " == *" $unit "* ]] && continue
           [[ $(systemctl show "$unit.timer" -p ActiveState --value) == active ]] || problems+=("$unit.timer")
         done
         if (( ''${#problems[@]} )); then
@@ -194,6 +200,13 @@
           install -d -m 0700 /var/lib/terrace-production
           echo "''${mode#--}" >"$adopting"
           chmod 0600 "$adopting"
+          # After a restore the backup, check, freshness and sweep timers stay off until the operator has verified the
+          # restored services: a scheduled backup ends in `forget --prune` on the repository the restore came from.
+          # Written before the target starts (and again by a resumed adoption), so no start of the target, at
+          # adoption or at boot, arms them while it exists; only `arm-timers` removes it.
+          if [[ $mode == --restored ]]; then
+            install -m 0600 /dev/null "$hold"
+          fi
           systemctl reset-failed ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))} 2>/dev/null || true
           systemctl start terrace-production.target || true
           # A writer can report "started" before it fails: nginx, for one, is active for a few
@@ -217,14 +230,46 @@
           install -m 0600 /dev/null ${marker}
           date -u +%FT%TZ >${marker}
           rm -f "$adopting"
-          [[ $mode == --restored ]] && rm -f "$replacement"
-          echo 'Adopted: the writers start now and at every boot.'
+          if [[ $mode == --restored ]]; then
+            rm -f "$replacement"
+            echo 'Adopted: the writers start now and at every boot.'
+            echo "Held until you have verified the restored services: $(printf '%s.timer ' "''${held[@]}")(they stay off across reboots)."
+            echo 'Arm them with: terrace-production arm-timers'
+          else
+            echo 'Adopted: the writers start now and at every boot.'
+          fi
+          ;;
+        arm-timers)
+          [[ -e ${marker} ]] || { echo 'terrace-production: not adopted; finish `terrace-production adopt` first' >&2; exit 1; }
+          systemctl is-active --quiet terrace-production.target || { echo 'terrace-production: the writers are not running (terrace-production.target is not active); nothing armed' >&2; exit 1; }
+          rm -f "$hold"
+          armed=()
+          for unit in "''${timers[@]}"; do
+            if [[ $(systemctl show "$unit.timer" -p ActiveState --value) != active ]]; then
+              systemctl start "$unit.timer"
+              armed+=("$unit.timer")
+            fi
+          done
+          off=()
+          for unit in "''${timers[@]}"; do
+            [[ $(systemctl show "$unit.timer" -p ActiveState --value) == active ]] || off+=("$unit.timer")
+          done
+          if (( ''${#off[@]} )); then
+            echo "terrace-production: not armed: ''${off[*]}; check them with systemctl status" >&2
+            exit 1
+          fi
+          if (( ''${#armed[@]} )); then
+            echo "Armed: ''${armed[*]}. Every writer timer is active now and at every boot."
+          else
+            echo 'Already armed: every writer timer is active.'
+          fi
           ;;
         status)
           if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; elif [[ -e $adopting ]]; then echo "adoption as $(cat "$adopting") not finished"; else echo 'not adopted: no writer starts at boot'; fi
+          if [[ -e $hold ]]; then echo "timers held after a restored adoption: $(printf '%s.timer ' "''${held[@]}")(run terrace-production arm-timers once the restored services are verified)"; fi
           systemctl is-active terrace-production.target || true
           ;;
-        *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | status' >&2; exit 2 ;;
+        *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | arm-timers | status' >&2; exit 2 ;;
       esac
     '';
   };
@@ -315,6 +360,12 @@ in {
       internal = true;
       description = "Timers armed only by terrace-production.target.";
     };
+    restoreHeldTimers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [];
+      description = "Writer timers that `adopt --restored` leaves off (a start condition on the hold marker) until `terrace-production arm-timers`: the backup timers, whose runs end in `forget --prune` on the repository the restore came from, and the sweep.";
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -372,6 +423,10 @@ in {
         {
           assertion = lib.all (name: config.sops.secrets ? ${name}) config.terrace.production.secrets.required;
           message = "Terrace production secret(s) not declared: ${toString (lib.filter (name: !(config.sops.secrets ? ${name})) config.terrace.production.secrets.required)}.";
+        }
+        {
+          assertion = lib.all (unit: lib.elem unit cfg.writerTimers) cfg.restoreHeldTimers;
+          message = "Terrace production: every restore-held timer must be a writer timer: ${toString (lib.subtractLists cfg.writerTimers cfg.restoreHeldTimers)}.";
         }
         {
           assertion = builtins.match "age1[02-9ac-hj-np-z]{58}" cfg.escrowRecipient != null;
@@ -471,7 +526,11 @@ in {
           };
         }
       ];
-      systemd.timers = lib.genAttrs cfg.writerTimers (_: {wantedBy = lib.mkForce ["terrace-production.target"];});
+      systemd.timers = lib.mkMerge [
+        (lib.genAttrs cfg.writerTimers (_: {wantedBy = lib.mkForce ["terrace-production.target"];}))
+        # Skipped (not failed) while the hold marker exists: the target starts without them.
+        (lib.genAttrs cfg.restoreHeldTimers (_: {unitConfig.ConditionPathExists = "!${holdMarker}";}))
+      ];
     }
   ]);
 }

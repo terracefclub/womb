@@ -187,7 +187,24 @@ host once, explicitly:
   --confirm HOST`.
 - `terrace-production adopt --restored` refuses unless
   `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
-  restored state is in place; it then clears the replacement marker.
+  restored state is in place; it then clears the replacement marker. It starts
+  the writers but **leaves the backup, backup check, backup freshness and (on the
+  app) sweep timers off** (`restoreHeldTimers`): before anything starts it writes
+  `/var/lib/terrace-production/timers-held`, and those timers carry
+  `ConditionPathExists=!` on that file, so every start of the target (this
+  adoption, a resumed one, every boot) skips them, and the adoption's completeness
+  check does not wait for them. A scheduled backup ends in `forget --prune`
+  against the repository the restore came from, and the sweep acts on restored
+  data, so they wait until the operator has verified the restored services. The
+  output names them and the one command that arms them:
+  `terrace-production arm-timers`. It needs an adopted host with the target
+  active, removes the hold, starts every writer timer that is not active, prints
+  `Armed: <timers>.` (or `Already armed: every writer timer is active.` when there
+  is nothing to do, so it can be repeated) and fails naming any timer that is
+  still not active. Other writer timers (the identity health check, the TLS
+  expiry check and renewal, the temporary-administrator check) are armed by the
+  adoption as before. `terrace-production status` says when timers are held.
+  A plain `adopt --new` holds nothing back.
 
 Each host is adopted once. Both commands verify the secrets, record
 `/var/lib/terrace-production/adopting`, start the target and write the adopted
@@ -238,10 +255,17 @@ follows the steps above (its installer stand-in stages the host key only).
 3. On the replacement (not adopted, so nothing writes):
    `terrace-backup-restore --target primary --snapshot <id> --dest /var/lib/terrace-restore`
    must print `RECONCILIATION OK`. Copy the restored media and outbox
-   directories and the stopped PostgreSQL data directory into place exactly as
-   the all-services rehearsal does (`platform/full/scenario.py`,
-   `fresh_restore`), then `terrace-production adopt --restored`, the migration
-   action (the ledger must stay unchanged) and the two services.
+   directories (`<dest>/files/<path>`) into place, and the PostgreSQL data
+   directory (`<dest>/pgdata`) into the cluster's data directory
+   (`services.postgresql.dataDir`, `/var/lib/postgresql/18` today), owned by
+   `postgres`. The all-services rehearsal's `fresh_restore`
+   (`platform/full/scenario.py`) copies only the file sets; its cluster copy is a
+   separate step, and the rehearsals read the data directory from
+   `/etc/rehearsal-pg-directory`, a file only the test harness provides (the
+   production VM check's exact commands are in its "replacement" subtest). Then
+   `terrace-production adopt --restored` (the backup and sweep timers stay off),
+   the migration action (the ledger must stay unchanged), the two services, and
+   once the restored services are verified `terrace-production arm-timers`.
 
 Promoting a restore into service on real data still needs the owner-approved
 procedure (G-22); this rehearsal is its technical basis.

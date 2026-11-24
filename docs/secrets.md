@@ -222,6 +222,7 @@ terrace-secrets public app backup/primary/sftp-key            # public half, for
 # on a host, as root:
 terrace-secrets verify                                        # every secret present, owner, mode, format, ramfs, recipients
 terrace-production adopt --new | --restored                   # once per host: arm the writers
+terrace-production arm-timers                                  # after adopt --restored, once the restored services are verified
 ```
 
 `push` and `apply` connect with `ssh -F /dev/null`, `HostKeyAlias` set to the

@@ -140,6 +140,8 @@ in {
       conditionalWriters = ["terrace-cms" "terrace-web"];
       stateWitness = "${config.services.postgresql.dataDir}/PG_VERSION";
       writerTimers = ["terrace-cms-sweep" "terrace-backup" "terrace-backup-check" "terrace-backup-freshness" "terrace-identity-health"];
+      # Off after `adopt --restored` until `terrace-production arm-timers` (docs/restore-promotion.md, step 15).
+      restoreHeldTimers = ["terrace-cms-sweep" "terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
     };
     # PostgreSQL's own target would otherwise pull the server in at boot.
     systemd.targets.postgresql.wantedBy = lib.mkForce ["terrace-production.target"];
