@@ -428,3 +428,75 @@ known to affect a deployed host (none exists).
   ([full rehearsal](full-rehearsal.md)); their derivations equal PR 64's
   reviewed code. The `--all-services` driver is unchanged from run `1f051756`
   and was not rerun. One run per variant does not show any failure rate.
+
+## Host update follow-ups (G-37 / 9.7), recorded 2026-11-24
+
+From the written [host updates](host-updates.md) procedure. None is done in that
+pull request.
+
+- Decide (owner, before any production install): how a new system closure reaches
+  an installed production host. SSH accepts only `operator` (`AllowUsers operator`,
+  `PermitRootLogin no`, `platform/production/base.nix`), `operator` is not a trusted
+  Nix user and signatures are required (nixpkgs defaults, unchanged by the
+  production modules), and nothing in the repository copies or activates a closure
+  on such a host. The choice (a signing key trusted by the host, a trusted
+  `operator`, or something else) must be in the module a host is installed with,
+  or its first update has no path.
+- Code or tool: a deploy and rollback command for production hosts that records
+  the running generation, activates a given toplevel (`switch`, `boot` or `test`)
+  and refuses while an operator tool or a migration runs, with a VM drill.
+- Hazard, decide and fix: after a migration, the previous generation's
+  `terrace-cms-migrate.service` would run the old bundle's `bin/migrate` against
+  the newer schema and, if it succeeds, write the old revision to the marker and
+  reopen the CMS gate. The gate compares revisions, not schemas. Make the marker or
+  the migration unit refuse a downgrade (for example compare the ledger with the
+  bundle's migration list), or test and document what Payload does.
+- Hazard, decide: the pre-update snapshot is protected only by retention. If a
+  second snapshot of the host is taken the same day, keep-last 3 is all that keeps
+  it (about two days with the daily timer, reading restic's rules; not tried).
+  Decide whether pre-update snapshots need a pin, and test the retention reading.
+- Docs correction: the website service has no revision gate (`terrace-web.service`
+  runs only the identity guard; `requireMigration` is on the CMS, its sweep and the
+  operator tools, `platform/website.nix`), but `docs/production-profile.md` ("a
+  revision mismatch still fails through the existing gate"), the comment in
+  `platform/production/app.nix` and `docs/website-host.md` ("Startup rejects a
+  missing/different revision marker") read as if both were gated. Decide whether
+  the website should be gated too, then correct the text.
+- Decide: the order between activating a revision that adds an inventory secret
+  and pushing it (the host refuses unknown names before activation; after it, a
+  reboot before the push leaves the writers gated), and how a removed inventory
+  name leaves the store (`terrace-secrets` has no general delete command; every
+  push is refused while the store holds it).
+- Decide: how the operator reaches a production host's console when a new
+  generation does not boot (no emergency shell; no provider access exists), and a
+  policy for garbage collection and boot-entry limits (none is set; generations
+  accumulate on the EFI system partition).
+- Not determined, needs a test: Keycloak and Headscale schema migrations on a
+  version change in `platform/flake.lock`, and whether the previous generation
+  starts on the migrated schema; what `bin/migrate` leaves after a failure part-way;
+  a PostgreSQL major upgrade (no tool exists).
+- Hazard, decide and fix: a migration that fails inside `bin/migrate`, or is killed
+  by the unit's `TimeoutStartSec = 180` (`platform/website.nix`; the preflight and
+  `bin/migrate` share it), leaves the marker at the **old** revision
+  (the marker is written only after `bin/migrate` exits 0). The new generation's
+  gate stays closed, but a generation rollback would start the old CMS on a
+  possibly partly migrated database. Decide whether the migration unit should mark
+  a failed attempt (so no generation's gate opens), and whether 180 s is right for
+  real data (measured only on empty or small synthetic databases).
+- Not determined, needs a test: what sops-nix does at activation when the new
+  manifest declares a name the delivered ciphertext lacks (expected failure of
+  `sops-install-secrets`; whether the previous secrets stay), and whether a push's
+  `restartUnits` starts a stopped `terrace-cms.service` or `terrace-web.service`
+  (the website would then run ungated on a stopped CMS).
+- Docs conflict: `docs/restore-promotion.md` step 15 says whether a persistent timer
+  started after a long stop runs a missed occurrence at once is not verified;
+  `platform/website-test.nix` asserts it for the sweep timer (a backdated stamp,
+  the restarted timer fires at once) and `platform/production/tls-test.nix` for the
+  freshness timer at boot. Correct the sister document.
+- Drill: the 16 items in the document's "Drills to add", first of all an upgrade
+  migration on data written by the previous pin, on the production profile,
+  followed by a generation rollback before and after the migration.
+- Docs: the owner runbook's 9.7 is labelled TESTED IN CODE ONLY while G-37 calls
+  9.7 NOT YET BUILT; 6.15 ("Deploy a release") is labelled PROVEN IN VM REHEARSAL
+  but its evidence migrates and starts a host built with the release, not a release
+  deployed to a running host. Settle both labels at the next runbook refresh.
