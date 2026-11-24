@@ -74,6 +74,13 @@ in that pull request.
 - Code: no `client-secret sync` for the Documenso, Windmill and Vaultwarden OIDC
   clients (only the four production clients), no rotation of Headscale keys, host SSH
   key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
+- Code: the production TLS store check validates PEM structure only; it does not
+  verify that the certificate and key match (`terrace-secrets:84-92`), and nginx
+  restarts on push. Add a match check at `set`/`install`.
+- Code: `host-apply --finish` (and `--only-current`) should refuse when the host's
+  delivered password is not the newest store value, and `--only-current` deletes
+  separately added escrow keys; require a `key list` confirmation or an explicit
+  list.
 - Decide and document: where Windmill's encryption key lives and how it is delivered;
   the exact way to deploy a changed private host module (escrow recipient, operator
   keys); how to compute the Hetzner `tokenSha256` pin.

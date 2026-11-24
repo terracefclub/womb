@@ -50,11 +50,18 @@ random bytes as 64 hex digits (`generate_value`, `terrace-secrets:403`).
 | `identity/client/terrace-editorial` (inv. 9) | realm client; `cms.env` `CMS_AUTH_INTROSPECTION_SECRET` | Keycloak copy in the dump | as above |
 | `identity/database-password` (inv. 10) | `services.keycloak.database.passwordFile` (`platform/identity.nix:74`); the PostgreSQL role `keycloak`, created once by `keycloakPostgreSQLInit` | the role's SCRAM hash is in the roles dump (`pg_dumpall --globals-only`) | The role keeps the password it was created with; replacing the file alone breaks Keycloak's login ([identity host](identity-host.md), "replacing its file does **not** rotate an existing role's password") |
 | `identity/bootstrap-admin-password` (inv. 11) | escrow only; never declared on a production host; handed once to `/run/terrace-identity-admin/` for `terrace-identity-admin first-admin` | no | single use |
-| `tls/certificate`, `tls/key` (inv. 12, 13; absent on an ACME host) | nginx credentials for every public name of the role | no | nginx restarts (a few seconds without HTTPS); a wrong pair fails `terrace-secrets` format checks at install |
+| `tls/certificate`, `tls/key` (inv. 12, 13; absent on an ACME host) | nginx credentials for every public name of the role | no | nginx restarts (a few seconds without HTTPS). `terrace-secrets` checks only the PEM labels and that the DER starts as a sequence (`private_key`, `certificates`, `terrace-secrets:84-92`): it does **not** check that the key belongs to the certificate, so a mismatched pair is accepted, nginx restarts on it, and HTTPS is down for every name of the role |
 | `backup/primary/repository-password` (inv. 14) | restic `passwordFile` of target `primary`, read by `terrace-backup`, `terrace-backup-check`, `terrace-backup-freshness` | no, never (backups.md) | Losing every copy makes the repository permanently unreadable; a changed file that the repository does not accept fails every backup and restore |
 | `backup/primary/sftp-key` (inv. 15) | restic SFTP identity (private half); the public half is enrolled at the Storage Box | no | backups fail until the new public half is enrolled |
 | `backup/secondary/repository-password` (inv. 16; feature `secondary-backup`) | restic `passwordFile` of target `secondary` | no | as the primary password |
 | `backup/secondary/environment` (inv. 17; feature `secondary-backup`) | restic `environmentFile` (B2 S3 key id and key) | no | secondary backups fail until the provider key is valid |
+
+The four client secrets are also placeholders in the rendered realm template
+`identity/terrace-realm.json` (`platform/production/app.nix:17-28`;
+`platform/production/identity-admin.nix:153` names it as the definition the tool
+reads). Keycloak imports that file only on its first start and `realm plan/apply`
+reads it, so after R3 it carries the new value while Keycloak holds whatever `sync`
+set.
 
 Not a credential of the store but delivered by it: the host's own age recipient
 and the escrow recipient (1.2). Rehearsal-only store entries
@@ -72,6 +79,8 @@ and the escrow recipient (1.2). Rehearsal-only store entries
 | Keycloak realm signing keys and administrator password hashes | the `keycloak` database | Keycloak | Keycloak | yes (database dump) | tokens signed by the old keys stop validating; the repository has no realm-key rotation tool |
 | ACME account key and issued key | `/var/lib/acme` (ACME mode) | lego, on the host | nginx credentials | **no**, deliberately ([TLS](tls.md#backup-deliberately-excluded)) | a replacement registers a new account |
 | Store ciphertext on the host | `/var/lib/terrace-secrets/secrets.sops.json` | `push` | `sops-install-secrets` | no | gone with the disk; `push` redelivers |
+| Website outbox invitation links | `/var/lib/terrace-cms-outbox` (CMS account, `0700`; files `0600`) | the CMS when a member is approved | CMS, sweep, operator reads as root | **yes** (`extraPaths.website-outbox`, `platform/website.nix:578`, backups.md) | each file is a live one-time link: anyone holding a copy can redeem it until it is redeemed, revoked or expired; there is no rotation, only erasure or expiry by the lifecycle |
+| Keycloak named-administrator passwords, generated handoff files, break-glass accounts | the `keycloak` database (hashes); handoff files in `/run/terrace-identity-admin/handoff/` (tmpfs, root `0400`); temporary `terrace-recovery-*` accounts | `terrace-identity-admin` (`docs/identity-admin.md`, `terrace-identity-admin:1339-1400`) | Keycloak master realm | hashes yes (database); handoff files no | see R5 |
 | Restic repository keys (inside the repository) | in each target | `restic init`, `key add` | `terrace-backup` | they are the repository | see 3.4 |
 
 ### 1.3 Credentials of services that exist only on the rehearsal profile
@@ -97,6 +106,7 @@ back up (`extraPaths`):
 | CMS database role `terrace_cms` | no password: local socket, "no remote database or password is accepted" (`platform/website.nix`, option description near line 346) | CMS and sweep | same | nothing to rotate |
 | K3s server token | `/var/lib/rancher/k3s/server/token`, not in any backup (`docs/backups.md`) | K3s | single-node module | rehearsal only; not determined |
 | Headscale pre-auth keys | created per client by the rehearsal driver, single use, expired before capture (`platform/full/scenario.py` `bootstrap_tailnet_peers`) | `tailscale up` | scenario.py | rehearsal only |
+| Per-lease Hetzner SSH key and the Rescue root password the provider returns; the install banner proof nonce | lease directory files (`infra/cloud/rehearsal_provider_actions.py:63-92`, `infra/nixos/rescue_install.py:388-399`) | the rehearsal controller, once per lease | rehearsal only; short-lived; never reused: excluded from the procedures | each lease | none |
 | Rehearsal certificate authority, TLS leaves, repository password | operator tooling files (`install_runtime`, `infra/nixos/rehearsal_services.py`) | the rehearsal hosts | cloud-rehearsal.md | synthetic, per run |
 
 ### 1.4 Credentials held outside the hosts
@@ -106,7 +116,7 @@ back up (`extraPaths`):
 | GitHub to GitLab mirror deploy key | GitHub Actions secret `GITLAB_MIRROR_KEY` | `.github/workflows/gitlab-mirror.yml` (line 24), `tools/mirror-gitlab.py` | `docs/github-migration.md` "One-way mirror" |
 | Hetzner project API token | a root-protected file passed as `--credential-file` or as `HCLOUD_TOKEN` at runtime; never in the repository | `infra/cloud/rehearsal_lease.py:363-390`, `rehearsal_apply.py:529-540`, `rehearsal_provider_actions.py`, `infra/cloud/index.ts:19-26` | `infra/cloud/README.md` |
 | Token fingerprint pins | `tokenSha256` in the ignored Pulumi stack config; `credentialSha256` in each lease manifest | `index.ts` refuses a different token; every lease command refuses a token that does not match the lease | the same files |
-| Pulumi stack passphrase | generated per rehearsal phase under the lease directory (`rehearsal_apply.py:439`) | the rehearsal controller | `infra/cloud/rehearsal_apply.py` |
+| Pulumi stack passphrase | generated per rehearsal phase under the lease directory (`rehearsal_apply.py:431,441`, read at `:448`) | the rehearsal controller | `infra/cloud/rehearsal_apply.py` |
 | The private secrets store and its remote | the owner's private Git remote (not this repository) | `terrace-secrets` | `docs/secrets.md` |
 | Storage Box sub-account, B2 account, GitHub and GitLab personal accounts | provider accounts | people | not determined from the repository (no code reads them) |
 
@@ -126,36 +136,64 @@ VM checks is not part of a production command.
 
 **General preconditions for every procedure.**
 
-- A backup of the host that finished successfully (`terrace-backup age` exits 0)
-  and an escrow copy that you have checked can decrypt the host's current store file
-  (`terrace-secrets check <host>`).
+- A backup of the host that finished successfully (`terrace-backup age` exits 0).
+- **A saved copy of the host's store file, and proof that the escrow identity opens
+  it.** `terrace-secrets check <host>` does **not** decrypt: it lists names and
+  compares recipients (`file_report`, `cmd_check`, `terrace-secrets:700-723`). The
+  production VM check proves decryption with `sops decrypt --output-type json
+  "$TERRACE_SECRETS_STORE/hosts/<host>/secrets.sops.json"` using the escrow identity
+  (`platform/production/test.nix:649`). Run that command (with `SOPS_AGE_KEY_FILE`
+  set) and discard the output: for example `sops decrypt --output-type json
+  "$TERRACE_SECRETS_STORE/hosts/<host>/secrets.sops.json" >/dev/null`, which must
+  exit 0.
 - **`rotate` and `set` overwrite the value in the store immediately**
-  (`cmd_rotate`, `cmd_set`). The previous value then exists only on the host and in
-  the private store's Git history. Keep a copy of the previous ciphertext
-  (`secrets.sops.json` for that host) until the procedure's last step has passed.
+  (`cmd_rotate`, `cmd_set`), and the tooling has no history or undo command. Before
+  step 1 of any procedure copy the file: `cp -p
+  "$TERRACE_SECRETS_STORE/hosts/<host>/secrets.sops.json" <saved copy>`. It holds
+  every secret of the host (encrypted to the host key and the escrow key), so keep
+  it with the same care as the store, off the host, and delete it only after the
+  procedure's last check has passed. If the store is a private Git repository
+  ([secrets](secrets.md#where-things-live)) its history also holds earlier revisions,
+  but that is the owner's choice, not something the tooling creates.
+- **How the old value comes back (the "way back" below).** Either (a) restore the
+  saved file (`cp -p <saved copy> "$TERRACE_SECRETS_STORE/hosts/<host>/secrets.sops.json"`)
+  and `push`: this also reverts every other change made to that host since the copy,
+  and `push` refuses a file whose recipients no longer match (after a `rekey` or an
+  escrow replacement), or (b) read one value and pipe it, never through a file left
+  on disk, into `terrace-secrets set <host> <name>` (it reads stdin). The nested
+  layout of the file follows the name split on `/` (`nested_set`,
+  `terrace-secrets:171`); the VM check pipes `sops decrypt` into `jq`
+  (`test.nix:649`). The exact `jq` path expression for one name is not given by the
+  repository.
 - A second SSH session to the host stays open until the end, because several steps
   restart services.
 - Never run two procedures at once; the store takes a lock but the hosts do not.
+- **After `host create --replace`**, `rotate` and `set` refuse until `rekey`
+  (`recipients()`, `terrace-secrets:358-362`), and `push`/`apply` pin the stored new
+  host key (`pinned_ssh`, `:734-752`), so they fail against the old host at once.
+  Rotations that follow a host replacement therefore happen on the replacement.
 
 ### R1. `website/lifecycle-intake` (shared CMS and website secret)
 
-1. `terrace-secrets rotate app website/lifecycle-intake`
-2. `terrace-secrets push app --address <app address> --identity <key>`
+1. Do the general preconditions.
+2. `terrace-secrets rotate app website/lifecycle-intake`
+3. `terrace-secrets push app --address <app address> --identity <key>`
 
 `push` installs the new file and `sops-install-secrets` restarts
 `terrace-cms.service` and `terrace-web.service` only. Worked: `rotate` prints
 "Rotated website/lifecycle-intake on app. `push` delivers it and restarts:
 terrace-cms.service, terrace-web.service."; the CMS and website run with the new
 value; the old value is refused with 403 at the intake endpoint; PostgreSQL,
-Keycloak and nginx are not restarted. Way back: set the previous value back with
-`terrace-secrets set app website/lifecycle-intake` (reads stdin) and push. Evidence:
-VM rehearsal (synthetic data), the production VM check subtest "rotate the intake
-secret" (`platform/production/test.nix:479`). Not exercised anywhere: on a provider.
+Keycloak and nginx are not restarted. Way back: restore the saved copy or `set` the
+old value as described in the preconditions, and push. Evidence: VM rehearsal
+(synthetic data), the production VM check subtest "rotate the intake secret"
+(`platform/production/test.nix:479`). Not exercised anywhere: on a provider.
 
 ### R2. `website/payload-secret`
 
-1. `terrace-secrets rotate app website/payload-secret`
-2. `terrace-secrets push app --address <app address> --identity <key>`
+1. Do the general preconditions.
+2. `terrace-secrets rotate app website/payload-secret`
+3. `terrace-secrets push app --address <app address> --identity <key>`
 
 The CMS restarts and every editorial session ends; nothing else signed with it is
 inventoried ("no field encryption is configured", [secrets](secrets.md#rotation)).
@@ -166,31 +204,41 @@ rotation was never run: not exercised anywhere.
 ### R3. A Keycloak client secret (`identity/client/<client>`)
 
 Clients: `terrace-web`, `terrace-community`, `terrace-cms`, `terrace-editorial`.
-Sign-ins through the client fail between steps 2 and 3: do them back to back.
+Sign-ins through the client fail between steps 3 and 4: do them back to back.
 
-1. `terrace-secrets rotate app identity/client/terrace-cms --manual`
-2. `terrace-secrets push app --address <app address> --identity <key>` (the
+1. Do the general preconditions.
+2. `terrace-secrets rotate app identity/client/terrace-cms --manual`
+3. `terrace-secrets push app --address <app address> --identity <key>` (the
    consumers restart on the new value)
-3. On the host, as root: `terrace-identity-admin client-secret sync --admin <you> --client terrace-cms [--dry-run]`
+4. On the host, as root: `terrace-identity-admin client-secret sync --admin <you> --client terrace-cms [--dry-run]`
 
 Worked: `Keycloak now uses the delivered secret; the previous one is refused.` and
 `Consumers on the delivered value: ...`; a second `sync` says `already has the
 delivered secret` ([identity administration](identity-admin.md#5-rotate-a-client-secret)).
 Way back: if `sync` fails, the store, the host file and the consumers hold the new
-value and Keycloak the old one: repeat `sync`, or `set` the old value back, push,
-and `sync`. Evidence: VM rehearsal (synthetic data)
-for `terrace-cms` only (`platform/production/identity-admin-test.nix:479`); the
-other three clients share the code path and were not run: not exercised anywhere.
+value and Keycloak the old one: repeat `sync`; or restore the old value (saved copy,
+as in the preconditions), push, and `sync` again. After a restore from a backup
+taken before the rotation, Keycloak's database holds the old client secrets while the
+store holds the new: run `sync` again for each rotated client
+([restore promotion](restore-promotion.md)). Evidence: VM rehearsal (synthetic data)
+for `terrace-cms` only (`platform/production/identity-admin-test.nix:479-497`, which
+also asserts the sign-in window, old refused, new accepted and an idempotent second
+`sync`); the other three clients share the code path and were not run: not
+exercised anywhere.
 
 ### R4. `identity/database-password` (Keycloak's PostgreSQL role)
 
 **Order matters and the inventory text is wrong about it.** The code reads the new
-value from the delivered file, so `push` comes before `apply`.
+value from the delivered file, so `push` comes before `apply`. **Between `push` and
+`apply`, any Keycloak restart fails** (new file, old role password): a crash restart,
+`first-admin` or `break-glass` runs, which stop and start Keycloak. Keep the window
+short and run no identity administration between the two commands.
 
-1. `terrace-secrets rotate app identity/database-password --manual`
-2. `terrace-secrets push app --address <app address> --identity <key>` (Keycloak
-   keeps running on its old connection settings)
-3. `terrace-secrets apply app identity/database-password --address <app address> --identity <key>`
+1. Do the general preconditions.
+2. `terrace-secrets rotate app identity/database-password --manual`
+3. `terrace-secrets push app --address <app address> --identity <key>` (Keycloak
+   keeps running on its old connection settings until it restarts)
+4. `terrace-secrets apply app identity/database-password --address <app address> --identity <key>`
 
 On the host `host-apply` computes a SCRAM verifier from the delivered file, runs
 `ALTER ROLE keycloak WITH PASSWORD '<verifier>'` through `psql` with statement
@@ -199,11 +247,12 @@ logging off, and restarts `keycloak.service`
 role keycloak updated with a SCRAM verifier and Keycloak restarted.`; Keycloak is
 active; `PGPASSWORD="$(cat /run/secrets/identity/database-password)" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1'`
 succeeds. **The VM check asserts the new password works; it does not assert that the
-old one is refused.** Way back: if `apply` fails, the role still has the old password and the host file
-holds the new one, so Keycloak cannot log in on its next start. Set the old value
-back with `terrace-secrets set app identity/database-password` (stdin), `push`, and
-restart Keycloak. If `apply` ran but Keycloak did not restart, restart it. Preconditions:
-a verified backup, and the previous ciphertext kept. Evidence: VM
+old one is refused.** Way back: if `apply` fails, the role still has the old password
+and the host file holds the new one, so Keycloak cannot log in on its next start.
+Restore the old value (saved copy), `push`, and restart Keycloak. If `apply` ran but
+Keycloak did not restart, restart it. A restore from a backup taken before the
+rotation brings back the old role hash (roles dump, backups.md); run `apply` again
+after the restore ([restore promotion](restore-promotion.md)). Evidence: VM
 rehearsal (synthetic data), `platform/production/test.nix:507-523`; a failing apply
 logs neither cleartext nor verifier (subtest at `:525`).
 
@@ -211,100 +260,167 @@ Other service database roles: the CMS, Windmill and Vaultwarden roles have no
 password (peer or socket authentication), so there is nothing to rotate. Documenso's
 role password is R11.
 
-### R5. The Keycloak bootstrap administrator password (`identity/bootstrap-admin-password`)
+### R5. Keycloak administrator passwords and the bootstrap password
 
-Single use. To create the first administrator: `terrace-secrets apply app
-identity/bootstrap-admin-password --address <app address> --identity <key>` hands the
-escrowed value once to `/run/terrace-identity-admin/` (tmpfs, root `0400`); on the
-host `terrace-identity-admin first-admin ...` uses it and removes it. Afterwards
-`terrace-secrets rotate app identity/bootstrap-admin-password --manual` changes the
-store copy only; nothing on the host holds it (`identity/bootstrap-admin-password`
-inventory line 11; [identity administration](identity-admin.md)). `apply
---finish` is refused for it. Evidence: VM rehearsal (synthetic data),
-`platform/production/identity-admin-test.nix:336,376`.
+Single use bootstrap value (`identity/bootstrap-admin-password`): `terrace-secrets
+apply app identity/bootstrap-admin-password --address <app address> --identity <key>`
+hands the escrowed value once to `/run/terrace-identity-admin/` (tmpfs, root
+`0400`); on the host `terrace-identity-admin first-admin ...` uses it and removes it.
+Afterwards `terrace-secrets rotate app identity/bootstrap-admin-password --manual`
+changes the store copy only; nothing on the host holds it (inventory line 11;
+[identity administration](identity-admin.md)). `apply --finish` is refused for it.
+Evidence: VM rehearsal (synthetic data), `platform/production/identity-admin-test.nix:336,376`.
 
 Named administrators change their own password with `terrace-identity-admin
-password --admin <you>` (`terrace-identity-admin:1467`). Keycloak keeps these hashes
-in its database, so they are in the backup. Evidence: no VM check
-that was searched (`platform/production/identity-admin-test.nix` and its probe) runs
-`terrace-identity-admin password`: not exercised anywhere.
+password --admin <you>` (`cmd_password`, `terrace-identity-admin:705-722`; the
+command refuses a new password shorter than 16 characters or equal to the current
+one, and checks that the old one is refused and the new accepted). Evidence: VM
+rehearsal (synthetic data): `identity-admin-test.nix:401-413` runs it for two
+administrators and asserts "Password of ops-alice changed; the old one is refused.";
+the change it performs is the first change of an initial (handoff) password to a
+chosen one, the same code path as any later change. A later rotation of an
+established password was not separately run.
+
+**If the only administrator password is lost** during a change, the recovery is
+`terrace-identity-admin break-glass begin` over SSH
+([identity administration](identity-admin.md#7-break-glass-no-administrator-no-sso-no-proxy-g-40)),
+then repair named access and `break-glass end` as a named administrator. Temporary
+`terrace-recovery-*` accounts are flagged by the temporary-administrator timer while
+older than the configured age. Evidence: VM rehearsal (synthetic data) for
+break-glass; not exercised after a restore (identity-admin.md says so).
 
 ### R6. TLS certificate and key (manual mode)
 
-1. Obtain the new certificate chain and key outside this repository; the chain must
-   cover every public name and not be near expiry.
-2. `terrace-secrets set app tls/key < key.pem` and `terrace-secrets set app tls/certificate < fullchain.pem`
-   (`set` reads stdin and validates the PEM format, `cmd_set`).
-3. `terrace-secrets check app`, then `terrace-secrets push app --address <app address> --identity <key>`
+**WARNING: `terrace-secrets` does not check that the key belongs to the certificate,
+and nginx restarts on push. A mismatched pair takes HTTPS down for the web, CMS and
+identity names until you push a good pair.**
 
-nginx restarts (a few seconds without HTTPS; its credential snapshot refreshes
-only on restart, [identity host](identity-host.md)). Worked: `terrace-tls check`
-exits 0 on the host ([TLS](tls.md#check-status)). Revoke the old certificate at its
-issuer afterwards. Way back: `set` the previous pair and push. Evidence: VM
-rehearsal (synthetic data), a delivered manual certificate passing the expiry check
-(`platform/production/tls-test.nix`); not exercised anywhere: a public CA, and the
-issuer-side revocation. In ACME mode there is no store entry; renewal is automatic
-and a forced renewal is `terrace-tls renew` ([TLS](tls.md#force-a-renewal)). Rotating
-the ACME **account** key by hand: not determined from the repository (the account
-is created on first order and kept in `/var/lib/acme`).
+1. Do the general preconditions.
+2. Obtain the new certificate chain and key outside this repository; the chain must
+   cover every public name and not be near expiry.
+3. **Offline, before anything is stored:** check on the operator machine that the
+   certificate and the key belong together by comparing the public key derived from
+   each. The repository gives no command for this (its own checks in
+   `platform/production/tls.nix` and the TLS VM test only look at subject, expiry and
+   chain), so use your operator tools; do not proceed until the two public keys are
+   identical.
+4. `terrace-secrets set app tls/key < key.pem` and `terrace-secrets set app tls/certificate < fullchain.pem`
+   (`set` reads stdin and validates only the PEM structure)
+5. `terrace-secrets check app`, then `terrace-secrets push app --address <app address> --identity <key>`
+
+Worked: `terrace-tls check` exits 0 on the host ([TLS](tls.md#check-status)).
+**If nginx does not come up after the push** (`systemctl status nginx.service`,
+`journalctl -u nginx.service` on the host), HTTPS is down for every name: restore the
+previous pair from the saved copy (preconditions) and push, which restarts nginx on the
+old pair. Revoke the old certificate at its issuer afterwards. Evidence: VM rehearsal
+(synthetic data), a delivered manual certificate passing the expiry check
+(`platform/production/tls-test.nix`); not exercised anywhere: a mismatched pair, a
+public CA, and the issuer-side revocation.
+
+In ACME mode there is no store entry and renewal is automatic. `terrace-tls renew`
+only starts the order unit and does nothing when renewal is not due. A forced order
+is `terrace-tls renew --force --yes` (refused without `--yes`; `platform/production/tls.nix:176-179`,
+[TLS](tls.md#force-a-renewal)); it counts against the CA's rate limits (tls.md quotes
+Let's Encrypt's published 5 certificates a week for the same names as of its writing;
+check the CA's current page), the served certificate stays until the new one is
+installed, and nginx is reloaded, not restarted. Whether a forced order also makes a
+new private key, and revoking the old certificate at the CA, are not covered by this
+repository: not determined from the repository. Rotating the ACME **account** key by
+hand: not determined from the repository.
 
 ### R7. Backup repository password (`backup/<target>/repository-password`)
 
-**WARNING: this procedure can lock you out of the repository. Keep the order
-below. If you `push` (step 3) before the first `apply` (step 2), the host holds a
-password the repository does not accept yet and cannot add the new key. If you run
-`apply --finish` (step 4) before `push`, the key the host's file opens is still the
-old one, so it counts as "current" and the NEW key is the one removed.** Preconditions: a verified backup repository (`terrace-backup restic
-<target> check`), the previous ciphertext kept, and a second SSH session.
+**WARNING: this procedure can lock you out of the repository, and its last step is
+not reversible. Keep the order. Checkpoint before any key is removed.**
 
-1. `terrace-secrets rotate app backup/primary/repository-password --manual`
+Preconditions: the general ones, plus `terrace-backup restic <target> check`
+succeeded, and a plan for an **independent escrow copy** of the new password: the
+store is not independent of the repository's host, and [backups](backups.md) requires
+a copy in the team password manager, outside the servers.
+
+1. `terrace-secrets rotate app backup/primary/repository-password --manual`.
+   **Do not run `rotate` for this credential again until the procedure has ended**:
+   it overwrites the store value with a third password that no repository key
+   accepts (see "If you rotated twice").
 2. `terrace-secrets apply app backup/primary/repository-password --address <app address> --identity <key>`
-   (sends the NEW value on stdin; the host runs `terrace-backup restic primary key
-   add --new-password-file /dev/stdin`, opened by the OLD password still in its
-   file)
+   (sends the NEW value on stdin; the host runs `terrace-backup restic primary key add
+   --new-password-file /dev/stdin`, opened by the OLD password still in its file)
 3. `terrace-secrets push app --address <app address> --identity <key>`
-4. `terrace-secrets apply app backup/primary/repository-password --finish --only-current --address <app address> --identity <key>`
-   (or `--keep <key id>` for every key to keep, for example a separately escrowed
-   one; ids are 4 to 64 hex digits)
+4. **Checkpoint, on the host as root, before any removal:**
+   - `terrace-backup restic primary key list --json` shows two keys and the key with
+     `"current": true` is the new one (the one the delivered file opens).
+   - `systemctl start terrace-backup.service` succeeds
+     (`systemctl show terrace-backup.service -p Result --value` prints `success`)
+     using the new delivered file.
+   - The new password is copied to the independent escrow (password manager).
+5. `terrace-secrets apply app backup/primary/repository-password --finish --keep <id> ... --address <app address> --identity <key>`,
+   with `--keep <key id>` (4 to 64 hex digits, a prefix of an id from `key list`) for
+   every key that must survive. **`--only-current` instead removes every key but the
+   current one, including a separately added escrow key** (`terrace-secrets:1038-1059`).
 
-`--finish` lists keys with `terrace-backup restic <target> key list --json`,
-requires exactly one `current` key, and removes every other key not listed in
-`--keep` (`terrace-secrets:1038-1059`). The "current" key is the one the host's
-delivered file opens: that is why `push` must come first. Worked: `Added the new
-repository key to primary; now push, then apply --finish.` then `Removed 1 old
-repository key(s) from primary; kept the current key.`; `terrace-backup restic
-primary key list --json` shows one key; `terrace-backup restic primary snapshots`
-works with the new file; the next backup succeeds. Repeat with `secondary` for a
-second target (the app role only). Way back: until step 4 both keys open the
-repository, so stop after step 3 and restore the old file with `set` and push; after
-step 4 the old password is gone from the repository, and only a kept copy of the old
-value helps if the new one is lost. Evidence: VM rehearsal (synthetic data), the
-production VM check `platform/production/test.nix:517-523` (key add, push, remove
-old, one key left). That check does not assert that the old password is refused and
-does not run a backup after the rotation: not exercised anywhere.
+`--finish` lists keys with `key list --json`, requires exactly one `current` key,
+and removes every other key not matched by `--keep`. Worked: `Added the new
+repository key to primary; now push, then apply --finish.` then `Removed <n> old
+repository key(s) from primary; ...`; `key list --json` shows the intended keys;
+`terrace-backup restic primary snapshots` works with the new file; the next backup
+succeeds. Repeat with `secondary` for a second target (app role only). Evidence: VM
+rehearsal (synthetic data), `platform/production/test.nix:517-523` (key add, push,
+remove old, one key left); that check does not assert that the old password is
+refused and does not run a backup afterwards: not exercised anywhere.
+
+**Recoveries, from the code; if the state is not one of these, do not proceed.**
+
+- *Pushed (step 3) before the first `apply` (step 2).* The host file holds a
+  password no key opens, so `key add` (opened by the delivered file) and every backup
+  fail. The repository is unchanged, with only the old key. Restore the old value
+  (saved copy) and `push`, then restart from step 1.
+- *`--finish` (step 5) before the `push`.* The delivered file still opens the OLD
+  key, which counts as current, so the NEW key is removed: the repository holds only
+  the old key and the store holds the new password. The host file is still the old
+  one, so nothing is lost yet: restore the old value in the store (saved copy), do
+  not push the new one, and restart. If you had also pushed, the host file holds a
+  password no key opens: the old password then exists only in the saved copy and the
+  independent escrow; restore it and push. With neither copy, there is no recovery
+  in the repository.
+- *If you rotated twice.* After step 2 and a second `rotate`, the repository holds
+  the old key and the first new key, the store a third password. Restore the old
+  value (saved copy), push, then `terrace-backup restic primary key list --json` on
+  the host and remove the stray key with `terrace-backup restic primary key remove
+  <id>` (the same command the tool uses), then start again.
+- *`--finish` fails after some keys were removed.* Run `key list --json`; if the
+  remaining keys are not exactly what you intended and the delivered file does not
+  open the repository, do not proceed.
+
+**What this does and does not protect (restic's documented key model; verify against
+the restic manual, this is not in this repository):** `key add` and `key remove`
+change which passwords open the repository; they do not change the repository's
+master key. Someone who learned the old password and kept access to the repository
+(the SFTP or B2 credential) can still read snapshots written **after** this rotation.
+Moving to a new repository is the only complete answer and is **not determined from
+the repository** (no tooling or procedure exists for it).
 
 ### R8. Backup SFTP key (`backup/primary/sftp-key`)
 
-**WARNING: the old public key is not kept by the store after step 1.** `rotate`
+**WARNING: the old public key is not kept by the store after step 3.** `rotate`
 rewrites `public/backup--primary--sftp-key.pub` (`generate_value`, `replace=True`).
-Print and save the old public half first (`terrace-secrets public app
-backup/primary/sftp-key`).
 
-1. Save the old public half: `terrace-secrets public app backup/primary/sftp-key`
-2. `terrace-secrets rotate app backup/primary/sftp-key --manual`
-3. `terrace-secrets public app backup/primary/sftp-key` and have the owner enrol the
-   new public half at the Storage Box alongside the old one (provider console; not
-   a command in this repository)
-4. `terrace-secrets push app --address <app address> --identity <key>`
-5. On the host run a backup: `systemctl start terrace-backup.service`; check
+1. Do the general preconditions.
+2. Save the old public half: `terrace-secrets public app backup/primary/sftp-key`
+3. `terrace-secrets rotate app backup/primary/sftp-key --manual`
+4. `terrace-secrets public app backup/primary/sftp-key`, and have the owner enrol the
+   new public half at the Storage Box alongside the old one (provider console; not a
+   command in this repository)
+5. `terrace-secrets push app --address <app address> --identity <key>`
+6. On the host run a backup: `systemctl start terrace-backup.service`; check
    `systemctl show terrace-backup.service -p Result --value` prints `success`
-6. Remove the old public key at the Storage Box
+7. Remove the old public key at the Storage Box
 
-Worked: step 5 succeeds with the new key. Way back before step 6: `set` the old
-private key back (you need it from the previous ciphertext) and push. Evidence: the
-store and `public` path are VM rehearsal (synthetic data); the Storage Box side and
-the whole sequence: not exercised anywhere. The relay has its own key and repository
-(repeat for `relay`).
+Worked: step 6 succeeds with the new key. Way back before step 7: the old private
+key is in the saved store copy: restore it (preconditions) and push; the old public
+half you saved in step 2 shows which key to keep enrolled. Evidence: the store and
+`public` path are VM rehearsal (synthetic data); the Storage Box side and the whole
+sequence: not exercised anywhere. The relay has its own key and repository (repeat
+for `relay`).
 
 ### R9. The escrow identity (`escrow replace`)
 
@@ -325,7 +441,10 @@ alone does not help: rotate every host secret as well (section 4).**
 
 How to deploy a changed private host module to a running host is **not determined
 from the repository** (the documents say "deploy" without a command). Worked:
-`terrace-secrets check <host>` passes with the new recipient and `terrace-secrets
+`terrace-secrets check <host>` (names and recipients only) passes with the new recipient,
+`sops decrypt --output-type json` of each host file succeeds with the NEW identity
+file (verify a second copy of that file decrypts before the old identity is destroyed),
+and `terrace-secrets
 verify` passes on each host. If the old escrow identity is lost with no copy left,
 `terrace-secrets escrow adopt <host> --address <addr>` re-encrypts each running
 host's own file to a new escrow ([secrets](secrets.md#escrow-key-lost-or-leaked)); a
@@ -338,20 +457,24 @@ exercised in a VM or anywhere else.
 `terrace-secrets host create <host> --role <role> --replace` makes a new key for a
 **replacement host**; `rekey` re-encrypts the same values to it; the retired key can
 still read any older ciphertext it saw ([restore promotion](restore-promotion.md), step 4).
-There is no command that changes the host key of a running host in place: **needs a
+`host create --replace` overwrites the stored public key at once and `rekey` is
+required before any `rotate`, `set` or `push` (see the preconditions). There is no
+command that changes the host key of a running host in place: **needs a
 code change** (the key is also the sops-nix age identity, `docs/secrets.md`
 "Mechanism"). Evidence for the replacement path: VM rehearsal (synthetic data),
 production VM check "back up, destroy the host, re-key from escrow".
 
 ### R11. Documenso (rehearsal profile only)
 
-Documented sequence for changing `secrets.json`, `signing.p12` or
-`signing-passphrase` ([Documenso host](documenso-host.md)): stop the writer
-(`systemctl stop terrace-documenso.service`), replace the protected file,
-`systemctl restart terrace-documenso-inputs.service`, then (for the database
-password) `systemctl restart terrace-documenso-database.service` because the unit
-stays active after its first run, then `terrace-documenso-migrate.service`,
-`terrace-documenso-bootstrap.service`, `terrace-documenso.service`. Whether
+Documented ([Documenso host](documenso-host.md), lines about inputs and signing):
+stop the writer (`systemctl stop terrace-documenso.service`), replace the protected
+file, `systemctl restart terrace-documenso-inputs.service`, start the writer; and
+"restart the database input unit when changing its password", with the same
+stopped-writer sequence for account changes. **Inferred, not documented:** the
+explicit `systemctl restart terrace-documenso-database.service` (the unit has
+`RemainAfterExit`, `platform/documenso.nix`, so a plain start would not re-run it)
+and running `terrace-documenso-migrate.service` and
+`terrace-documenso-bootstrap.service` before starting the writer. Whether
 restarting the inputs unit alone re-runs the database unit is systemd behaviour this
 document has not verified; check that the new password logs in
 (`PGPASSWORD=... psql -h /run/postgresql -U terrace_documenso -d terrace_documenso -c 'select 1'`,
@@ -367,17 +490,22 @@ exercised anywhere.
 ### R12. Windmill (rehearsal profile only)
 
 - `clientSecret`: the bootstrap builds the provider settings with this secret on every run
-  (`platform/windmill/policy.ts:34`). Stop the worker then the server, replace
-  `bootstrap.json`, start them and let `terrace-windmill-bootstrap` reconcile
-  ([Windmill host](windmill-host.md)). The Keycloak client secret must be changed to
+  (`platform/windmill/policy.ts:34`). **Inferred, not documented:** stop the worker
+  then the server, replace `bootstrap.json`, start them and let
+  `terrace-windmill-bootstrap` reconcile; [Windmill host](windmill-host.md) says only
+  to stop worker then server before taking a snapshot, and gives no rotation sequence. The Keycloak client secret must be changed to
   match: no tool for that client: **needs a code change**.
 - `adminPassword`: **cannot be rotated by editing the file.** `bootstrap.ts:50-56`
   logs in with `adminPassword`; only if that fails does it try the factory password
   `changeme` and set `adminPassword`. After the first bootstrap the factory password
   no longer works, so a changed `adminPassword` makes both logins fail, the
   bootstrap fails, and nginx keeps returning 503 until a bootstrap succeeds
-  ([Windmill host](windmill-host.md)). There is no path to change it later:
-  **needs a code change**. Do not edit that field on a running host.
+  ([Windmill host](windmill-host.md)). What the code does: it logs in with `adminPassword`; on failure it tries `changeme`
+  and sets `adminPassword`; on failure it throws, and nginx stays at 503 until a
+  bootstrap succeeds. The repository has no other path in `bootstrap.ts`; whether
+  Windmill itself offers another way to change an administrator password is not
+  determined here. A rotation by this route **needs a code change**. Do not edit
+  that field on a running host.
 - The workspace encryption key: see 3.1.
 
 Evidence: not exercised anywhere.
@@ -417,11 +545,14 @@ verification on 2026-11-06 only): not exercised anywhere.
    `rehearsal_apply.py:540`).
 2. Create the new token inside the dedicated project in the Hetzner console and keep
    it in the protected file; never in a command line, chat or the repository.
-3. Compute its SHA-256 locally without exposing the token and replace `tokenSha256`
-   in the ignored Pulumi stack config; `index.ts` refuses a token whose fingerprint
-   differs ([infra/cloud README](../infra/cloud/README.md)). The exact command to
-   compute the digest is not given in the repository: **not determined from the
-   repository**.
+3. Compute `tokenSha256`: per [infra/cloud README](../infra/cloud/README.md) it is
+   the lowercase SHA-256 of the project token, computed locally without exposing the
+   token. `infra/cloud/index.ts:22-24` computes it as the SHA-256 hex digest (64
+   lowercase hex digits) of exactly the `HCLOUD_TOKEN` bytes, and
+   `rehearsal_lease.py:361-370` strips surrounding whitespace from the credential file
+   first, so hash the token bytes without a trailing newline. The repository gives no
+   ready shell command for it. Replace `tokenSha256` in the ignored Pulumi stack
+   config; `index.ts` refuses a token whose digest differs.
 4. Revoke the old token in the console.
 
 Evidence: not exercised anywhere (no provider apply is authorised; WORKER_RULES).
@@ -508,53 +639,76 @@ the identity every client, host or token relies on.
 
 ## 4. Compromise response
 
-Not exercised anywhere. Orders follow
-[secrets](secrets.md#revoke-after-a-host-compromise), which lists the same order
-for a compromised host; each item points to the procedure above. Before starting,
-keep the old ciphertext, take a backup if the host is trustworthy, and stop making
-changes through any channel you suspect.
+Not exercised anywhere. The order for a compromised host follows
+[secrets](secrets.md#revoke-after-a-host-compromise). Each case below separates what
+leaked, because the responses differ. Before starting: save the store file copy,
+take a backup if the host is trustworthy, and stop making changes through any
+channel you suspect. Remember that `rotate`/`set` re-encrypt only to the current
+recipients: a key that stays a recipient reads the new ciphertext too, so replace the
+host (or the escrow) first, then rotate values.
 
-**Lost or stolen operator laptop** (holds an operator SSH key and possibly the
-escrow identity or the store):
-1. Remove its public key from every host (R17), adding a new key first.
-2. If it held the escrow identity or the store: treat as an escrow leak, R9, then
-   rotate every value of every host as in the next list. A retired key still reads
-   every older ciphertext it saw.
-3. Rotate what the laptop could reach: GitHub and GitLab sessions and the mirror key
-   (R15), the Hetzner token (R16) if it was on the laptop, the store remote
+**A. A laptop with an operator SSH key only.**
+1. Add a new key and verify a login, then remove the stolen key from every host (R17).
+2. Rotate what the laptop could reach: GitHub and GitLab sessions and the mirror
+   key (R15), the Hetzner token (R16) if it was on the laptop, the store remote
    credentials (R18).
 
-**Leaked host secret store** (ciphertext only, escrow safe): the ciphertext is
-encrypted to the host key and the escrow recipient only, so nothing is readable
-unless one of those keys also leaked; verify that first. If either did:
-1. Revoke and replace the host as in secrets.md ("Revoke after a host compromise":
-   `host create --replace`, `rekey`, install, `push`), which also changes the host
-   key (R10).
-2. Rotate in that document's order: the database password (R4), the Keycloak client
-   secrets (R3), `PAYLOAD_SECRET` (R2), the intake secret (R1), the repository
-   password (R7), the SFTP key (R8), TLS (R6), B2 credentials (R8 step list with
-   `set`), the bootstrap administrator password (R5).
+**B. A copy of the store ciphertext only** (no escrow identity, no host private
+key). The file is encrypted to {host key, escrow key} only, so it is unreadable
+without one of them. Verify that neither leaked. Nothing to rotate; record the date,
+because a later leak of either key reads this copy.
 
-**Leaked backup credential** (repository password, SFTP key or B2 key):
-1. SFTP key or B2 key: R8, or for B2 create a new key at the provider,
-   `terrace-secrets set app backup/secondary/environment`, push, delete the old key.
-2. Repository password: R7. Data already copied from the repository can be
-   decrypted with the old password for as long as that copy exists, so also treat
-   everything in the backups as exposed: every database password hash, the Keycloak
-   realm and client secrets, and the outbox's invitation links. Rotate R4, R3, R2
-   and R1 and expire the pending invitations.
-3. Check that no backup ran with the old credential after the leak
-   (`terrace-backup restic <target> snapshots`).
+**C. The escrow identity (or `SOPS_AGE_KEY_FILE`), host key safe.** No host
+replacement is needed.
+1. `terrace-secrets escrow replace` (R9), update `escrowRecipient` and push to every
+   host.
+2. Rotate every value of every host, because the old escrow reads every ciphertext it
+   ever saw: R4, R3, R2, R1, R7, R8, R6, B2 credentials (`set backup/secondary/environment`
+   after creating a new key at the provider, then push, then delete the old provider
+   key), and the bootstrap password (R5).
+
+**D. A host private key (a staged host key from `host create` before `host
+unstage`, or a stolen host disk), escrow safe.**
+1. Replace the host: `host create <host> --role <role> --replace`, `rekey`, install,
+   `push` (R10; [restore promotion](restore-promotion.md) steps 4 to 6). From
+   `host create` on, `push` and `apply` pin the new key, so **rotate on the
+   replacement host**, after `rekey` and `push`.
+2. Rotate every value in secrets.md's order: R4, R3, R2, R1, R7, R8, R6, B2
+   credentials (as in C.2), R5.
+
+**E. A leaked backup credential** (repository password, SFTP key or B2 key).
+1. SFTP key: R8. B2 key: create a new key at the provider, `terrace-secrets set app
+   backup/secondary/environment`, push, delete the old provider key.
+2. Repository password: R7. **R7 does not make later snapshots unreadable to someone
+   who has both the old password and repository access** (restic's documented key
+   model; verify against the restic manual); a new repository is the only complete
+   answer and is not determined from the repository.
+3. A repository copy exposes what the backups hold: the Keycloak realm signing keys,
+   client secrets and user password hashes (the `keycloak` database dump), all PostgreSQL
+   role hashes, Headscale's Noise and DERP private keys, and the outbox's live
+   invitation links. Rotatable with a procedure here: R3 (client secrets), R4
+   (database role password). **Keycloak realm signing keys, user password hashes and
+   Headscale keys have no rotation procedure in this repository**: the owner can
+   expire or revoke outbox invitation links through the lifecycle and can ask members
+   to change passwords, but cannot rotate those keys with the tooling. R1 and R2 are
+   not in any backup (inventory) and do not need rotating for a backup leak alone.
+4. Check the repository for tampering by someone with write access, not only for
+   later snapshots: `terrace-backup restic <target> check` and `terrace-backup restic
+   <target> snapshots` (a snapshot you did not make is a sign).
 
 ## 5. What nothing has exercised, and tests to add
 
 Nothing has exercised, anywhere:
 
 - Any rotation on a provider host, or with real credentials, data or consumers.
-- R2 (`PAYLOAD_SECRET`), R3 for three of the four clients, R5's named administrator
-  password change, R8 (the SFTP key and the Storage Box side), R9 (`escrow replace`
-  and `escrow adopt` beyond unit tests), R11 to R14, R15, R16, R17 and the
-  compromise orders of section 4.
+- R2 (`PAYLOAD_SECRET`), R3 for three of the four clients, R5's rotation of an
+  established administrator password (the initial-to-chosen change is run, see R5),
+  R8 (the SFTP key and the Storage Box side), R9 (`escrow replace` and `escrow adopt`
+  beyond unit tests), R11 to R14, R15, R16, R17 and the compromise orders of
+  section 4.
+- A mismatched TLS certificate and key pair pushed to a host (R6).
+- Any backup, restore or `key list` check between the steps of R7, and the recoveries
+  listed there.
 - Asserting that an **old** credential is rejected after R4 (database password) and
   R7 (repository password).
 - A backup running after a repository password rotation, and a restore after it.
@@ -578,8 +732,9 @@ Tests to add (not implemented), each as a VM assertion:
    with the new key and fails with the removed one.
 5. R9: `escrow replace` then a host restart, a `push`, and a restore from the new
    identity; the old identity can no longer decrypt the new file.
-6. R10: a replacement with a new host key and the retired key refused on the next
-   push (exists in the production VM check; add the relay).
+6. R10: a replacement with a new host key; the retired key can no longer decrypt
+   the new store file and `push` before `rekey` is refused (both exist in the
+   production VM check, `test.nix:650-662`, for the app role; add the relay).
 7. A rotation under the stopped-writer rule for Documenso `databasePassword`: old
    password refused, new accepted, documents still decrypt.
 8. A negative test that a changed Windmill `adminPassword` fails closed (documents
