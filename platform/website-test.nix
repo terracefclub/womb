@@ -425,7 +425,7 @@ in {
         held = "roster-locked@terrace.invalid"
         source.succeed("printf 'name,affiliation,class_year,contact_email\nSynthetic Locked,alumni,2004," + held + "\n' >/root/locked.csv && install -o terrace_cms -g terrace_cms -m 0600 /root/locked.csv ${operator}/locked.csv && rm /root/locked.csv")
         locked_plan = summary(tool(["roster-invite", "dry-run", "--file", "${operator}/locked.csv", "--operator", "operator@terrace.invalid", "--report", report()])[0])
-        source.succeed("systemd-run --unit=website-test-lock-holder -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote(f"begin; select pg_advisory_xact_lock(hashtextextended('terrace-application-email:{held}', 0)); select pg_sleep(60); commit"))
+        source.succeed("systemd-run --unit=website-test-lock-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote(f"begin; select pg_advisory_xact_lock(hashtextextended('terrace-application-email:{held}', 0)); select pg_sleep(60); commit"))
         waiting_sql = "select count(*) from pg_locks w join pg_locks h on h.locktype = 'advisory' and h.granted and w.classid = h.classid and w.objid = h.objid and w.objsubid = h.objsubid and h.pid <> w.pid where w.locktype = 'advisory' and not w.granted"
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where locktype = 'advisory' and granted\") -ge 1", timeout=30)
         intake = [line.split("=", 1)[1] for line in source.succeed("cat ${inputs}/cms.env").splitlines() if line.startswith("LIFECYCLE_INTAKE_SECRET=")][0]
@@ -455,7 +455,7 @@ in {
         assert sql(source, f"select count(*) from member_applications where contact_email = '{held}'") == "0"
         assert 0.1 <= waited < 2.0, f"lock wait {waited:.2f}s with LIFECYCLE_LOCK_TIMEOUT_MS=500"
         print(f"roster lock wait with LIFECYCLE_LOCK_TIMEOUT_MS=500: {waited:.2f}s; public apply answered {answer[0]} in {answer[1]}s")
-        source.succeed("systemctl stop website-test-lock-holder.service")
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-lock-holder.service", timeout=30)
 
         # The transient unit, frozen while it runs: the CMS account and the CMS units' own settings, and no secret value in its
         # properties (as root or as another user) or in any process's arguments.
@@ -503,7 +503,7 @@ in {
         assert source.succeed("sha256sum ${inputs}/cms.env").split()[0] == original_cms_env
 
         # A tool that does not end (a dry run blocked on a held table lock stands in for a hung or orphaned run).
-        source.succeed("systemd-run --unit=website-test-table-holder -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.succeed("systemd-run --unit=website-test-table-holder -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
         def hung(name):
             run = background(name, ["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])
@@ -531,14 +531,14 @@ in {
         listed = source.succeed("systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'")
         assert listed.split()[0] == first_unit, listed
         source.succeed("systemctl stop 'terrace-cms-tool-*'")
-        source.succeed("systemctl stop website-test-table-holder.service")
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder.service", timeout=30)
         source.succeed("systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service")
         source.succeed("systemctl start terrace-cms-migrate.service")
         source.succeed("systemctl start terrace-cms.service terrace-web.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
         assert_content(source)
         # Exit statuses: a tool unit killed by a signal, and one stopped at the run-time bound (60 s here).
-        source.succeed("systemd-run --unit=website-test-table-holder-2 -p User=postgres ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
+        source.succeed("systemd-run --unit=website-test-table-holder-2 -p User=postgres -p Environment=PGAPPNAME=website-test-holder ${pkgs.postgresql_18}/bin/psql -X -d terrace_cms -c " + shlex.quote("begin; lock table member_applications in access exclusive mode; select pg_sleep(900); commit"))
         source.wait_until_succeeds("test $(runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(*) from pg_locks where relation = 'member_applications'::regclass and mode = 'AccessExclusiveLock' and granted\") = 1", timeout=30)
         killed, killed_unit = hung("hung-killed")
         source.succeed(f"systemctl kill --signal=SIGKILL {killed_unit}")
@@ -548,7 +548,7 @@ in {
         exits = {"signal": rc_and_result(killed, killed_unit), "bound": rc_and_result(bounded, bounded_unit)}
         print("TOOL-EXIT " + json.dumps(exits))
         assert exits["signal"][0] != "0" and exits["bound"][0] != "0" and exits["bound"][1] == "Failed with result 'timeout'", exits
-        source.succeed("systemctl stop website-test-table-holder-2.service")
+        source.succeed("runuser -u postgres -- psql -XAt -d terrace_cms -c \"select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = 'website-test-holder'\" >/dev/null"); source.wait_until_fails("systemctl is-active --quiet website-test-table-holder-2.service", timeout=30)
         for service in ["terrace-cms", "terrace-web"]:
             source.succeed(f"systemctl is-active --quiet {service}.service")
         before_outbox = source.succeed("cd ${outbox} && sha256sum *.json").strip()
