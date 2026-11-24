@@ -158,7 +158,7 @@ Each is a stop point: nothing after it runs until the owner says go.
 | U3, before step 7, only when step 2 found a Keycloak or Headscale version change | Activate: **for such an update this is the point of no return** for that service's database | Upstream schema changes happen when the new version starts; whether the old version starts on the new schema is not determined (section 4.3) |
 | U4, before step 9 | Apply the realm plan | The printed plan and its hash; what `apply` changes and never deletes, and that a generation rollback does not undo it (section 4.4) |
 | U5, before step 10 | Run the CMS migration: **the point of no return** for the CMS database | After the migration starts, the only documented way back for the database is a restore onto a replacement host (section 4.3) |
-| U6 | Reboot (kernel, initrd or kernel-module change) | Console access at the provider in case the new generation does not boot (section 5, H4); that a reboot re-arms every timer and starts the writers, the ungated website among them, so a parked failed migration (step 10) needs its stops repeated after it |
+| U6 | Reboot (kernel, initrd or kernel-module change) | Console access at the provider in case the new generation does not boot (section 5, H4); that a reboot re-arms every writer timer not held after a restored adoption (`base.nix`, `terrace-production.sh`) and starts the writers, the ungated website among them, so a parked failed migration (step 10) needs its stops repeated after it |
 | U7, step 13 | Declare the update done, or go back (section 4) | The checks of steps 11 and 12 |
 | U8 | Go back by restore onto a replacement | The data written since the pre-update snapshot is lost (section 4.3) |
 
@@ -579,7 +579,9 @@ timeout. Then:
   adopted host starts `terrace-production.target`, which arms the backup, check,
   freshness and sweep timers and starts the writers, the ungated website among
   them (`base.nix`; [restore promotion](restore-promotion.md) step 2 says the same
-  for an original). After any reboot in this state run `systemctl list-timers` and
+  for an original). On a host adopted with `--restored` whose timers are still held
+  (`terrace-production status` names them), a reboot leaves those held timers off:
+  they carry `ConditionPathExists=!` on their hold marker (`base.nix`). After any reboot in this state run `systemctl list-timers` and
   `systemctl is-active terrace-web.service`, then stop the website and the timers
   again (the same commands as step 6's first line and this item). The boot default
   must be the new generation (`nix-env --set` and `switch`, step 7), never an old

@@ -560,7 +560,7 @@ and it never erases a member by itself (READ: website `docs/member-lifecycle.md`
 section 9 at `dd1aef7`). The manual sweep run in step 16 performs the same actions
 anyway. Starting a held timer by hand (`systemctl start terrace-backup.timer`) is
 skipped by the same condition; do not remove a marker by hand, use step 21 and D5.
-Asserted in the production VM check ("replacement" subtest): a first adoption that
+Asserted in the production VM check ("replacement" subtest) (proof run of this change pending): a first adoption that
 fails on nginx and its resumed run both leave the four timers inactive (condition
 not met), a second start of the target and of the backup timer leaves them so, the
 identity health timer is armed, and `status` reports both held groups. The relay's
@@ -767,7 +767,8 @@ and on the relay the `Armed:` line and `Every writer timer is active now and at
 every boot.` Repeated, it prints `Already armed: nothing to arm.` and the same
 second line; it fails, naming the timer, if one does not become active. From now
 on the backup timers start at every boot as on any adopted host; the sweep stays
-held. The production VM check takes the backup by hand, runs `arm-timers` (both
+held. The production VM check (proof run of this change pending) takes the backup by hand, refuses
+`arm-timers --in-service` before it, runs `arm-timers` (both
 outputs), reboots the replacement and checks that the backup timers came back
 armed and the sweep still held.
 
@@ -816,7 +817,10 @@ Never let the original run a backup after promotion.
 Only now is the replacement ready to be declared in service. **D5**: the owner
 declares it when steps 15 to 21 passed, D2b is settled (the erasure replay of step
 16 is done) and public traffic has been moved. Then arm the sweep and end the
-procedure by checking that every timer is active. App host:
+procedure by checking that every timer is active. `arm-timers --in-service` refuses
+while the backup timers are still held (`the backup timers are still held (...); run
+terrace-production arm-timers first, after the first backup by hand (restore
+promotion step 21); nothing armed`), so step 21 cannot be skipped. App host:
 
 ```sh
 terrace-production arm-timers --in-service
@@ -839,6 +843,7 @@ nothing to arm.` and the same line), `status` names no held timers, `active` onc
 per unit named, and `list-timers` shows a next run for each. Timers you forget to
 arm stay off for good (across reboots, by design) and raise no alert: no alerting
 exists (G-23), so this check is the only safeguard. The production VM check asserts
+(proof run of this change pending)
 both outputs, the four app timers active and `status` naming nothing held on the
 replacement, and the relay's `--in-service` output on an adopted relay (not a
 restored one).

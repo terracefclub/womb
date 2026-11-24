@@ -799,6 +799,12 @@ in {
           ok(app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip() == rotated, "the rotated intake value survived the re-key")
           for unit in ["terrace-cms", "terrace-web"]:
               ok(env_matches(unit, "/run/secrets/website/lifecycle-intake") == "same", f"replacement {unit} runs with the delivered value")
+          # The sweep stage cannot come first: refused while the backup timers are held, nothing armed, both markers kept.
+          refused = app.fail("terrace-production arm-timers --in-service 2>&1").strip()
+          ok(refused == "terrace-production: the backup timers are still held (terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer);"
+             " run terrace-production arm-timers first, after the first backup by hand (restore promotion step 21); nothing armed", f"arm-timers --in-service refused before arm-timers: {refused}")
+          timers_held("refused sweep stage")
+          app.succeed("test -e /var/lib/terrace-production/timers-held && test -e /var/lib/terrace-production/service-timers-held")
           # The restored services are verified: the first backup by hand (procedure step 21), then the backup timers are armed
           # and the sweep stays held.
           app.succeed("systemctl start terrace-backup.service", timeout=600)

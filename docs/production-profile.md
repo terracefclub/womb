@@ -205,7 +205,9 @@ host once, explicitly:
   nothing to arm.`, so it can be repeated), then either names the timers still held
   until service or says `Every writer timer is active now and at every boot.`, and
   fails naming any timer that did not become active. `terrace-production
-  arm-timers --in-service` also removes the sweep hold and arms the sweep; on the
+  arm-timers --in-service` removes the sweep hold and arms the sweep, and refuses
+  (`the backup timers are still held ...; run terrace-production arm-timers first
+  ...; nothing armed`) while the backup hold exists, so the order is enforced; on the
   relay, which has no sweep, it says so and does not fail. `terrace-production
   status` prints one line per held group. **Nothing else reports a held timer**:
   the markers never expire and the freshness timer that would report a missing
