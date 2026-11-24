@@ -305,7 +305,7 @@ in {
             base = "/var/lib/website-test-tool/" + name
             source.succeed("install -d -m 0700 /var/lib/website-test-tool && rm -f " + base + ".*")
             script = "/run/current-system/sw/bin/terrace-cms-tool " + " ".join(shlex.quote(a) for a in args) + f" >{base}.out 2>{base}.err; echo $? >{base}.rc"
-            source.succeed(f"systemd-run --quiet --collect --unit=website-test-{name} ${pkgs.bash}/bin/bash -c " + shlex.quote(script))
+            source.succeed(f"systemd-run --quiet --collect --unit=website-test-{name} --description='website test {name}' ${pkgs.bash}/bin/bash -c " + shlex.quote(script))
             return base
         def files(directory):
             # Every file and its hash (names may contain spaces).
@@ -481,9 +481,14 @@ in {
         # No secret value in any journal, including the tools' namespace.
         logs = source.succeed("journalctl --no-pager -o json; journalctl --namespace=terrace-apps --no-pager -o json")
         assert len(logs) > 1000 and not any(value in logs for value in secrets), "secret value in a journal"
-        # Nor the tools' own output: their stdout and stderr go to the caller (--pipe), never to a journal.
-        for printed in [plan["planSha256"], applied["runId"], "Usage: roster-invite.ts", "This is a production target"]:
+        # Nor the tools' own output (stdout and stderr go to the caller through --pipe): the roster file's hash is printed by the
+        # tool only, and the two refusals only on its stderr. Nor their arguments: the fixed unit description keeps the command
+        # line (operator email, file paths, plan hash) out of systemd's start and stop messages.
+        for printed in [plan["fileSha256"], "Usage: roster-invite.ts", "This is a production target"]:
             assert printed not in logs, "tool output in a journal: " + printed
+        for argument in ["operator@terrace.invalid", plan["planSha256"], "roster file.csv"]:
+            assert argument not in logs, "tool argument in a journal: " + argument
+        assert "Terrace CMS operator tool (roster-invite)" in logs
         # Inputs and reports stay in the operator directory, which no backup includes (checked against the snapshot below); purge it.
         names = source.succeed("ls ${operator}").strip().split("\n")
         assert {"locked.csv", "plan.json", "roster file.csv"} <= set(names) and all(name in ("locked.csv", "plan.json", "roster file.csv") or (name.startswith("report-") and name.endswith(".json")) for name in names), names

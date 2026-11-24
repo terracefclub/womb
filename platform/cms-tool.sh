@@ -53,5 +53,8 @@ properties=()
 for property in "${TOOL_PROPERTIES[@]}"; do
   properties+=(-p "$property")
 done
+# A fixed description: systemd's default (the command line, with the operator's email and file paths) would be
+# written to the system journal in every start and stop message.
 exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
-  --unit="terrace-cms-tool-$tool-$(date +%s%N)" "${properties[@]}" -- "$TOOL_RUNNER" "$tool" "$@"
+  --unit="terrace-cms-tool-$tool-$(date +%s%N)" --description="Terrace CMS operator tool ($tool)" \
+  "${properties[@]}" -- "$TOOL_RUNNER" "$tool" "$@"

@@ -87,8 +87,9 @@ class CmsTool(unittest.TestCase):
         separator = recorded.index("--")
         self.assertEqual(recorded[separator + 1:], [RUNNER, "roster-invite", *args])
         options = recorded[:separator]
-        self.assertEqual(options[:6], ["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", "--unit=terrace-cms-tool-roster-invite-1700000000123456789"])
-        self.assertEqual(options[6:], [item for prop in PROPERTIES for item in ("-p", prop)])
+        self.assertEqual(options[:7], ["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", "--unit=terrace-cms-tool-roster-invite-1700000000123456789",
+                                       "--description=Terrace CMS operator tool (roster-invite)"])
+        self.assertEqual(options[7:], [item for prop in PROPERTIES for item in ("-p", prop)])
 
     def test_refuses_while_another_wrapper_holds_the_lock(self):
         result = self.run_tool("roster-invite", "dry-run", busy="1")
