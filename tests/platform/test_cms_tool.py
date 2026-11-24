@@ -3,6 +3,8 @@
 The module prepends TOOL_RUNNER and TOOL_PROPERTIES to the script and builds it with writeShellApplication
 (errexit, nounset, pipefail); this test does the same. The website VM proof runs the real wrapper.
 Run: python3 -B tests/platform/test_cms_tool.py -v
+Needs Linux: GNU `stat` and `chmod` on PATH and /dev/fd/N naming the open file (the wrapper checks its lock through the
+descriptor). On macOS it is expected to fail (BSD stat; /dev/fd reports another device), as noted in docs/website-host.md.
 """
 import os
 from pathlib import Path
@@ -17,7 +19,9 @@ RUNNER = "/nix/store/synthetic-terrace-cms-tool-run"
 # Absolute: a NixOS host has no bash under /usr/bin or /bin.
 BASH = shutil.which("bash") or "/bin/bash"
 # cut, tr, stat and chmod come from coreutils (GNU) on the host's PATH; the stubs below stand in for everything else.
-TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr", "stat", "chmod")),}))
+TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr", "chmod")),}))
+# The real stat, called through a stub that can alter the owner (descriptor) or inode (path) it reports.
+REAL_STAT = shutil.which("stat") or "/bin/stat"
 PROPERTIES = ["User=terrace_cms", "EnvironmentFile=/run/secrets/rendered/terrace-website/cms.env", "ReadWritePaths=/var/lib/a /var/lib/b",
               "Environment=PATH=/nix/store/x/bin:/nix/store/y/bin"]
 
@@ -38,6 +42,11 @@ class CmsTool(unittest.TestCase):
             # The lock: refused when FAKE_LOCK_BUSY is set, as `flock -n` on a held lock; it must be fd 9.
             "flock": '[[ "$*" == "-n 9" ]] || exit 99\n[[ -z "$FAKE_LOCK_BUSY" ]]\n',
             "date": '[[ $1 == +%s%N ]] || exit 99\necho 1700000000123456789\n',
+            # stat -L on the descriptor: FAKE_FD_UID replaces the owner; stat on the path: FAKE_PATH_INODE replaces the inode.
+            "stat": ('out=$("$REAL_STAT" "$@") || exit $?\n'
+                     'if [[ $1 == -L && -n $FAKE_FD_UID ]]; then out="$FAKE_FD_UID ${out#* }"; fi\n'
+                     'if [[ $1 != -L && -n $FAKE_PATH_INODE ]]; then out="${out%% *} $FAKE_PATH_INODE"; fi\n'
+                     'echo "$out"\n'),
             # Records its arguments NUL-separated, prints a line to each stream and exits with the requested status.
             "systemd-run": 'printf "%s\\0" "$@" >"$FAKE_CALLS"\necho tool-output\necho tool-error >&2\nexit "$FAKE_EXIT"\n',
         }
@@ -50,9 +59,9 @@ class CmsTool(unittest.TestCase):
         self.wrapper = self.dir / "terrace-cms-tool"
         self.wrapper.write_text(prelude + SCRIPT.read_text())
 
-    def run_tool(self, *args, uid="0", state="inactive", status="0", units="", busy=""):
+    def run_tool(self, *args, uid="0", state="inactive", status="0", units="", busy="", fd_uid="", path_inode=""):
         env = {"PATH": f"{self.bin}:{TOOLS_PATH}", "FAKE_UID": uid, "FAKE_STATE": state, "FAKE_EXIT": status, "FAKE_CALLS": str(self.calls),
-               "FAKE_UNITS": units, "FAKE_LOCK_BUSY": busy}
+               "FAKE_UNITS": units, "FAKE_LOCK_BUSY": busy, "REAL_STAT": REAL_STAT, "FAKE_FD_UID": fd_uid, "FAKE_PATH_INODE": path_inode}
         return subprocess.run([BASH, "-euo", "pipefail", str(self.wrapper), *args], capture_output=True, text=True, timeout=30, env=env)
 
     def recorded(self):
@@ -135,6 +144,22 @@ class CmsTool(unittest.TestCase):
             else:
                 self.lock.unlink()
         self.assertEqual((target.read_text(), target.stat().st_mode & 0o777), ("keep", 0o644))
+
+    def test_a_lock_owned_by_another_user_or_swapped_while_opening_is_refused(self):
+        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
+        kept = self.lock.stat().st_ino
+        self.calls.unlink()
+        message = "The operator tool lock {} is not a root-owned regular file ({}); nothing was run. Inspect it, remove it by hand and run the tool again.\n"
+        # The descriptor reports another owner (as a file chowned to another account would).
+        self.lock.chmod(0o644)
+        result = self.run_tool("wp-import", "dry-run", fd_uid="4242")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (72, "", message.format(self.lock, "owned by uid 4242")))
+        self.assertEqual((self.lock.stat().st_ino, self.lock.stat().st_mode & 0o777), (kept, 0o644))  # neither replaced nor narrowed
+        # The path names another inode than the opened descriptor (swapped between the type check and the open).
+        result = self.run_tool("wp-import", "dry-run", path_inode="1")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (72, "", message.format(self.lock, "it changed while it was being opened")))
+        self.assertEqual(self.lock.stat().st_ino, kept)
+        self.assertFalse(self.calls.exists())
 
     def test_refuses_while_another_wrapper_holds_the_lock(self):
         result = self.run_tool("roster-invite", "dry-run", busy="1")

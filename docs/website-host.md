@@ -188,9 +188,11 @@ and exit status come back to the caller. The environment file is only named:
 systemd reads it before dropping privileges, and the wrapper never sources,
 copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
 missing or unknown tool (64), a lock file that is not a root-owned regular file
-(72), another tool run (73) and a running migration (75).
-Its logic is `platform/cms-tool.sh` (unit tests:
-`python3 -B tests/platform/test_cms_tool.py -v`).
+(72), another tool run (73) and a running migration (75). A tool's own exit status
+passes through unchanged, so any of these numbers can also come from the tool:
+read the message on standard error. Its logic is `platform/cms-tool.sh` (unit
+tests: `python3 -B tests/platform/test_cms_tool.py -v`, Linux only: they need GNU
+`stat` and `/dev/fd` naming the open file, and fail on macOS).
 
 **One at a time, in the foreground.** The wrapper holds a lock
 (`/run/terrace-cms-tool.lock`, root's alone: mode `0600`, so no other account can
