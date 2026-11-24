@@ -33,7 +33,11 @@ credentials; Nginx also receives protected copies of the TLS files through
 systemd credentials. Deliver them before service startup and
 keep the source directory root-only. The database password initializes a new
 local database role; replacing its file does **not** rotate an existing role's
-password. Rotation needs a separately reviewed database/consumer transaction.
+password. On a production host the rotation is `terrace-secrets rotate --manual`,
+`push`, then `terrace-secrets apply`, which sets the role from the delivered file
+(`ALTER ROLE` with a SCRAM verifier) and restarts Keycloak ([secrets](secrets.md),
+[credential rotation](credential-rotation.md), R4); on a host without the
+production profile there is still no rotation path.
 TLS file replacement requires restarting Nginx to refresh its credential snapshot.
 
 ## Realm contract boundary

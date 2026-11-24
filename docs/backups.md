@@ -73,7 +73,9 @@ These overlapping rules bound the retained snapshot count to at most 21.
 randomised by up to 30 minutes) with a 5% data subset
 (`terrace.backup.check.readDataSubset`), so each week re-reads a different slice.
 Proposed recovery targets (first stated in the superseded [community pilot](community-pilot.md); [migration](migration.md) proposes a 24 hour RPO and same-day recovery) are at
-most 24 hours of data loss (daily schedule) and four hours to recover; they are
+most 24 hours of data loss (daily schedule) and four hours to recover. The two
+proposals differ on recovery time (four hours here, same day in
+[migration](migration.md)); neither is an owner decision yet, and both are
 unmeasured against a real repository.
 
 ### Cost

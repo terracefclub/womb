@@ -141,7 +141,9 @@ Before capture it scales K3s controllers down, terminates pods, stops its
 server/runtime and verifies no pod/runtime processes remain. Every cgroup read
 must succeed: empty output after a failed find or file reader refuses capture. It stops all app,
 identity, automation and relay writers, then keeps them stopped throughout all
-three encrypted snapshots and a full repository read check. PostgreSQL remains
+three encrypted snapshots and a full repository read check (the rehearsal profiles
+set `terrace.backup.check.readDataSubset` to `100%`; a production host keeps the
+module default of `5%` per weekly check). PostgreSQL remains
 up only for logical dumps. This quiescent window closes the known sequential
 DB/files snapshot consistency gap for this test; it does not implement a live
 production backup scheduler or promise zero downtime.

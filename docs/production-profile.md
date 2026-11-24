@@ -212,7 +212,8 @@ marker only when every writer is active (the CMS and website may instead be
 skipped by their migration condition) and still runs the same process after a
 15-second stability window (a writer can report started and fail seconds later,
 as nginx does while it retries a port it cannot bind), every helper (Keycloak's
-database init, the website input check) succeeded and every timer runs. If anything is not
+database init, the website input check) succeeded and every timer runs (except
+the ones a restored adoption holds back). If anything is not
 running, the command names it and stops; fix the cause and **run the same adopt
 command again**: while `adopting` says `new`, `adopt --new` resumes instead of
 refusing the database its first attempt created. `terrace-production status`

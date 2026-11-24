@@ -249,8 +249,10 @@ changed values) and `verify`, and restores the previous file if either fails.
    ciphertext** (a gap, see
    [production profile](production-profile.md#cold-start-of-a-new-deployment)),
    so the first boot has no secrets and nothing writes.
-4. `push` (SSH pinned to the staged key), then `host unstage`, then
-   `terrace-production adopt --new` on the host.
+4. `push` (SSH pinned to the host's public key kept in the store), then `host
+   unstage`, then `terrace-production adopt --new` on the host. The order of `push`
+   and `host unstage` does not matter once the host runs the staged key (the pin is
+   the store's copy of the public key); the production VM check unstages first.
 
 ## Rotation
 

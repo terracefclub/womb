@@ -380,8 +380,11 @@ load remain unverified.
 ## Backup owner and isolated recovery
 
 When `terrace.backup.enable` is true, the module automatically adds its managed
-`terrace_cms` database, uploads and the entire protected input directory to the
-existing encrypted restic backup. Recovery credentials/SSH keys are separately
+`terrace_cms` database, uploads, the lifecycle outbox and, only when `inputFiles`
+is unset, the protected input directory to the existing encrypted restic backup.
+With `inputFiles` set (the production profile delivers `cms.env` and `web.env` as
+sops templates on ramfs) the input directory is neither used nor backed up: the
+secret manager is the source of truth (`platform/website.nix`). Recovery credentials/SSH keys are separately
 escrowed, outside that input directory and independently available without SSO.
 The infrastructure operator owns backup targets, retention, age/check alerts,
 restore drills and credential escrow. The inherited backup retention applies;
