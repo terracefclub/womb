@@ -523,8 +523,10 @@ class FailedRunPurge(unittest.TestCase):
                 self.refused(r'^cannot tell whether the controller in controller\.json is running$')
 
     def test_a_controller_record_too_deep_to_read_refuses(self):
-        # Reading a deeply nested record raises RecursionError on Pythons whose JSON reader counts recursion
-        # (3.9 at these depths; 3.14 parses them): a refusal, not a crash, whichever Python runs the tool.
+        # The patched part raises RecursionError where a real one would surface (private_json) and is the only
+        # part that exercises the `except RecursionError` clause; a natural RecursionError from the json module is
+        # not exercised here. On the dev shell's Python the real records below parse, and are refused as not a
+        # controller record (not a JSON object, or no run id).
         real = full.private_json
         def too_deep(path, *args, **kwargs):
             if Path(path).name == 'controller.json':

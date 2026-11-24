@@ -469,9 +469,14 @@ guardian stopped every guest within a second of the controller's death
 (the unit exited 143 then); `--failed` then removed `state/`, `retained/`,
 `escrow/`, the runtime directory and the `driver-root` link, kept the logs,
 `evidence/` and the receipt (`syntheticStatePurged`, `purgedIncomplete`), and no
-unit, tagged guest or controller of the run remained. About 1.2 GB came back on
-the scratch dataset after `c512e778`'s purge. Evidence on the build machine in
-`verification-sweep-evidence-ede1f07/`.
+unit, tagged guest or controller of the run remained. For `c512e778` (about
+851 MiB of allocated state) free space on the scratch dataset was 1.08 GB higher
+just after the purge than while it ran, and 1.18 GB higher 60 s later. Evidence
+on the build machine in `verification-sweep-evidence-ede1f07/`.
+
+Limits: each variant ran once, so this shows no failure rate; and a `--failed`
+refusal during the unit's stop window after the controller dies was never
+observed (the guardian's shutdown finished before a second purge could start).
 
 ### Observed all-services rehearsals at the proof follow-ups — November 23, 2026 (Pacific)
 

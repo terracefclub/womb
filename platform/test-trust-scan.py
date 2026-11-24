@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show that nothing built from a VM proof's build-time random CA holds a copy of it.
+"""Show that every output built from a VM proof's build-time random CA still references it.
 
 A synthetic CA or certificate made at build time with a random key can be rebuilt with a
 new key under the same store path (platform/test-trust.nix). Every output built from it
@@ -12,13 +12,18 @@ TOP_DRV is the proof's derivation (for a flake check, `nix eval --raw
 path:./platform#checks.x86_64-linux.<check>.drvPath`); CA_NAME is the name of the CA
 derivation in its closure (for example terrace-identity-proof-certificate). The scan
 finds every derivation in TOP_DRV's closure that is built, directly or not, from the CA
-derivation and checks each of its outputs: it references the CA output, or it is a copy.
+derivation and checks each of its outputs: the CA output is in its closure
+(`nix-store -qR`), or it dropped its reference and may be a copy.
 --build first realises the CA and every such derivation except TOP_DRV itself (the VM
 run), so nothing is left unchecked; run it under the shared build lock.
 
 Exit 0 only when the CA output is valid, every dependent output except TOP_DRV's own is
 built and references it, and there is at least one. TOP_DRV's own output (the test
 result) is reported, not required: it is a log, built after the proof ran.
+
+It checks store references only. It cannot show that an output which references the CA
+holds no copy of its bytes as well, nor catch bytes that entered through a source path or
+builtins.readFile; those rest on reading the sources.
 """
 import argparse
 import re

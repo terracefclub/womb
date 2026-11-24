@@ -62,7 +62,9 @@ known to affect a deployed host (none exists).
   directory entry (`platform/production/tls.nix`; [TLS](tls.md)). Done since
   (verification sweep): a mistyped `--overwrite` (any argument other than
   `--overwrite`) is a usage error before any change, asserted in the TLS VM
-  proof on the relay.
+  proof on the relay. Left as is (harmless, review of PR 66): an empty second
+  argument is accepted as none, a third argument is ignored, and the root check
+  runs first, so a non-root typo gets "run as root" rather than the usage line.
 - `terrace-identity-admin` ([identity administration](identity-admin.md)): a
   failure of the hardening step aborts the command that triggered it (no
   lockout, because `break-glass begin` needs no login); the timer's
@@ -149,8 +151,10 @@ known to affect a deployed host (none exists).
   a second of the controller's death, and `--failed` then removed
   `state/`, `retained/`, `escrow/`, the runtime directory and the `driver-root`
   link, kept the logs, `evidence/` and the receipt (marked
-  `purgedIncomplete`); no unit, tagged guest or controller remained, and about
-  1.2 GB came back on the scratch dataset for `c512e778`. Not seen on a real
+  `purgedIncomplete`); no unit, tagged guest or controller remained. For
+  `c512e778` (851 MiB of allocated state) free space on the scratch
+  dataset was 1.08 GB higher just after the purge than while it ran, and 1.18 GB
+  higher 60 s later. Not seen on a real
   run: a refusal while the unit is still stopping after the controller died
   (the shutdown was faster than a second purge could start). Also since:
   explicit refusals, with a reason, for an unparsable `/proc` stat line and a
@@ -226,14 +230,14 @@ known to affect a deployed host (none exists).
   garbage-collected before the scan, so there was nothing to scan. The scan is
   now a committed tool, `platform/test-trust-scan.py`, which can first build
   the certificate and every output built from it (not the VM run), so nothing
-  is left unchecked ([identity host](identity-host.md#test-certificate-no-copy)).
+  is left unchecked ([identity host](identity-host.md#test-certificate-every-dependent-output-keeps-its-reference)).
   At Womb `ede1f07` (2026-11-23, identity check derivation unchanged from
   trunk): 13 derivations are built from the certificate; all 12 of their
   outputs other than the test result reference it, none without a reference,
   none unchecked (evidence `verification-sweep-evidence-ede1f07/head-ede1f07/identity-scan.*`).
   What this establishes: no output built from the certificate drops its store
-  reference, so none can be a cached copy split from the key. What it does not:
-  that an output which references the certificate holds no copy of its bytes as
+  reference, so none can be a cached copy split from the key in that way. What it
+  does not: that an output which references the certificate holds no copy of its bytes as
   well (that rests on reading the sources), and it was not rerun with the
   certificate rebuilt under a new key (PR 61 ran the identity proof that way).
 - The pinned website release (`eab4189`) declares admin events for the
