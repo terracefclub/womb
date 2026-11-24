@@ -16,8 +16,8 @@ SCRIPT = Path(os.environ.get("CMS_TOOL_SCRIPT", Path(__file__).resolve().parents
 RUNNER = "/nix/store/synthetic-terrace-cms-tool-run"
 # Absolute: a NixOS host has no bash under /usr/bin or /bin.
 BASH = shutil.which("bash") or "/bin/bash"
-# cut and tr come from coreutils on the host's PATH; the stubs below stand in for everything else.
-TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr", "find", "rm")),}))
+# cut, tr, stat and chmod come from coreutils (GNU) on the host's PATH; the stubs below stand in for everything else.
+TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr", "stat", "chmod")),}))
 PROPERTIES = ["User=terrace_cms", "EnvironmentFile=/run/secrets/rendered/terrace-website/cms.env", "ReadWritePaths=/var/lib/a /var/lib/b",
               "Environment=PATH=/nix/store/x/bin:/nix/store/y/bin"]
 
@@ -91,25 +91,49 @@ class CmsTool(unittest.TestCase):
                                        "--description=Terrace CMS operator tool (roster-invite)"])
         self.assertEqual(options[7:], [item for prop in PROPERTIES for item in ("-p", prop)])
 
-    def test_the_lock_file_is_owner_only_and_a_wider_or_foreign_one_is_replaced(self):
+    def test_the_lock_file_is_owner_only_and_never_replaced(self):
         self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
         self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
         kept = self.lock.stat().st_ino
         self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
         self.assertEqual(self.lock.stat().st_ino, kept)  # a correct lock file is reused
-        # An older wrapper's world-readable file: replaced by a new 0600 one (a holder of the old inode keeps only that).
-        self.lock.chmod(0o644)
-        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
-        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
-        # A link: removed, never followed; its target is untouched.
-        self.lock.unlink()
+        # An older wrapper's world-readable file: the same inode is locked and narrowed to 0600 under the lock, never
+        # removed, so two wrappers that both found it nonconforming still lock one file (trunk's script replaced it).
+        for wide in [0o644, 0o666, 0o640, 0o700]:
+            self.lock.write_text("left by an older wrapper\n")
+            self.lock.chmod(wide)
+            result = self.run_tool("wp-import", "dry-run")
+            self.assertEqual((result.returncode, result.stderr), (0, "tool-error\n"), oct(wide))
+            self.assertEqual((self.lock.stat().st_ino, self.lock.stat().st_mode & 0o777), (kept, 0o600), oct(wide))
+            self.assertEqual(self.lock.read_text(), "left by an older wrapper\n")  # opened without truncation
+        self.assertTrue(self.calls.exists())
+
+    def test_a_lock_path_that_is_not_a_regular_file_is_refused_and_left_alone(self):
         target = self.dir / "elsewhere"
         target.write_text("keep")
         target.chmod(0o644)
-        self.lock.symlink_to(target)
-        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
-        self.assertFalse(self.lock.is_symlink())
-        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+        cases = {
+            "a symbolic link": lambda: self.lock.symlink_to(target),
+            "a dangling symbolic link": lambda: self.lock.symlink_to(self.dir / "missing"),
+            "a directory": lambda: self.lock.mkdir(),
+            "a FIFO": lambda: os.mkfifo(self.lock),
+        }
+        for label, make in cases.items():
+            make()
+            before = os.lstat(self.lock)
+            result = self.run_tool("wp-import", "dry-run")
+            reason = "a symbolic link" if "link" in label else "not a regular file"
+            self.assertEqual((result.returncode, result.stdout), (72, ""), label)
+            self.assertEqual(result.stderr, f"The operator tool lock {self.lock} is not a root-owned regular file ({reason}); nothing was run."
+                                            " Inspect it, remove it by hand and run the tool again.\n", label)
+            after = os.lstat(self.lock)
+            self.assertEqual((after.st_ino, after.st_mode), (before.st_ino, before.st_mode), label)  # not removed, not replaced
+            self.assertFalse(self.calls.exists(), label)
+            self.assertFalse((self.dir / "missing").exists(), label)  # a link is never followed, not even to create its target
+            if self.lock.is_dir() and not self.lock.is_symlink():
+                self.lock.rmdir()
+            else:
+                self.lock.unlink()
         self.assertEqual((target.read_text(), target.stat().st_mode & 0o777), ("keep", 0o644))
 
     def test_refuses_while_another_wrapper_holds_the_lock(self):

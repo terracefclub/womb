@@ -413,6 +413,23 @@ in {
         # The wrapper's lock file is root's alone: another user cannot open it, so cannot hold it.
         assert source.succeed("stat -c %U:%a /run/terrace-cms-tool.lock").strip() == "root:600"
         assert "Permission denied" in source.fail("runuser -u nobody -- ${pkgs.util-linux}/bin/flock -n /run/terrace-cms-tool.lock true 2>&1")
+        # It is never replaced: a wider mode is narrowed on the same inode under the lock; a file root does not own, or a
+        # link, is refused with exit 72 before the tool runs and is left as it was.
+        inode = source.succeed("stat -c %i /run/terrace-cms-tool.lock").strip()
+        source.succeed("chmod 0644 /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=1)
+        assert out == "" and err.startswith("Usage: wp-import.ts"), err
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":root:600"
+        refusal = "The operator tool lock /run/terrace-cms-tool.lock is not a root-owned regular file ({}); nothing was run. Inspect it, remove it by hand and run the tool again."
+        source.succeed("chown nobody /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=72)
+        assert out == "" and err.strip() == refusal.format("owned by uid " + source.succeed("id -u nobody").strip()), err
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":nobody:600"
+        source.succeed("chown root /run/terrace-cms-tool.lock && mv /run/terrace-cms-tool.lock /run/terrace-cms-tool.lock.kept && ln -s /run/terrace-cms-tool.lock.kept /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=72)
+        assert out == "" and err.strip() == refusal.format("a symbolic link"), err
+        source.succeed("test -L /run/terrace-cms-tool.lock && rm /run/terrace-cms-tool.lock && mv /run/terrace-cms-tool.lock.kept /run/terrace-cms-tool.lock")
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":root:600"
         files_before = set(source.succeed("ls ${outbox}").split())
         applied = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"], "--report", report(), "--confirm-production"])[0])
         assert applied["counts"]["created"] == 2 and applied["counts"]["failed"] == 0, applied

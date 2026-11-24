@@ -6,8 +6,8 @@
 # The module prepends TOOL_RUNNER (the runner script), TOOL_LOCK (a root-only lock file) and TOOL_PROPERTIES
 # (NAME=VALUE unit properties, including EnvironmentFile= naming the protected CMS environment file). This script never reads that file: systemd does,
 # before it drops privileges. Arguments reach the tool unchanged and its output and exit status come back.
-# Exit codes of its own: 64 usage (no or unknown tool), 73 another operator tool is starting or running,
-# 75 a CMS migration is running, 77 not root.
+# Exit codes of its own: 64 usage (no or unknown tool), 72 the lock file is not a root-owned regular file,
+# 73 another operator tool is starting or running, 75 a CMS migration is running, 77 not root.
 #
 # One tool at a time: the wrapper holds TOOL_LOCK from its checks until the tool ends (systemd-run inherits the
 # descriptor), so two wrappers cannot both pass the checks and start. A tool unit whose wrapper is gone (a dropped
@@ -29,17 +29,40 @@ case "$1" in
   *) usage ;;
 esac
 
-# The lock file is root's alone (0600): a user who could open it could hold a lock on it and refuse every run. A file
-# that is not a root-owned 0600 regular file (an older wrapper's 0644 one, a link, anything else) is replaced: whoever
-# still holds the old one keeps only the old inode, and /run is root-only, so nobody else can recreate it meanwhile.
+# The lock file is root's alone (0600): a user who could open it could hold a lock on it and refuse every run. It is
+# never removed or replaced, so every wrapper locks the same inode: two wrappers cannot each lock a file of their own.
+# A link, a directory or any other non-regular file is refused before it is opened (a link is never followed, a FIFO
+# never blocks the open). The regular file is opened without truncation, locked, and only then checked through the
+# open descriptor: it must be the file at the path (not a link swapped in), owned by root, and an older wrapper's wider
+# mode is narrowed to 0600 under the lock. Anything else is refused with exit 72 and left for the operator to inspect.
+# The owner is compared with $EUID, which is 0 here (checked above); the unit test runs as an ordinary user.
+lock_refused() {
+  echo "The operator tool lock $TOOL_LOCK is not a root-owned regular file ($1); nothing was run. Inspect it, remove it by hand and run the tool again." >&2
+  exit 72
+}
 umask 077
-if [[ -e "$TOOL_LOCK" || -L "$TOOL_LOCK" ]] && [[ -z "$(find "$TOOL_LOCK" -maxdepth 0 -type f -user "$EUID" -perm 600 2>/dev/null)" ]]; then
-  rm -f -- "$TOOL_LOCK"
+if [[ -L "$TOOL_LOCK" ]]; then
+  lock_refused 'a symbolic link'
+elif [[ -e "$TOOL_LOCK" && ! -f "$TOOL_LOCK" ]]; then
+  lock_refused 'not a regular file'
 fi
-exec 9>"$TOOL_LOCK"
+exec 9>>"$TOOL_LOCK"
 if ! flock -n 9; then
   echo 'Another terrace-cms-tool run is starting or running; run the tools one at a time.' >&2
   exit 73
+fi
+lock_info=$(stat -L -c '%u %f %d %i' /dev/fd/9) || lock_refused 'its status cannot be read'
+path_info=$(stat -c '%d %i' -- "$TOOL_LOCK") || lock_refused 'it is gone from its path'
+read -r lock_uid lock_mode lock_device lock_inode <<<"$lock_info"
+read -r path_device path_inode <<<"$path_info"
+if [[ "$lock_device:$lock_inode" != "$path_device:$path_inode" ]]; then
+  lock_refused 'it changed while it was being opened'
+elif (((16#$lock_mode & 0170000) != 0100000)); then
+  lock_refused 'not a regular file'
+elif [[ "$lock_uid" != "$EUID" ]]; then
+  lock_refused "owned by uid $lock_uid"
+elif (((16#$lock_mode & 07777) != 0600)); then
+  chmod 0600 /dev/fd/9
 fi
 active=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*' | cut -d' ' -f1 | tr '\n' ' ')
 if [[ -n "${active// /}" ]]; then

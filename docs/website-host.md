@@ -186,14 +186,20 @@ guard and migration gate run, the module's settings are exported exactly as for
 and exit status come back to the caller. The environment file is only named:
 systemd reads it before dropping privileges, and the wrapper never sources,
 copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
-missing or unknown tool (64), another tool run (73) and a running migration (75).
+missing or unknown tool (64), a lock file that is not a root-owned regular file
+(72), another tool run (73) and a running migration (75).
 Its logic is `platform/cms-tool.sh` (unit tests:
 `python3 -B tests/platform/test_cms_tool.py -v`).
 
 **One at a time, in the foreground.** The wrapper holds a lock
 (`/run/terrace-cms-tool.lock`, root's alone: mode `0600`, so no other account can
-open it to hold it; a lock file of any other kind, mode or owner is replaced) from
-its checks until the tool ends, and refuses
+open it to hold it) from its checks until the tool ends. The file is never removed
+or replaced, so every wrapper locks the same file: it is opened without
+truncation, locked, and only then checked through the open descriptor. A wider
+mode (an older wrapper's `0644` file) is narrowed to `0600` under the lock; a
+symbolic link (never followed), a directory or other non-regular file, or a file
+root does not own is refused with exit 72 and left as it is: inspect it, remove it
+by hand and run the tool again. It refuses
 while any `terrace-cms-tool-*` unit is still active, naming it (exit 73). Run the
 tools one at a time, in the foreground of an SSH session (or in `tmux`/`screen`),
 and do not start the wrapper as a background job with an open standard input
