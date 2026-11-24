@@ -28,7 +28,10 @@
       ${pkgs.lib.optionalString (component == "cms") ''
         test -x "$out/bin/migrate"
         test -x "$out/bin/sweep"
-        jq -e '.entrypoints.migrate == "bin/migrate" and .entrypoints.sweep == "bin/sweep"' "$out/release.json" >/dev/null
+        test -x "$out/bin/roster-invite"
+        test -x "$out/bin/wp-import"
+        jq -e '.entrypoints.migrate == "bin/migrate" and .entrypoints.sweep == "bin/sweep" and
+          .entrypoints["roster-invite"] == "bin/roster-invite" and .entrypoints["wp-import"] == "bin/wp-import"' "$out/release.json" >/dev/null
         test -d "$out/.next/cache"
         test -z "$(ls -A "$out/.next/cache")"
       ''}

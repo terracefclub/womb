@@ -134,6 +134,7 @@
     export CMS_MEDIA_DIR=${lib.escapeShellArg cfg.mediaDirectory}
     export LIFECYCLE_OUTBOX_DIR=${lib.escapeShellArg cfg.outboxDirectory}
     ${lib.optionalString (cfg.lifecyclePublicOrigin != null) "export LIFECYCLE_PUBLIC_ORIGIN=${lib.escapeShellArg cfg.lifecyclePublicOrigin}"}
+    ${lib.optionalString (cfg.lifecycleLockTimeoutMs != null) "export LIFECYCLE_LOCK_TIMEOUT_MS=${toString cfg.lifecycleLockTimeoutMs}"}
   '';
   webEnvironment = ''
     ${lib.optionalString (cfg.cmsPublicOrigin != null) "export CMS_PUBLIC_ORIGIN=${lib.escapeShellArg cfg.cmsPublicOrigin}"}
@@ -152,6 +153,55 @@
     if ! test -f /var/lib/terrace-cms/migrated-revision ||
        test "$(cat /var/lib/terrace-cms/migrated-revision)" != '${cfg.revision}'; then
       echo 'CMS migration gate is closed; run the explicit migration unit for this release.' >&2
+      exit 1
+    fi
+  '';
+  # Operator tools of the CMS bundle (website tools/release/README.md, "Operator tools"), run by root through
+  # terrace-cms-tool as the CMS account. The transient unit's properties are generated from cmsRuntime, the
+  # attrset of the CMS units, so the tools cannot drift from them; only the operator input directory is added.
+  # ExecStartPre's guards run inside the runner instead, as the same account with the same environment.
+  toolServiceConfig =
+    removeAttrs cmsRuntime.serviceConfig ["ExecStartPre"]
+    // {ReadWritePaths = cmsRuntime.serviceConfig.ReadWritePaths ++ [cfg.operatorDirectory];};
+  toolProperty = name: value: "${name}=${
+    if builtins.isBool value
+    then
+      (
+        if value
+        then "yes"
+        else "no"
+      )
+    else if builtins.isList value
+    then lib.concatMapStringsSep " " toString value
+    else toString value
+  }";
+  toolProperties =
+    lib.mapAttrsToList toolProperty toolServiceConfig
+    ++ lib.mapAttrsToList (name: value: "Environment=${name}=${value}") (cmsRuntime.environment // {PATH = lib.makeBinPath cmsRuntime.path;});
+  toolRunner = pkgs.writeShellScript "terrace-cms-tool-run" ''
+    set -euo pipefail
+    ${identityGuard "cms"}
+    ${requireMigration}
+    ${cmsEnvironment}
+    tool=$1
+    shift
+    exec ${cfg.cmsPackage}/bin/"$tool" "$@"
+  '';
+  # The wrapper's logic is platform/cms-tool.sh (unit-tested in tests/platform/test_cms_tool.py with stub commands).
+  cmsTool = pkgs.writeShellApplication {
+    name = "terrace-cms-tool";
+    runtimeInputs = [pkgs.coreutils pkgs.systemd];
+    text =
+      ''
+        TOOL_RUNNER=${toolRunner}
+        TOOL_PROPERTIES=(${lib.concatMapStringsSep " " lib.escapeShellArg toolProperties})
+      ''
+      + builtins.readFile ./cms-tool.sh;
+  };
+  # A migration never starts under a running operator tool (it would change the schema beneath it).
+  refuseDuringTool = pkgs.writeShellScript "terrace-cms-migrate-refuse-during-tool" ''
+    if test -n "$(${pkgs.systemd}/bin/systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*')"; then
+      echo 'A CMS operator tool is running; start the migration after it has finished.' >&2
       exit 1
     fi
   '';
@@ -202,6 +252,16 @@ in {
       type = lib.types.str;
       default = "/var/lib/terrace-cms-media";
       description = "Retained CMS upload directory, included with the database in backups.";
+    };
+    operatorDirectory = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/terrace-cms-operator";
+      description = "Private (0700, CMS account) directory for the operator tools' inputs and reports (roster files, import plans). Never backed up: the operator keeps the originals elsewhere and purges it after each run.";
+    };
+    lifecycleLockTimeoutMs = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 100 10000);
+      default = null;
+      description = "LIFECYCLE_LOCK_TIMEOUT_MS for the CMS, its sweep and its operator tools: how long the public apply form and the roster tool wait for the per-address lock. Unset uses the CMS default (3000 ms).";
     };
     outboxDirectory = lib.mkOption {
       type = lib.types.str;
@@ -273,7 +333,7 @@ in {
         message = "Terrace website requires one reviewed revision and distinct unprivileged loopback ports.";
       }
       {
-        assertion = lib.all validDirectory [cfg.inputsDirectory cfg.mediaDirectory cfg.outboxDirectory cfg.databaseSocketDirectory];
+        assertion = lib.all validDirectory [cfg.inputsDirectory cfg.mediaDirectory cfg.outboxDirectory cfg.operatorDirectory cfg.databaseSocketDirectory];
         message = "Terrace website directories must be normalized absolute runtime paths outside the Nix store.";
       }
       {
@@ -284,8 +344,24 @@ in {
         assertion = let
           disjoint = a: b: a != b && !(lib.hasPrefix (a + "/") b) && !(lib.hasPrefix (b + "/") a);
         in
-          disjoint cfg.inputsDirectory cfg.mediaDirectory && disjoint cfg.inputsDirectory cfg.outboxDirectory && disjoint cfg.mediaDirectory cfg.outboxDirectory;
-        message = "Terrace runtime inputs, uploads and the lifecycle outbox must not overlap.";
+          lib.all (pair: disjoint (lib.head pair) (lib.last pair)) [
+            [cfg.inputsDirectory cfg.mediaDirectory]
+            [cfg.inputsDirectory cfg.outboxDirectory]
+            [cfg.mediaDirectory cfg.outboxDirectory]
+            [cfg.operatorDirectory cfg.inputsDirectory]
+            [cfg.operatorDirectory cfg.mediaDirectory]
+            [cfg.operatorDirectory cfg.outboxDirectory]
+          ];
+        message = "Terrace runtime inputs, uploads, the lifecycle outbox and the operator directory must not overlap.";
+      }
+      {
+        # Operator inputs hold personal data the operator keeps elsewhere: never part of any backup set.
+        assertion = let
+          backup = config.terrace.backup;
+          roots = lib.attrValues backup.media ++ lib.attrValues backup.extraPaths;
+        in
+          lib.all (root: root != cfg.operatorDirectory && !(lib.hasPrefix (root + "/") cfg.operatorDirectory) && !(lib.hasPrefix (cfg.operatorDirectory + "/") root)) roots;
+        message = "The Terrace CMS operator directory must not be inside, contain or equal a backup path.";
       }
       {
         assertion = cfg.cmsUid != cfg.webUid && cfg.cmsUid >= 10000 && cfg.cmsUid <= 60000 && cfg.webUid >= 10000 && cfg.webUid <= 60000;
@@ -314,7 +390,9 @@ in {
       "d ${cfg.mediaDirectory} 0700 ${cmsUser} ${cmsUser} - -"
       # The CMS forces this mode too; its mirror files are 0600 and the sweep runs as the same account.
       "d ${cfg.outboxDirectory} 0700 ${cmsUser} ${cmsUser} - -"
+      "d ${cfg.operatorDirectory} 0700 ${cmsUser} ${cmsUser} - -"
     ];
+    environment.systemPackages = [cmsTool];
     services.postgresql = lib.mkIf cfg.manageDatabase {
       enable = true;
       ensureDatabases = ["terrace_cms"];
@@ -368,7 +446,7 @@ in {
         TimeoutStartSec = 180;
         # A running sweep is interrupted (it is idempotent and retried); a sweep
         # requested during the migration waits for it, see terrace-cms-sweep.
-        ExecStartPre = ["+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" (identityGuard "cms")];
+        ExecStartPre = ["+${refuseDuringTool}" "+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" (identityGuard "cms")];
       };
       script = ''
         set -euo pipefail

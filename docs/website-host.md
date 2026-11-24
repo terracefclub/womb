@@ -111,10 +111,12 @@ runtime input cannot redirect them (as with `DATABASE_URI` and `CMS_MEDIA_DIR`):
 
 Optional retention placeholders (`LIFECYCLE_APPLICATION_DAYS`,
 `LIFECYCLE_INVITATION_DAYS`, `LIFECYCLE_GRACE_DAYS`) may be added to `cms.env`;
-their defaults apply otherwise. Since website `eab4189` the CMS also reads an
-optional `LIFECYCLE_LOCK_TIMEOUT_MS` (how long the public apply form and the bulk
-roster tool wait for the per-address lock, 100 to 10000, default 3000); Womb does
-not set it and no VM proof uses another value. Everything else in the website's production
+their defaults apply otherwise. The CMS also reads an optional
+`LIFECYCLE_LOCK_TIMEOUT_MS` (how long the public apply form and the bulk roster
+tool wait for the per-address lock). The module owns it as
+`lifecycleLockTimeoutMs` (100 to 10000, unset by default, which keeps the CMS
+default of 3000 ms) and exports it to the CMS, its sweep and the operator tools.
+The website VM proof sets 500 and holds the lock (see below). Everything else in the website's production
 configuration table (`docs/member-lifecycle.md` in the website repository)
 is unchanged and delivered through the same protected files.
 
@@ -123,16 +125,6 @@ writes its mirror files `0600`. It holds live one-time invitation links, so it i
 included in backups with the database (`extraPaths.website-outbox`) and is not
 readable by the website account. Read it as root on the host; there is no mail
 transport yet.
-
-Website `eab4189` adds an opt-in bulk roster tool (`roster:invite`, website
-`docs/member-lifecycle.md`, "Bulk roster onboarding"). It is not in the release
-bundle: running it needs a source checkout with Bun and the host's real CMS
-environment, which this module does not provide, so Womb has no supported way to
-run it yet. What it writes is ordinary CMS state: its journal (`roster_runs`,
-`roster_run_items`, from migration `20261119_165021_roster_journal`) is in the
-database, and its invitation files are the same outbox mirror files an approval
-writes, so both are covered by the existing backup and restore. It needs no
-setting, timer or gateway rule.
 
 `terrace-cms-sweep.service` runs the bundle's `bin/sweep` (without
 `--purge-moderated`) as the CMS account with the same environment file, guards
@@ -160,6 +152,75 @@ to new hosts. NixOS does not renumber existing users: a host that already has th
 accounts with allocated numbers needs a planned renumbering (stop the services,
 change the IDs, `chown` their state) before adopting the static values, and backups
 taken before the change still carry the old numbers. No such host exists yet.
+
+## Operator tools: `terrace-cms-tool`
+
+The CMS bundle ships two operator command lines (website
+`tools/release/README.md`, "Operator tools"): `bin/roster-invite`, the opt-in
+bulk roster onboarding (website `docs/member-lifecycle.md`, "Bulk roster
+onboarding"), and `bin/wp-import`, the WordPress import applier (website
+`docs/wordpress-import.md`). The module installs one root-only command that runs
+them as the CMS account:
+
+```sh
+terrace-cms-tool roster-invite|wp-import ARGS...
+```
+
+It starts a transient systemd unit whose properties are generated from the same
+attribute set as the CMS units (account, hardening, memory and CPU limits, log
+namespace, working directory, `EnvironmentFile=` naming the protected `cms.env`),
+plus write access to the operator directory below. Inside it the CMS identity
+guard and migration gate run, the module's settings are exported exactly as for
+`bin/start` and `bin/sweep`, and the tool gets its arguments unchanged. Output
+and exit status come back to the caller. The environment file is only named:
+systemd reads it before dropping privileges, and the wrapper never sources,
+copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
+missing or unknown tool (64) and a running migration (75); the migration unit in
+turn refuses to start while a tool runs. Its logic is `platform/cms-tool.sh`
+(unit tests: `python3 -B tests/platform/test_cms_tool.py -v`).
+
+**Inputs and reports.** The tools read only owner-only files of the account
+that runs them, outside any Git checkout, by absolute path. Put them in the
+module's `operatorDirectory` (default `/var/lib/terrace-cms-operator`, `0700`,
+CMS account), and purge it when the run is over:
+
+```sh
+install -o terrace_cms -g terrace_cms -m 0600 roster.csv /var/lib/terrace-cms-operator/roster.csv
+find /var/lib/terrace-cms-operator -mindepth 1 -delete      # after the run
+```
+
+**Command lines on a host** (`OP` is the operator's administrator email; the
+plan hash comes from the dry run's output):
+
+```sh
+D=/var/lib/terrace-cms-operator
+terrace-cms-tool roster-invite dry-run --file $D/roster.csv --operator OP --report $D/roster-dry-run.json
+terrace-cms-tool roster-invite apply --file $D/roster.csv --operator OP --plan-sha256 PLAN_SHA256 --report $D/roster-apply.json --confirm-production
+terrace-cms-tool roster-invite rollback --run RUN_ID --operator OP --report $D/roster-rollback.json --confirm-production
+terrace-cms-tool wp-import dry-run --plan $D/wp-import-plan.json --report $D/import-dry-run.json --allow-nonlocal-database
+terrace-cms-tool wp-import apply --plan $D/wp-import-plan.json --report $D/import-apply.json --allow-nonlocal-database --confirm-production
+```
+
+Both flags stay explicit operator choices; the wrapper adds neither. The host's
+`DATABASE_URI` (`postgresql://terrace_cms@/terrace_cms?host=...`) names a user
+with an empty host, which the tools' local-database check does not parse, so it
+counts as not local: the importer refuses every command without
+`--allow-nonlocal-database`, and both tools treat the database as production, so
+every write also needs `--confirm-production`. Take a verified backup before an
+importer apply or a roster apply, as for a migration.
+
+**What is backed up.** The tools' database rows (the roster journal
+`roster_runs` and `roster_run_items`, applications, invitations, outbox rows,
+imported documents and the import run ledger) are ordinary CMS rows in the
+database backup. The roster tool's invitation link files are written to the
+lifecycle outbox (`outboxDirectory`), which is in the backup set
+(`extraPaths.website-outbox`) and restored with the database. The operator
+directory is in no backup set, by design: it holds personal data the operator
+supplies and keeps elsewhere, and a module assertion refuses a configuration that
+puts it inside, around or at a backup path.
+
+**Proven where.** In VM proofs only (below and in the production profile
+proof); nothing has been run on a real host or against a provider.
 
 ## Health, private logs and capacity
 
