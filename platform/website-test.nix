@@ -504,7 +504,9 @@ in {
         # (this guest otherwise allocates its system accounts in a different order).
         for machine in [source, recovery]:
             assert machine.succeed("id -u terrace_cms && id -g terrace_cms").split() == ["44121", "44121"]
-        assert recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split() == ["terrace_cms:700", "terrace_cms:600"]
+        # The sweep's file and the roster tool's link files: the directory and every file keep the CMS account and private modes.
+        outbox_modes = recovery.succeed("stat -c %U:%a ${outbox} ${outbox}/*.json").split()
+        assert outbox_modes[0] == "terrace_cms:700" and len(outbox_modes) == 1 + len(before_outbox.splitlines()) and set(outbox_modes[1:]) == {"terrace_cms:600"}, outbox_modes
         # Behaviour, not just owners: the CMS account reads a restored mirror file and writes beside it.
         recovery.succeed("runuser -u terrace_cms -- sh -c 'cat ${outbox}/*.json >/dev/null && umask 077 && echo probe >${outbox}/restore-write-probe && rm ${outbox}/restore-write-probe'")
         assert recovery.succeed("cd ${inputs} && sha256sum *.env 2>/dev/null").strip() == before_inputs
