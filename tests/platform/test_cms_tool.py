@@ -17,7 +17,7 @@ RUNNER = "/nix/store/synthetic-terrace-cms-tool-run"
 # Absolute: a NixOS host has no bash under /usr/bin or /bin.
 BASH = shutil.which("bash") or "/bin/bash"
 # cut and tr come from coreutils on the host's PATH; the stubs below stand in for everything else.
-TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr")),}))
+TOOLS_PATH = ":".join(sorted({os.path.dirname(BASH), *(os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("cut", "tr", "find", "rm")),}))
 PROPERTIES = ["User=terrace_cms", "EnvironmentFile=/run/secrets/rendered/terrace-website/cms.env", "ReadWritePaths=/var/lib/a /var/lib/b",
               "Environment=PATH=/nix/store/x/bin:/nix/store/y/bin"]
 
@@ -90,6 +90,27 @@ class CmsTool(unittest.TestCase):
         self.assertEqual(options[:7], ["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec", "--unit=terrace-cms-tool-roster-invite-1700000000123456789",
                                        "--description=Terrace CMS operator tool (roster-invite)"])
         self.assertEqual(options[7:], [item for prop in PROPERTIES for item in ("-p", prop)])
+
+    def test_the_lock_file_is_owner_only_and_a_wider_or_foreign_one_is_replaced(self):
+        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
+        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+        kept = self.lock.stat().st_ino
+        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
+        self.assertEqual(self.lock.stat().st_ino, kept)  # a correct lock file is reused
+        # An older wrapper's world-readable file: replaced by a new 0600 one (a holder of the old inode keeps only that).
+        self.lock.chmod(0o644)
+        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
+        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+        # A link: removed, never followed; its target is untouched.
+        self.lock.unlink()
+        target = self.dir / "elsewhere"
+        target.write_text("keep")
+        target.chmod(0o644)
+        self.lock.symlink_to(target)
+        self.assertEqual(self.run_tool("wp-import", "dry-run").returncode, 0)
+        self.assertFalse(self.lock.is_symlink())
+        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((target.read_text(), target.stat().st_mode & 0o777), ("keep", 0o644))
 
     def test_refuses_while_another_wrapper_holds_the_lock(self):
         result = self.run_tool("roster-invite", "dry-run", busy="1")

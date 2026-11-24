@@ -333,23 +333,38 @@ known to affect a deployed host (none exists).
   derivation without any commit. Found at PR 68: the same commit evaluated to two
   Windmill derivations, one with and one without the cache; on a clean tree they
   match the proven ones. The PR 68 rehearsals were built after the unit tests had
-  created such caches (no functional effect). Run unit tests with
-  `PYTHONDONTWRITEBYTECODE=1`, and check `git status --ignored` before a proof.
-- Sweep and migration (pre-existing, also on trunk before PR 68): the migration's
-  first `ExecStartPre` stops `terrace-cms-sweep.service`, so a sweep start
-  requested between the migration becoming `activating` and that stop (a window
-  of milliseconds) is cancelled instead of queued behind the migration. The
-  sweep is idempotent and the daily timer retries it; the website VM proof's
-  queued-sweep check passes because it requests the sweep after that stop. A
-  fix would order the stop before the migration's start job (for example in a
-  separate unit the migration requires), not attempted here.
+  created such caches (no functional effect). Fixed after the PR 68 round 2
+  review: the checks copy `platform/windmill-evidence-source.nix`, a filtered
+  copy without what `.gitignore` ignores there (same name and content as a clean
+  tree's copy, so the clean-tree derivations do not change);
+  `tests/platform/test_clean_sources.py` evaluates it with and without a planted
+  cache and fails on any other unfiltered directory copy under `platform/` or
+  `infra/` (none exists). Still check `git status --ignored` before a proof.
+- Sweep and migration (pre-existing, also on trunk before PR 68), closed after
+  the PR 68 round 2 review: the migration stopped `terrace-cms-sweep.service`
+  unconditionally, so a sweep start requested between the migration becoming
+  `activating` and that stop (a window of milliseconds) was cancelled instead of
+  queued. The migration's preflight now stops the sweep only when it is running
+  (a sweep start requested during the migration leaves it `inactive` with a start
+  job waiting, which is kept); only a sweep already running is interrupted, as
+  intended. The exact window is not tested; the website VM proof's queued-sweep
+  and running-sweep checks cover the two cases on either side. This does not
+  change when the sweep timer is armed: after a restore, adoption arms it before
+  the operator has verified the services (see "Restore promotion follow-ups"),
+  and a sweep it starts during the post-restore migration now waits for the
+  migration and runs right after it.
 - Migrations start with a plain `systemctl start terrace-cms-migrate.service`
-  (by hand in the production steps, or from the rehearsal launcher); there is no
-  single deployment entry point that could check for a running CMS operator tool
-  before `Conflicts=` stops the CMS and the website. The migration unit's own
-  check is a backstop that refuses after they are stopped; operators check for a
-  running tool first ([website host](website-host.md), "When a tool is still
-  running"). A deployment entry point with that preflight is not built.
+  (by hand in the production steps, or from the rehearsal launcher). Since the
+  PR 68 round 2 review the unit has no `Conflicts=` on the CMS and website: its
+  last start-up step refuses while an operator tool runs and only then stops the
+  running CMS, website and sweep, so a refused migration (by that check or any
+  guard) leaves the site up ([website host](website-host.md), "When a tool is
+  still running"). The CMS, website and sweep are ordered after it, so a start
+  of any of them requested meanwhile waits; before, a CMS start would have
+  stopped a running migration through `Conflicts=`. A separate deployment
+  command was considered and not built: the refusal it would add before the
+  stop is now in the unit, where every caller (operator, rehearsal launcher,
+  proofs) gets it.
 - Operator tools (G-45). Website `dd1aef7` packages the bulk roster tool and the
   WordPress import applier as `bin/roster-invite` and `bin/wp-import`; Womb runs
   them as the CMS account through the root-only `terrace-cms-tool`
@@ -363,12 +378,18 @@ known to affect a deployed host (none exists).
   `--allow-nonlocal-database` on a Womb host because the module's `DATABASE_URI`
   names a user with an empty host, which the tools' local-database check does not
   parse (a different URI form is a website or Womb decision, not made here); the
-  operator directory is purged by hand; a migration refused because a tool runs
-  has already stopped the CMS and website (see the migration entry point above);
-  a migration started in the same milliseconds as a wrapper can pass both checks;
-  while a tool runs, its command line (operator email, file paths) is visible to
-  every local user; the wrapper has not been run as a background job with an open
-  standard input. Tool runs are serialised and bounded (`operatorToolMaxSeconds`,
+  operator directory is purged by hand; a migration started in the same
+  milliseconds as a wrapper can pass both checks; while a tool runs, its command
+  line (operator email, file paths) is visible to every local user, and it may be
+  recorded by sudo's log, audit `execve` records or root's shell history (none
+  tested); the wrapper has not been run as a background job with an open
+  standard input.
+- Operator from a file (website repo, tfc-website): `bin/roster-invite` takes
+  the operator's administrator email only as `--operator` on the command line.
+  A host with unprivileged interactive users should not run the tools until the
+  website tools can take the operator (and any other identifying argument) from
+  a file or an environment variable; Womb's production hosts have no such users
+  today. Tool runs are serialised and bounded (`operatorToolMaxSeconds`,
   default 3600 s), proven in the website VM.
 
 ## Follow-ups from the proof follow-ups review (PR 64), done in the verification sweep

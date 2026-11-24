@@ -205,17 +205,14 @@
       + builtins.readFile ./cms-tool.sh;
   };
   # A migration never starts under a running operator tool (it would change the schema beneath it).
-  # Fails closed: a listing that cannot be read refuses too.
-  refuseDuringTool = pkgs.writeShellScript "terrace-cms-migrate-refuse-during-tool" ''
-    if ! units=$(${pkgs.systemd}/bin/systemctl list-units --plain --no-legend --state=active,activating,deactivating 'terrace-cms-tool-*'); then
-      echo 'Cannot list CMS operator tool units; migration refused.' >&2
-      exit 1
-    fi
-    if test -n "$units"; then
-      echo "A CMS operator tool is running ($(printf '%s\n' "$units" | ${pkgs.coreutils}/bin/cut -d' ' -f1 | ${pkgs.coreutils}/bin/tr '\n' ' ')); start the migration after it has finished." >&2
-      exit 1
-    fi
-  '';
+  # The migration's last start-up check (platform/cms-migrate-preflight.sh, unit-tested in
+  # tests/platform/test_cms_migrate_preflight.py): refuse while an operator tool runs, before anything is stopped,
+  # then stop the CMS, website and sweep units that are actually running.
+  migratePreflight = pkgs.writeShellApplication {
+    name = "terrace-cms-migrate-preflight";
+    runtimeInputs = [pkgs.coreutils pkgs.systemd];
+    text = builtins.readFile ./cms-migrate-preflight.sh;
+  };
   # Backup roots are free strings: compare normalised forms. Relative paths and any ".." segment are refused outright.
   normalisePath = path: "/" + lib.concatStringsSep "/" (lib.filter (part: part != "" && part != ".") (lib.splitString "/" path));
   plainAbsolute = path: lib.hasPrefix "/" path && !(lib.elem ".." (lib.splitString "/" path));
@@ -462,17 +459,19 @@ in {
     };
     systemd.services.terrace-cms-migrate = lib.recursiveUpdate cmsRuntime {
       description = "Explicit CMS migration; never part of automatic startup";
-      conflicts = ["terrace-cms.service" "terrace-web.service"];
+      # No Conflicts= on the CMS and website: that would stop them as soon as the start job is queued, before any check
+      # could refuse. The preflight stops them instead, after the operator-tool check; they are ordered After= this
+      # unit, so a start requested during a migration waits for it.
       requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
-      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-web.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      after = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
       serviceConfig = {
         Type = "oneshot";
         TimeoutStartSec = 180;
-        # A running sweep is interrupted (it is idempotent and retried); a sweep
-        # requested during the migration waits for it, see terrace-cms-sweep.
-        # The sweep stop stays first (as before the tool check existed), so a sweep requested at a migration's start is
-        # queued behind it rather than cancelled; then a running operator tool refuses the migration.
-        ExecStartPre = ["+${pkgs.systemd}/bin/systemctl stop terrace-cms-sweep.service" "+${refuseDuringTool}" (identityGuard "cms")];
+        # Checks first, so a refused migration stops nothing: the identity guard and any guard another module adds
+        # (lib.mkAfter, as website-gateway.nix does), then the preflight, ordered after all of them: its tool check, and
+        # only then the stop of the running CMS, website and sweep (a running sweep is idempotent and retried; one
+        # requested during the migration waits for it, see terrace-cms-sweep).
+        ExecStartPre = lib.mkMerge [[(identityGuard "cms")] (lib.mkOrder 2000 ["+${migratePreflight}/bin/terrace-cms-migrate-preflight"])];
       };
       script = ''
         set -euo pipefail
@@ -485,7 +484,8 @@ in {
       description = "Terrace CMS immutable production runtime";
       wantedBy = ["multi-user.target"];
       requires = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
-      after = ["terrace-website-inputs.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
+      # A start requested during an explicit migration waits for it.
+      after = ["terrace-website-inputs.service" "terrace-cms-migrate.service"] ++ lib.optional cfg.manageDatabase "postgresql.target";
       unitConfig = {
         StartLimitIntervalSec = 600;
         StartLimitBurst = 3;
@@ -505,7 +505,7 @@ in {
       wantedBy = ["multi-user.target"];
       wants = ["terrace-cms.service"];
       requires = ["terrace-website-inputs.service"];
-      after = ["terrace-website-inputs.service" "terrace-cms.service"];
+      after = ["terrace-website-inputs.service" "terrace-cms.service" "terrace-cms-migrate.service"];
       path = [cfg.nodePackage pkgs.bash pkgs.coreutils];
       environment = {
         NODE_OPTIONS = "--max-old-space-size=384";

@@ -6,6 +6,7 @@
 }: let
   directory = "/var/lib/terrace-windmill-inputs";
   release = builtins.fromJSON (builtins.readFile ./windmill/release.json);
+  evidencePrograms = import ./windmill-evidence-source.nix;
   image = "${release.imageName}:${release.version}";
   oldParentProbe = pkgs.writeText "windmill-old-parent-probe.sh" ''
     set -eu
@@ -142,7 +143,7 @@ in {
                         if len(parts)==2 and parts[0] in ["low","high","max","oom","oom_kill","oom_group_kill","sock_throttled"] and parts[1].isdigit():print("Windmill resource "+name+" "+parts[0]+": "+parts[1])
       '';
       systemd.services.podman-terrace-windmill-server.serviceConfig.ExecStopPost = lib.mkBefore ["${pkgs.python3}/bin/python /etc/windmill-resource-probe.py"];
-      environment.etc."windmill-evidence".source = ./windmill;
+      environment.etc."windmill-evidence".source = evidencePrograms;
       networking.firewall.allowedTCPPorts = [18001 18002 18003 5432];
     };
     client = {nodes, ...}: {
