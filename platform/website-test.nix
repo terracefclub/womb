@@ -484,11 +484,16 @@ in {
         # Nor the tools' own output (stdout and stderr go to the caller through --pipe): the roster file's hash is printed by the
         # tool only, and the two refusals only on its stderr. Nor their arguments: the fixed unit description keeps the command
         # line (operator email, file paths, plan hash) out of systemd's start and stop messages.
-        for printed in [plan["fileSha256"], "Usage: roster-invite.ts", "This is a production target"]:
-            assert printed not in logs, "tool output in a journal: " + printed
-        for argument in ["operator@terrace.invalid", plan["planSha256"], "roster file.csv"]:
-            assert argument not in logs, "tool argument in a journal: " + argument
-        assert "Terrace CMS operator tool (roster-invite)" in logs
+        # Checked per entry: every entry's message, and every field of the tool units' own entries. Not the _CMDLINE of
+        # unrelated processes: this harness's own psql and runuser command lines (which name the synthetic operator) are logged there.
+        entries = [json.loads(line) for line in logs.splitlines() if line.startswith("{")]
+        def text(value):
+            return value if isinstance(value, str) else json.dumps(value)
+        tool_entries = [entry for entry in entries if any(text(entry.get(field, "")).startswith("terrace-cms-tool-") for field in ("_SYSTEMD_UNIT", "UNIT", "USER_UNIT"))]
+        for marker in [plan["fileSha256"], "Usage: roster-invite.ts", "This is a production target", "operator@terrace.invalid", plan["planSha256"], "roster file.csv"]:
+            found = [entry for entry in entries if marker in text(entry.get("MESSAGE", ""))] + [entry for entry in tool_entries if marker in json.dumps(entry)]
+            assert not found, "tool output or argument in a journal: " + marker + " " + json.dumps([{key: entry.get(key) for key in ("MESSAGE", "_COMM", "SYSLOG_IDENTIFIER", "_SYSTEMD_UNIT", "UNIT")} for entry in found[:3]])
+        assert len(tool_entries) > 0 and any("Terrace CMS operator tool (roster-invite)" in text(entry.get("MESSAGE", "")) for entry in entries)
         # Inputs and reports stay in the operator directory, which no backup includes (checked against the snapshot below); purge it.
         names = source.succeed("ls ${operator}").strip().split("\n")
         assert {"locked.csv", "plan.json", "roster file.csv"} <= set(names) and all(name in ("locked.csv", "plan.json", "roster file.csv") or (name.startswith("report-") and name.endswith(".json")) for name in names), names
