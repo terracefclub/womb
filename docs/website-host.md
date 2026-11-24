@@ -89,7 +89,10 @@ another module adds, and a refusal while a CMS operator tool runs); a refused
 migration stops nothing. Only then does it stop the CMS, the website and a
 running sweep, apply the bundle's explicit migrations and record the successful
 revision under `/var/lib/terrace-cms`. A start of the CMS, website or sweep
-requested while it runs waits for it. It is never enabled at boot or called by normal startup.
+requested while it runs waits for it (all three are ordered after it; the website
+VM proof requests each start while a slowed migration runs and checks that each
+stays inactive with its start job waiting, then runs after the migration ended).
+It is never enabled at boot or called by normal startup.
 Repeat the migration action to check that the ledger is unchanged, then start
 both services again. Startup rejects a missing/different revision marker. This
 gate prevents accidental unmigrated startup; it does not prove schema downgrade
@@ -144,12 +147,10 @@ every administrator-initiated erasure:
 systemctl start terrace-cms-sweep.service
 ```
 
-A sweep requested while an explicit migration runs normally waits for it (and is
-skipped if one is still active when it starts). There is one exception: the
-migration's first step stops the sweep unit, so a sweep requested in the few
-milliseconds between the migration becoming `activating` and that step is
-cancelled rather than queued; the next timer run (or a manual start) does the
-work. Starting a migration stops a running sweep,
+A sweep requested while an explicit migration runs waits for it and runs once the
+migration has finished: the migration's last start-up step stops the sweep only
+when it is actually running, so a start job queued behind the migration is kept
+(`platform/cms-migrate-preflight.sh`). Starting a migration stops a running sweep,
 which is idempotent and retried (website `680ad56`:
 `cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
 writes every mirror file to a private temporary file and renames it into place,
