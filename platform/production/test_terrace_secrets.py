@@ -343,6 +343,7 @@ class StoreTest(Fixture):
             os.environ["SOPS_AGE_KEY_FILE"] = identity
         self.assertEqual(code, 0)  # the stand-in ssh accepts anything; on a host `install` refuses (HostTest)
         self.assertIn("NOTE: SOPS_AGE_KEY_FILE is not set, so the TLS pair is not checked here; the host's install checks it.", out)
+        sent = self.argv_log().count('"install"')
         self.assertEqual(self.plaintext()["tls/key"], OTHER_KEY)
         self.assertNotIn("WARNING", self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode()))
         self.assertIn("set the matching tls/key next", self.ok("set", "app", "tls/certificate",
@@ -350,6 +351,27 @@ class StoreTest(Fixture):
         # OpenSSL saw the key on stdin only.
         for key in (TLS_KEY, OTHER_KEY):
             self.assertNotIn(key.splitlines()[1], self.argv_log())
+        # Without openssl on this machine push refuses (it never skips the check silently) and names the program.
+        (self.bin / "openssl").unlink()
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
+            err = self.refused("push", "app", "--address", "app")
+        self.assertIn("openssl is not installed here, so the TLS pair cannot be checked; install it and repeat"
+                      " (a host's install checks the pair with its own openssl)", err)
+        self.assertEqual(self.argv_log().count('"install"'), sent)  # nothing sent
+
+    def test_push_notes_an_unchecked_pair_only_for_a_host_that_has_one(self):
+        self.bootstrap(externals=True)
+        identity = os.environ.pop("SOPS_AGE_KEY_FILE")
+        try:
+            self.assertIn("NOTE: SOPS_AGE_KEY_FILE is not set", self.ok("push", "app", "--address", "app"))
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
+            self.ok("host", "tls", "app", "acme", "--yes")
+            del os.environ["SOPS_AGE_KEY_FILE"]
+            out = self.ok("push", "app", "--address", "app")
+            self.assertIn("remote ok", out)
+            self.assertNotIn("NOTE", out)
+        finally:
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
 
     def test_rotate_one_value_and_manual_procedures(self):
         self.bootstrap()
@@ -803,12 +825,19 @@ class RealOpenSSLTest(unittest.TestCase):
                   "-subj", "/CN=pair.terrace.invalid", "-days", "1"])
         return Path(f"{base}.crt").read_text(), Path(f"{base}.key").read_text()
 
+    def test_ed25519_pair(self):
+        try:
+            ed_cert, ed_key = self.pair("ed25519", "ed25519")
+        except tool.Refused:
+            self.skipTest("this openssl cannot make Ed25519 certificates (LibreSSL, for one)")
+        rsa_cert, rsa_key = self.pair("rsa", "rsa:2048")
+        self.assertIsNone(tool.tls_pair_problem(ed_cert, ed_key))
+        self.assertEqual(tool.tls_pair_problem(ed_cert, rsa_key), "the certificate's public key is not the key's")
+        self.assertEqual(tool.tls_pair_problem(rsa_cert, ed_key), "the certificate's public key is not the key's")
+
     def test_matching_mismatched_and_chained_pairs(self):
         rsa_cert, rsa_key = self.pair("rsa", "rsa:2048")
         ec_cert, ec_key = self.pair("ec", "ec:" + str(self.ec_parameters()))
-        ed_cert, ed_key = self.pair("ed25519", "ed25519")
-        self.assertIsNone(tool.tls_pair_problem(ed_cert, ed_key))
-        self.assertEqual(tool.tls_pair_problem(ed_cert, rsa_key), "the certificate's public key is not the key's")
         other_cert, other_key = self.pair("other", "rsa:2048")
         self.assertIsNone(tool.tls_pair_problem(rsa_cert, rsa_key))
         self.assertIsNone(tool.tls_pair_problem(ec_cert, ec_key))
