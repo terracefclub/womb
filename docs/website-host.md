@@ -284,6 +284,15 @@ systemctl start terrace-cms.service terrace-web.service
 The site stays up until the second-to-last command, which stops it as any
 migration does.
 
+If that stop fails partway (not tested), some of the CMS, website and sweep are
+already stopped and the migration does not run: `systemctl start` reports the
+migration unit failed and the apps journal has the stop error. Check which of
+the three are active (`systemctl is-active terrace-cms.service
+terrace-web.service terrace-cms-sweep.service`), then either start the CMS and
+website again (`systemctl start terrace-cms.service terrace-web.service`) or fix
+the cause, `systemctl reset-failed terrace-cms-migrate.service` and run the
+migration again.
+
 Stopping a tool unit stops the tool where it was (see the run-time bound above
 for what that leaves and how to roll it back).
 
@@ -468,7 +477,9 @@ with `systemctl stop` (its run row and 6 media documents written, its first even
 waiting on a held lock; the wrapper exits 0) leaves the run `running`, rollback refuses it (`run-still-running`, then `run-not-stale`), and
 `--take-over-stale --stale-after-minutes 1` rolls it back (the 6 documents
 deleted) once it has been idle for a minute; a roster run left `running` is refused by rollback while it is
-younger than 30 minutes and marked failed and rolled back after.
+younger than 30 minutes and marked failed and rolled back after (simulated by
+setting the run's status and timestamp in `roster_runs`, not produced by stopping
+a real roster apply).
 
 Verified again 2026-11-24 at Womb `e7403a5` after the review (fresh result,
 04:02 to 04:08 Pacific): 39 CMS tables; roster lock wait 0.50 s at 500 ms,

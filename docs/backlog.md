@@ -384,6 +384,21 @@ known to affect a deployed host (none exists).
   recorded by sudo's log, audit `execve` records or root's shell history (none
   tested); the wrapper has not been run as a background job with an open
   standard input.
+- Operator tool lock file, open: a conforming lock file (root, `0600`, regular)
+  is never removed, so the normal case has no race. When the existing file does
+  not conform, two wrappers can both test it before either removes it; each then
+  removes the other's file, creates its own inode and takes its own `flock`, so
+  both pass the lock. The second check (an active `terrace-cms-tool-*` unit, exit
+  73) covers all but a short window. Reachable only when a nonconforming file
+  exists; `/run` is root-only. Fix in the next code change: never remove the
+  file; open it, take the `flock`, then check owner and type through the open
+  descriptor and fix the mode under the lock, refusing if it cannot be fixed (or
+  create it at boot with tmpfiles).
+- No test requests a CMS or website start during a running migration (only a
+  sweep start is tested); the `After=` ordering that makes such a start wait is
+  not proven in a VM. Nor is a migration preflight whose stop of the CMS, website
+  and sweep fails partway ([website host](website-host.md), "When a tool is still
+  running").
 - Operator from a file (website repo, tfc-website): `bin/roster-invite` takes
   the operator's administrator email only as `--operator` on the command line.
   A host with unprivileged interactive users should not run the tools until the
