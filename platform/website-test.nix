@@ -302,12 +302,6 @@ in {
                 ("applications", "select count(*) from member_applications"), ("invitations", "select count(*) from member_invitations"),
                 ("outbox", "select count(*) from message_outbox"), ("runs", "select count(*) from roster_runs"), ("items", "select count(*) from roster_run_items"),
                 ("import_runs", "select count(*) from wp_import_runs"), ("pages", "select count(*) from pages"), ("posts", "select count(*) from posts"), ("redirects", "select count(*) from redirects")]}
-        # The tools run in the public profile, as on a production host: swap in a public variant of the protected
-        # file for this subtest (same secrets), and put the original back byte for byte afterwards.
-        original_cms_env = source.succeed("sha256sum ${inputs}/cms.env").split()[0]
-        source.succeed("cp -a ${inputs}/cms.env /root/cms.env.loopback && chmod 0600 ${inputs}/cms.env"
-                       " && sed -i -e 's|^CMS_ORIGIN=.*|CMS_ORIGIN=https://editor.terrace.invalid|' -e 's|_ISSUER=.*|_ISSUER=https://identity.terrace.invalid/realms/terrace|' ${inputs}/cms.env"
-                       " && printf 'CMS_PUBLIC_DEPLOYMENT=1\nLIFECYCLE_PUBLIC_ORIGIN=https://web.terrace.invalid\n' >>${inputs}/cms.env && chmod 0400 ${inputs}/cms.env")
         secrets = [line.split("=", 1)[1] for line in source.succeed("cat ${inputs}/cms.env").splitlines() if line.split("=", 1)[0] in ("PAYLOAD_SECRET", "LIFECYCLE_INTAKE_SECRET", "CMS_AUTH_CLIENT_SECRET", "MEMBER_AUTH_INTROSPECTION_SECRET")]
         assert len(secrets) == 4 and all(len(value) == 64 for value in secrets)
         assert source.succeed("stat -c %U:%G:%a ${operator}").strip() == "terrace_cms:terrace_cms:700"
@@ -349,6 +343,12 @@ in {
         source.succeed("systemctl stop terrace-cms-tool-probe.service && systemctl reset-failed terrace-cms-migrate.service terrace-cms.service terrace-web.service && systemctl start terrace-cms.service terrace-web.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
 
+        # The writes run in the public profile, as on a production host: swap in a public variant of the protected file (same
+        # secrets) now that the migration checks are done (the CMS keeps running as started), and put the original back byte for byte afterwards.
+        original_cms_env = source.succeed("sha256sum ${inputs}/cms.env").split()[0]
+        source.succeed("cp -a ${inputs}/cms.env /root/cms.env.loopback && chmod 0600 ${inputs}/cms.env"
+                       " && sed -i -e 's|^CMS_ORIGIN=.*|CMS_ORIGIN=https://editor.terrace.invalid|' -e 's|_ISSUER=.*|_ISSUER=https://identity.terrace.invalid/realms/terrace|' ${inputs}/cms.env"
+                       " && printf 'CMS_PUBLIC_DEPLOYMENT=1\nLIFECYCLE_PUBLIC_ORIGIN=https://web.terrace.invalid\n' >>${inputs}/cms.env && chmod 0400 ${inputs}/cms.env")
         # Roster: a write needs --confirm-production (the host's database counts as a production target); then apply, no-op, rollback.
         plan = summary(tool(["roster-invite", "dry-run", "--file", roster, "--operator", "operator@terrace.invalid", "--report", report()])[0])
         out, err = tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"]], expect=1)
