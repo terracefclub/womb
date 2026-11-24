@@ -53,6 +53,50 @@ Issue descriptions: problem, intended behavior, acceptance criteria. Labels:
 `platform`, `website`, `migration`, `integrations`, `community`. Distinguish ready,
 in progress, review, and external dependency. Keep evidence in the linked MR.
 
+## Restore promotion follow-ups (G-22), recorded 2026-11-24
+
+From the review of the written [restore promotion](restore-promotion.md) procedure.
+None of these is done in that pull request.
+
+- Drill: run the procedure's commands verbatim in a VM on the production profile
+  for both roles with the original disks destroyed, and add the assertions in its
+  "Drill to add" section. Until then it is written from the rehearsals and has not
+  been run as written.
+- Code: `terrace-production adopt` arms the backup, check, freshness and sweep
+  timers (`writerTimers` in `platform/production/app.nix` and `relay.nix`) before
+  the operator has verified the restored services; a scheduled backup ends in
+  `forget --prune` against the repository the restore came from. Decide whether
+  adoption after a restore should leave them off until a second explicit step.
+- Decide and document: the production website backup set is the `terrace_cms`
+  database, the media directory (`/var/lib/terrace-cms-media`) and the outbox
+  (`/var/lib/terrace-cms-outbox`), plus the `keycloak` database. It does not
+  include the website input files (`cms.env`, `web.env`: sops templates, the
+  inputs directory is backed up only when `inputFiles` is null,
+  `platform/website.nix`), the CMS migration marker
+  (`/var/lib/terrace-cms/migrated-revision`), ACME state (`/var/lib/acme`) or the
+  operator directory. Decide whether that is intended and document the re-supply
+  path for each.
+- Erasure replay: no erasure ledger exists outside the restored database and
+  outbox (website `dd1aef7`, `cms/src/lifecycle/erasure.ts`), and the production
+  gateway has no closed or maintenance state, so a restore from a snapshot older
+  than an erasure cannot re-apply it before public exposure unless the operator
+  uses a manual certificate and a forwarded, name-mapped route that has never been
+  tried on the production profile. Needed: an erasure record kept outside the
+  backed-up data, a way to re-apply erasures before the site is reachable (a closed
+  gateway state or an operator-only listener for the CMS administrator interface),
+  and the realm-side disable for members in the production identity tool.
+- Docs corrections found and not made there: `docs/website-host.md` says the module
+  backs up "the entire protected input directory" (only when `inputFiles` is null;
+  production sets it); `docs/production-profile.md` "Host replacement" says to copy
+  the PostgreSQL directory "exactly as" `fresh_restore` does (that function copies
+  file sets only, the cluster copy is separate, and the rehearsals read the data
+  directory from `/etc/rehearsal-pg-directory`, a harness-only file);
+  `docs/secrets.md` says push then `host unstage` while the production VM check
+  unstages first (harmless); `docs/full-rehearsal.md` says "a full repository read
+  check" (the rehearsal profiles set `check.readDataSubset` to 100 percent, the
+  production default is 5 percent); `docs/backups.md` still says four hours to
+  recover where `docs/migration.md` proposes same-day recovery.
+
 ## Follow-ups recorded 2026-11-20
 
 Small review findings that did not block a merge. Each is open work, not a defect
