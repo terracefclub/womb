@@ -1,0 +1,128 @@
+{
+  "blocks": {
+    "step02-quiesce-and-final-backup": [
+      "systemctl stop terrace-backup.timer terrace-backup-check.timer",
+      "systemctl stop terrace-cms-sweep.timer terrace-cms-sweep.service terrace-web.service terrace-cms.service keycloak.service nginx.service",
+      "systemctl start terrace-backup.service",
+      "terrace-backup restic primary snapshots --json",
+      "systemctl stop postgresql.target postgresql.service"
+    ],
+    "step04-rekey": [
+      "terrace-secrets host create app --role app --replace",
+      "terrace-secrets rekey app",
+      "terrace-secrets check app"
+    ],
+    "step06-push": [
+      "terrace-secrets push app --address <replacement address> --identity <operator ssh key>",
+      "terrace-secrets host unstage app"
+    ],
+    "step06-check-on-host": [
+      "terrace-secrets verify",
+      "test -e /var/lib/terrace-secrets/replacement"
+    ],
+    "step07-snapshots": [
+      "terrace-backup restic primary snapshots --json"
+    ],
+    "step08-read-data": [
+      "terrace-backup restic primary check --read-data"
+    ],
+    "step09-restore": [
+      "umask 077",
+      "terrace-backup-restore --target primary --snapshot <SNAPSHOT_ID> --dest /var/lib/terrace-restore >/var/tmp/restore.log 2>&1",
+      "grep -qx 'RECONCILIATION OK' /var/lib/terrace-restore/reconciliation.txt"
+    ],
+    "step10-status": [
+      "terrace-production status"
+    ],
+    "step11-copy-file-set": [
+      "test ! -L <path> && { test ! -e <path> || test -z \"$(ls -A <path>)\"; }",
+      "mkdir -p <path> && cp -a /var/lib/terrace-restore/files<path>/. <path>/"
+    ],
+    "step12-postgresql": [
+      "pg_dir=/var/lib/postgresql/18",
+      "test ! -L \"$pg_dir\" && { test ! -e \"$pg_dir\" || test -z \"$(ls -A \"$pg_dir\")\"; }",
+      "install -d -m 0700 -o postgres -g postgres \"$pg_dir\" && cp -a /var/lib/terrace-restore/pgdata/. \"$pg_dir\"/ && chown -R postgres:postgres \"$pg_dir\""
+    ],
+    "step13-headscale": [
+      "test ! -L /var/lib/headscale && { test ! -e /var/lib/headscale || test -z \"$(ls -A /var/lib/headscale)\"; }",
+      "mkdir -p /var/lib/headscale && cp -a /var/lib/terrace-restore/files/var/lib/headscale/. /var/lib/headscale/",
+      "install -m 0600 -o headscale -g headscale /var/lib/terrace-restore/files/var/lib/terrace-backup/dumps/sqlite/headscale.sqlite /var/lib/headscale/db.sqlite"
+    ],
+    "step14-role-checks": [
+      "systemctl start postgresql.target",
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d postgres -c \"select rolsuper and rolcanlogin from pg_authid where oid=10 and rolname='postgres'\"   # t",
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d postgres -c \"select count(*) from pg_roles where rolname='terrace-restore'\"   # 0",
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d postgres -c \"show fsync\"   # on",
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d postgres -c \"show hba_file\"   # a /nix/store path",
+      "runuser -u terrace-restore -- psql -X -w -h /run/postgresql -U postgres -d postgres -c 'select 1'   # must FAIL"
+    ],
+    "step15-adopt": [
+      "terrace-production adopt --restored"
+    ],
+    "step16-migration-gate": [
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -c 'select name||batch from payload_migrations order by id'",
+      "systemctl start terrace-cms-migrate.service",
+      "systemctl start terrace-cms.service terrace-web.service",
+      "runuser -u postgres -- psql -XAt -w -v ON_ERROR_STOP=1 -d terrace_cms -c 'select name||batch from payload_migrations order by id'"
+    ],
+    "step16-sweep-by-hand": [
+      "systemctl start terrace-cms-sweep.service"
+    ],
+    "step20-health": [
+      "systemctl --failed",
+      "terrace-tls check",
+      "terrace-secrets verify",
+      "terrace-backup age"
+    ],
+    "step21-first-backup-and-arm": [
+      "systemctl start terrace-backup.service",
+      "terrace-backup age",
+      "systemctl start terrace-backup-freshness.service",
+      "terrace-backup restic primary snapshots --json",
+      "terrace-production arm-timers"
+    ],
+    "d5-app": [
+      "terrace-production arm-timers --in-service",
+      "terrace-production status",
+      "systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer terrace-cms-sweep.timer",
+      "systemctl list-timers"
+    ],
+    "d5-relay": [
+      "terrace-production status",
+      "systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer"
+    ]
+  },
+  "outputs": {
+    "step15-output-app": [
+      "Adopted: the writers start now and at every boot.",
+      "Held until you have verified the restored services: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer (they stay off across reboots).",
+      "Arm them with: terrace-production arm-timers",
+      "Held until the replacement is declared in service, after any erasure replay: terrace-cms-sweep.timer (they stay off across reboots).",
+      "Arm it then with: terrace-production arm-timers --in-service"
+    ],
+    "step21-output-app": [
+      "Armed: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer.",
+      "Still held until the replacement is declared in service: terrace-cms-sweep.timer. Arm with: terrace-production arm-timers --in-service"
+    ]
+  },
+  "inline": {
+    "step02-result": "systemctl show terrace-backup.service -p Result --value",
+    "step02-log": "target primary: backup succeeded in",
+    "step02-age": "terrace-backup age",
+    "step09-stop-isolated": "terrace-backup-restore --stop /var/lib/terrace-restore",
+    "step09-remove": "rm -rf /var/lib/terrace-restore",
+    "step11-outbox-owner": "test \"$(stat -c %U:%a /var/lib/terrace-cms-outbox)\" = terrace_cms:700",
+    "step13-integrity": "sqlite3 /var/lib/headscale/db.sqlite \"PRAGMA integrity_check\"",
+    "step13-owners": "stat -c %U:%G /var/lib/headscale /var/lib/headscale/noise_private.key /var/lib/headscale/derp_server_private.key",
+    "step17-keycloak": "systemctl is-active keycloak.service",
+    "step19-tls": "terrace-tls check",
+    "relay-role": "relay --role relay",
+    "relay-in-service": "terrace-production arm-timers --in-service"
+  },
+  "excluded": {
+    "step18-rehearsal-only": {
+      "firstLine": "# after PostgreSQL, Keycloak, nginx, the CMS migration and the CMS are up (BOOTSTRAP_APP):",
+      "reason": "Documenso, Windmill and Vaultwarden are refused by the production profile; step 18 describes rehearsal behaviour only."
+    }
+  }
+}
