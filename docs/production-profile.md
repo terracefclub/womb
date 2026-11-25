@@ -455,6 +455,15 @@ now carries the manifest and the extended `terrace-production`). The evaluation
 check passes with 143 rejected variants. The other checks and the five rehearsal
 drivers have derivations equal to trunk's and were not rerun.
 
+Verified for the deploy path follow-ups and the website migration gate at Womb
+`c8f6f29` (fresh results, builder, 2026-11-25): the deploy VM proof PASS in 697 s
+with 133 assertions ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in));
+this VM proof 263 assertions (198 protocol), the identity administration proof 347,
+the TLS proof 148, the website and website gateway checks, and the five rehearsal
+variants once each, all PASS (every derivation changed with the website module).
+The evaluation check passes with 145 rejected variants (two new: the migration gate
+removed from the CMS or from the website).
+
 ## Keycloak administration
 
 The app role also installs `terrace-identity-admin` (root-only wrapper) and the

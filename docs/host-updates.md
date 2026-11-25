@@ -35,8 +35,23 @@ website now has the CMS's migration gate (H7, closed by an engineering change: t
 owner was told it was planned and has not answered). `rollback` passes over a
 generation whose last record is a failure and takes `--generation N`; a dry run
 before the quiesce reports what else would stop the update instead of stopping at
-the first check; the record is written once the gated units have stopped retrying.
-Section 1.5 says what ran for each.
+the first check; the record is written once the gated units have stopped retrying,
+and a gated switch that `switch-to-configuration` reports as exit 0 is judged like one
+that exits 4. Section 1.5 says what ran for each. Results at Womb `c8f6f29` (builder,
+2026-11-25, synthetic data): the deploy VM proof PASS with 133 assertions in 697 s
+(migration 4.01 s); the production proof 263 (198 protocol), identity administration
+347 and TLS 148, the website and website gateway checks and the five rehearsal
+variants (default, `--documenso`, `--documenso-signing`, `--relay-peers`,
+`--all-services`, once each) all PASS; 442 unit tests and 65 of 65 mutants killed.
+Two earlier runs of the deploy proof failed and are recorded here because the first
+found a defect in the command as merged on 2026-11-24 (still on trunk until this
+change merges): on a re-pin with the gated website, `switch-to-configuration` exited
+0 (step 7) and `activate` recorded a plain `success` while the CMS and website were
+down. The merged command reads the units only after exit 4, and whether a gated
+switch exits 0 or 4 depends on timing (step 7), so the merged command can record
+that outcome as `success` too. The second failure was a wrong VM assertion (a
+systemd timestamp that changes on refused starts), replaced by a journal measure
+with a control.
 
 Evidence levels, as in [restore promotion](restore-promotion.md) and
 [credential rotation](credential-rotation.md): **VM rehearsal (synthetic data)**,
@@ -357,7 +372,9 @@ change; the inventory and realm steps (8, 9); a failed or timed-out migration; t
 old migration unit on the newer schema (H1); backups, retention and the backup
 window (steps 5, 6, 13); a failed switch's state (seen while the proof was built,
 when the VM could not take GRUB, but asserted only by unit tests); the bootstrap
-route and key rotation; real data sizes; `rollback --generation N`, a plain
+route and key rotation; real data sizes; the 300 s wait for the CMS and website
+reaching its limit (unit test only); a gated switch with the gated website that exits
+4 for the gated units alone (only exit 0 was seen); `rollback --generation N`, a plain
 `rollback` that actually switches past a failed generation (the VM shows the choice
 with `--dry-run` only), the lock under two concurrent SSH sessions and the race of
 two first-ever runs on the lock file, and a symlinked signing key (unit tests only).
@@ -700,7 +717,9 @@ rehearsal observed a re-pin from `680ad56` to `dd1aef7` on the app role):
   restart delay with no failed main process (READ: `switch-to-configuration-ng`
   counts an `auto-restart` service as failed only when its `ExecMainStatus` is not
   0, and the bundles' main process never ran), so it reported them among "the
-  following new units were started" and **exited 0**. With the ungated website
+  following new units were started" and **exited 0**. In the passing run at `c8f6f29`
+  every gated switch recorded `switchExit` 0 and the one that also broke a unit 4; each
+  gated unit made three start attempts, all three refused by the gate. With the ungated website
   (before 2026-11-25) the website's health check held the switch for about a minute,
   the CMS reached its start limit meanwhile, and the switch exited 4. The command
   does not depend on either: after exit 0 or 4 it waits (at most 300 s, about 30 s
@@ -1331,9 +1350,10 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
   restarted until its start limit, three to four minutes (RAN IN VM at the deploy
   path's merge). Now it fails at once like the CMS, after a re-pin, after a forced
   rollback (the old bundle against a migrated database) and after a reboot or push
-  before step 10. RAN IN VM: the deploy proof (both units refused by the gate at
-  activation and after the forced rollback, each refusing a start by hand) and the
-  website check (start refused with the marker removed and with another revision);
+  before step 10. RAN IN VM: the deploy proof (after the activation both units
+  failed at their start limit, every start refused by the gate and no main process
+  run, each also refusing a start by hand; after the forced rollback both failed
+  again) and the website check (start refused with the marker removed and with another revision);
   RAN (eval): the evaluation check requires the gate on both units, with a
   rejected variant for each. `production-profile.md`, the comment in
   `platform/production/app.nix` and [website host](website-host.md#runtime-and-migration-boundary)
