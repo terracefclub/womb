@@ -286,7 +286,7 @@ in {
     operator.wait_for_unit("multi-user.target")
     operator.succeed("install -d -m 0700 /root/escrow /root/.ssh /root/signing " + STORE + " && install -m 0600 ${keys}/operator /root/.ssh/operator")
     operator.succeed("install -m 0600 ${escrow}/escrow.age " + ESCROW + " && install -m 0644 ${escrow}/escrow.pub " + STORE + "/escrow.recipient")
-    operator.succeed("install -m 0600 ${signing}/deploy.sec ${signing}/foreign.sec /root/signing/")
+    operator.succeed("install -m 0600 ${signing}/deploy.sec ${signing}/foreign.sec ${signing}/cachelike.sec /root/signing/")
 
     with subtest("operator creates the app host key and secrets"):
         op("terrace-secrets host create app --role app")
