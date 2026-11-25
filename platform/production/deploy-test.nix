@@ -219,6 +219,18 @@ in {
            and record["result"] == "switched; down until the CMS migration: " + " ".join(GATED),
            f"{label}: switched with exactly the gated CMS and website down: {record}")
 
+    def bundle_runs(mark, seen):
+        # Per gated unit since the epoch second `mark`: start attempts (PID 1's "Starting ..." lines in the system journal),
+        # refusals by the gate (its message in the units' own journal namespace, counted from `seen`), and any sign that the
+        # bundle's main process ran (PID 1's "Started ..." after the health check, or "Main process exited"); and whether
+        # anything listens on the bundles' ports. (Not ExecMainStartTimestampMonotonic: in the first VM run it changed across starts the gate refused.)
+        units = {}
+        for unit in GATED:
+            lines = app.succeed(f"journalctl -u {unit} -o cat --no-pager --since @{mark}").splitlines()
+            units[unit] = {"attempts": sum(line.startswith("Starting ") for line in lines), "refused": gate_messages(unit) - seen[unit],
+                           "ran": sum(line.startswith("Started ") or "Main process exited" in line for line in lines)}
+        return units, app.execute("ss -ltn | grep -E '127.0.0.1:(13048|14294) '")[0] == 0
+
     def gate_messages(unit):
         return int(app.succeed(f"journalctl --namespace=terrace-apps -u {unit} -o cat --no-pager | grep -c 'CMS migration gate is closed' || true").strip())
     BACKUP_HELD = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
@@ -414,7 +426,7 @@ in {
         # A start of a held timer (as the target's at boot) is skipped while its marker exists.
         app.succeed("systemctl start " + " ".join(BACKUP_HELD + SERVICE_HELD))
         held("before the update")
-        bundle_starts = {unit: unit_state(unit, "ExecMainStartTimestampMonotonic") for unit in GATED}
+        mark, seen = app.succeed("date +%s").strip(), {unit: gate_messages(unit) for unit in GATED}
         # `-tt`: a terminal, as `ssh -t` gives an operator, so a dropped connection hangs up the remote side.
         operator.succeed("(" + SSH.replace("ssh ", "ssh -tt ", 1) + "sudo terrace-production activate " + NEXT + " >/tmp/activate.log 2>&1 </dev/null; echo $? >/tmp/activate.rc) >/dev/null 2>&1 </dev/null & echo $! >/tmp/activate.pid")
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-started", timeout=180)
@@ -435,9 +447,9 @@ in {
         ok(failed_units() == GATED, "when the command returns, exactly the CMS and the website are failed")
         ok(all(unit_state(unit, "Result") == "start-limit-hit" for unit in GATED), "both stopped at their start limit")
         ok(gate_messages("terrace-web.service") > 0, "the website, started by the switch, was refused by its migration gate (H7 closed)")
-        ok({unit: unit_state(unit, "ExecMainStartTimestampMonotonic") for unit in GATED} == bundle_starts
-           and app.execute("ss -ltn | grep -E '127.0.0.1:(13048|14294) '")[0] != 0,
-           f"neither bundle ran: no main process started since the quiesce, nothing listens on their ports (switch exit {record.get('switchExit')})")
+        runs, listening = bundle_runs(mark, seen)
+        ok(all(u["attempts"] > 0 and u["refused"] == u["attempts"] and u["ran"] == 0 for u in runs.values()) and not listening,
+           f"neither bundle ran: every start since the quiesce was refused by the gate, no main process, nothing listens (switch exit {record.get('switchExit')}): {runs}, listening {listening}")
         status = app.succeed("terrace-production status")
         ok(f"running system: {NEXT} (Womb ${revisions.next}, website {NEW_PIN})" in status and f"previous generation: 1 {BASE} (Womb ${revisions.old}, website {OLD_PIN})" in status, "status shows both generations")
         held("after the update")
@@ -493,7 +505,12 @@ in {
         ok([name for name in after if name not in OLD_MIGRATIONS] == [name for name in NEW_MIGRATIONS if name not in OLD_MIGRATIONS], "only the new release's added migrations ran")
         app.succeed("systemctl start terrace-cms-migrate.service", timeout=300)
         ok(ledger() == after, "a second migration run applies nothing")
+        mark, seen = app.succeed("date +%s").strip(), {unit: gate_messages(unit) for unit in GATED}
         restart_after_quiesce()
+        # Control for the check above: once migrated, the same measure sees both bundles run, unrefused, and listening.
+        runs, listening = bundle_runs(mark, seen)
+        ok(all(u["attempts"] > 0 and u["refused"] == 0 and u["ran"] > 0 for u in runs.values()) and listening,
+           f"control: after the migration the same measure sees both bundles run: {runs}, listening {listening}")
         app.succeed("systemctl start terrace-cms-sweep.timer")
         cms_serves("after the upgrade")
         migrated = data()
