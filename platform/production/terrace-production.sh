@@ -267,9 +267,9 @@ deploy() {
   if [[ $mode == boot ]]; then echo "Generation $(gen_of) is the boot default; reboot to run it."; else echo "Running generation $(gen_of): $(readlink -f "$current_system")."; fi
   if [[ $(tail -n 1 "$records" | jq -r .result) == "switched;"* ]]; then
     echo "The CMS gate is closed for this release: $(tail -n 1 "$records" | jq -r '.failedUnits | join(" ")') stay failed until the migration (docs/host-updates.md steps 10 and 11)."
-    starting=$(tail -n 1 "$records" | jq -r '.startingUnits | join(" ")')
-    if [[ -n $starting ]]; then
-      echo "Still starting without a gate (H7): $starting; it retries its health check against the stopped CMS and fails within minutes. Stop it now: systemctl stop $starting (step 7)."
+    pending=$(tail -n 1 "$records" | jq -r '.startingUnits | join(" ")')
+    if [[ -n $pending ]]; then
+      echo "Still starting without a gate (H7): $pending; it retries its health check against the stopped CMS and fails within minutes. Stop it now: systemctl stop $pending (step 7)."
     fi
   fi
 }
