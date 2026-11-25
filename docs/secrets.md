@@ -106,6 +106,8 @@ differ); a working pair of that kind is refused, never a mismatched one accepted
 | Host private key | the host's `/etc/ssh/ssh_host_ed25519_key`; the operator's staging copy is on tmpfs and removed with `host unstage` | no |
 | Ciphertext on the host | `/var/lib/terrace-secrets/secrets.sops.json` (`0600`) | no |
 | Plaintext | ramfs on the host; the operator tool's memory and its tmpfs scratch | never |
+| Deploy signing key, secret half (only with the opt-in deploy path) | the build machine, outside any checkout and outside the Nix store ([below](#deploy-signing-key)) | **no** |
+| Deploy signing key, public half | each host's `terrace.production.deploy.trustedKeys` (private host module) | not secret |
 
 **Why ciphertext stays out of the public repository.** sops files are safe to
 publish only while every recipient key stays secret forever. Public Git history
@@ -356,6 +358,33 @@ changed values) and `verify`, and restores the previous file if either fails.
 key; `rekey <host>` decrypts with the escrow identity and re-encrypts the same
 values to {new host, escrow} with a fresh data key. Install the replacement with
 the new key and `push`.
+
+## Deploy signing key
+
+Only when the opt-in deploy path is used ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in);
+the owner has not chosen it). It is a new secret, separate from every value above:
+the host never receives it and `terrace-secrets` does not manage it. Written
+procedure, NOT RUN outside the VM proof (which makes its keys at build time).
+
+- **Create** on the build machine, as the user that builds:
+  `umask 077; mkdir -p ~/.config/terrace/deploy && nix key generate-secret --key-name terrace-deploy-1 >~/.config/terrace/deploy/terrace-deploy-1.sec`,
+  then `nix key convert-secret-to-public <~/.config/terrace/deploy/terrace-deploy-1.sec`
+  prints the public half for `deploy.trustedKeys`. Number the name (`-1`, `-2`):
+  rotation trusts two names at once.
+- **Where and mode**: a directory `0700` and the file `0600`, owned by the build
+  user, outside every checkout (the repository runs gitleaks, but keep it out of
+  reach anyway) and never passed to a Nix build (a store path is world-readable).
+  `terrace-deploy.sh` reads it only for `nix store sign`.
+- **Who may sign**: `nix store sign` writes into the build machine's store, so the
+  user must be root or trusted by its Nix daemon.
+- **Backup**: none of the secret half. Instead keep a **second, offline key** (same
+  commands on an offline machine, stored with the escrow key) and trust both public
+  halves from the first install; the spare signs only when the main key is lost.
+  Whether to keep a spare is the owner's choice; without one, a lost key means the
+  manual bootstrap route of the host updates document.
+- **Loss, leak and rotation**: [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in),
+  "Losing or replacing the signing key". A leaked key alone does not reach a host:
+  copying still needs the `operator` login and activation needs `sudo`.
 
 ## Verification
 

@@ -2,7 +2,7 @@
 from platform/production/terrace-production.sh or platform/production/terrace-deploy.sh, and the unit tests must
 FAIL against it. A mutant that passes means its guard is untested. The unmutated scripts must pass.
 
-Run: python3 -B tests/platform/deploy_mutants.py   (exit 0 only if every mutant is killed; about two minutes)
+Run: python3 -B tests/platform/deploy_mutants.py   (exit 0 only if every mutant is killed; several minutes)
 """
 from concurrent.futures import ThreadPoolExecutor
 import os
