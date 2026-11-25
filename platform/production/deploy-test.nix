@@ -104,6 +104,8 @@ in {
         # Copied closures land on the guest's disk, not in its memory.
         writableStoreUseTmpfs = false;
       };
+      # The test framework turns switching off for its nodes; an installed production host keeps NixOS's default (on).
+      system.switch.enable = true;
       terrace.production = {
         instance = "rehearsal";
         memoryMiB = 9216;
@@ -138,6 +140,7 @@ in {
     # Built for its toplevel only (a closure for the other role); never started.
     relay = {...}: {
       imports = [sopsModule ./relay.nix ./rehearsal-relay.nix];
+      system.switch.enable = true;
       terrace.production = {
         instance = "rehearsal";
         memoryMiB = 2048;
