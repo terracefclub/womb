@@ -204,15 +204,23 @@ comparison); **READ**; **NOT EXERCISED**. Nothing here ran on a real host.
 **What `activate` and `rollback` refuse, before anything changes.** Each refusal
 prints `terrace-production: nothing changed: ...` and exits 1; the unit tests check
 that the profile, the running system and the record are unchanged, and a mutant
-without each check fails them. The whole command holds a root-only lock
-(`/var/lib/terrace-production/deploy.lock`, created once, never replaced), so a
-second `activate` or `rollback` is refused at once; the `terrace-switch` unit
-repeats the state checks (the running system and the profile's generation the
-decision was made against, the idle checks, the target's form) immediately before
-it changes anything, and refuses a decision made against an older state; the
-command prints only the records it wrote itself (unit tests; a mutant for each).
-`--dry-run` runs every check and stops (RAN IN VM, as the control of the
-non-deploy-key case below).
+without each check fails them. The client command holds a root-only lock on
+`/var/lib/terrace-production/deploy.lock` from its first check to its record (the
+file is created on first use and not replaced afterwards), so a second `activate`
+or `rollback` is refused at once. If the client is killed while its switch runs,
+the lock is released, but `terrace-switch.service` is one of the busy units, so a
+new command is still refused until the switch ends. Inside the `terrace-switch`
+unit, immediately before it changes anything, the command repeats: the running
+system and the profile's generation the decision was made against (a different
+state is refused), the idle checks (all busy units except the switch itself, the
+sweep, the operator tools) and the target's form and identity (store path,
+validity, NixOS system, manifest, role, host, instance; and not the running system,
+except for `cancel`). It does **not** repeat the signature, boot, upstream-version
+or CMS ledger checks: those were made under the same lock just before. The command
+prints only the records it wrote itself (unit tests; a mutant for each).
+`--dry-run` runs every check, prints the target (`Checks passed; <action> <path>
+(<revisions>)`, or for a cancel the generation and path that become the boot
+default) and stops (RAN IN VM, as the control of the non-deploy-key case below).
 
 | Check | Why (this document) | Evidence |
 | --- | --- | --- |
@@ -852,7 +860,10 @@ timeout. Then:
   **restore** the step 6 snapshot onto a replacement (U8, section 4.3). A blind
   retry of step 10 is not a decision the operator takes alone.
 - **Fixing forward does not restart this procedure from the top.** Build and copy
-  the corrected closure (steps 3 and 4), then go straight to activation (step 7),
+  the corrected closure (steps 3 and 4), stop the CMS and website if either is
+  still retrying (`systemctl stop terrace-cms.service terrace-web.service`;
+  `activate` refuses a release change until they are), then go straight to
+  activation (step 7),
   secrets (step 8) if needed, the realm (step 9) and the migration (step 10). Do
   **not** run step 5's checks as a gate (its marker check fails by design in this
   state) and do **not** run step 6 again the same day: a second snapshot today
@@ -1025,9 +1036,21 @@ changes, client reconnection after an update: not exercised anywhere.
 
 ### 4.1 What a generation rollback reverts, and what it does not
 
-With the deploy path: `sudo terrace-production rollback` (the newest older
-generation, the checks of section 1.5, the same `terrace-switch` unit and a record;
-after a migration it refuses unless `--cms-stays-down`). RAN IN VM. The standard
+With the deploy path: `sudo terrace-production rollback` (the checks of section
+1.5, the same `terrace-switch` unit and a record; after a migration it refuses
+unless `--cms-stays-down`). RAN IN VM. **Which generation it picks**: the newest
+generation older than the current one. After an attempt that failed and was rolled
+back, followed by a new activation, that can be the failed attempt's generation;
+nothing checks that the generation it picks ever ran well. So run `sudo
+terrace-production rollback --dry-run` first: it prints the target path and its
+revisions and changes nothing; compare them with `terrace-production status` and
+`nix-env -p /nix/var/nix/profiles/system --list-generations` before the real
+`rollback`. When the boot default is not the running system (after `activate
+--boot`, or a switch that failed after registering), `rollback` cancels that pending
+generation (the running system becomes the boot default again) instead of going
+further back; run it again to go further back. Before any rollback that changes the
+release, stop the CMS and website if they may still be retrying (`systemctl stop
+terrace-cms.service terrace-web.service`; section 4.2). The standard
 NixOS commands it runs, also the way without the deploy path (run the switch
 detached, as in step 7):
 
@@ -1099,8 +1122,11 @@ a failed migration is not exercised in a VM).
 and the marker holds the new one: the old CMS refuses to start (RAN IN VM,
 `deploy-test.nix`: after the upgrade migration on populated data, `terrace-production
 rollback` refused, `rollback --cms-stays-down` ran the previous generation, and its
-CMS failed with `CMS migration gate is closed`; activating the new generation again
-brought the site back with the data unchanged). That refusal is the protection; do
+CMS failed with `CMS migration gate is closed`; then, after `systemctl stop
+terrace-cms.service terrace-web.service` (the old CMS and website were still
+retrying, and `activate` refuses a release change until they are stopped),
+activating the new generation again brought the site back with the data unchanged).
+That refusal is the protection; do
 not defeat it. **After a
 failed step 10** there is no such protection on the old generation (step 10,
 "Failed inside `bin/migrate`"): stay on the new generation with the CMS, website,

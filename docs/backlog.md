@@ -573,11 +573,26 @@ marked so.
   fails (today it leaves the failed generation as the boot default, as
   `nixos-rebuild` does; `status` warns, and the host updates document gives the
   manual commands, not run).
-- Decide: `terrace-production rollback` goes to the newest generation older than the
-  current one; after an attempt that failed and was rolled back, then a new
-  activation, that can be the failed attempt's generation (as with `nixos-rebuild
-  --rollback`). The docs tell the operator to read `status` first; a rollback to a
-  named generation is not offered.
+- Code, deploy path (found in review round 2 of the deploy path pull request, none
+  fixed there):
+  - `rollback` goes to the newest generation older than the current one, which after
+    a failed attempt, a rollback and a new activation can be the failed attempt's
+    generation; nothing checks it ever ran well (the docs say to run `rollback
+    --dry-run` and read `status` first). Skip generations whose last finished
+    record is a failure, or add `rollback --generation N`.
+  - First-creation race on the lock file: two first-ever runs overlapping could
+    each `install` the file, the second replacing the first's. Open it for append
+    instead of creating it with `install`.
+  - `terrace-deploy.sh` reads a symlinked key file's own mode (`stat` without
+    following the link) and so refuses a symlinked key: follow the link.
+  - The exit-4 logic reads switch-to-configuration's "the following units failed"
+    line by its exact text. If upstream changes that text, the check gets weaker
+    (only the unit listing remains); it does not fail open. Add a comment and a
+    test pinning the text.
+  - The deploy VM proof depends on timing in two places: the case A refusal needs
+    the CMS still `activating` (in its restart delay) when `rollback` runs, and the
+    `failedUnits` assertions need it already start-limited. If the timing differs
+    they fail loudly, not vacuously; make them independent of it.
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.
