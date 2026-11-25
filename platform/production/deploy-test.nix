@@ -106,6 +106,9 @@ in {
       };
       # The test framework turns switching off for its nodes; an installed production host keeps NixOS's default (on).
       system.switch.enable = true;
+      # The test VM's disk cannot take GRUB (`switch` installs the boot loader first and would fail there): write the
+      # menu only. A real host's hardware module declares its own boot loader.
+      boot.loader.grub.device = lib.mkForce "nodev";
       terrace.production = {
         instance = "rehearsal";
         memoryMiB = 9216;
@@ -141,6 +144,7 @@ in {
     relay = {...}: {
       imports = [sopsModule ./relay.nix ./rehearsal-relay.nix];
       system.switch.enable = true;
+      boot.loader.grub.device = lib.mkForce "nodev";
       terrace.production = {
         instance = "rehearsal";
         memoryMiB = 2048;
