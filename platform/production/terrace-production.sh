@@ -201,7 +201,7 @@ check_cms() {
 # and only it, is recorded as switched with those units down: exit 4, every failed unit one of the quiesce units,
 # and the marker not holding the target's revision. Anything else that failed is a failed switch.
 apply() {
-  local action=$1 mode=$2 target=$3 generation=${4:-} from before after rc=0 result marker="" unit expected=1 failed=()
+  local action=$1 mode=$2 target=$3 generation=${4:-} from before after rc=0 result marker="" unit expected=1 failed=() starting=()
   from=$(readlink -f "$current_system"); before=$(gen_of)
   # A start limit hit by an earlier gate refusal must not keep a unit from starting where its gate is open.
   if (( ${#quiesce[@]} )); then systemctl reset-failed "${quiesce[@]/%/.service}" 2>/dev/null || true; fi
@@ -214,6 +214,10 @@ apply() {
     if [[ -n $cms_marker && -e $cms_marker ]]; then marker=$(cat "$cms_marker"); fi
     [[ -n $cms_marker && $marker != "$(field "$target" .website.revision)" && ${#failed[@]} -gt 0 ]] || expected=0
     for unit in "${failed[@]}"; do [[ " ${quiesce[*]/%/.service} " == *" $unit "* ]] || expected=0; done
+    # The website has no gate and restarts on failure: when the switch returns it can still be retrying its health check.
+    for unit in "${quiesce[@]}"; do
+      [[ $(systemctl show "$unit.service" -p ActiveState --value) != activating ]] || starting+=("$unit.service")
+    done
   fi
   if [[ $rc == 0 ]]; then result=success
   elif [[ $rc == 4 && $expected == 1 ]]; then result="switched; down until the CMS migration: ${failed[*]}"; rc=0
@@ -221,8 +225,8 @@ apply() {
   install -d -m 0700 "$state_dir"
   jq -cn --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" \
     --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" \
-    --arg failed "${failed[*]}" \
-    '{time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: ($failed | split(" ") | map(select(. != "")))}' >>"$records"
+    --arg failed "${failed[*]}" --arg starting "${starting[*]}" \
+    '{time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: ($failed | split(" ") | map(select(. != ""))), startingUnits: ($starting | split(" ") | map(select(. != "")))}' >>"$records"
   chmod 0600 "$records"
   exit "$rc"
 }
@@ -263,6 +267,10 @@ deploy() {
   if [[ $mode == boot ]]; then echo "Generation $(gen_of) is the boot default; reboot to run it."; else echo "Running generation $(gen_of): $(readlink -f "$current_system")."; fi
   if [[ $(tail -n 1 "$records" | jq -r .result) == "switched;"* ]]; then
     echo "The CMS gate is closed for this release: $(tail -n 1 "$records" | jq -r '.failedUnits | join(" ")') stay failed until the migration (docs/host-updates.md steps 10 and 11)."
+    starting=$(tail -n 1 "$records" | jq -r '.startingUnits | join(" ")')
+    if [[ -n $starting ]]; then
+      echo "Still starting without a gate (H7): $starting; it retries its health check against the stopped CMS and fails within minutes. Stop it now: systemctl stop $starting (step 7)."
+    fi
   fi
 }
 deploy_status() {

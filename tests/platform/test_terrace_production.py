@@ -501,10 +501,21 @@ class DeployPath(Harness):
         (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded failed failed web\n")
         out = self.accepted("activate", str(gated)).stdout
         self.assertIn("The CMS gate is closed for this release: terrace-cms.service terrace-web.service stay failed until the migration", out)
+        self.assertNotIn("Still starting", out)
         record = self.records()[-1]
-        self.assertEqual((record["result"], record["failedUnits"]), ("switched; down until the CMS migration: terrace-cms.service terrace-web.service",
-                                                                     ["terrace-cms.service", "terrace-web.service"]))
+        self.assertEqual((record["result"], record["failedUnits"], record["startingUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", ["terrace-cms.service", "terrace-web.service"], []))
         self.assertIn("reset-failed terrace-cms.service terrace-web.service", (self.dir / "reset-failed.log").read_text())
+        # The website can still be retrying its health check (Restart=on-failure) when the switch returns.
+        self.accepted("rollback")
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\n")
+        self.set_unit("terrace-web.service", "activating")
+        out = self.accepted("activate", str(gated)).stdout
+        self.assertIn("Still starting without a gate (H7): terrace-web.service; it retries its health check against the stopped CMS and fails within minutes. "
+                      "Stop it now: systemctl stop terrace-web.service (step 7).", out)
+        record = self.records()[-1]
+        self.assertEqual((record["result"], record["failedUnits"], record["startingUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service", ["terrace-cms.service"], ["terrace-web.service"]))
 
     def test_other_failed_units_fail_the_switch(self):
         gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
