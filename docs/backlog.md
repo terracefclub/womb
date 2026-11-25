@@ -126,7 +126,13 @@ None of these was done in that pull request; the production safeguards follow-up
   (the test driver's type check: three diagnostics, a mixed-type dictionary and a
   reused variable; no VM started) and `775727e` (the app part passed; the relay
   assertion expected the bare line `OK sqlite headscale`, which the tool never
-  writes, and the document had named it that way).
+  writes, and the document had named it that way). Passing runs, all of the same
+  derivation on the build machine: one at `9db302a` and two separate builds at
+  `8a80cd3` (`--rebuild`), each 155 assertions in about 560 to 570 s; in each, the
+  restored-from snapshot was pruned by the third run after the restore (same day)
+  and the returning original pruned one replacement snapshot. Three passes are not
+  a failure rate. Every other proof derivation, flake check, rehearsal driver and
+  the production `nix.conf` evaluated equal to trunk `b41d168`, so none was rerun.
 - Left by the promotion drill (section 5 of the document has the reasons): Headscale
   peers on a replaced production relay; acceptance of an adoption with the media
   copy skipped; a promotion from the S3 secondary target; a whole regenerated store;
