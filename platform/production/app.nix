@@ -251,7 +251,8 @@ in {
     systemd.services.terrace-cms-migrate.serviceConfig.LimitCORE = 0;
     systemd.services.terrace-cms-sweep.serviceConfig.LimitCORE = 0;
     # Before the first explicit migration the CMS and website are skipped, not
-    # failed; a revision mismatch still fails through the module's own gate.
+    # failed; a revision mismatch still fails through the module's own gate
+    # (requireMigration, on both units since the website was gated too).
     systemd.services.terrace-cms.unitConfig.ConditionPathExists = migrated;
     systemd.services.terrace-web.unitConfig.ConditionPathExists = migrated;
 

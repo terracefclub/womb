@@ -95,7 +95,10 @@ stays inactive with its start job waiting, then runs after the migration ended;
 passed on 2026-11-24 with the derivation of Womb `9664be1`).
 It is never enabled at boot or called by normal startup.
 Repeat the migration action to check that the ledger is unchanged, then start
-both services again. Startup rejects a missing/different revision marker. This
+both services again. Startup of the CMS, the website, the sweep and the operator
+tools rejects a missing/different revision marker (the website's gate runs with
+full privileges, `+`, because the marker is in the CMS account's private state
+directory; the website VM proof checks both refusals). This
 gate prevents accidental unmigrated startup; it does not prove schema downgrade
 compatibility. A code rollback does not undo migrations: use a separately
 verified database/upload recovery with the matching application pair.

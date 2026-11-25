@@ -510,20 +510,16 @@ marked so.
   second snapshot of the host is taken the same day, keep-last 3 is all that keeps
   it (about two days with the daily timer, reading restic's rules; not tried).
   Decide whether pre-update snapshots need a pin, and test the retention reading.
-- Docs correction: the website service has no revision gate (`terrace-web.service`
-  runs only the identity guard; `requireMigration` is on the CMS, its sweep and the
-  operator tools, `platform/website.nix`), but `docs/production-profile.md` ("a
-  revision mismatch still fails through the existing gate"), the comment in
-  `platform/production/app.nix` and `docs/website-host.md` ("Startup rejects a
-  missing/different revision marker") read as if both were gated. Decide whether
-  the website should be gated too, then correct the text. **Observed 2026-11-24**
-  (deploy VM rehearsal): on a re-pin the activation's switch starts the new website
-  against the stopped CMS; it fails its health check and restarts until its start
-  limit, three to four minutes later. **Proposed follow-up change, not decided**:
-  add the module's `requireMigration` to `terrace-web.service`'s `ExecStartPre`
-  (one line in `platform/website.nix`), so the website fails at once like the CMS;
-  it changes the website module, so the website and gateway checks and the
-  rehearsal drivers would have to run again.
+- Done 2026-11-25 (engineering change; the owner was told it was planned and has
+  not answered): the website has the CMS's migration gate. `terrace-web.service`
+  runs `requireMigration` (`platform/website.nix`, as root: the marker is in the CMS
+  account's private directory), so after a re-pin it fails at once instead of
+  serving the new bundle against a gated CMS for three to four minutes (H7 in
+  [host updates](host-updates.md)). `docs/production-profile.md`, the comment in
+  `platform/production/app.nix` and `docs/website-host.md` now match the code. VM
+  proofs: deploy (both units refused at activation and after a forced rollback),
+  website (start refused without the marker and with another revision); the
+  evaluation check requires the gate on both units.
 - Decide: the order between activating a revision that adds an inventory secret
   and pushing it (the host refuses unknown names before activation; after it, a
   reboot before the push leaves the writers gated), and how a removed inventory
@@ -552,7 +548,7 @@ marked so.
   manifest declares a name the delivered ciphertext lacks (expected failure of
   `sops-install-secrets`; whether the previous secrets stay), and whether a push's
   `restartUnits` starts a stopped `terrace-cms.service` or `terrace-web.service`
-  (the website would then run ungated on a stopped CMS).
+  (both now fail their gate until the migration).
 - Drill: the 16 items in the document's "Drills to add". **Narrowed 2026-11-24**:
   the deploy VM rehearsal covers drills 2, 3 (one release pair, small synthetic
   data), 4 (without the sweep and tool refusals), 5, 6 (without H1) and 15, and drill
@@ -573,26 +569,22 @@ marked so.
   fails (today it leaves the failed generation as the boot default, as
   `nixos-rebuild` does; `status` warns, and the host updates document gives the
   manual commands, not run).
-- Code, deploy path (found in review round 2 of the deploy path pull request, none
-  fixed there):
-  - `rollback` goes to the newest generation older than the current one, which after
-    a failed attempt, a rollback and a new activation can be the failed attempt's
-    generation; nothing checks it ever ran well (the docs say to run `rollback
-    --dry-run` and read `status` first). Skip generations whose last finished
-    record is a failure, or add `rollback --generation N`.
-  - First-creation race on the lock file: two first-ever runs overlapping could
-    each `install` the file, the second replacing the first's. Open it for append
-    instead of creating it with `install`.
-  - `terrace-deploy.sh` reads a symlinked key file's own mode (`stat` without
-    following the link) and so refuses a symlinked key: follow the link.
-  - The exit-4 logic reads switch-to-configuration's "the following units failed"
-    line by its exact text. If upstream changes that text, the check gets weaker
-    (only the unit listing remains); it does not fail open. Add a comment and a
-    test pinning the text.
-  - The deploy VM proof depends on timing in two places: the case A refusal needs
-    the CMS still `activating` (in its restart delay) when `rollback` runs, and the
-    `failedUnits` assertions need it already start-limited. If the timing differs
-    they fail loudly, not vacuously; make them independent of it.
+- Done 2026-11-25 (deploy path follow-ups, found in review round 2 of the deploy
+  path pull request; [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
+  `rollback` passes over a generation whose last finished record is a failure
+  (generations without records stay eligible) and takes `--generation N`; the lock
+  file is opened for append and made root-only in place; the helper follows a
+  symlinked key file; the exit-4 logic's reading of the switch's "the following
+  units failed" line is commented and pinned by a unit test and a VM assertion;
+  the record waits (at most 300 s) for the gated units to stop retrying, which
+  removed the `failedUnits` timing dependence of the VM proof (the case A one is made
+  detectable, not removed: the check counts only when the CMS was retrying before and
+  after it, and is repeated up to five times); a dry run before the quiesce
+  runs every other check and reports NOT READY with exit 3. Left: the race of two
+  first-ever runs on the lock file is not exercised (only reuse of an existing
+  file); `switch-to-configuration` also prints `Failed to start <unit>` lines,
+  which the tool does not read (a unit whose start job failed but which recovered
+  before the listing is not counted).
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.

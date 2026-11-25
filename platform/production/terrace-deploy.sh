@@ -31,8 +31,9 @@ done
 [[ -n $key && -n $address && -n $identity && -n $known_hosts && -n $toplevel ]] || usage
 [[ $address =~ ^[A-Za-z0-9.:-]+$ ]] || fail "address '$address' is not a host name or IP address"
 [[ -f $key ]] || fail "signing key $key not found"
-# Like ssh with an identity: a signing key that others can read is refused.
-mode=$(stat -c %a "$key" 2>/dev/null || stat -f %Lp "$key")
+# Like ssh with an identity: a signing key that others can read is refused. -L: a symlinked key is judged by the file
+# it points to, not by the link's own mode (always 777 on Linux).
+mode=$(stat -L -c %a "$key" 2>/dev/null || stat -L -f %Lp "$key")
 (( (8#$mode & 8#077) == 0 )) || fail "signing key $key is readable by group or others (mode $mode); chmod 0600 it"
 # A secret key is "name:" plus 64 bytes in base64 (88 characters); a public key (44 characters) cannot sign.
 grep -Eq '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{86}==$' "$key" || fail "$key is not a Nix secret signing key (nix key generate-secret)"

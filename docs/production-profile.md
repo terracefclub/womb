@@ -260,7 +260,9 @@ shows an unfinished adoption.
    terrace-cms-migrate.service`, then `systemctl start terrace-cms.service
    terrace-web.service`. Until the first migration the CMS and website are
    skipped, not failed (`ConditionPathExists` on the migration marker; a
-   revision mismatch still fails through the existing gate).
+   revision mismatch still fails through the module's gate, `requireMigration`,
+   which both services carry: the website's was added on 2026-11-25, see
+   [host updates](host-updates.md), H7).
 6. `terrace-backup init primary`. The first scheduled backup before this step
    fails visibly (`systemctl --failed`); after it, backups succeed.
 
@@ -452,6 +454,19 @@ and the TLS proof 148, all PASS (their derivations changed: every production sys
 now carries the manifest and the extended `terrace-production`). The evaluation
 check passes with 143 rejected variants. The other checks and the five rehearsal
 drivers have derivations equal to trunk's and were not rerun.
+
+Verified for the deploy path follow-ups and the website migration gate at Womb
+`c8f6f29` (fresh results, builder, 2026-11-25): the deploy VM proof PASS in 697 s
+with 133 assertions ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in));
+this VM proof 263 assertions (198 protocol), the identity administration proof 347,
+the TLS proof 148, the website and website gateway checks, and the five rehearsal
+variants once each, all PASS (every derivation changed with the website module).
+The evaluation check passes with 145 rejected variants (two new: the migration gate
+removed from the CMS or from the website). After review round 1 of that change, at Womb `5f1a3bb`
+(2026-11-25): the deploy VM proof PASS with 133 assertions in 704 s, this VM proof 263
+(198 protocol), identity administration 347 and TLS 148, all fresh; the website and
+gateway checks and the rehearsal drivers have derivations identical to `c8f6f29`'s and
+carry over from it.
 
 ## Keycloak administration
 

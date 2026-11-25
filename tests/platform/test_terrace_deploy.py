@@ -94,6 +94,16 @@ class TerraceDeploy(unittest.TestCase):
         self.assertIn("is readable by group or others (mode 640)", result.stderr)
         self.assertFalse(self.log.exists())
 
+    def test_a_symlinked_key_is_judged_by_its_target(self):
+        link = self.dir / "deploy-link.sec"
+        link.symlink_to(self.key)
+        result = self.run_helper(*self.args(**{"--key": str(link)}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.key.chmod(0o644)
+        result = self.run_helper(*self.args(**{"--key": str(link)}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is readable by group or others (mode 644)", result.stderr)
+
     def test_a_result_link_becomes_its_store_path(self):
         link = self.dir / "result"
         link.symlink_to(self.system)
