@@ -89,7 +89,11 @@ another module adds, and a refusal while a CMS operator tool runs); a refused
 migration stops nothing. Only then does it stop the CMS, the website and a
 running sweep, apply the bundle's explicit migrations and record the successful
 revision under `/var/lib/terrace-cms`. A start of the CMS, website or sweep
-requested while it runs waits for it. It is never enabled at boot or called by normal startup.
+requested while it runs waits for it (all three are ordered after it; the website
+VM proof requests each start while a slowed migration runs and checks that each
+stays inactive with its start job waiting, then runs after the migration ended;
+passed on 2026-11-24 with the derivation of Womb `9664be1`).
+It is never enabled at boot or called by normal startup.
 Repeat the migration action to check that the ledger is unchanged, then start
 both services again. Startup rejects a missing/different revision marker. This
 gate prevents accidental unmigrated startup; it does not prove schema downgrade
@@ -144,12 +148,10 @@ every administrator-initiated erasure:
 systemctl start terrace-cms-sweep.service
 ```
 
-A sweep requested while an explicit migration runs normally waits for it (and is
-skipped if one is still active when it starts). There is one exception: the
-migration's first step stops the sweep unit, so a sweep requested in the few
-milliseconds between the migration becoming `activating` and that step is
-cancelled rather than queued; the next timer run (or a manual start) does the
-work. Starting a migration stops a running sweep,
+A sweep requested while an explicit migration runs waits for it and runs once the
+migration has finished: the migration's last start-up step stops the sweep only
+when it is actually running, so a start job queued behind the migration is kept
+(`platform/cms-migrate-preflight.sh`). Starting a migration stops a running sweep,
 which is idempotent and retried (website `680ad56`:
 `cms/src/lifecycle/sweep.ts` is safe to repeat; `cms/src/lifecycle/outbox.ts`
 writes every mirror file to a private temporary file and renames it into place,
@@ -186,14 +188,22 @@ guard and migration gate run, the module's settings are exported exactly as for
 and exit status come back to the caller. The environment file is only named:
 systemd reads it before dropping privileges, and the wrapper never sources,
 copies or prints it. The wrapper refuses a caller that is not root (exit 77), a
-missing or unknown tool (64), another tool run (73) and a running migration (75).
-Its logic is `platform/cms-tool.sh` (unit tests:
-`python3 -B tests/platform/test_cms_tool.py -v`).
+missing or unknown tool (64), a lock file that is not a root-owned regular file
+(72), another tool run (73) and a running migration (75). A tool's own exit status
+passes through unchanged, so any of these numbers can also come from the tool:
+read the message on standard error. Its logic is `platform/cms-tool.sh` (unit
+tests: `python3 -B tests/platform/test_cms_tool.py -v`, Linux only: they need GNU
+`stat` and `/dev/fd` naming the open file, and fail on macOS).
 
 **One at a time, in the foreground.** The wrapper holds a lock
 (`/run/terrace-cms-tool.lock`, root's alone: mode `0600`, so no other account can
-open it to hold it; a lock file of any other kind, mode or owner is replaced) from
-its checks until the tool ends, and refuses
+open it to hold it) from its checks until the tool ends. The file is never removed
+or replaced, so every wrapper locks the same file: it is opened without
+truncation, locked, and only then checked through the open descriptor. A wider
+mode (an older wrapper's `0644` file) is narrowed to `0600` under the lock; a
+symbolic link (never followed), a directory or other non-regular file, or a file
+root does not own is refused with exit 72 and left as it is: inspect it, remove it
+by hand and run the tool again. It refuses
 while any `terrace-cms-tool-*` unit is still active, naming it (exit 73). Run the
 tools one at a time, in the foreground of an SSH session (or in `tmux`/`screen`),
 and do not start the wrapper as a background job with an open standard input
@@ -373,8 +383,11 @@ load remain unverified.
 ## Backup owner and isolated recovery
 
 When `terrace.backup.enable` is true, the module automatically adds its managed
-`terrace_cms` database, uploads and the entire protected input directory to the
-existing encrypted restic backup. Recovery credentials/SSH keys are separately
+`terrace_cms` database, uploads, the lifecycle outbox and, only when `inputFiles`
+is unset, the protected input directory to the existing encrypted restic backup.
+With `inputFiles` set (the production profile delivers `cms.env` and `web.env` as
+sops templates on ramfs) the input directory is neither used nor backed up: the
+secret manager is the source of truth (`platform/website.nix`). Recovery credentials/SSH keys are separately
 escrowed, outside that input directory and independently available without SSO.
 The infrastructure operator owns backup targets, retention, age/check alerts,
 restore drills and credential escrow. The inherited backup retention applies;

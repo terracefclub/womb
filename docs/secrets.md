@@ -81,6 +81,20 @@ templates safe: sops-nix substitutes placeholders textually (it cannot
 JSON-escape), and every value that lands in an env file, in the realm JSON or in
 the SQL of the database-password action is `hex64`.
 
+Beyond the formats, the TLS pair must belong together: the first certificate's
+public key must be the key's (OpenSSL reads both on stdin, `tls_pair_problem`).
+`set` warns while the stored pair does not match (one half is set at a time);
+`push` checks the pair before it sends anything when `SOPS_AGE_KEY_FILE` lets it
+decrypt the store (without one it prints a note and leaves the check to the host);
+and the host's `install` refuses a mismatched pair before anything is installed, so
+nginx is not restarted on it. A host still running an older `terrace-secrets`
+does not check, so the operator-side check is the only one until the host is
+updated. `check` decrypts nothing and does not check the pair. Known false
+refusals, not tested: a certificate whose key is RSASSA-PSS (OpenSSL reports a PSS
+public key for the certificate and an RSA one for the key) and an EC key with
+explicit curve parameters where the certificate names the curve (the encodings
+differ); a working pair of that kind is refused, never a mismatched one accepted.
+
 ## Where things live
 
 | Item | Location | Public repo? |
@@ -216,6 +230,7 @@ terrace-secrets public app backup/primary/sftp-key            # public half, for
 # on a host, as root:
 terrace-secrets verify                                        # every secret present, owner, mode, format, ramfs, recipients
 terrace-production adopt --new | --restored                   # once per host: arm the writers
+terrace-production arm-timers [--in-service]                   # after adopt --restored: backups once verified, the sweep once in service
 ```
 
 `push` and `apply` connect with `ssh -F /dev/null`, `HostKeyAlias` set to the
@@ -242,8 +257,10 @@ changed values) and `verify`, and restores the previous file if either fails.
    ciphertext** (a gap, see
    [production profile](production-profile.md#cold-start-of-a-new-deployment)),
    so the first boot has no secrets and nothing writes.
-4. `push` (SSH pinned to the staged key), then `host unstage`, then
-   `terrace-production adopt --new` on the host.
+4. `push` (SSH pinned to the host's public key kept in the store), then `host
+   unstage`, then `terrace-production adopt --new` on the host. The order of `push`
+   and `host unstage` does not matter once the host runs the staged key (the pin is
+   the store's copy of the public key); the production VM check unstages first.
 
 ## Rotation
 
@@ -270,7 +287,10 @@ changed values) and `verify`, and restores the previous file if either fails.
   restic key while the old one still opens the repository); `push`; `apply
   --finish --keep <id>` for every key to keep (for example a separately
   escrowed one; an id is 4 to 64 lowercase hex digits, checked on both ends), or `--finish --only-current` to remove every key but the one
-  the delivered password opens. The escrowed store holds the new value.
+  the delivered password opens: run alone it lists every key and removes nothing,
+  then `--remove <id>` must name exactly each key it removes. `--finish` sends the
+  store value again and the host refuses it until `push` has delivered that value
+  (before the push it would remove the new key). The escrowed store holds the new value.
 - **SFTP key**: `rotate --manual backup/primary/sftp-key`; `public` and enrol the
   new public key at the Storage Box (owner, alongside the old); `push`; run a
   backup; remove the old public key at the Storage Box.
@@ -349,7 +369,11 @@ non-secret control (the closure scan a string built into the closure); no core
 file or coredump journal entry after a writer is aborted; `root:root 0400` on
 ramfs and nothing left after a reboot; rotation of the intake secret (old value
 refused, both services on the new one, PostgreSQL, Keycloak and nginx not
-restarted); the database-password and repository-password `apply` procedures;
+restarted); the database-password and repository-password `apply` procedures,
+each previous password refused afterwards, and `apply --finish` refused before the
+`push` and, with `--only-current`, until every removed key is named; a mismatched
+TLS pair refused by `push` before sending and by `install` with nginx untouched
+(these last checks first passed at `9664be1`, 2026-11-24);
 and a host replacement re-keyed from escrow (the retired key can no longer
 decrypt the new file), restored with reconciliation, identical data and the
 lifecycle continuing. The operator guest's disk and journal hold no value either.

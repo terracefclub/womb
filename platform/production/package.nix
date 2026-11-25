@@ -8,6 +8,7 @@
   age,
   ssh-to-age,
   openssh,
+  openssl,
 }:
 stdenvNoCC.mkDerivation {
   pname = "terrace-secrets";
@@ -20,7 +21,7 @@ stdenvNoCC.mkDerivation {
     makeWrapper ${python3}/bin/python3 $out/bin/terrace-secrets \
       --add-flags "-I -B $out/libexec/terrace-secrets/terrace-secrets.py" \
       --set TERRACE_SECRETS_INVENTORY $out/share/terrace-secrets/inventory.json \
-      --prefix PATH : ${lib.makeBinPath [sops age ssh-to-age openssh]}
+      --prefix PATH : ${lib.makeBinPath [sops age ssh-to-age openssh openssl]}
   '';
   meta.mainProgram = "terrace-secrets";
 }

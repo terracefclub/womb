@@ -91,6 +91,8 @@ in {
       writers = ["headscale" "nginx"];
       stateWitness = "/var/lib/headscale/db.sqlite";
       writerTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
+      # Off after `adopt --restored` until `terrace-production arm-timers` (docs/restore-promotion.md, steps 15 and 21).
+      restoreHeldTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
     };
     terrace.relay = {
       enable = true;

@@ -453,6 +453,10 @@ in {
           lifecycle_steps("original", LIFECYCLE_ORIGINAL_STEPS)
           ok(app.succeed("systemctl is-enabled terrace-cms-sweep.timer terrace-backup.timer").split() == ["enabled", "enabled"], "sweep and backup timers enabled")
           ok(app.succeed("systemctl is-active terrace-cms-sweep.timer terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer").split() == ["active"] * 4, "sweep and backup timers active")
+          # A plain adoption holds nothing back: no hold marker, and arm-timers has nothing to arm.
+          app.fail("test -e /var/lib/terrace-production/timers-held || test -e /var/lib/terrace-production/service-timers-held")
+          ok("timers held" not in app.succeed("terrace-production status"), "adopt --new: status reports no held timers")
+          ok(app.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", "Every writer timer is active now and at every boot."], "adopt --new: arm-timers finds every timer armed")
 
       with subtest("first backup: fails visibly until the repository is initialised, then succeeds"):
           app.fail("systemctl start terrace-backup.service", timeout=300)
@@ -503,7 +507,38 @@ in {
           rotated = app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip()
           app.succeed("rm -rf /run/terrace-rotation")
 
-      with subtest("manual secrets: database password and backup repository password via `apply`"):
+      with subtest("TLS pair: a certificate that is not the key's is refused by push and by the host's install, nginx untouched; the matching pair is delivered"):
+          served_fp = lambda: app.succeed("echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername web.terrace.invalid 2>/dev/null | ${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256").strip()
+          before_fp, nginx_before = served_fp(), pids(["nginx"])
+          host_file = app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip()
+          # A new leaf for a NEW key, made in tmpfs scratch; first only its certificate goes into the store.
+          op("sh -ec 'umask 077; d=/dev/shm/tls-next; rm -rf $d; mkdir -m 0700 $d; "
+             "openssl req -new -nodes -newkey rsa:2048 -sha256 -keyout $d/key.pem -out $d/req.pem -subj /CN=web.terrace.invalid 2>/dev/null; "
+             "openssl x509 -req -in $d/req.pem -CA ${ca}/ca.pem -CAkey ${ca}/ca-key.pem -set_serial 0x$(openssl rand -hex 8) -days 30 -sha256 -extfile ${extension} -out $d/cert.pem 2>/dev/null'")
+          out = op("terrace-secrets set app tls/certificate </dev/shm/tls-next/cert.pem")
+          ok("WARNING: tls/certificate and tls/key in the store do not belong together" in out and "set the matching tls/key next" in out, "set warns about a mismatched pair")
+          refused = operator.fail(ENV + "terrace-secrets push app" + PUSH + " 2>&1")
+          ok("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing sent" in refused, "push of a mismatched pair refused before sending")
+          # Without an identity the operator side cannot decrypt the pair, says so and sends it: the host's install refuses it.
+          refused = operator.fail(ENV + "unset SOPS_AGE_KEY_FILE; terrace-secrets push app" + PUSH + " 2>&1")
+          ok("the TLS pair is not checked here" in refused and "tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing installed, nginx not restarted" in refused,
+             "push of a mismatched pair without an operator identity refused by the host's install")
+          ok(app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip() == host_file, "host ciphertext unchanged")
+          ok(pids(["nginx"]) == nginx_before and served_fp() == before_fp, "nginx not restarted, still serving the previous certificate")
+          out = op("terrace-secrets set app tls/key </dev/shm/tls-next/key.pem && rm -rf /dev/shm/tls-next")
+          ok("WARNING" not in out, "the matching key completes the pair without a warning")
+          push("TLS pair")
+          app.wait_until_succeeds("systemctl is-active nginx.service && test \"$(systemctl show nginx.service -p MainPID --value)\" != " + nginx_before["nginx"], timeout=120)
+          app.wait_until_succeeds("test \"$(echo | ${pkgs.openssl}/bin/openssl s_client -connect 127.0.0.1:443 -servername web.terrace.invalid 2>/dev/null | ${pkgs.openssl}/bin/openssl x509 -noout -fingerprint -sha256)\" != " + shlex.quote(before_fp), timeout=60)
+          trust_consistent("new TLS pair")
+
+      with subtest("manual secrets: database password and backup repository password via `apply`; the old ones are refused"):
+          # The old values, kept on root-only tmpfs to show afterwards that they no longer open anything.
+          app.succeed("rm -rf /run/terrace-rotation && install -d -m 0700 /run/terrace-rotation && install -m 0400 /run/secrets/identity/database-password /run/terrace-rotation/old-db"
+                      " && install -m 0400 /run/secrets/backup/primary/repository-password /run/terrace-rotation/old-repo")
+          db_login = "PGPASSWORD=\"$(cat {})\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null 2>&1"
+          app.succeed(db_login.format("/run/terrace-rotation/old-db"))
+          ok(True, "the old database password opens the Keycloak role before the rotation (control)")
           before = pids(["keycloak"])
           op("terrace-secrets rotate app identity/database-password --manual")
           push("database password")
@@ -512,15 +547,42 @@ in {
           ok("Database role keycloak updated with a SCRAM verifier and Keycloak restarted." in out, "database password applied on the host as a SCRAM verifier")
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(pids(["keycloak"]) != before, "Keycloak restarted onto the new database password")
-          app.succeed("PGPASSWORD=\"$(cat /run/secrets/identity/database-password)\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null")
+          app.succeed(db_login.format("/run/secrets/identity/database-password"))
           ok(True, "the delivered database password opens the Keycloak role")
+          app.fail("cmp -s /run/terrace-rotation/old-db /run/secrets/identity/database-password")
+          ok("password authentication failed" in app.fail(db_login.format("/run/terrace-rotation/old-db").replace(" >/dev/null 2>&1", " 2>&1 >/dev/null")),
+             "the old database password no longer opens the Keycloak role")
+          # Opening the repository with a given password file (restic's flag overrides the configured file).
+          repo_open = "terrace-backup restic primary --password-file {} cat config >/dev/null 2>&1"
+          app.succeed(repo_open.format("/run/terrace-rotation/old-repo"))
           op("terrace-secrets rotate app backup/primary/repository-password --manual")
           out = op("terrace-secrets apply app backup/primary/repository-password" + PUSH)
           ok("Added the new repository key" in out, "new repository key added over the pinned channel")
+          # --finish before push: the host still delivers the old password (whose key is "current"); finishing now would
+          # remove the NEW key, so it is refused before restic is asked, and both keys stay.
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH + " 2>&1")
+          ok("the password delivered to this host is not the store's newest value; `push` first" in refused, "apply --finish refused before push")
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --keep 0000" + PUSH + " 2>&1")
+          ok("not the store's newest value" in refused, "apply --finish --keep refused before push")
+          keys = json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))
+          ok(len(keys) == 2 and app.succeed("cmp -s /run/terrace-rotation/old-repo /run/secrets/backup/primary/repository-password && echo same").strip() == "same", "both repository keys kept, the old password still delivered")
           push("repository password")
-          out = op("terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH)
+          app.succeed(repo_open.format("/run/secrets/backup/primary/repository-password") + " && " + repo_open.format("/run/terrace-rotation/old-repo"))
+          ok(True, "between push and finish both passwords open the repository (control)")
+          keys = json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))
+          old_key = [key["id"] for key in keys if not key["current"]]
+          ok(len(keys) == 2 and len(old_key) == 1, "after push the new key is current")
+          # --only-current shows every key and removes nothing until each removal is named.
+          refused = operator.fail(ENV + "terrace-secrets apply app backup/primary/repository-password --finish --only-current" + PUSH + " 2>&1")
+          ok(f"key {old_key[0]} other (removed)" in refused and "repeat with --remove KEYID" in refused, "apply --finish --only-current lists the keys and refuses without --remove")
+          ok(len(json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))) == 2, "nothing removed by the refused finish")
+          out = op("terrace-secrets apply app backup/primary/repository-password --finish --only-current --remove " + old_key[0][:12] + PUSH)
           ok("Removed 1 old repository key(s)" in out, "old repository key removed")
           ok(len(json.loads(app.succeed("terrace-backup restic primary key list --json 2>/dev/null"))) == 1, "one repository key left")
+          app.succeed(repo_open.format("/run/secrets/backup/primary/repository-password"))
+          ok("wrong password" in app.fail(repo_open.format("/run/terrace-rotation/old-repo").replace(" >/dev/null 2>&1", " 2>&1 >/dev/null")).lower(),
+             "the old repository password no longer opens the repository")
+          app.succeed("rm -rf /run/terrace-rotation")
 
       with subtest("a failing database-password apply logs neither the cleartext nor the verifier"):
           app.succeed("rm -rf /run/terrace-db && install -d -m 0700 /run/terrace-db && install -m 0400 /run/secrets/identity/database-password /run/terrace-db/patterns && echo 'SCRAM-SHA-256$' >>/run/terrace-db/patterns && echo 'role \"terrace_missing_role\" does not exist' >/run/terrace-db/control")
@@ -628,6 +690,9 @@ in {
           ok(any(line.endswith(":3478") for line in relay_listeners if line.startswith("udp ")), "relay STUN listener")
           relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
           ok(relay.succeed("systemctl show terrace-backup.service -p Result --value").strip() == "success", "relay backup")
+          # The relay has no sweep: the in-service stage says so and does not fail.
+          ok(relay.succeed("terrace-production arm-timers --in-service").strip().splitlines() == ["Already armed: nothing to arm.", "This role holds no timer until service (it has no sweep).", "Every writer timer is active now and at every boot."],
+             "relay: arm-timers --in-service has nothing to hold and says so")
           relay.shutdown()
 
       with subtest("back up, destroy the host, re-key from escrow for a new host key"):
@@ -694,7 +759,32 @@ in {
           app.succeed("install -d -m 0700 -o postgres -g postgres " + pg_dir + " && cp -a " + RESTORE + "/pgdata/. " + pg_dir + "/ && chown -R postgres:postgres " + pg_dir)
           refused = app.fail("terrace-production adopt --new 2>&1")
           ok("delivered as a replacement" in refused, "adopt --new refused on a restored host (replacement marker)")
-          app.succeed("terrace-production adopt --restored")
+          backup_held = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
+          service_held = ["terrace-cms-sweep.timer"]
+          def timers_held(label, units=backup_held + service_held):
+              for unit in units:
+                  ok((unit_state(unit, "ActiveState"), unit_state(unit, "ConditionResult")) in [("inactive", "no"), ("inactive", "")], f"{label}: {unit} held")
+          # A first adoption that fails after the target started (nginx cannot bind 443) leaves the held timers off ...
+          app.succeed("systemd-run --unit=rehearsal-block-443-restored ${pkgs.python3}/bin/python3 -m http.server 443 --bind 0.0.0.0")
+          app.wait_until_succeeds("ss -ltn | grep -q ':443 '")
+          refused = app.fail("terrace-production adopt --restored 2>&1")
+          ok("not adopted yet" in refused and "nginx.service" in refused and ".timer" not in refused, "a failed restored adoption names nginx, not the held timers")
+          timers_held("failed restored adoption")
+          status = app.succeed("terrace-production status")
+          ok("timers held after a restored adoption: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer" in status
+             and "timers held until the replacement is declared in service: terrace-cms-sweep.timer" in status, "status reports both held groups")
+          app.succeed("systemctl stop rehearsal-block-443-restored.service")
+          # ... and so does the resumed one, which starts the target again.
+          out = app.succeed("terrace-production adopt --restored")
+          ok("Held until you have verified the restored services: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer" in out
+             and "Arm them with: terrace-production arm-timers" in out
+             and "Held until the replacement is declared in service, after any erasure replay: terrace-cms-sweep.timer" in out
+             and "Arm it then with: terrace-production arm-timers --in-service" in out, "adopt --restored names both held groups and their arming commands")
+          timers_held("resumed restored adoption")
+          ok(unit_state("terrace-identity-health.timer", "ActiveState") == "active", "adopt --restored arms the identity health timer")
+          # A start of a held timer (as the target's at boot) is skipped while the hold exists.
+          app.succeed("systemctl start terrace-production.target terrace-backup.timer")
+          timers_held("target and backup timer started again")
           app.fail("test -e /var/lib/terrace-secrets/replacement")
           # The next push learns the host is adopted and clears the operator's replacement marker.
           ok("replacement marker is cleared" in op("terrace-secrets push app" + PUSH), "push after adoption clears the store's replacement marker")
@@ -702,14 +792,47 @@ in {
           app.wait_for_unit("keycloak.service", timeout=360)
           ok(sql("select count(*) from user_entity where username='gateway-fixture-bootstrap'", "keycloak") == "0", "no bootstrap administrator on the replacement")
           app.succeed("systemctl start terrace-cms-migrate.service && systemctl start terrace-cms.service terrace-web.service", timeout=300)
-          app.succeed("systemctl stop terrace-cms-sweep.timer")
+          timers_held("restored services verified")
           after = signature()
           for key in before:
               ok(after[key] == before[key], "restored " + key)
           ok(app.succeed("sha256sum </run/secrets/website/lifecycle-intake").strip() == rotated, "the rotated intake value survived the re-key")
           for unit in ["terrace-cms", "terrace-web"]:
               ok(env_matches(unit, "/run/secrets/website/lifecycle-intake") == "same", f"replacement {unit} runs with the delivered value")
-          app.succeed("systemctl start terrace-cms-sweep.timer")
+          # The sweep stage cannot come first: refused while the backup timers are held, nothing armed, both markers kept.
+          refused = app.fail("terrace-production arm-timers --in-service 2>&1").strip()
+          ok(refused == "terrace-production: the backup timers are still held (terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer);"
+             " run terrace-production arm-timers first, after the first backup by hand (restore promotion step 21); nothing armed", f"arm-timers --in-service refused before arm-timers: {refused}")
+          timers_held("refused sweep stage")
+          app.succeed("test -e /var/lib/terrace-production/timers-held && test -e /var/lib/terrace-production/service-timers-held")
+          # The restored services are verified: the first backup by hand (procedure step 21), then the backup timers are armed
+          # and the sweep stays held.
+          app.succeed("systemctl start terrace-backup.service", timeout=600)
+          ok(unit_state("terrace-backup.service", "Result") == "success", "first backup of the replacement by hand")
+          still = "Still held until the replacement is declared in service: terrace-cms-sweep.timer. Arm with: terrace-production arm-timers --in-service"
+          out = app.succeed("terrace-production arm-timers").strip().splitlines()
+          ok(out == ["Armed: " + " ".join(backup_held) + ".", still], f"arm-timers arms the backup timers and names the held sweep: {out}")
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held)).split() == ["active"] * 3, "backup timers active after arm-timers")
+          timers_held("after arm-timers", service_held)
+          app.fail("test -e /var/lib/terrace-production/timers-held")
+          ok(app.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", still], "arm-timers is idempotent")
+          # A reboot between the two stages keeps the backup timers armed and the sweep held.
+          app.shutdown()
+          app.start()
+          app.wait_for_unit("multi-user.target")
+          app.wait_for_unit("keycloak.service", timeout=360)
+          app.wait_for_unit("terrace-cms.service", timeout=240)
+          app.wait_for_unit("terrace-web.service", timeout=240)
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held)).split() == ["active"] * 3, "after a reboot: backup timers armed")
+          timers_held("after a reboot", service_held)
+          ok("timers held until the replacement is declared in service: terrace-cms-sweep.timer" in app.succeed("terrace-production status"), "after a reboot: status reports the held sweep")
+          # Declared in service (after any erasure replay): the second stage arms the sweep.
+          out = app.succeed("terrace-production arm-timers --in-service").strip().splitlines()
+          ok(out == ["Armed: terrace-cms-sweep.timer.", "Every writer timer is active now and at every boot."], f"arm-timers --in-service arms the sweep: {out}")
+          ok(app.succeed("systemctl is-active " + " ".join(backup_held + service_held)).split() == ["active"] * 4, "every held timer active")
+          app.fail("test -e /var/lib/terrace-production/service-timers-held")
+          ok("timers held" not in app.succeed("terrace-production status"), "status reports nothing held")
+          ok(app.succeed("terrace-production arm-timers --in-service").strip().splitlines() == ["Already armed: nothing to arm.", "Every writer timer is active now and at every boot."], "arm-timers --in-service is idempotent")
           lifecycle_steps("replacement", LIFECYCLE_REPLACEMENT_STEPS)
           verify(app)
           modes(app)

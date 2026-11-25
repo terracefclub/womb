@@ -42,8 +42,12 @@ def armour(label, raw):
     return f"{BEGIN}{label}-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + f"\n{END}{label}-----\n"
 
 
-TLS_KEY = armour(PRIVATE[:-5], der(b"\x02\x01\x00" + b"k" * 40))
-TLS_CERT = armour("CERTIFICATE", der(b"c" * 60))
+# The stand-in `openssl` below derives a "public key" from the last 8 bytes of the first block's DER, so these two
+# belong together and OTHER_KEY does not; RealOpenSSLTest checks the real derivation.
+TLS_KEY = armour(PRIVATE[:-5], der(b"\x02\x01\x00" + b"k" * 32 + b"pairtag1"))
+TLS_CERT = armour("CERTIFICATE", der(b"c" * 52 + b"pairtag1"))
+OTHER_KEY = armour(PRIVATE[:-5], der(b"\x02\x01\x00" + b"k" * 32 + b"pairtag2"))
+REAL_OPENSSL = __import__("shutil").which("openssl")
 def s3(key, secret, extra=""):
     """A synthetic S3 environment value (built at run time; no literal credential shape)."""
     return "AWS_ACCESS_KEY_ID=" + key + "\nAWS_" + "SECRET_ACCESS_KEY=" + secret + "\n" + extra
@@ -85,6 +89,19 @@ FAKES = {
             sys.stdout.write("remote ok\n")
             if os.path.exists(os.path.join(here, "host-adopted")):
                 sys.stdout.write("Host state: adopted\n")
+    ''',
+    "openssl": r'''
+        text = sys.stdin.read()
+        if sys.argv[1:] not in (["x509", "-noout", "-pubkey"], ["pkey", "-pubout"]):
+            sys.exit(2)
+        try:
+            body = text.split("-----\n", 1)[1].split("\n-----END", 1)[0]
+            raw = base64.b64decode(body.replace("\n", ""))
+        except (IndexError, ValueError):
+            sys.exit(1)
+        if len(raw) < 16:
+            sys.exit(1)  # nothing it could read as a key or certificate
+        print("PUBLIC " + raw[-8:].hex())
     ''',
     "systemctl": r'''
         sys.exit(1 if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fail-systemctl")) else 0)
@@ -304,6 +321,58 @@ class StoreTest(Fixture):
         self.assertIn("does not match its format", self.refused("set", "app", "tls/key", stdin=b"not a key"))
         self.refused("set", "app", "website/lifecycle-intake", stdin=b"0" * 64 + b"\nCMS_LOCAL_BOOTSTRAP=1\n")
 
+    def test_set_warns_when_the_stored_tls_pair_does_not_belong_together(self):
+        self.bootstrap()
+        # The first half alone has nothing to match; the second, matching half gives no warning.
+        self.assertNotIn("WARNING", self.ok("set", "app", "tls/certificate", stdin=TLS_CERT.encode()))
+        self.assertNotIn("WARNING", self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode()))
+        # A key that is not the certificate's: stored (the operator replaces one half at a time) with a warning that
+        # names the half to set next; push is refused on the host until the pair matches (HostTest).
+        out = self.ok("set", "app", "tls/key", stdin=OTHER_KEY.encode())
+        self.assertIn("WARNING: tls/certificate and tls/key in the store do not belong together (the certificate's public key is not the key's)."
+                      " `push` refuses to send them and the host's `install` refuses them until they do: set the matching tls/certificate next.", out)
+        # push checks the pair before sending anything when it can decrypt the store; without an identity it says so
+        # and leaves the check to the host.
+        err = self.refused("push", "app", "--address", "app")
+        self.assertIn("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's); nothing sent", err)
+        self.assertNotIn('"install"', self.argv_log())
+        identity = os.environ.pop("SOPS_AGE_KEY_FILE")
+        try:
+            code, out, _ = self.call("push", "app", "--address", "app")
+        finally:
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
+        self.assertEqual(code, 0)  # the stand-in ssh accepts anything; on a host `install` refuses (HostTest)
+        self.assertIn("NOTE: SOPS_AGE_KEY_FILE is not set, so the TLS pair is not checked here; the host's install checks it.", out)
+        sent = self.argv_log().count('"install"')
+        self.assertEqual(self.plaintext()["tls/key"], OTHER_KEY)
+        self.assertNotIn("WARNING", self.ok("set", "app", "tls/key", stdin=TLS_KEY.encode()))
+        self.assertIn("set the matching tls/key next", self.ok("set", "app", "tls/certificate",
+                                                                stdin=armour("CERTIFICATE", der(b"c" * 52 + b"pairtag3")).encode()))
+        # OpenSSL saw the key on stdin only.
+        for key in (TLS_KEY, OTHER_KEY):
+            self.assertNotIn(key.splitlines()[1], self.argv_log())
+        # Without openssl on this machine push refuses (it never skips the check silently) and names the program.
+        (self.bin / "openssl").unlink()
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
+            err = self.refused("push", "app", "--address", "app")
+        self.assertIn("openssl is not installed here, so the TLS pair cannot be checked; install it and repeat"
+                      " (a host's install checks the pair with its own openssl)", err)
+        self.assertEqual(self.argv_log().count('"install"'), sent)  # nothing sent
+
+    def test_push_notes_an_unchecked_pair_only_for_a_host_that_has_one(self):
+        self.bootstrap(externals=True)
+        identity = os.environ.pop("SOPS_AGE_KEY_FILE")
+        try:
+            self.assertIn("NOTE: SOPS_AGE_KEY_FILE is not set", self.ok("push", "app", "--address", "app"))
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
+            self.ok("host", "tls", "app", "acme", "--yes")
+            del os.environ["SOPS_AGE_KEY_FILE"]
+            out = self.ok("push", "app", "--address", "app")
+            self.assertIn("remote ok", out)
+            self.assertNotIn("NOTE", out)
+        finally:
+            os.environ["SOPS_AGE_KEY_FILE"] = identity
+
     def test_rotate_one_value_and_manual_procedures(self):
         self.bootstrap()
         before = self.plaintext()
@@ -470,6 +539,15 @@ class StoreTest(Fixture):
                 self.call("apply", "app", "backup/primary/repository-password", "--finish", "--keep", bad, "--address", "app")
         value = self.plaintext()["backup/primary/repository-password"]
         self.assertNotIn(value, self.argv_log())
+        # --finish sends the store value on stdin too (the host compares it with its delivered file), and passes
+        # every --remove through unchanged.
+        self.ok("apply", "app", "backup/primary/repository-password", "--finish", "--only-current", "--remove", "abcd1234", "--remove", "ef01",
+                "--address", "app")
+        ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
+        self.assertEqual(ssh[-8:], ["host-apply", "backup/primary/repository-password", "--finish", "--only-current",
+                                    "--remove", "abcd1234", "--remove", "ef01"])
+        self.assertEqual((self.bin / "ssh-stdin").read_text(), value)
+        self.assertNotIn(value, self.argv_log())
         # The escrow-only bootstrap password goes once to the host, on stdin, never as an argument.
         self.ok("apply", "app", "identity/bootstrap-admin-password", "--address", "app")
         ssh = [json.loads(line) for line in self.argv_log().splitlines() if json.loads(line)[0].endswith("/ssh")][-1]
@@ -539,6 +617,96 @@ class HostTest(Fixture):
             self.assertEqual(self.host_file.read_bytes(), good)
         (self.etc / "instance").write_text("rehearsal\n")
         self.ok("install", stdin=self.ciphertext(rehearsal))
+
+    def test_install_refuses_a_tls_pair_that_does_not_belong_together(self):
+        good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.ok("install", stdin=good)
+        tree = tool.decrypt("app")
+        tree["tls"]["key"] = OTHER_KEY
+        mismatched = self.ciphertext(tree)
+        restarts = self.argv_log().count("systemctl")
+        err = self.refused("install", stdin=mismatched)
+        self.assertIn("tls/certificate and tls/key do not belong together (the certificate's public key is not the key's);"
+                      " nothing installed, nginx not restarted", err)
+        self.assertEqual(self.host_file.read_bytes(), good)
+        self.assertEqual(self.argv_log().count("systemctl"), restarts)  # sops-install-secrets was not restarted
+        self.assertNotIn(OTHER_KEY.splitlines()[1], self.argv_log())
+        # A key OpenSSL cannot read at all is refused the same way.
+        tree["tls"]["key"] = armour(PRIVATE[:-5], b"\x30\x00")
+        self.assertIn("OpenSSL cannot read the certificate or the key", self.refused("install", stdin=self.ciphertext(tree)))
+        # An ACME host does not consume tls/* (its sops-nix ignores them): a stale pair there is not checked.
+        (self.etc / "features").write_text("acme-tls\n")
+        tree["tls"]["key"] = OTHER_KEY
+        self.ok("install", stdin=self.ciphertext(tree))
+
+    def test_host_apply_restic_finish_needs_the_newest_value_delivered_and_names_every_removal(self):
+        secrets = self.root / "run-secrets"
+        (secrets / "backup" / "primary").mkdir(parents=True)
+        delivered = secrets / "backup" / "primary" / "repository-password"
+        new, old = "ab" * 32, "cd" * 32
+        name = "backup/primary/repository-password"
+        current, previous, escrowed = "1111" + "a" * 60, "2222" + "b" * 60, "3333" + "c" * 60
+        keys = [{"id": current, "current": True, "userName": "root", "hostName": "app", "created": "2026-11-24T10:00:00Z"},
+                {"id": previous, "current": False, "userName": "root", "hostName": "app", "created": "2026-01-01T10:00:00Z"},
+                {"id": escrowed, "current": False, "userName": "owner", "hostName": "workstation", "created": "2026-02-01T10:00:00Z"}]
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout=json.dumps(keys).encode())
+        removed = lambda: [argv[-1] for argv in calls if argv[-2:-1] == ["remove"]]
+        with mock.patch.object(tool, "SECRETS_ROOT", secrets), mock.patch.object(tool.subprocess, "run", fake):
+            # Before `push` the host still has the old password: refused before restic is even asked.
+            delivered.write_text(old)
+            for flags in (["--only-current", "--remove", "2222", "--remove", "3333"], ["--keep", "3333"]):
+                err = self.refused("host-apply", name, "--finish", *flags, stdin=new.encode())
+                self.assertIn("the password delivered to this host is not the store's newest value; `push` first", err)
+            self.assertEqual(calls, [])
+            self.assertIn("needs the store's value on stdin", self.refused("host-apply", name, "--finish", "--keep", "3333"))
+            self.assertIn("does not match its format", self.refused("host-apply", name, "--finish", "--keep", "3333", stdin=b"not-hex"))
+            self.assertEqual(calls, [])
+            delivered.write_text(new)
+            # --only-current without naming the removals: every key is listed, nothing is removed.
+            code, out, err = self.call("host-apply", name, "--finish", "--only-current", stdin=new.encode())
+            self.assertEqual(code, 1)
+            self.assertEqual(out.splitlines(), [f"key {current} current (kept) root@app created 2026-11-24T10:00:00Z",
+                                                f"key {previous} other (removed) root@app created 2026-01-01T10:00:00Z",
+                                                f"key {escrowed} other (removed) owner@workstation created 2026-02-01T10:00:00Z"])
+            self.assertIn("--only-current removes 2 key(s), every key but the current one, including any separately added escrow key", err)
+            # Naming only some, the current key, or a prefix of two keys: listed and refused, nothing removed.
+            for flags in (["--remove", "2222"], ["--remove", "2222", "--remove", "3333", "--remove", "1111"],
+                          ["--remove", "2222", "--remove", "3333", "--remove", "4444"]):
+                self.assertIn("Read the list above", self.refused("host-apply", name, "--finish", "--only-current", *flags, stdin=new.encode()))
+            keys.append({"id": "2222" + "d" * 60, "current": False})
+            self.refused("host-apply", name, "--finish", "--only-current", "--remove", "2222", "--remove", "3333", "--remove", "2222dddd", stdin=new.encode())
+            keys.pop()
+            self.assertEqual(removed(), [])
+            # Every non-current key named: exactly those are removed.
+            out = self.ok("host-apply", name, "--finish", "--only-current", "--remove", "3333", "--remove", "2222bbbb", stdin=new.encode())
+            self.assertIn("Removed 2 old repository key(s) from primary", out)
+            self.assertEqual(sorted(removed()), sorted([previous, escrowed]))
+            # --keep still removes every other non-current key, once the newest value is delivered.
+            calls.clear()
+            self.assertIn("Removed 1 old repository key(s)", self.ok("host-apply", name, "--finish", "--keep", "3333", stdin=new.encode()))
+            self.assertEqual(removed(), [previous])
+            # A --keep prefix that names no key (a typo) or two keys is refused with the list, before anything is removed.
+            calls.clear()
+            keys.append({"id": "3333" + "e" * 60, "current": False})
+            for flags in (["--keep", "3334"], ["--keep", "3333"], ["--keep", "1111", "--keep", "3334"]):
+                code, out, err = self.call("host-apply", name, "--finish", *flags, stdin=new.encode())
+                self.assertEqual(code, 1, flags)
+                self.assertIn("does not name exactly one key; nothing removed", err)
+                self.assertIn(f"key {escrowed} other", out)
+            keys.pop()
+            self.assertEqual(removed(), [])
+            # A prefix of the current key is a valid --keep (it is kept anyway).
+            self.assertIn("Removed 2 old repository key(s)", self.ok("host-apply", name, "--finish", "--keep", "1111", stdin=new.encode()))
+            self.assertEqual(sorted(removed()), sorted([previous, escrowed]))
+            calls.clear()
+            self.assertIn("give either --keep or --only-current", self.refused("host-apply", name, "--finish", "--only-current", "--keep", "3333", stdin=new.encode()))
+            self.assertIn("--remove belongs to --finish --only-current", self.refused("host-apply", name, "--finish", "--keep", "3333", "--remove", "2222", stdin=new.encode()))
+            self.assertIn("--remove belongs to --finish --only-current", self.refused("host-apply", name, "--remove", "2222", stdin=new.encode()))
+            self.assertEqual(removed(), [])
 
     def test_install_restores_the_previous_file_when_activation_fails(self):
         good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
@@ -638,6 +806,53 @@ class HostTest(Fixture):
         verifier = tool.scram_verifier("pencil", salt=b"\x00" * 16)
         self.assertEqual(verifier, tool.scram_verifier("pencil", salt=b"\x00" * 16))
         self.assertNotEqual(verifier, tool.scram_verifier("pencil"))
+
+
+@unittest.skipUnless(REAL_OPENSSL, "needs openssl on PATH")
+class RealOpenSSLTest(unittest.TestCase):
+    """tls_pair_problem with the real OpenSSL: pairs made at run time in a private temporary directory."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.env = mock.patch.dict(os.environ, {"PATH": os.path.dirname(REAL_OPENSSL) + ":" + os.environ.get("PATH", "/usr/bin:/bin")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def pair(self, name, algorithm):
+        base = Path(self.temp.name) / name
+        tool.run([REAL_OPENSSL, "req", "-x509", "-nodes", "-newkey", algorithm, "-keyout", f"{base}.key", "-out", f"{base}.crt",
+                  "-subj", "/CN=pair.terrace.invalid", "-days", "1"])
+        return Path(f"{base}.crt").read_text(), Path(f"{base}.key").read_text()
+
+    def test_ed25519_pair(self):
+        try:
+            ed_cert, ed_key = self.pair("ed25519", "ed25519")
+        except tool.Refused:
+            self.skipTest("this openssl cannot make Ed25519 certificates (LibreSSL, for one)")
+        rsa_cert, rsa_key = self.pair("rsa", "rsa:2048")
+        self.assertIsNone(tool.tls_pair_problem(ed_cert, ed_key))
+        self.assertEqual(tool.tls_pair_problem(ed_cert, rsa_key), "the certificate's public key is not the key's")
+        self.assertEqual(tool.tls_pair_problem(rsa_cert, ed_key), "the certificate's public key is not the key's")
+
+    def test_matching_mismatched_and_chained_pairs(self):
+        rsa_cert, rsa_key = self.pair("rsa", "rsa:2048")
+        ec_cert, ec_key = self.pair("ec", "ec:" + str(self.ec_parameters()))
+        other_cert, other_key = self.pair("other", "rsa:2048")
+        self.assertIsNone(tool.tls_pair_problem(rsa_cert, rsa_key))
+        self.assertIsNone(tool.tls_pair_problem(ec_cert, ec_key))
+        # A chain: the first certificate is the leaf and decides.
+        self.assertIsNone(tool.tls_pair_problem(rsa_cert + other_cert, rsa_key))
+        self.assertEqual(tool.tls_pair_problem(other_cert + rsa_cert, rsa_key), "the certificate's public key is not the key's")
+        for certificate, key in [(rsa_cert, other_key), (other_cert, rsa_key), (rsa_cert, ec_key), (ec_cert, rsa_key)]:
+            self.assertEqual(tool.tls_pair_problem(certificate, key), "the certificate's public key is not the key's")
+        self.assertEqual(tool.tls_pair_problem(rsa_cert, TLS_KEY), "OpenSSL cannot read the certificate or the key")
+        self.assertEqual(tool.tls_pair_problem(TLS_CERT, rsa_key), "OpenSSL cannot read the certificate or the key")
+
+    def ec_parameters(self):
+        path = Path(self.temp.name) / "prime256v1.pem"
+        tool.run([REAL_OPENSSL, "ecparam", "-name", "prime256v1", "-out", str(path)])
+        return path
 
 
 class VerifyTest(unittest.TestCase):

@@ -93,7 +93,7 @@ until the owner says go.
 | D3, after step 9 | Go or no-go to touch live paths | The reconciliation report (table names and counts, file counts) looks like the real thing |
 | D2b, before step 15 | Erasure replay and public exposure (see "Erasure replay and the public-exposure conflict" below the table) | The list of erasures since the snapshot, and which of the options there the owner accepts |
 | D4, before step 15 | Go or no-go to start the writers | Steps 10 to 14 done. After step 15 the replacement writes; this document has no tested way back (step 15) |
-| D5, step 21 | Declare the replacement in service, cut public traffic over, and restart the sweep timer | The checks of steps 20 and 21, and the erasure replay of D2b done |
+| D5, step 21 | Declare the replacement in service, cut public traffic over, and arm the sweep timer (`terrace-production arm-timers --in-service`; step 21 has armed the backup timers) | The checks of steps 20 and 21, and the erasure replay of D2b done |
 | D6, after D5 | Retire the original's disk and state for good | Never earlier. Only the all-services scenario (`platform/full/scenario.py`, `stopped_guest`) keeps the retired original disks; the production VM check and the TLS VM test delete the original disk (`test.nix`, `tls-test.nix`), so a production promotion's retention of the original is your decision, not a rehearsed practice |
 
 ### Erasure replay and the public-exposure conflict (D2b)
@@ -181,9 +181,9 @@ is the owner's decision, D2b. Record it with the snapshot time and the erasure l
 Order follows the rehearsal: quiesce and fence the original (in the order the case
 needs, Part A), restore to a staging directory and reconcile, load into live paths
 while nothing writes, start the writers once, migrate where a migration gate
-exists, check health. Scheduled backups do **not** wait for the end: adoption
-(step 15) arms the backup and sweep timers, so steps 15 and 21 tell you to stop
-them until the checks pass.
+exists, check health. Scheduled backups wait for the end: `adopt --restored` (step 15)
+leaves the backup, check, freshness and sweep timers off; step 21 arms the backup
+timers once the checks pass, and the sweep is armed at D5, after any erasure replay.
 All commands run as root on the host named, unless a step says "operator machine".
 `<...>` marks a value you supply. Never paste a command's output that could hold a
 secret into a ticket or chat; the commands below send secret-bearing output to
@@ -517,44 +517,54 @@ It refuses unless `/var/lib/terrace-restore/reconciliation.txt` has the line
 PostgreSQL data directory on the app; `db.sqlite` on the relay). That is all it
 checks: it does not check that the media and outbox were copied, that the
 reconciled restore is the one you copied, or how old the snapshot is. It then runs
-`terrace-secrets verify`, starts every writer and timer, waits a 15 second
-stability window, and writes the adopted marker only if everything is running (the
-CMS and website may be skipped by their migration gate). Worked: `Adopted: the
-writers start now and at every boot.`, and `terrace-production status` prints
-`adopted <time>`. It also removes the replacement marker. Failed: it names what is
-not running and exits non-zero; fix the cause and run **the same command again**
-(it resumes). Next, from the operator machine, a later `terrace-secrets push`
-clears the store's own replacement marker (asserted in the VM check).
+`terrace-secrets verify`, writes the hold markers
+`/var/lib/terrace-production/timers-held` (backup timers) and, on the app,
+`/var/lib/terrace-production/service-timers-held` (sweep), starts every writer and
+every timer that is not held, waits a 15 second stability window, and writes the adopted marker only
+if everything is running (the CMS and website may be skipped by their migration
+gate). Worked:
 
-**Adoption arms the backup, check, freshness and sweep timers now, not at step 21**
-(`writerTimers` in `platform/production/app.nix` and `relay.nix`; the target wants
-them, `platform/production/base.nix`). `adopt` arms them when it runs `systemctl start terrace-production.target`, which
-is before its stability wait and before it can report success, so a failed
-adoption that you then resume has already armed them. Until your checks pass, a
-scheduled backup (03:15 daily with up to 15 minutes' delay) could back up a
-replacement whose CMS gate is closed or whose media copy was skipped, and every
-backup run ends in `forget --prune` against the repository the restore came from
-(`platform/backup/backup.sh`; what that can remove is in step 21). The sweep
-timer (03:30 daily) will act on the restored data as soon as the migration gate
-opens. Stopping it is a precaution so that nothing changes restored data before you
-have checked it, not a protection of any erasure: the sweep expires stale invitations, withdraws
-unreviewed applications and completes pending outbox redactions, the same things
-the original's sweep would have done, and it never erases a member by itself
-(READ: website `docs/member-lifecycle.md` section 9 at `dd1aef7`). The manual
-sweep run in step 16 performs the same actions anyway. So, as soon as
-you have started `adopt`, whether it succeeded or not:
-
-```sh
-systemctl stop terrace-backup.timer terrace-cms-sweep.timer
+```text
+Adopted: the writers start now and at every boot.
+Held until you have verified the restored services: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer (they stay off across reboots).
+Arm them with: terrace-production arm-timers
+Held until the replacement is declared in service, after any erasure replay: terrace-cms-sweep.timer (they stay off across reboots).
+Arm it then with: terrace-production arm-timers --in-service
 ```
 
-On the relay only `terrace-backup.timer` (it has no sweep). This is not in any rehearsal (not
-exercised anywhere); stopping a timer does not stop the writers. A reboot of the
-replacement re-arms them, because the production target wants them again. Start
-them again in step 21 (backup) and at D5 (sweep). Whether a timer started after a
-long stop runs a missed occurrence at once (`Persistent=`) is systemd behaviour that
-this document has not verified: after re-arming, check `systemctl
-list-timers` for the next run times.
+(on the relay only the first two lines), and `terrace-production status` prints
+`adopted <time>` and one line per held group. It also removes the replacement marker.
+Failed: it names what is not running and exits non-zero; fix the cause and run
+**the same command again** (it resumes). Next, from the operator machine, a later
+`terrace-secrets push` clears the store's own replacement marker (asserted in the VM
+check).
+
+**The backup, check and freshness timers stay off from here to step 21, and the
+sweep until D5** (`restoreHeldTimers` and, for the sweep,
+`restoreServiceHeldTimers` in `platform/production/app.nix` and `relay.nix`; the
+conditions and the `adopt`/`arm-timers` commands are in
+`platform/production/base.nix`). The hold markers are written before `adopt` starts
+the production target, and each held timer has `ConditionPathExists=!` on its
+group's marker, so no start of the target arms them while the marker exists: not this adoption, not
+a failed adoption you then resume (it writes the marker again before starting the
+target), and not a reboot of the replacement. The adoption's own completeness check
+does not wait for the held timers. Until you arm them nothing schedules a backup:
+every backup run ends in `forget --prune` against the repository the restore came
+from (`platform/backup/backup.sh`; what that can remove is in step 21), and the
+sweep (03:30 daily once armed) would act on the restored data as soon as the
+migration gate opens. Holding the sweep until D5 keeps it from running on restored
+data before the erasure replay of step 16 and before you have checked the data; it
+does not itself protect any erasure: the sweep expires stale invitations, withdraws unreviewed applications and completes
+pending outbox redactions, the same things the original's sweep would have done,
+and it never erases a member by itself (READ: website `docs/member-lifecycle.md`
+section 9 at `dd1aef7`). The manual sweep run in step 16 performs the same actions
+anyway. Starting a held timer by hand (`systemctl start terrace-backup.timer`) is
+skipped by the same condition; do not remove a marker by hand, use step 21 and D5.
+Asserted in the production VM check ("replacement" subtest; passed at `9664be1`, 2026-11-24): a first adoption that
+fails on nginx and its resumed run both leave the four timers inactive (condition
+not met), a second start of the target and of the backup timer leaves them so, the
+identity health timer is armed, and `status` reports both held groups. The relay's
+held timers are not exercised (its replacement is not in the VM check).
 
 **There is no documented way back after this step.** The snapshot still exists in
 the repository and the original's disk exists if you kept it, so a second
@@ -583,8 +593,10 @@ ledger across this step, `test.nix`; see the traceability table). Failed: a chan
 ledger means the replacement runs a different release than the original; stop and
 decide with the owner.
 
-Keep `terrace-cms-sweep.timer` stopped (step 15) until D5; the production VM check
-also stops it while it compares state.
+`terrace-cms-sweep.timer` stays held (step 15) until D5; the production VM check
+asserts that it and the three backup timers are inactive with their start condition
+not met right after the migration and the start of the CMS and website, just before
+it compares state (passed at `9664be1`, 2026-11-24).
 
 **Step 16, continued: erasure replay (D2b), only now.** It can start only after the
 gate is open and the CMS is running, and before D5. For each person the owner lists
@@ -605,7 +617,7 @@ as D2b, option 1, or public DNS); not exercised.
    decision notes and outbox recipients, revokes pending invitations and turns the
    member row into a tombstone.
 3. Complete the outbox files, because the administrator save cannot redact files
-   itself. The sweep is started by hand while its timer stays stopped:
+   itself. The sweep is started by hand while its timer stays held:
 
 ```sh
 systemctl start terrace-cms-sweep.service
@@ -713,12 +725,10 @@ terrace-backup age
 
 Worked: no failed units except the expected one below, every public name passes
 `terrace-tls check`, `verify` passes. `terrace-backup age` exits 1 until the first
-backup of the replacement (step 21 takes it; you stopped the timer in step 15), and
-for the same reason `terrace-backup-freshness.service` is expected to be **failed**
-("no successful backup recorded") if its hourly timer, which adoption left running,
-has fired since adoption. It clears when step 21 starts it by hand after the first
-backup, or at its next hourly run after that backup (`OnCalendar=hourly`,
-`platform/backup.nix`).
+backup of the replacement (step 21 takes it; the timers are held since step 15).
+The freshness timer is held too, so `terrace-backup-freshness.service` has not run
+and is not failed; started by hand before the first backup it would fail ("no
+successful backup recorded").
 The rehearsal's functional checks (198 HTTPS protocol assertions, the website
 lifecycle steps, the browser checks) use scripts that only the rehearsal harness
 installs (`/etc/gateway-protocol.py`); no equivalent is installed on a production
@@ -728,27 +738,49 @@ fails later shows only in `systemctl --failed`.
 
 ### Part F. First backup and timers, then declare
 
-**Step 21. Take the first backup by hand, restart the backup timer, then D5 and the sweep timer.** Adoption
-(step 15) already armed the backup, check and freshness timers, and you stopped
-the backup timer there. Their state files on the replacement start empty, so the
-hourly freshness unit fails until one backup succeeds (shown for a newly adopted
-host, not for a replacement, in `platform/production/tls-test.nix`). Do **not** run
-`terrace-backup init primary`: the repository exists, and `init` is only for a
-first deployment. When steps 16 to 20 have passed, take a backup and check it:
+**Step 21. Take the first backup by hand, then arm the backup timers.** Adoption
+(step 15) left the backup, check, freshness and (app) sweep timers off. The backup
+state files on the replacement start empty, so the freshness unit fails until one
+backup succeeds (shown for a newly adopted host, not for a replacement, in
+`platform/production/tls-test.nix`). Do **not** run `terrace-backup init primary`:
+the repository exists, and `init` is only for a first deployment. When steps 16 to
+20 have passed, take a backup and check it, then arm the backup timers:
 
 ```sh
 systemctl start terrace-backup.service
 terrace-backup age
 systemctl start terrace-backup-freshness.service
 terrace-backup restic primary snapshots --json
-systemctl start terrace-backup.timer
+terrace-production arm-timers
 ```
 
 Worked: the service succeeds, `terrace-backup age` exits 0, the freshness unit
-passes, and a new snapshot appears under the same host name
+passes, a new snapshot appears under the same host name
 (`platform/production/tls-test.nix` takes such a backup on the replacement into
 the same repository and checks that it succeeds; nothing there checks the series or
-the retention).
+the retention), and `arm-timers` prints on the app
+
+```text
+Armed: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer.
+Still held until the replacement is declared in service: terrace-cms-sweep.timer. Arm with: terrace-production arm-timers --in-service
+```
+
+and on the relay the `Armed:` line and `Every writer timer is active now and at
+every boot.` Repeated, it prints `Already armed: nothing to arm.` and the same
+second line; it fails, naming the timer, if one does not become active. From now
+on the backup timers start at every boot as on any adopted host; the sweep stays
+held. The production VM check (passed at `9664be1`, 2026-11-24) takes the backup by hand, refuses
+`arm-timers --in-service` before it, runs `arm-timers` (both
+outputs), reboots the replacement and checks that the backup timers came back
+armed and the sweep still held.
+
+**Nothing alerts on a replacement whose timers are never armed.** The hold markers
+never expire, and the freshness timer that would report a missing backup is itself
+held, so a replacement adopted with `--restored` on which `arm-timers` is never run
+**never takes a scheduled backup and nothing says so**: only `terrace-production
+status` shows it (one line per held group). Run `arm-timers` at this step, check
+`status` afterwards, and check it again at D5. Alerting that reaches a person does
+not exist (G-23).
 
 What a backup run can remove. READ from `platform/backup/backup.sh` and the
 retention options in `platform/backup.nix`, not tried across a promotion. The run
@@ -769,7 +801,7 @@ Consequences:
 - What a backup from a half-restored replacement certainly does is add a snapshot
   that is incomplete (for example an empty media directory) to the group, and
   prune older snapshots outside the windows: the very fallbacks you would use if
-  this promotion turns out wrong. That is why the timer stays stopped until now.
+  this promotion turns out wrong. That is why the timer stays held until now.
 - The same applies to a returning original, which has the same host name and
   credentials. A prune by it while you are restoring could remove a snapshot you
   chose: whether restic refuses to prune while your restore holds a lock on the
@@ -785,25 +817,37 @@ Consequences:
 Never let the original run a backup after promotion.
 
 Only now is the replacement ready to be declared in service. **D5**: the owner
-declares it when steps 15 to 21 passed, D2b is settled and public traffic has been
-moved. Only then start the sweep timer, and end the procedure by checking that
-every timer is active again. App host:
+declares it when steps 15 to 21 passed, D2b is settled (the erasure replay of step
+16 is done) and public traffic has been moved. Then arm the sweep and end the
+procedure by checking that every timer is active. `arm-timers --in-service` refuses
+while the backup timers are still held (`the backup timers are still held (...); run
+terrace-production arm-timers first, after the first backup by hand (restore
+promotion step 21); nothing armed`), so step 21 cannot be skipped. App host:
 
 ```sh
-systemctl start terrace-cms-sweep.timer
+terrace-production arm-timers --in-service
+terrace-production status
 systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer terrace-cms-sweep.timer
 systemctl list-timers
 ```
 
-Relay (no sweep timer):
+Relay (no sweep timer; `arm-timers --in-service` says `This role holds no timer
+until service (it has no sweep).` and does not fail):
 
 ```sh
+terrace-production status
 systemctl is-active terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer
 ```
 
-Worked: `active` once per unit named, and `list-timers` shows a next run for each.
-A sweep timer you forget to start stays off for good and raises no alert: no
-alerting exists (G-23), so this check is the only safeguard. Not exercised anywhere.
+Worked: `arm-timers --in-service` prints `Armed: terrace-cms-sweep.timer.` and
+`Every writer timer is active now and at every boot.` (repeated: `Already armed:
+nothing to arm.` and the same line), `status` names no held timers, `active` once
+per unit named, and `list-timers` shows a next run for each. Timers you forget to
+arm stay off for good (across reboots, by design) and raise no alert: no alerting
+exists (G-23), so this check is the only safeguard. The production VM check
+(passed at `9664be1`, 2026-11-24) asserts both outputs, the four app timers active and `status` naming nothing held on the
+replacement, and the relay's `--in-service` output on an adopted relay (not a
+restored one).
 The rehearsals end with every guest stopped; none has a "declared in service" point,
 and DNS cut-over, member communication and the retirement of the original (D6) are
 outside every test.
@@ -843,7 +887,7 @@ network).
 | 12. PostgreSQL cluster in place | `ADOPT_POSTGRES` in `rehearsal_services.py`; lines after `fresh_restore` in `scenario.py`; copy in `test.nix` | Source bootstrap identity preserved; no `terrace-restore` role; native HBA and `fsync` on; restore OS user cannot connect; app roles log in but cannot assume `postgres`; role, membership and setting fingerprints equal; Windmill role boundary | VM rehearsal (synthetic data); also on temporary Hetzner hosts once (synthetic data; rehearsal profile). The production VM check copies the cluster and lets adoption start it but runs none of these role checks. Loading a database into a running, populated cluster: not exercised anywhere |
 | 13. Headscale keys and database before first start | `relay-state-adoption` and `sqlite-adoption` in `rehearsal_services.py`; `restore-relay` in `scenario.py` | Key hashes equal the original's; user list equal; `PRAGMA integrity_check` ok; relay health through HTTPS; with `--relay-peers`, all three client identities (node ID, key, address) return without enrolling again | Keys, database and users: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile; "identity and private HTTPS unchanged"). Client reconnection after restore: VM rehearsal (synthetic data) only (lease 5 ran no peer checks). The production relay role replaced and adopted with `--restored`: not exercised anywhere. The relay's public name and address changing: not exercised anywhere (the VM guests used `.invalid` or `.test` names on a private test network; lease 5 ran its checks on the hosts themselves) |
 | 14. Database role checks | `ADOPT_POSTGRES`, `WIND_ROLES` | as step 12 | as step 12 |
-| 15. `adopt --restored` | "replacement" subtest in `test.nix`, `terrace-production` in `platform/production/base.nix` | Refused with no reconciled restore; refused for `--new` on a restored replacement; adoption succeeds; replacement marker gone; the next `push` clears the store's marker | VM rehearsal (synthetic data), app role only; relay and lease 5: not exercised anywhere (the rehearsal profile has no adoption gate; `bootstrap_app` starts services directly) |
+| 15. `adopt --restored` | "replacement" subtest in `test.nix`, `platform/production/terrace-production.sh` (settings from `base.nix`) | Refused with no reconciled restore; refused for `--new` on a restored replacement; a first restored adoption that fails on nginx (443 taken) names nginx and no timer, and it and its resumed run leave the three backup timers and the sweep timer inactive with their start condition not met, also after a further `systemctl start` of the target and of `terrace-backup.timer`; the identity health timer is active; `status` names both held groups; the resumed adoption succeeds and prints both held groups and their commands; replacement marker gone; the next `push` clears the store's marker | VM rehearsal (synthetic data), app role only, passed at `9664be1` (2026-11-24); unit tests (`tests/platform/test_terrace_production.py`, stub systemctl); relay and lease 5: not exercised anywhere (the rehearsal profile has no adoption gate; `bootstrap_app` starts services directly) |
 | 16. CMS migration gate | `BOOTSTRAP_APP` in `rehearsal_services.py` (`terrace-cms-migrate.service`); `bootstrap_app` in `scenario.py`; `test.nix` | Rehearsals: the restored database's signature equals the original's, compared before the migration runs (`replacement()` in `rehearsal_services.py`, the signature check before `recoveredBootstrapApplication` in `scenario.py`); afterwards only the protocol assertions run. Production VM check: the whole signature (realm, users, migrations, outbox, applications, roles, media) compared before and after the migration and start, and the replacement runs with the delivered secret | Restored-database signature equals the original's: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Ledger and signature unchanged across the migration gate: VM rehearsal (synthetic data), production VM check only. A production release pair differing from the original's: not exercised anywhere |
 | 17. Identity | signature in `test.nix` and `app_signature`; `documenso_recovery_access` in `scenario.py`; `platform/identity-restore-test.nix` | Realm ID, admin-events flags, user list equal; 198 protocol assertions with real single sign-on after restore; recovery administrators of the apps authenticate while Keycloak is stopped; issuer and public signing keys continue (separate drill) | VM rehearsal (synthetic data); the 198 assertions after restore also on temporary Hetzner hosts once (synthetic data; rehearsal profile). Real accounts, sessions and tokens after the move, and break-glass after a restore: not exercised anywhere |
 | 18. Documenso | `BOOTSTRAP_APP`; `documenso_browser('verify')`, `app_signature` in `scenario.py` | Same unsigned and signed PDF, decrypted 2FA data, input hashes, account hash, one completed signing request | VM rehearsal (synthetic data) for the full checks. On temporary Hetzner hosts once: migrated, bootstrapped, started, health-checked only. Production profile: refused, not exercised anywhere |
@@ -851,7 +895,7 @@ network).
 | 18. Vaultwarden | `START_APPLICATIONS`; `vault_browser('restore')`, `vault_attachments('verify')` | Same two vault items and attachment bytes decrypt for a retained user device; the server-side copy of master passwords is absent | VM rehearsal (synthetic data). Hetzner once: migrated, started, bootstrap unit run, `/alive` answers; liveness only. Production profile: not exercised anywhere |
 | 19. TLS and CA | `install_runtime` and `INSTALL_INPUT` in `rehearsal_services.py`; CA by store path in `scenario.py`; `platform/production/tls-test.nix`; manual mode in `test.nix` | Rehearsal: operator supplies CA, certificate, key and repository password again, each checked by digest; served chain verifies. Production VMs: manual `tls/*` re-delivered by `push`; ACME state not in the backup and a restored host registers a new account and gets a new certificate from a local test ACME server | Re-supplied by operator tooling: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; **not restored from backup**). Manual and local-ACME replacement: VM rehearsal (synthetic data). A public CA, real DNS, a real first issuance: not exercised anywhere |
 | 20. Health checks | `protocol` (198 assertions) and `lifecycle` in `rehearsal_services.py`; `check_app` in `scenario.py`; `terrace-tls check` in `tls-test.nix` | Native HTTPS SSO, roles, publication, privacy; member lifecycle before and after | VM rehearsal (synthetic data); the 198 assertions and lifecycle also on temporary Hetzner hosts once (synthetic data). These scripts exist only in the rehearsal harness; the production host has `systemctl --failed`, `terrace-tls check` and `terrace-secrets verify` |
-| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` (about line 738); the freshness assertions for a first adopted app host at about lines 434-436 | Replacement: the backup service succeeds into the same repository under the same host name and the freshness unit then passes. First adopted app host (not the replacement): the freshness unit fails before its first backup and passes after. "The restore did not bring the old host's backup status" is a code comment there, not an assertion. Nothing asserts the snapshot series or retention across the promotion | VM rehearsal (synthetic data), local repository, for the backup itself. The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Retention and pruning across a promotion, the freshness behaviour on a replacement, backup timers armed by adoption running before the checks, and an original that comes back: not exercised anywhere |
+| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` (about line 738); the freshness assertions for a first adopted app host at about lines 434-436 | Replacement: the backup service succeeds into the same repository under the same host name and the freshness unit then passes. First adopted app host (not the replacement): the freshness unit fails before its first backup and passes after. "The restore did not bring the old host's backup status" is a code comment there, not an assertion. Nothing asserts the snapshot series or retention across the promotion; on the restored app replacement ("replacement" subtest in `test.nix`): `arm-timers --in-service` first is refused with `the backup timers are still held (...); run terrace-production arm-timers first ...; nothing armed` and both markers kept; a backup by hand succeeds; `arm-timers` prints `Armed: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer.` and the `Still held ... terrace-cms-sweep.timer ...` line, the three are active and the sweep held, a repeat prints `Already armed: nothing to arm.` and the same line; after a reboot the three are active, the sweep held and `status` names it; `arm-timers --in-service` prints `Armed: terrace-cms-sweep.timer.` and `Every writer timer is active now and at every boot.`, all four are active, `status` names nothing held, and a repeat prints `Already armed: nothing to arm.` and the same line. On an adopted (not restored) relay `arm-timers --in-service` prints `Already armed: nothing to arm.`, `This role holds no timer until service (it has no sweep).` and the same line | VM rehearsal (synthetic data), local repository, for the backup itself; the `arm-timers` assertions passed at `9664be1` (2026-11-24). The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Retention and pruning across a promotion, the freshness behaviour on a replacement, a restored relay's held timers, and an original that comes back: not exercised anywhere |
 | 21. Declared in service, DNS cut-over | none (every rehearsal ends by stopping all guests) | none | not exercised anywhere |
 
 ## 4. What a production promotion needs that nothing has exercised

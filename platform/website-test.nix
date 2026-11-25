@@ -307,18 +307,30 @@ in {
         running = source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID --value").strip()
         assert running != migration
         swept = source.succeed("systemctl show terrace-cms-sweep.service -p InvocationID --value").strip()
-        source.succeed("systemctl start --no-block terrace-cms-sweep.service && sleep 3")
-        # The sweep's start job waits behind the running migration instead of stopping it.
-        assert source.succeed("systemctl show terrace-cms-migrate.service -p ActiveState --value").strip() == "activating"
-        assert source.succeed("systemctl show terrace-cms-sweep.service -p ActiveState --value").strip() == "inactive"
-        source.succeed("systemctl list-jobs --no-legend | grep -E 'terrace-cms-sweep.service +start +waiting' >/dev/null")
+        # The preflight has stopped the CMS and website before the migration proper; only then request their starts, so
+        # each is a start of an inactive unit while the migration runs (not a no-op on a unit still running).
+        source.wait_until_succeeds("systemctl show terrace-cms.service -p ActiveState --value | grep -qx inactive && systemctl show terrace-web.service -p ActiveState --value | grep -qx inactive", timeout=60)
+        app_ids = {unit: source.succeed(f"systemctl show {unit} -p InvocationID --value").strip() for unit in ["terrace-cms.service", "terrace-web.service"]}
+        source.succeed("systemctl start --no-block terrace-cms-sweep.service terrace-cms.service terrace-web.service && sleep 3")
+        # The start jobs of the sweep, the CMS and the website wait behind the running migration instead of stopping it,
+        # and none of them runs alongside it.
+        shown = lambda unit, props: dict(line.split("=", 1) for line in source.succeed(f"systemctl show {unit} -p {props}").splitlines())
+        assert shown("terrace-cms-migrate.service", "ActiveState,InvocationID") == {"ActiveState": "activating", "InvocationID": running}
+        for unit in ["terrace-cms-sweep.service", "terrace-cms.service", "terrace-web.service"]:
+            assert shown(unit, "ActiveState,MainPID") == {"ActiveState": "inactive", "MainPID": "0"}, unit
+            source.succeed(f"systemctl list-jobs --no-legend | grep -E '{unit} +start +waiting' >/dev/null")
         source.wait_until_succeeds("systemctl show terrace-cms-migrate.service -p ActiveState --value | grep -qx inactive", timeout=120)
         migrated = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-migrate.service -p InvocationID,Result,ExecMainExitTimestampMonotonic").splitlines())
         assert migrated["InvocationID"] == running and migrated["Result"] == "success", migrated
         source.wait_until_succeeds(f"test \"$(systemctl show terrace-cms-sweep.service -p InvocationID --value)\" != {swept} && systemctl show terrace-cms-sweep.service -p ActiveState --value | grep -qx inactive", timeout=180)
         sweep = dict(line.split("=", 1) for line in source.succeed("systemctl show terrace-cms-sweep.service -p Result,ExecMainStatus,ExecMainStartTimestampMonotonic").splitlines())
         assert sweep["Result"] == "success" and sweep["ExecMainStatus"] == "0" and int(sweep["ExecMainStartTimestampMonotonic"]) > int(migrated["ExecMainExitTimestampMonotonic"]), sweep
-        source.succeed("rm /run/website-test-slow-migration && systemctl start terrace-cms.service terrace-web.service")
+        # The queued CMS and website starts ran once the migration had finished, as new invocations.
+        for unit in ["terrace-cms.service", "terrace-web.service"]:
+            source.wait_until_succeeds(f"systemctl is-active --quiet {unit}", timeout=180)
+            started = dict(line.split("=", 1) for line in source.succeed(f"systemctl show {unit} -p InvocationID,ExecMainStartTimestampMonotonic").splitlines())
+            assert started["InvocationID"] != app_ids[unit] and int(started["ExecMainStartTimestampMonotonic"]) > int(migrated["ExecMainExitTimestampMonotonic"]), (unit, started)
+        source.succeed("rm /run/website-test-slow-migration")
 
     with subtest("operator tools through terrace-cms-tool: roster and importer as the CMS account, refusals, lock wait, no secret exposure"):
         def tool(args, expect=0):
@@ -413,6 +425,23 @@ in {
         # The wrapper's lock file is root's alone: another user cannot open it, so cannot hold it.
         assert source.succeed("stat -c %U:%a /run/terrace-cms-tool.lock").strip() == "root:600"
         assert "Permission denied" in source.fail("runuser -u nobody -- ${pkgs.util-linux}/bin/flock -n /run/terrace-cms-tool.lock true 2>&1")
+        # It is never replaced: a wider mode is narrowed on the same inode under the lock; a file root does not own, or a
+        # link, is refused with exit 72 before the tool runs and is left as it was.
+        inode = source.succeed("stat -c %i /run/terrace-cms-tool.lock").strip()
+        source.succeed("chmod 0644 /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=1)
+        assert out == "" and err.startswith("Usage: wp-import.ts"), err
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":root:600"
+        refusal = "The operator tool lock /run/terrace-cms-tool.lock is not a root-owned regular file ({}); nothing was run. Inspect it, remove it by hand and run the tool again."
+        source.succeed("chown nobody /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=72)
+        assert out == "" and err.strip() == refusal.format("owned by uid " + source.succeed("id -u nobody").strip()), err
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":nobody:600"
+        source.succeed("chown root /run/terrace-cms-tool.lock && mv /run/terrace-cms-tool.lock /run/terrace-cms-tool.lock.kept && ln -s /run/terrace-cms-tool.lock.kept /run/terrace-cms-tool.lock")
+        out, err = tool(["wp-import", "--surprise"], expect=72)
+        assert out == "" and err.strip() == refusal.format("a symbolic link"), err
+        source.succeed("test -L /run/terrace-cms-tool.lock && rm /run/terrace-cms-tool.lock && mv /run/terrace-cms-tool.lock.kept /run/terrace-cms-tool.lock")
+        assert source.succeed("stat -c %i:%U:%a /run/terrace-cms-tool.lock").strip() == inode + ":root:600"
         files_before = set(source.succeed("ls ${outbox}").split())
         applied = summary(tool(["roster-invite", "apply", "--file", roster, "--operator", "operator@terrace.invalid", "--plan-sha256", plan["planSha256"], "--report", report(), "--confirm-production"])[0])
         assert applied["counts"]["created"] == 2 and applied["counts"]["failed"] == 0, applied

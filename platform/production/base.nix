@@ -15,6 +15,10 @@
   marker = "/var/lib/terrace-production/adopted";
   # The documented restore destination (terrace-backup-restore --dest) and its reconciliation report.
   restoreMarker = "/var/lib/terrace-restore/reconciliation.txt";
+  # Present from `adopt --restored` until `terrace-production arm-timers`: the backup timers stay off.
+  holdMarker = "/var/lib/terrace-production/timers-held";
+  # Present from `adopt --restored` until `terrace-production arm-timers --in-service`: the sweep stays off.
+  serviceHoldMarker = "/var/lib/terrace-production/service-timers-held";
   # Core dumps would put process memory (with secrets) on disk: pipe them to a no-op.
   noCore = "|${pkgs.coreutils}/bin/false";
   portDefinitions = option:
@@ -107,126 +111,27 @@
   adopt = pkgs.writeShellApplication {
     name = "terrace-production";
     runtimeInputs = [pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.systemd tool];
-    text = ''
-      [[ $(id -u) == 0 ]] || { echo 'terrace-production: run as root' >&2; exit 1; }
-      restored=${restoreMarker}
-      populated=${lib.escapeShellArg cfg.stateWitness}
-      adopting=/var/lib/terrace-production/adopting
-      replacement=/var/lib/terrace-secrets/replacement
-      refuse() { echo "terrace-production: not adopted: $*" >&2; exit 1; }
-      targets=(${lib.escapeShellArgs backupTargets})
-      writers=(${lib.escapeShellArgs cfg.writers})
-      helpers=(${lib.escapeShellArgs cfg.writerHelpers})
-      timers=(${lib.escapeShellArgs cfg.writerTimers})
-      # A host whose backup repository already holds snapshots of it is a replacement, whatever its disk says.
-      # The repository is per role: ANY snapshot in it means this role already has a deployment
-      # (also when a replacement was given a different host name).
-      repository_check() {
-        local target out rc
-        for target in "''${targets[@]}"; do
-          rc=0
-          out=$(timeout 120 terrace-backup restic "$target" snapshots --json 2>/dev/null) || rc=$?
-          if [[ $rc == 0 ]]; then
-            if [[ $(jq length <<<"$out") != 0 ]]; then
-              refuse "backup repository $target already holds snapshots; this is a replacement: restore, then adopt --restored"
-            fi
-          elif [[ $rc == 10 ]]; then
-            : # not initialised yet: a genuinely new deployment
-          elif [[ ''${1:-} == --first-deployment-without-repository && ''${2:-} == ${lib.escapeShellArg config.networking.hostName} ]]; then
-            echo "terrace-production: WARNING: adopting as new without seeing backup repository $target (restic exit $rc). Only for a first deployment whose repository does not exist yet, after confirming no earlier host existed." >&2
-          elif [[ $rc == 124 ]]; then
-            refuse "backup repository $target did not answer within 120 s; fix access (a replacement must be restored, not adopted as new)"
-          else
-            refuse "backup repository $target unreachable (restic exit $rc); fix access (a replacement must be restored, not adopted as new)"
-          fi
-        done
-      }
-      # Success means every writer is active (or skipped by its documented condition) and every helper succeeded.
-      settled() {
-        local unit state condition problems=()
-        for unit in "''${writers[@]}"; do
-          state=$(systemctl show "$unit.service" -p ActiveState --value)
-          condition=$(systemctl show "$unit.service" -p ConditionResult --value)
-          if [[ $state != active ]] && ! { [[ " ${toString cfg.conditionalWriters} " == *" $unit "* ]] && [[ $state == inactive && $condition == no ]]; }; then
-            problems+=("$unit.service:$state")
-          fi
-        done
-        for unit in "''${helpers[@]}"; do
-          if systemctl is-failed --quiet "$unit.service" || [[ $(systemctl show "$unit.service" -p Result --value) != success ]]; then
-            problems+=("$unit.service:$(systemctl show "$unit.service" -p Result --value)")
-          fi
-        done
-        for unit in "''${timers[@]}"; do
-          [[ $(systemctl show "$unit.timer" -p ActiveState --value) == active ]] || problems+=("$unit.timer")
-        done
-        if (( ''${#problems[@]} )); then
-          echo "terrace-production: not adopted yet; not running: ''${problems[*]}. Fix them and run the same adopt command again (it resumes)." >&2
-          return 1
-        fi
-      }
-      case "''${1:-}" in
-        adopt)
-          mode=''${2:-}
-          case "$mode" in
-            --new | --restored) ;;
-            *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored' >&2; exit 2 ;;
-          esac
-          [[ -e ${marker} ]] && { echo 'Already adopted.'; exit 0; }
-          case "$mode" in
-            --new)
-              [[ -e $replacement ]] && refuse "this host was delivered as a replacement; restore, then adopt --restored"
-              if [[ $(cat "$adopting" 2>/dev/null) != new ]]; then
-                # A new deployment starts from nothing: refuse a host that already holds state or a restore.
-                if [[ -e $populated || -e $restored ]]; then
-                  refuse "this host holds data or a restore; use adopt --restored after a reconciled restore"
-                fi
-              fi
-              repository_check "''${3:-}" "''${4:-}" ;;
-            --restored)
-              if ! grep -qx 'RECONCILIATION OK' "$restored" 2>/dev/null || [[ ! -e $populated ]]; then
-                refuse "no reconciled restore promoted into place; restore first (docs/production-profile.md)"
-              fi ;;
-            *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored' >&2; exit 2 ;;
-          esac
-          [[ -e $adopting && $(cat "$adopting") != "''${mode#--}" ]] && refuse "an adoption as $(cat "$adopting") is in progress; repeat that one"
-          # Fail closed: the writers start only on a host whose secrets verify.
-          terrace-secrets verify
-          install -d -m 0700 /var/lib/terrace-production
-          echo "''${mode#--}" >"$adopting"
-          chmod 0600 "$adopting"
-          systemctl reset-failed ${lib.escapeShellArgs (map (unit: "${unit}.service") (cfg.writers ++ cfg.writerHelpers))} 2>/dev/null || true
-          systemctl start terrace-production.target || true
-          # A writer can report "started" before it fails: nginx, for one, is active for a few
-          # seconds while it retries a port it cannot bind. Require the same processes to be
-          # running after a stability window, not just a passing snapshot.
-          declare -A seen=()
-          for unit in "''${writers[@]}"; do
-            seen[$unit]=$(systemctl show "$unit.service" -p MainPID -p NRestarts --value | tr '\n' ' ')
-          done
-          sleep ${toString cfg.adoptStabilitySeconds}
-          unstable=()
-          for unit in "''${writers[@]}"; do
-            [[ $(systemctl show "$unit.service" -p MainPID -p NRestarts --value | tr '\n' ' ') == "''${seen[$unit]}" ]] || unstable+=("$unit.service")
-          done
-          stable=yes
-          if (( ''${#unstable[@]} )); then
-            echo "terrace-production: not adopted yet; restarted during the stability window: ''${unstable[*]}. Fix them and run the same adopt command again (it resumes)." >&2
-            stable=no
-          fi
-          if ! settled || [[ $stable == no ]]; then exit 1; fi
-          install -m 0600 /dev/null ${marker}
-          date -u +%FT%TZ >${marker}
-          rm -f "$adopting"
-          [[ $mode == --restored ]] && rm -f "$replacement"
-          echo 'Adopted: the writers start now and at every boot.'
-          ;;
-        status)
-          if [[ -e ${marker} ]]; then echo "adopted $(cat ${marker})"; elif [[ -e $adopting ]]; then echo "adoption as $(cat "$adopting") not finished"; else echo 'not adopted: no writer starts at boot'; fi
-          systemctl is-active terrace-production.target || true
-          ;;
-        *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | status' >&2; exit 2 ;;
-      esac
-    '';
+    text =
+      ''
+        restored=${restoreMarker}
+        populated=${lib.escapeShellArg cfg.stateWitness}
+        adopted=${marker}
+        adopting=/var/lib/terrace-production/adopting
+        replacement=/var/lib/terrace-secrets/replacement
+        state_dir=/var/lib/terrace-production
+        hold=${holdMarker}
+        service_hold=${serviceHoldMarker}
+        hostname=${lib.escapeShellArg config.networking.hostName}
+        stability_seconds=${toString cfg.adoptStabilitySeconds}
+        targets=(${lib.escapeShellArgs backupTargets})
+        writers=(${lib.escapeShellArgs cfg.writers})
+        helpers=(${lib.escapeShellArgs cfg.writerHelpers})
+        conditional=(${lib.escapeShellArgs cfg.conditionalWriters})
+        timers=(${lib.escapeShellArgs cfg.writerTimers})
+        held=(${lib.escapeShellArgs cfg.restoreHeldTimers})
+        service_held=(${lib.escapeShellArgs cfg.restoreServiceHeldTimers})
+      ''
+      + builtins.readFile ./terrace-production.sh;
   };
 in {
   options.terrace.production = {
@@ -315,6 +220,18 @@ in {
       internal = true;
       description = "Timers armed only by terrace-production.target.";
     };
+    restoreHeldTimers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [];
+      description = "Writer timers that `adopt --restored` leaves off (a start condition on the hold marker) until `terrace-production arm-timers`: the backup timers, whose runs end in `forget --prune` on the repository the restore came from.";
+    };
+    restoreServiceHeldTimers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [];
+      description = "Writer timers that `adopt --restored` leaves off until `terrace-production arm-timers --in-service`, when the replacement is declared in service after any erasure replay: the sweep.";
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -372,6 +289,10 @@ in {
         {
           assertion = lib.all (name: config.sops.secrets ? ${name}) config.terrace.production.secrets.required;
           message = "Terrace production secret(s) not declared: ${toString (lib.filter (name: !(config.sops.secrets ? ${name})) config.terrace.production.secrets.required)}.";
+        }
+        {
+          assertion = lib.all (unit: lib.elem unit cfg.writerTimers) (cfg.restoreHeldTimers ++ cfg.restoreServiceHeldTimers) && lib.intersectLists cfg.restoreHeldTimers cfg.restoreServiceHeldTimers == [];
+          message = "Terrace production: every restore-held timer must be a writer timer, in one hold group only: ${toString (lib.subtractLists cfg.writerTimers (cfg.restoreHeldTimers ++ cfg.restoreServiceHeldTimers))}.";
         }
         {
           assertion = builtins.match "age1[02-9ac-hj-np-z]{58}" cfg.escrowRecipient != null;
@@ -471,7 +392,12 @@ in {
           };
         }
       ];
-      systemd.timers = lib.genAttrs cfg.writerTimers (_: {wantedBy = lib.mkForce ["terrace-production.target"];});
+      systemd.timers = lib.mkMerge [
+        (lib.genAttrs cfg.writerTimers (_: {wantedBy = lib.mkForce ["terrace-production.target"];}))
+        # Skipped (not failed) while the hold marker exists: the target starts without them.
+        (lib.genAttrs cfg.restoreHeldTimers (_: {unitConfig.ConditionPathExists = "!${holdMarker}";}))
+        (lib.genAttrs cfg.restoreServiceHeldTimers (_: {unitConfig.ConditionPathExists = "!${serviceHoldMarker}";}))
+      ];
     }
   ]);
 }

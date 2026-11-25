@@ -187,7 +187,37 @@ host once, explicitly:
   --confirm HOST`.
 - `terrace-production adopt --restored` refuses unless
   `/var/lib/terrace-restore/reconciliation.txt` says `RECONCILIATION OK` and the
-  restored state is in place; it then clears the replacement marker.
+  restored state is in place; it then clears the replacement marker. It starts
+  the writers but **leaves the backup, backup check and backup freshness timers
+  off** (`restoreHeldTimers`), and on the app **the sweep timer too**
+  (`restoreServiceHeldTimers`). Before anything starts it writes
+  `/var/lib/terrace-production/timers-held` and, on the app,
+  `/var/lib/terrace-production/service-timers-held`; each held timer carries
+  `ConditionPathExists=!` on its group's file, so every start of the target (this
+  adoption, a resumed one, every boot) skips it, and the adoption's completeness
+  check does not wait for it. A scheduled backup ends in `forget --prune` against
+  the repository the restore came from, so the backups wait until the operator has
+  verified the restored services; the sweep acts on restored data, so it waits until
+  the replacement is declared in service, after any erasure replay. The output names
+  each group and its command. `terrace-production arm-timers` needs an adopted host
+  with the target active, removes the backup hold, starts every writer timer that
+  is neither active nor still held, prints `Armed: <timers>.` (or `Already armed:
+  nothing to arm.`, so it can be repeated), then either names the timers still held
+  until service or says `Every writer timer is active now and at every boot.`, and
+  fails naming any timer that did not become active. `terrace-production
+  arm-timers --in-service` removes the sweep hold and arms the sweep, and refuses
+  (`the backup timers are still held ...; run terrace-production arm-timers first
+  ...; nothing armed`) while the backup hold exists, so the order is enforced; on the
+  relay, which has no sweep, it says so and does not fail. `terrace-production
+  status` prints one line per held group. **Nothing else reports a held timer**:
+  the markers never expire and the freshness timer that would report a missing
+  backup is held too, so a restored host on which `arm-timers` is never run takes
+  no scheduled backup and nothing alerts ([restore promotion](restore-promotion.md),
+  step 21). The other writer timers (`writerTimers`: the identity health check in
+  `app.nix`, the TLS expiry check and, in ACME mode, renewal added by `tls.nix`, the
+  temporary-administrator check added by `identity-admin.nix`) are armed by the
+  adoption as before.
+  A plain `adopt --new` holds nothing back.
 
 Each host is adopted once. Both commands verify the secrets, record
 `/var/lib/terrace-production/adopting`, start the target and write the adopted
@@ -195,7 +225,8 @@ marker only when every writer is active (the CMS and website may instead be
 skipped by their migration condition) and still runs the same process after a
 15-second stability window (a writer can report started and fail seconds later,
 as nginx does while it retries a port it cannot bind), every helper (Keycloak's
-database init, the website input check) succeeded and every timer runs. If anything is not
+database init, the website input check) succeeded and every timer runs (except
+the ones a restored adoption holds back). If anything is not
 running, the command names it and stops; fix the cause and **run the same adopt
 command again**: while `adopting` says `new`, `adopt --new` resumes instead of
 refusing the database its first attempt created. `terrace-production status`
@@ -238,10 +269,19 @@ follows the steps above (its installer stand-in stages the host key only).
 3. On the replacement (not adopted, so nothing writes):
    `terrace-backup-restore --target primary --snapshot <id> --dest /var/lib/terrace-restore`
    must print `RECONCILIATION OK`. Copy the restored media and outbox
-   directories and the stopped PostgreSQL data directory into place exactly as
-   the all-services rehearsal does (`platform/full/scenario.py`,
-   `fresh_restore`), then `terrace-production adopt --restored`, the migration
-   action (the ledger must stay unchanged) and the two services.
+   directories (`<dest>/files/<path>`) into place, and the PostgreSQL data
+   directory (`<dest>/pgdata`) into the cluster's data directory
+   (`services.postgresql.dataDir`, `/var/lib/postgresql/18` today), owned by
+   `postgres`. The all-services rehearsal's `fresh_restore`
+   (`platform/full/scenario.py`) copies only the file sets; its cluster copy is a
+   separate step, and the rehearsals read the data directory from
+   `/etc/rehearsal-pg-directory`, a file only the test harness provides (the
+   production VM check's exact commands are in its "replacement" subtest). Then
+   `terrace-production adopt --restored` (the backup and sweep timers stay off),
+   the migration action (the ledger must stay unchanged), the two services, once
+   the restored services are verified a backup by hand and `terrace-production
+   arm-timers`, and once the replacement is declared in service
+   `terrace-production arm-timers --in-service`.
 
 Promoting a restore into service on real data still needs the owner-approved
 procedure (G-22); this rehearsal is its technical basis.

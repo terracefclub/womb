@@ -308,6 +308,11 @@ let
     ++ check "boot target wants: ${toString (lib.subtractLists allowedBoot.targetPulls (targetPulls cfg))}" (subset (targetPulls cfg) allowedBoot.targetPulls)
     ++ check "gated services: ${toString (gatedUnits cfg "services")}" (gatedUnits cfg "services" == sorted p.writers)
     ++ check "gated timers: ${toString (gatedUnits cfg "timers")}" (gatedUnits cfg "timers" == sorted p.writerTimers)
+    ++ check "restore-held timers: ${toString p.restoreHeldTimers}; until service: ${toString p.restoreServiceHeldTimers}" (sorted p.restoreHeldTimers
+      == ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"]
+      && p.restoreServiceHeldTimers == lib.optional (role == "app") "terrace-cms-sweep"
+      && lib.all (timer: (cfg.systemd.timers.${timer}.unitConfig.ConditionPathExists or null) == "!/var/lib/terrace-production/timers-held") p.restoreHeldTimers
+      && lib.all (timer: (cfg.systemd.timers.${timer}.unitConfig.ConditionPathExists or null) == "!/var/lib/terrace-production/service-timers-held") p.restoreServiceHeldTimers)
     ++ check "firewall" (cfg.networking.firewall.enable
       && sorted (lib.unique cfg.networking.firewall.allowedTCPPorts)
       == (
