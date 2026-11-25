@@ -652,7 +652,8 @@ something else, such as a timer. Anything else, an inventory addition's
 `sops-install-secrets` included, is recorded `failed (exit 4)` with every
 unexpected unit named: read the list, do not retry blindly. RAN IN VM: the gated
 switches were recorded as switched with the CMS failed and the website failed or
-still starting (the test accepts either; the record shows which), and a gated switch
+still starting (the test accepts either; in the passing run every gated switch
+recorded the CMS failed and the website still starting), and a gated switch
 whose system also carried a unit that fails and restarts was recorded `failed (exit
 4)` naming that unit; unit tests for a failed timer, a service in `auto-restart`
 and a unit named only in the switch's own list. **Stop the website now**

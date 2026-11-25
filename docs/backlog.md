@@ -573,6 +573,11 @@ marked so.
   fails (today it leaves the failed generation as the boot default, as
   `nixos-rebuild` does; `status` warns, and the host updates document gives the
   manual commands, not run).
+- Decide: `terrace-production rollback` goes to the newest generation older than the
+  current one; after an attempt that failed and was rolled back, then a new
+  activation, that can be the failed attempt's generation (as with `nixos-rebuild
+  --rollback`). The docs tell the operator to read `status` first; a rollback to a
+  named generation is not offered.
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.
