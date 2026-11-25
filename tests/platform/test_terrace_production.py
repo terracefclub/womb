@@ -585,18 +585,23 @@ class DeployPath(Harness):
         self.accepted("activate", str(self.new))
 
     def test_a_decision_on_a_changed_state_is_not_applied(self):
-        # Between the checks and the unit, another activation switched the host: the unit refuses and records nothing.
+        # An earlier run left records; between the checks and the unit, another activation switched the host: the unit
+        # refuses and records nothing, and none of the earlier records is printed as this run's.
+        self.accepted("activate", str(self.new))
+        (self.dir / "switch.log").unlink()
+        earlier = self.records()
+        third = self.system("third", website=NEW_REV, migrations=M_NEW)
         other = self.system("other-activation", website=NEW_REV, migrations=M_NEW)
         (self.dir / "race").write_text(str(other))
-        result = self.run_tool("activate", str(self.new))
+        result = self.run_tool("activate", str(third))
         self.assertEqual(result.returncode, 1)
         self.assertIn("the running system or the profile changed after the checks", result.stderr)
-        self.assertEqual((self.generation(), self.records(), (self.dir / "switch.log").exists()), ("system-1-link", [], False))
+        self.assertEqual((self.generation(), self.records(), (self.dir / "switch.log").exists()), ("system-2-link", earlier, False))
         self.assertNotIn('"action"', result.stdout, "no record of another run is printed as this one's")
         (self.dir / "race").unlink()
         self.current.unlink()
-        self.current.symlink_to(self.old)
-        self.accepted("activate", str(self.new))
+        self.current.symlink_to(self.new)
+        self.accepted("activate", str(third))
 
     def test_rollback_cancels_a_pending_boot_default(self):
         kernel = self.system("kernel", website=NEW_REV, migrations=M_NEW, kernel="2")

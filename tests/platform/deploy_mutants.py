@@ -27,7 +27,7 @@ MUTANTS = [
     ("manifest present", PRODUCTION, '|| deny "$target has no Terrace system manifest', '|| true "$target has no Terrace system manifest'),
     ("role, host, instance", PRODUCTION, '|| deny "$target was built for', '|| true "$target was built for'),
     ("not the running system", PRODUCTION, '|| deny "$target is already the running system"', '|| true'),
-    ("no switch, migration, sweep or backup running", PRODUCTION, 'deactivating | reloading) deny "$unit.service is', 'never-matches) deny "$unit.service is'),
+    ("no switch, migration, sweep or backup running", PRODUCTION, 'case $state in active | activating | deactivating | reloading) deny "$unit.service is', 'case $state in never-matches) deny "$unit.service is'),
     ("no operator tool running", PRODUCTION, "[[ -z $tools ]] || deny", "true || deny"),
     ("operator tools must be listable", PRODUCTION, "'terrace-cms-tool-*') || deny", "'terrace-cms-tool-*') || true"),
     ("signatures", PRODUCTION, "if ! out=$(nix", "if false && ! out=$(nix"),
