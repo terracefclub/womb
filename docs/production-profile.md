@@ -80,6 +80,19 @@ default. Evaluation stops with a clear message when one is missing or unsafe.
 | `terrace.website.webPackage`, `cmsPackage`, `revision` | app | the reviewed release pair (`platform/website-release.nix`) |
 | `relay.hostname`, `relay.publicIPv4`, `relay.backup.primary.*` | relay | as above for the relay |
 
+Optional, with defaults:
+
+| Option (`terrace.production.*`) | Role | Meaning |
+| --- | --- | --- |
+| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. It is one way to settle owner decision U0, which the owner has not taken |
+| `wombRevision` | both | the Womb commit built, recorded in the system manifest; `production-config.nix` sets it from its `wombRevision` argument; default `null` |
+| `app.releaseMigrations` | app | the release's CMS migration list, recorded in the manifest; default the pin's list when the host runs the pinned revision, otherwise `null` (`activate` and `rollback` then refuse any release change on a migrated database) |
+
+Every production system carries a manifest, `/etc/terrace/system.json`: role,
+host name, instance, Womb revision, the app's release revision and migration list,
+and the Keycloak, PostgreSQL and Headscale versions. `terrace-production activate`
+recognises a closure built for this host by it.
+
 Origins, the realm's callbacks, `LIFECYCLE_PUBLIC_ORIGIN`, `CMS_PUBLIC_ORIGIN`
 and the client-address header all derive from the hostnames.
 
@@ -349,10 +362,15 @@ nix build --no-link --print-out-paths --impure --expr '
                         terrace.cloudDisk.device = "/dev/disk/by-id/REPLACE_WITH_VERIFIED_DISK"; };
      webArchive = /protected/terrace-web-<rev>-linux-x64-gnu.tar.gz;
      cmsArchive = /protected/terrace-cms-<rev>-linux-x64-gnu.tar.gz;
-     tfcSource = /source/tfc-at-<rev>; }).config.system.build.toplevel'
+     tfcSource = /source/tfc-at-<rev>;
+     wombRevision = "<git rev-parse HEAD of /checkout>"; }).config.system.build.toplevel'
 ```
 
-Build on the Linux builder under the shared lock, never on a Mac.
+Build on the Linux builder under the shared lock, never on a Mac. `wombRevision` is
+optional and informational (`terrace-production status` shows it). With the deploy
+path, the private module also sets `terrace.production.deploy.trustedKeys`, and
+the built toplevel reaches an installed host by
+`platform/production/terrace-deploy.sh` ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
 
 ## Verification
 
@@ -362,6 +380,13 @@ Build on the Linux builder under the shared lock, never on a Mac.
   `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`
 - Certificates by ACME against a local CA (builder): `platform/production-tls-check`, see [TLS](tls.md#verification)
+- Deploy path (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-deploy-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE PREVIOUS_WEB_ARCHIVE PREVIOUS_CMS_ARCHIVE`,
+  the pinned pair plus the previous kept pair (`680ad56`, pinned in
+  `platform/production/deploy-previous-release.json`); unit tests (CI):
+  `python3 -B tests/platform/test_terrace_production.py -v` and
+  `python3 -B tests/platform/test_terrace_deploy.py -v`; mutation check (any
+  machine, several minutes): `python3 -B tests/platform/deploy_mutants.py`. What it
+  proves: [host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)
 
 The VM proof boots the **same** app role and, briefly, the **same** relay role
 (secrets pushed, adopted, Headscale and HTTPS answering, redirect on port 80,
@@ -415,6 +440,18 @@ are new: the first import of the release's realm artifact through the hosting
 policy reads back admin events on and details off from Keycloak's database, and
 the restored host's signature now includes those two flags. The evaluation check
 passes with 123 rejected variants and the cloud rehearsal check passes.
+
+Verified for the deploy path at Womb `c3a9090` (fresh results, builder; runs started
+2026-11-24 and ended 2026-11-25, builder local time): the deploy VM proof PASS in
+945 s with 124 assertions, each a real condition (an upgrade of a populated app host
+from the kept `680ad56` release to the pinned `dd1aef7`, its migration, the refusals,
+rollbacks, the cancel of a pending `--boot` activation and a gated switch that also
+broke another unit, as in [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in));
+this VM proof 263 assertions (198 protocol), the identity administration proof 347
+and the TLS proof 148, all PASS (their derivations changed: every production system
+now carries the manifest and the extended `terrace-production`). The evaluation
+check passes with 143 rejected variants. The other checks and the five rehearsal
+drivers have derivations equal to trunk's and were not rerun.
 
 ## Keycloak administration
 

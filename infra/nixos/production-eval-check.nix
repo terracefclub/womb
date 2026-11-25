@@ -420,7 +420,22 @@ let
   relayDocumentation = violations "relay" (relayAs "production" {});
   relayAcmeDocumentation = violations "relay" (relayAcme "production" {});
   acmeMissing = name: evaluateApp (appParameters // {tls = acmeTLS // {acme = removeAttrs acmeTLS.acme [name];};}) {};
+  # Deploy path (docs/host-updates.md): off by default, opt-in by public key only.
+  cacheKey = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
+  deployKey = "terrace-eval-deploy-1:" + lib.concatStrings (lib.replicate 43 "A") + "=";
+  manifestOf = system: builtins.fromJSON system.config.environment.etc."terrace/system.json".text;
+  nixTrust = system: let
+    settings = system.config.nix.settings;
+  in {
+    inherit (settings) trusted-users require-sigs trusted-public-keys;
+    extra = settings.extra-trusted-public-keys or null;
+  };
+  appWithKey = app {terrace.production.deploy.trustedKeys = [deployKey];};
   negatives = [
+    (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["not-a-key"];}))
+    (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["terrace-eval-deploy-1:${lib.concatStrings (lib.replicate 86 "A")}=="];}))
+    (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = [deployKey deployKey];}))
+    (rejects "none of the keys Nix trusts by default" (app {terrace.production.deploy.trustedKeys = [cacheKey];}))
     # Secrets.
     (rejects "secret(s) not declared: website/lifecycle-intake" (app ({config, ...}: {
       sops.secrets = lib.mkForce (lib.genAttrs (lib.remove "website/lifecycle-intake" config.terrace.production.secrets.required) (_: {mode = "0400";}));
@@ -645,6 +660,27 @@ let
   ];
 in
   assert lib.all lib.id boundsAccepted;
+  # Without deploy keys Nix keeps its defaults: root the only trusted user, signatures required, only the cache key.
+  assert lib.assertMsg (nixTrust (app {})
+    == {
+      trusted-users = ["root"];
+      require-sigs = true;
+      trusted-public-keys = [cacheKey];
+      extra = null;
+    }) "Default production Nix trust changed: ${builtins.toJSON (nixTrust (app {}))}";
+  assert lib.assertMsg (nixTrust (relayAs "rehearsal" {}) == nixTrust (app {})) "Default relay Nix trust differs";
+  # With a deploy key it is added, and nothing else changes.
+  assert lib.assertMsg (nixTrust appWithKey
+    == {
+      trusted-users = ["root"];
+      require-sigs = true;
+      trusted-public-keys = [cacheKey];
+      extra = [deployKey];
+    }) "Deploy key trust: ${builtins.toJSON (nixTrust appWithKey)}";
+  assert lib.assertMsg (violations "app" appWithKey == []) "Production app with a deploy key violations: ${toString (violations "app" appWithKey)}";
+  # The system manifest names this host's role, name and instance, and the release's migration list.
+  assert lib.assertMsg (let m = manifestOf (app {}); in m.schema == 1 && m.role == "app" && m.hostName == "app" && m.instance == "production" && m.website.revision == pin.revision && m.website.migrations == pin.migrations && m.wombRevision == null && m.versions.keycloak != null) "App manifest: ${builtins.toJSON (manifestOf (app {}))}";
+  assert lib.assertMsg (let m = manifestOf (relayAs "rehearsal" {}); in m.role == "relay" && m.hostName == "relay" && m.website == null && m.versions.headscale != null) "Relay manifest: ${builtins.toJSON (manifestOf (relayAs "rehearsal" {}))}";
   assert lib.assertMsg (positive.app == []) "Production app violations: ${toString positive.app}";
   assert lib.assertMsg (positive.static == []) "Static-network app violations: ${toString positive.static}";
   assert lib.assertMsg (positive.relayRehearsal == []) "Relay (rehearsal addressing) violations: ${toString positive.relayRehearsal}";

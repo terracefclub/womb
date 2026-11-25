@@ -27,6 +27,7 @@
     };
   };
   migrated = "/var/lib/terrace-cms/migrated-revision";
+  pin = builtins.fromJSON (builtins.readFile ../website-release.json);
 in {
   imports = [
     ./base.nix
@@ -53,6 +54,15 @@ in {
     identityContract = lib.mkOption {
       type = lib.types.package;
       description = "Required: the hash-pinned TFC realm producer (platform/identity-contract.nix).";
+    };
+    releaseMigrations = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default =
+        if config.terrace.website.revision == pin.revision
+        then pin.migrations
+        else null;
+      defaultText = lib.literalMD "the pinned migration list of `platform/website-release.json` when the host runs that revision, otherwise `null`";
+      description = "The CMS migration names of the release this host runs, recorded in the system manifest. `terrace-production activate` and `rollback` compare the database's migration ledger with the target system's list; `null` (unknown) makes them refuse any release change.";
     };
     backup = {
       primary = {
@@ -144,6 +154,17 @@ in {
       restoreHeldTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
       # ... and the sweep until `arm-timers --in-service`, at D5 after any erasure replay.
       restoreServiceHeldTimers = ["terrace-cms-sweep"];
+      manifestExtra = {
+        website = {
+          inherit (config.terrace.website) revision;
+          migrations = app.releaseMigrations;
+        };
+        versions = {
+          keycloak = config.services.keycloak.package.version;
+          postgresql = config.services.postgresql.package.version;
+          headscale = null;
+        };
+      };
     };
     # PostgreSQL's own target would otherwise pull the server in at boot.
     systemd.targets.postgresql.wantedBy = lib.mkForce ["terrace-production.target"];

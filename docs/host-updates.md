@@ -17,6 +17,19 @@ exists for it; most of it is "not exercised anywhere". Do not read "the VM check
 for the new pin passed" as "this update is safe": the VM checks prove the new
 revision on a fresh host, not the move to it.
 
+**Update of 2026-11-24: a deploy path exists, opt-in.** Option 1 of owner decision
+U0 (signed closures, section 1.2) is now built: an option that makes a host trust a
+build machine's public signing key, a manifest in every production system, the
+commands `terrace-production activate` and `terrace-production rollback`, and an
+operator-side helper that signs and copies. It is off unless the private host
+module sets the option. **The owner has not chosen it**: U0 is still his decision,
+and options 2 and 3 remain open. Section 1.5 describes it; the steps below say where
+it replaces a hand-typed command. Its proof is a VM rehearsal of the production app
+role, `platform/production/deploy-test.nix` (synthetic data), which updates a
+populated host from one website release to the next, including a real CMS
+migration, and rolls back; it has not run on any real host. Where the document
+below still says "not exercised anywhere", that is true outside that proof.
+
 Evidence levels, as in [restore promotion](restore-promotion.md) and
 [credential rotation](credential-rotation.md): **VM rehearsal (synthetic data)**,
 with the test file and what it asserts; **unit test**; **READ** (read from code,
@@ -87,13 +100,14 @@ READ, for every row.
 | Building a host's toplevel from a revision, the private module, the hardware module, the archives and the TFC source | Yes | `infra/nixos/production-config.nix`; the command is in [production profile](production-profile.md#building-a-host). Build on the Linux builder, never on a Mac (AGENTS.md) |
 | Refusing a wrong archive | Yes | `platform/website-release.nix` refuses an archive whose SHA-256 is not the pinned one before copying it, and checks every packaged file against the bundle's own manifest; `platform/identity-contract.nix` does the same for the three realm-producer files |
 | Installing a first closure on a blank disk | Yes, lease tooling only | `infra/nixos/rescue_install.py` copies closures as `root` to a Rescue system and runs `nixos-install` ([Rescue installer](cloud-rescue-install.md)). It is not an update path: it formats the disk |
-| A command that copies a new closure to an installed production host | **No** | Nothing in the repository does it. The legacy root `flake.nix` names `deploy-rs` as an input; nothing in the new platform uses it |
-| A command that activates or rolls back a generation on a production host | **No** | Nothing in the repository wraps `switch-to-configuration` or the system profile for production |
+| A command that copies a new closure to an installed production host | **Opt-in since 2026-11-24** | `platform/production/terrace-deploy.sh` signs the closure on the build machine and copies it as `operator`; the host accepts it only with `terrace.production.deploy.trustedKeys` set (section 1.5). Without the option: no. The legacy root `flake.nix` names `deploy-rs` as an input; nothing in the new platform uses it |
+| A command that activates or rolls back a generation on a production host | **Yes since 2026-11-24** | `terrace-production activate` and `terrace-production rollback` (section 1.5). `activate` refuses everything while no deploy key is trusted |
 | Automatic upgrades, garbage collection, a boot-entry limit | No | The production modules set none of `system.autoUpgrade`, `nix.gc`, `boot.loader.systemd-boot.configurationLimit` (grep of `platform/production/` and `infra/nixos/`). RAN: in the pinned nixpkgs `31ecbaca` their defaults are off, off and no limit. A private or hardware module could change them |
 | The private host module | Kept by the operator outside this repository | [production profile](production-profile.md#building-a-host). Its content is the operator's; this document cannot see it |
 
-Why copying a closure is not a one-liner on this profile (READ, plus RAN for the
-defaults):
+Why copying a closure is not a one-liner on this profile without the deploy path
+(READ, plus RAN for the defaults; the refusal of an unsigned and of a foreign-signed
+copy is now VM rehearsal, section 1.5):
 
 - SSH accepts only the `operator` account: `base.nix` sets `PermitRootLogin = "no"`
   and `AllowUsers = ["operator"]`; it asserts `AllowUsers`, and
@@ -131,7 +145,8 @@ tried on this profile:
 
 Options 1 and 2 are themselves private-module changes, so they must be in the
 module a host is **installed** with, or the first update has no path. Record the
-choice; section 8 lists the drill it needs.
+choice; section 8 lists the drill it needs. Option 1 now exists in the repository as
+an opt-in (section 1.5); building it does not choose it.
 
 ### 1.3 What must exist before an update
 
@@ -161,6 +176,196 @@ Each is a stop point: nothing after it runs until the owner says go.
 | U6 | Reboot (kernel, initrd or kernel-module change) | Console access at the provider in case the new generation does not boot (section 5, H4); that a reboot re-arms every writer timer not held after a restored adoption (`base.nix`, `terrace-production.sh`) and starts the writers, the ungated website among them, so a parked failed migration (step 10) needs its stops repeated after it |
 | U7, step 13 | Declare the update done, or go back (section 4) | The checks of steps 11 and 12 |
 | U8 | Go back by restore onto a replacement | The data written since the pre-update snapshot is lost (section 4.3) |
+
+### 1.5 The deploy path (option 1 of U0, opt-in)
+
+Built 2026-11-24 as one way to settle U0; **not chosen by the owner**. Nothing in it
+is active unless the private host module sets `terrace.production.deploy.trustedKeys`.
+Evidence labels in this section: **RAN IN VM** (the deploy VM rehearsal,
+`platform/production/deploy-test.nix`, run with `platform/production-deploy-check`,
+synthetic data, the production app role at instance `rehearsal`); **unit test**
+(`tests/platform/test_terrace_production.py`, class `DeployPath`, and
+`tests/platform/test_terrace_deploy.py`, stub tools, run by CI;
+`tests/platform/deploy_mutants.py` removes each guard in turn and shows the tests
+fail); **RAN (eval)** (`infra/nixos/production-eval-check.nix` or a derivation
+comparison); **READ**; **NOT EXERCISED**. Nothing here ran on a real host.
+
+**The pieces.**
+
+| Piece | What it is | Evidence |
+| --- | --- | --- |
+| `terrace.production.deploy.trustedKeys` (`base.nix`) | A list of the build machine's **public** Nix signing keys (`name:base64`, as `nix key convert-secret-to-public` prints them; a secret-key shape is refused at evaluation). Each is added to the host's Nix trusted public keys (`extra-trusted-public-keys`). `trusted-users` stays `root`, `require-sigs` stays on, root login stays refused, no binary cache is added. Empty (the default): the host's `nix.conf` is exactly what it was before the option existed | RAN (eval): the evaluation check asserts the default settings (`trusted-users = [root]`, `require-sigs = true`, only the nixpkgs cache key, no extra key) and the settings with a key; the derivation comparison shows the default app and relay `nix.conf` equal to trunk's. RAN IN VM: `nix config show` on the host lists `root` alone, `require-sigs true`, the deploy key and not the foreign one |
+| The system manifest | `/etc/terrace/system.json`, so `<toplevel>/etc/terrace/system.json` in every production system: `schema`, `role`, `hostName`, `instance`, `wombRevision`, the app's `website.revision` and `website.migrations` (the release's migration list: `terrace.production.app.releaseMigrations`, by default the pin's list when the host runs the pinned revision, otherwise unknown), and `versions` of Keycloak, PostgreSQL and Headscale. `wombRevision` comes from the new `wombRevision` argument of `infra/nixos/production-config.nix` ([production profile](production-profile.md#building-a-host)) | RAN (eval) for both roles; RAN IN VM (read by `activate` and `status`) |
+| `platform/production/terrace-deploy.sh` (operator machine) | Refuses unless given a Nix **secret** key file, an SSH identity and a built production toplevel with a manifest; then `nix store sign --recursive` (needs a user the build machine's Nix daemon lets add signatures: root or a trusted user), `nix copy --to ssh-ng://operator@<host>` with strict host key checking, and prints the activation command. It activates nothing | RAN IN VM (the operator guest stands in for the build machine); unit test |
+| `terrace-production activate <toplevel> [--boot] [--cms-stays-down] [--accept-upstream-schema-change]` | Root only (`sudo` from `operator`). The checks below, then **inside the transient unit** `systemd-run --unit=terrace-switch --collect --service-type=exec --wait`: `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`, `<toplevel>/bin/switch-to-configuration switch` (or `boot` with `--boot`), and a record | RAN IN VM; unit test |
+| `terrace-production rollback [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]` | The newest generation older than the current one (after an attempt that failed, that can be the failed attempt's generation: read `status` first), same checks except the signatures (a generation is already root-trusted), same unit: `nix-env --switch-generation <n>`, then that generation's `switch-to-configuration`. When the boot default is **not** the running system (after `activate --boot`, or a switch that failed after registering its generation), `rollback` instead makes the running system's generation the boot default again: `nix-env --switch-generation <that generation>` and the running system's `switch-to-configuration boot`, in the same unit, recorded as `cancel`; nothing running changes | RAN IN VM (both forms: the second as `activate --boot` cancelled before a reboot); unit test (both, and the failed-switch case) |
+| The records and `status` | The unit appends two JSON lines to `/var/lib/terrace-production/deployments.log` (root, 0600): a `started` line before it changes anything (time, action, mode, from, to, generation before, and `failedBefore`: which of the CMS and website were already failed; the unit then clears their failed state so a start limit hit earlier cannot block a unit whose gate is open), and a `finished` line after (generation after, Womb and website revision, result `success`, `switched; down until the CMS migration: <units>` or `failed (exit <n>)`, `failedUnits`, `startingUnits`, `unexpectedUnits`). The unit writes them, so they exist even when the SSH session dropped. `terrace-production status` adds the running system and its revisions, the profile's generation (the boot default) with a WARNING when it is not the running system, the previous generation and its revisions, whether the deploy path is on, and the last record, with a WARNING when the last activation started and never finished (its unit stopped, or the host rebooted mid-switch) | RAN IN VM (records and `status` lines); unit test (both WARNINGs, `failedBefore`) |
+
+**What `activate` and `rollback` refuse, before anything changes.** Each refusal
+prints `terrace-production: nothing changed: ...` and exits 1; the unit tests check
+that the profile, the running system and the record are unchanged, and a mutant
+without each check fails them. The client command holds a root-only lock on
+`/var/lib/terrace-production/deploy.lock` from its first check to its record (the
+file is created on first use and not replaced afterwards), so a second `activate`
+or `rollback` is refused at once. If the client is killed while its switch runs,
+the lock is released, but `terrace-switch.service` is one of the busy units, so a
+new command is still refused until the switch ends. Inside the `terrace-switch`
+unit, immediately before it changes anything, the command repeats: the running
+system and the profile's generation the decision was made against (a different
+state is refused), the idle checks (all busy units except the switch itself, the
+sweep, the operator tools) and the target's form and identity (store path,
+validity, NixOS system, manifest, role, host, instance; and not the running system,
+except for `cancel`). It does **not** repeat the signature, boot, upstream-version
+or CMS ledger checks: those were made under the same lock just before. The command
+prints only the records it wrote itself (unit tests; a mutant for each).
+`--dry-run` runs every check, prints the target (`Checks passed; <action> <path>
+(<revisions>)`, or for a cancel the generation and path that become the boot
+default) and stops (RAN IN VM, as the control of the non-deploy-key case below).
+
+| Check | Why (this document) | Evidence |
+| --- | --- | --- |
+| Not root | The command changes the system | RAN IN VM (`operator` without `sudo` over SSH, and `nobody`; control: `sudo` from `operator` activates); unit test |
+| No deploy key trusted (activate) | The deploy path is off | unit test (the VM host has a key) |
+| Not a canonical store path, absent, not valid in the host's store, no `bin/switch-to-configuration`, no manifest | Only a whole, copied NixOS system built by this profile | unit test |
+| Manifest names another role, host name or instance | Never activate a closure built for another host. Recognised from the manifest, never from the path's name | RAN IN VM: a signed and copied closure built for host name `app-other` and one built for the relay role, both accepted by the copy (control), refused by `activate`; unit test (role, host, instance) |
+| The target is the running system | Nothing to do | RAN IN VM; unit test |
+| `terrace-switch`, `terrace-backup`, `terrace-backup-check`, (app) `terrace-cms-migrate` or `terrace-cms-sweep` active, or (app) any `terrace-cms-tool-*` unit active; refused too when those units cannot be listed | One switch at a time (step 7); no switch under a backup, a migration, the sweep or an operator tool (steps 6, 10) | RAN IN VM (a running `terrace-switch` unit); unit test (each, and the listing failure) |
+| A path of the closure that is in no system generation on this host (current, booted or any profile generation) lacks a valid signature by a trusted deploy key, or its contents do not match (`nix store verify --sigs-needed 1` given **only** the deploy keys) | Paths already in a generation came by a root-trusted route (installation, an earlier activation); everything else must come from the build machine | RAN IN VM: an unsigned closure and one signed with an untrusted key, both put into the store by root (`nix-store --import`, as an operator with `sudo` could), refused; a closure signed only by a second key that the host's Nix trusts through plain `nix.settings` (as it trusts the nixpkgs cache key), accepted by the copy as `operator`, refused by `activate`, while `nix config show` lists that key; controls: the signed closure activates, and the second closure with the deploy key's signature added passes every check (`--dry-run`); unit test |
+| Kernel, initrd or kernel modules differ from the booted system, without `--boot` | `switch` would leave the old kernel running (U6, section 5) | unit test only (the VM proof's systems share a kernel; a test VM boots its first system directly, so a boot into a new generation cannot be shown there) |
+| Keycloak or Headscale version differs, without `--accept-upstream-schema-change` | **U3**: their schema may migrate at start, a point of no return | unit test |
+| PostgreSQL major version differs, or (app) a manifest records no PostgreSQL version | No upgrade path (step 2); no flag | unit test |
+| (App) the release changes and `terrace-cms` or `terrace-web` is active, activating (a restart loop) or reloading | Quiesce first (step 6) | RAN IN VM (control: after step 6's stops it activates); unit test |
+| (App) the release changes, a migration marker exists and PostgreSQL is down | The ledger cannot be compared | unit test |
+| (App) the CMS ledger (`payload_migrations`) holds a migration the target's manifest does not list | **Migrations are forward-only**: the target's CMS will refuse to start. Refused unless `--cms-stays-down`, which then warns that the CMS stays down and that the old migration unit must never be started (H1) | RAN IN VM: after the upgrade migration, `rollback` refused, then `rollback --cms-stays-down` ran and the previous CMS failed its gate; unit test |
+| (App) the same, while the marker holds the **target's** revision | H9: a failed or partial migration left the old marker, so the old CMS would start on a newer schema. Refused, no flag | unit test |
+| (App) the target's migration list is unknown (`null`) while the ledger is not empty | Nothing shows the target accepts the database | unit test |
+
+**What stays an operator step** (the command does not do or check it, by design: it
+stays small, refuses by default and changes only the system profile):
+
+- U0 to U8, every owner decision; step 2's classification (the command only
+  refuses Keycloak, Headscale and PostgreSQL version changes it can see in the two
+  manifests);
+- the backup window and the pre-update backup (steps 5, 6, H2): the command
+  checks only that no backup runs at this moment;
+- quiescing (step 6): it refuses a release change while the CMS or website runs, it
+  does not stop them;
+- the secrets order for a changed inventory (step 8), the realm (step 9), the
+  migration itself (step 10), starting the units (step 11), the checks (step 12) and
+  re-arming the backup timers (step 13);
+- free space on `/nix/store` (step 4) and garbage collection (H8);
+- operator tools in flight (`terrace-cms-tool-*`): not checked by `activate`; the
+  migration's preflight refuses them (step 10);
+- timers held after a restored adoption: the command never touches the hold
+  markers. RAN IN VM: with the markers in place (written by hand on an adopted
+  host, as `adopt --restored` writes them: **not a restored host**), a start of the
+  three backup timers and the sweep was skipped by their start condition, they
+  stayed off (start condition not met) after the first activation and after both
+  rollbacks, and `status` kept naming them; `arm-timers` and `arm-timers
+  --in-service` armed them at the end.
+
+**A dropped session.** RAN IN VM: the operator guest ran `ssh -tt operator@app sudo
+terrace-production activate <toplevel>` (a terminal, as `ssh -t` gives an operator),
+and the second system held its activation for 20 seconds (a probe activation script,
+rehearsal only); while `terrace-switch.service` was active the test killed the SSH
+client; the `terrace-production` client on the host was gone before the switch
+finished, and the switch completed, ran the new generation and wrote its record. The
+switch in that proof does not restart sshd, so a session cut by the switch itself is
+not shown.
+
+**A switch to a new release, before its migration.** See step 7: the switch starts
+the gated CMS and the ungated website; `activate` records `switched; down until the
+CMS migration` only under the three conditions there, and tells the operator to
+stop the website (RAN IN VM; unit test for each condition and a mutant for each).
+
+**Activating a system that is already the newest generation.** `nix-env --set`
+reuses the newest generation when it already points to the same toplevel instead of
+creating another (Nix's own behaviour). RAN IN VM: after the case A rollback to
+generation 1, activating the next system again made generation 2 current again, and
+the record says `1` to `2`.
+
+**A switch that fails.** `activate` registers the generation before it switches,
+exactly as `nixos-rebuild` does, and `switch-to-configuration` installs the boot
+loader before it changes the running system. So a switch that fails, for example
+at the boot loader step, leaves the system profile (the boot default) on the new
+generation while the old system keeps running. The command prints `FAILED`, the
+record says `failed (exit <n>)`, and `status` prints `WARNING: the boot default,
+generation <n> (...), is not the running system: a reboot boots generation <n>.`
+(unit test; a failed switch was seen in the VM while the proof was being built,
+when its test VM could not take GRUB, but no VM assertion checks it). In that state
+**a reboot boots the new, never-activated generation**. The command does not revert
+the profile on its own (the operator decides, after reading `journalctl -u
+terrace-switch.service -o cat --no-pager`); whether it should is an open question in
+the [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24). The
+ways out:
+
+- the cause is fixed: repeat `activate` with the same toplevel (the profile already
+  points to it, so Nix reuses that generation);
+- keep the running system: `sudo terrace-production rollback`, which in this state
+  makes the running system's generation the boot default again (unit test for this
+  state; VM rehearsal for the same command after `activate --boot`). Then `status`
+  prints no WARNING;
+- by hand, if the command cannot run (written procedure, NOT RUN): `status` prints
+  the running system's path on its `running system:` line; find its generation
+  with `nix-env -p /nix/var/nix/profiles/system --list-generations` and `readlink -f
+  /nix/var/nix/profiles/system-<n>-link`, run `nix-env -p
+  /nix/var/nix/profiles/system --switch-generation <that n>`, then `systemd-run
+  --unit=terrace-switch --collect --service-type=exec --wait -- <the running
+  system's path>/bin/switch-to-configuration boot`. **If that boot step fails the
+  same way** (the boot loader cannot be written), the profile already names the
+  running system, but the boot menu may still default to the failed generation: do
+  not reboot; repair the boot loader cause first, and plan for console access at
+  the provider before any reboot (H4).
+
+**What the deploy VM proof does not assert.** A real host, provider or network; the
+relay role's update (its closure is only refused on the app); a boot loader
+installed on a real disk (the test nodes only write the GRUB menu); a kernel change
+and a reboot into a new generation (a test VM boots its first system directly;
+`--boot` runs only as far as the boot step, then is cancelled); a switch that
+restarts sshd; a Keycloak, Headscale or PostgreSQL version
+change; the inventory and realm steps (8, 9); a failed or timed-out migration; the
+old migration unit on the newer schema (H1); backups, retention and the backup
+window (steps 5, 6, 13); a failed switch's state (seen while the proof was built,
+when the VM could not take GRUB, but asserted only by unit tests); the bootstrap
+route and key rotation; real data sizes. One release pair (`680ad56` to `dd1aef7`)
+and small synthetic data. The test nodes enable `switch-to-configuration` (the test
+framework turns it off for its nodes; an installed host keeps NixOS's default, on)
+and write the GRUB menu without installing it (the VM disk cannot take GRUB).
+
+**Integrity, not a privilege boundary.** `operator` has passwordless `sudo`, so root
+on the host can still import any closure (`nix-store --import`, as the VM proof does
+for its refusal cases) and run `switch-to-configuration` by hand. The signatures
+prove where a closure came from and that it arrived intact; they do not stop the
+operator.
+
+**Bootstrap: how the key reaches a host.** The trusted key is part of the installed
+configuration. A host installed from a private module that already sets
+`deploy.trustedKeys` trusts it from its first boot. **No production host exists yet,
+so set it before the first install.** A host installed from a Womb revision BEFORE
+this change has no system manifest (`/etc/terrace/system.json`), so `activate`
+refuses it even with a key ("the running system has no Terrace manifest"): its first
+update also needs the other route below. A host installed without it has no signed path:
+its first update needs another route, for example the operator copies an exported
+closure (`nix-store --export`) as `operator`, imports it with `sudo nix-store
+--import` and activates it with the raw commands of step 7, because `activate`
+refuses everything while no key is trusted. That route is NOT EXERCISED as an update
+(only the import itself ran, in the VM proof's refusal cases).
+
+**Losing or replacing the signing key** (written procedure, NOT RUN). The secret
+key's custody is in [secrets](secrets.md#deploy-signing-key).
+
+- *Rotation, two keys during the changeover*: generate the new key on the build
+  machine; add its public half to `deploy.trustedKeys` **beside** the old one;
+  build, sign with the **old** key and deploy (the host now trusts both); move
+  signing to the new key; remove the old public half; build, sign with the **new**
+  key and deploy; destroy the old secret key. Check after each deploy that `nix
+  config show trusted-public-keys` on the host lists what you expect.
+- *Loss*: no new closure can be signed with that key. If a second trusted key was
+  kept (the documented suggestion: an offline spare, trusted from the first
+  install), sign with it and rotate. Otherwise use the bootstrap route above for one
+  update that trusts a new key.
+- *Leak*: copying still needs the `operator` login and activation still needs
+  `sudo`, so a leaked key alone does not reach a host; rotate as above.
 
 ## 2. The app host procedure
 
@@ -214,7 +419,23 @@ archive is not the kept build (`platform/website-release.nix`). Nothing changed 
 the host: stop. Evidence: the build is what the VM checks build; READ for a real host.
 
 **Step 4. Copy the closure to the host**, by the mechanism decided at U0, and check
-it arrived:
+it arrived. With the deploy path (section 1.5), on the build machine, from a
+checkout at the new revision:
+
+```sh
+platform/production/terrace-deploy.sh --key <secret signing key file> --address <host address> \
+  --identity <operator ssh key> --known-hosts <file pinning the host key> <new toplevel>
+```
+
+`--known-hosts` is required and pins the host's SSH key: make the file from the
+secrets store's copy of the key the host was installed with (no trust on first use):
+`printf '%s %s\n' <host address> "$(cut -d' ' -f1,2
+"$TERRACE_SECRETS_STORE/hosts/<host>/ssh_host_ed25519_key.pub")" >known_hosts`. The
+helper refuses a signing key file that group or others can read, resolves
+`./result` to its store path, signs, copies as `operator` and prints the step 7
+command with that store path; RAN IN VM (the VM proof built the file the same way
+from the staged key). A copy that fails part-way leaves the paths already copied in
+the host's store: signed, unused, harmless. Then, on the host:
 
 ```sh
 test -e <new toplevel>/bin/switch-to-configuration
@@ -224,8 +445,9 @@ Worked: the test succeeds on the host. The copy adds the new closure to the host
 store, next to every earlier generation (nothing collects them, H8): check free space
 on the root filesystem first (`df -h /nix/store`); the space a closure needs is not
 measured. Failed: nothing changed on the host and the site is still up; stop and fix
-the mechanism. Not determined from the repository;
-not exercised anywhere.
+the mechanism. Evidence: with the deploy path, RAN IN VM (signed copies accepted,
+unsigned and foreign-signed copies refused by the host's Nix daemon, section 1.5);
+the space a closure needs: not measured.
 
 **Step 5. Record where you start, and check the window.**
 
@@ -335,8 +557,18 @@ anywhere. The retention reasoning: not exercised anywhere.
 ### Part C. Activate the new generation
 
 **Step 7. U3 if step 2 found a Keycloak or Headscale version change, then
-activate.** Standard NixOS, READ from the toplevel's layout, never run on this
-profile:
+activate.** With the deploy path (section 1.5), from the operator machine:
+
+```sh
+ssh -t operator@<app address> sudo terrace-production activate <new toplevel>
+```
+
+It runs the checks of section 1.5 and then exactly the three lines below inside the
+`terrace-switch` unit, and records the result; add `--accept-upstream-schema-change`
+only after U3, and `--boot` for a kernel change (then section 5). RAN IN VM for the
+app role, `switch` mode, a new release. Without the deploy path, or for a host
+installed without a deploy key, the standard NixOS commands, READ from the
+toplevel's layout:
 
 ```sh
 nix-env --profile /nix/var/nix/profiles/system --set <new toplevel>
@@ -373,15 +605,14 @@ profile (below). After step 10 it is the wrong choice: a reboot would bring back
 old generation onto the migrated database (section 4.3). If you use it, run the
 `nix-env --set` line and `switch-to-configuration switch` before step 10.
 
-What activation does to this host (READ; which units a switch restarts, starts or
-leaves is systemd and NixOS behaviour that no test here observes on the production
-profile):
+What activation does to this host (READ unless marked RAN IN VM: the deploy VM
+rehearsal observed a re-pin from `680ad56` to `dd1aef7` on the app role):
 
-- Every unit whose definition changed and that runs is restarted. On a re-pin the
-  CMS and website units change (new bundle paths), but after step 6 they are not
-  running; whether the switch starts them anyway, because the active
-  `terrace-production.target` wants them, is not determined here (see the gate
-  below for what happens if it does). Keycloak and PostgreSQL restart if their
+- Every unit whose definition changed and that runs is restarted. **On a re-pin the
+  switch starts the CMS and the website even though step 6 stopped them**: their
+  definitions changed (new bundle paths) and the active `terrace-production.target`
+  wants them (RAN IN VM, three times). What follows is in the gate item below.
+  Keycloak and PostgreSQL restart if their
   package or settings changed; nginx if its configuration changed (a few seconds
   without HTTPS, as in [TLS](tls.md#switching-a-live-manual-host-to-acme)).
 - `sops-install-secrets.service` runs with the new manifest
@@ -396,24 +627,48 @@ profile):
 - **On a re-pin the CMS cannot start until step 10.** The production profile adds
   `ConditionPathExists` on the marker (`platform/production/app.nix`), and the
   marker exists, so the CMS runs its gate and fails: `CMS migration gate is closed;
-  run the explicit migration unit for this release.` After three attempts in ten
-  minutes it stays failed (`StartLimitBurst = 3`, `platform/website.nix`). The
-  sweep has the same gate (READ); the operator tool's refusal with that message is
-  VM rehearsal (below). The **website has no such gate**: `terrace-web.service`
-  checks only the identity settings (`identityGuard "web"`) and the input unit
-  checks that both bundles carry the new revision, so if anything starts it, it
-  runs the new bundle while the CMS is down (READ; section 5, H7).
+  run the explicit migration unit for this release.` It restarts (`Restart =
+  "on-failure"`, 10 s apart) and after three attempts in ten minutes stays failed
+  with `start-limit-hit` (`StartLimitBurst = 3`, `platform/website.nix`); RAN IN VM,
+  within about 30 s. The sweep has the same gate (READ); the operator tool's refusal
+  with that message is VM rehearsal (below). The **website has no such gate** (H7):
+  `terrace-web.service` checks only the identity settings (`identityGuard "web"`)
+  and the input unit checks that both bundles carry the new revision, so the switch
+  starts the new website bundle while the CMS is down. RAN IN VM: its start waits
+  for its own health check (`/events/`), which fails after about 60 s against the
+  stopped CMS (control process exit 22); it restarts the same way and ends
+  `failed` with `start-limit-hit` about three to four minutes after the switch.
+  Whether it answered visitors meanwhile is not determined.
 - Units and timers are wanted by `terrace-production.target`, not by a boot target
   (`base.nix`); the adopted marker and the boot gate are unchanged by a switch.
 
 Worked: the journal ends without errors; `readlink -f /run/current-system` is `<new
 toplevel>`; `systemctl --failed` lists nothing, or only what is expected: on a
-re-pin `terrace-cms.service` (gate) and perhaps `terrace-web.service`, with an
-inventory addition `sops-install-secrets.service`. `switch-to-configuration` exits
-non-zero when a unit failed (standard behaviour, not tried here), so an expected
-failure makes the run "fail": read the list, do not retry blindly. If
-`terrace-web.service` is active on a re-pin, stop it (`systemctl stop
-terrace-web.service`) until step 11.
+re-pin `terrace-cms.service` (gate) and, a few minutes later, `terrace-web.service`;
+with an inventory addition `sops-install-secrets.service`. `switch-to-configuration`
+exits 4 when a unit failed to start (RAN IN VM on a re-pin). `terrace-production
+activate` accepts that exit **only** when the migration marker does not hold the new
+release's revision (the gate is closed), the CMS or the website is failed, and no
+other unit of any type (service, timer, mount, socket, target...) is failed or in
+`auto-restart`, nor named in `switch-to-configuration`'s own "the following units
+failed" line. It then exits 0 and records `switched; down until the CMS migration:
+<units>`, with `failedUnits` (the CMS or website, failed), `startingUnits` (the CMS
+or website still retrying) and `unexpectedUnits` (empty). A unit outside the CMS and
+website that is merely `activating` when the switch has returned is not counted:
+`switch-to-configuration` waits for the jobs it queued, so such a unit was started by
+something else, such as a timer. Anything else, an inventory addition's
+`sops-install-secrets` included, is recorded `failed (exit 4)` with every
+unexpected unit named: read the list, do not retry blindly. RAN IN VM: the gated
+switches were recorded as switched with the CMS failed and the website failed or
+still starting (the test accepts either; in the passing run every gated switch
+recorded the CMS failed and the website still starting), and a gated switch
+whose system also carried a unit that fails and restarts was recorded `failed (exit
+4)` naming that unit; unit tests for a failed timer, a service in `auto-restart`
+and a unit named only in the switch's own list. **Stop the website now**
+(`systemctl stop terrace-web.service`) and keep it stopped until step 11; left alone
+it serves the new bundle without its CMS until it gives up. Any later `activate` or
+`rollback` that changes the release again refuses while the CMS or the website is
+still retrying, and names `systemctl stop terrace-cms.service terrace-web.service`.
 
 Failed: anything else in `systemctl --failed` (Keycloak, PostgreSQL, nginx, sshd,
 an unexpected `sops-install-secrets`). Without a Keycloak or Headscale version
@@ -425,9 +680,15 @@ Evidence: a live `switch-to-configuration test` on a running, adopted production
 relay, between two closures prepared in one build (a specialisation), is VM
 rehearsal (synthetic data): `platform/production/tls-test.nix`, subtest "relay:
 live switch from ACME to the manual certificate and back, never the placeholder"
-(clients saw only valid certificates, no failed units). A new closure from a
-different revision, the app role, `switch`, `boot`, the system profile and running it
-under `systemd-run`: not exercised anywhere. The operator tool refused with the
+(clients saw only valid certificates, no failed units). RAN IN VM
+(`deploy-test.nix`): on the app role, a closure built with a different website
+release and Womb revision, registered in the system profile and switched with
+`switch` under `systemd-run --unit=terrace-switch --collect --wait` by
+`terrace-production activate`, with the SSH session killed mid-switch; on a re-pin
+the switch started the stopped CMS and website, the new CMS failed with the gate
+message at its start limit, and the ungated website failed its health check and
+ended at its start limit minutes later. `boot`, the
+relay role and a reboot into the new generation: not exercised anywhere. The operator tool refused with the
 marker moved away: VM rehearsal (synthetic data), `platform/website-test.nix`, the
 website module only.
 
@@ -599,7 +860,10 @@ timeout. Then:
   **restore** the step 6 snapshot onto a replacement (U8, section 4.3). A blind
   retry of step 10 is not a decision the operator takes alone.
 - **Fixing forward does not restart this procedure from the top.** Build and copy
-  the corrected closure (steps 3 and 4), then go straight to activation (step 7),
+  the corrected closure (steps 3 and 4), stop the CMS and website if either is
+  still retrying (`systemctl stop terrace-cms.service terrace-web.service`;
+  `activate` refuses a release change until they are), then go straight to
+  activation (step 7),
   secrets (step 8) if needed, the realm (step 9) and the migration (step 10). Do
   **not** run step 5's checks as a gate (its marker check fails by design in this
   state) and do **not** run step 6 again the same day: a second snapshot today
@@ -614,8 +878,15 @@ Evidence: VM rehearsal (synthetic data), `platform/website-test.nix`, subtest
 unchanged, refused starts change nothing, an accepted start stops the CMS, website
 and a running sweep and leaves the CMS neither active nor failed. On restored data
 with the **same** release: the ledger unchanged across the migration, production VM
-check (`platform/production/test.nix`, replacement subtest). **A migration of data
-written by an older release (a real upgrade), a failing migration and the time
+check (`platform/production/test.nix`, replacement subtest). **A real upgrade**: RAN
+IN VM (`platform/production/deploy-test.nix`, synthetic data): a host adopted at the
+previous kept release `680ad56` (eleven migrations), with synthetic posts, a redirect,
+media rows and files and a user written into it, activated to the pinned `dd1aef7`
+and migrated: the marker holds the new revision, the ledger equals the new pin's
+list, the only migration applied is the one the new pin adds
+(`20261119_165021_roster_journal`), a second run applies nothing, the tables written
+before are unchanged row for row, the media files are unchanged, and the CMS serves
+again. One release pair, small synthetic data. **A failing migration and the time
 limit: not exercised anywhere**, in this repository or in the website's release CI,
 which migrates an empty database (website `tools/release/README.md` at `dd1aef7`).
 
@@ -765,8 +1036,23 @@ changes, client reconnection after an update: not exercised anywhere.
 
 ### 4.1 What a generation rollback reverts, and what it does not
 
-A rollback activates an older generation (READ: standard NixOS, never run here; run
-the switch detached, as in step 7):
+With the deploy path: `sudo terrace-production rollback` (the checks of section
+1.5, the same `terrace-switch` unit and a record; after a migration it refuses
+unless `--cms-stays-down`). RAN IN VM. **Which generation it picks**: the newest
+generation older than the current one. After an attempt that failed and was rolled
+back, followed by a new activation, that can be the failed attempt's generation;
+nothing checks that the generation it picks ever ran well. So run `sudo
+terrace-production rollback --dry-run` first: it prints the target path and its
+revisions and changes nothing; compare them with `terrace-production status` and
+`nix-env -p /nix/var/nix/profiles/system --list-generations` before the real
+`rollback`. When the boot default is not the running system (after `activate
+--boot`, or a switch that failed after registering), `rollback` cancels that pending
+generation (the running system becomes the boot default again) instead of going
+further back; run it again to go further back. Before any rollback that changes the
+release, stop the CMS and website if they may still be retrying (`systemctl stop
+terrace-cms.service terrace-web.service`; section 4.2). The standard
+NixOS commands it runs, also the way without the deploy path (run the switch
+detached, as in step 7):
 
 ```sh
 nix-env --profile /nix/var/nix/profiles/system --list-generations
@@ -787,13 +1073,25 @@ kept archives (step 3) instead.
 | The secrets manifest and the host tool's inventory | The host ciphertext and the store (they are outside generations, `secrets.nix`): pushed or rotated values stay |
 | | The backup repository: snapshots taken and snapshots pruned; ACME state in `/var/lib/acme`; media and outbox files; the adopted marker |
 
+RAN IN VM (`deploy-test.nix`, after the upgrade migration and `rollback
+--cms-stays-down`): reverted, the release revision the gate expects (the running
+manifest) and the CMS unit definition (it names the previous bundle again); not
+reverted, the marker (still the new revision), the CMS ledger and schema, the media
+files, the host ciphertext, the adopted marker and the timer hold markers. The rest
+of the table: READ.
+
 ### 4.2 Case A: nothing irreversible ran
 
 Step 10 not started (or the revision did not change), no realm `apply`, no Keycloak,
 Headscale or PostgreSQL version change. Then a generation rollback is the whole way
 back:
 
-1. Roll back as in 4.1.
+1. Stop the CMS and the website first: after a gated activation (step 7) they can
+   still be retrying (`Restart=on-failure`), and `terrace-production rollback`
+   refuses a release change while either is active, activating or reloading,
+   naming the command: `systemctl stop terrace-cms.service terrace-web.service`
+   (RAN IN VM: refused while the CMS retried, then accepted after the stop). Then
+   roll back as in 4.1.
 2. App: run "restart after quiesce" (step 6). The marker still holds the old
    revision, which the old generation's gate expects. Relay: run only `systemctl
    start terrace-backup.timer terrace-backup-check.timer` (R1 stopped nothing else;
@@ -806,17 +1104,30 @@ back:
    the old revision.
 4. Step 12's checks; the step 5 record is what "back" looks like.
 
+Evidence: RAN IN VM (`deploy-test.nix`, "case A"): after activating the next release
+and before its migration, `terrace-production rollback` ran generation 1 again;
+"restart after quiesce" brought the previous CMS and website back, serving the
+populated data, with the old marker and ledger unchanged. Items 3 and the relay:
+not exercised anywhere.
+
 **This case does not cover a step 10 that started and failed**: the marker then
 still holds the old revision, and item 2 would start the old CMS on a database that
-may be partly migrated. That is case B.
-
-Evidence: not exercised anywhere.
+may be partly migrated. That is case B. `terrace-production rollback` refuses it
+whenever the ledger records a migration the old release does not list (unit test;
+a failed migration is not exercised in a VM).
 
 ### 4.3 Case B: a migration started, or an upstream schema changed
 
 **After a successful step 10**, the old generation's gate expects the old revision
-and the marker holds the new one: the old CMS refuses to start (READ:
-`requireMigration`). That refusal is the protection; do not defeat it. **After a
+and the marker holds the new one: the old CMS refuses to start (RAN IN VM,
+`deploy-test.nix`: after the upgrade migration on populated data, `terrace-production
+rollback` refused, `rollback --cms-stays-down` ran the previous generation, and its
+CMS failed with `CMS migration gate is closed`; then, after `systemctl stop
+terrace-cms.service terrace-web.service` (the old CMS and website were still
+retrying, and `activate` refuses a release change until they are stopped),
+activating the new generation again brought the site back with the data unchanged).
+That refusal is the protection; do
+not defeat it. **After a
 failed step 10** there is no such protection on the old generation (step 10,
 "Failed inside `bin/migrate`"): stay on the new generation with the CMS, website,
 sweep and tools stopped until the owner decides.
@@ -906,10 +1217,12 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
 - **H2. The pre-update snapshot can be pruned within about two days** if a second
   snapshot of the host is taken the same day (step 6): a retry of step 6, an extra
   backup, or a scheduled run that had not happened yet. There is no pin.
-- **H3. No path for a closure to reach an installed production host.** Root SSH is
+- **H3. No path for a closure to reach an installed production host** unless the
+  module it was installed with sets `deploy.trustedKeys` (section 1.5). Root SSH is
   refused, `operator` is not a trusted Nix user and signatures are required (RAN
-  defaults). Without U0 settled in the module a host is installed with, the first
-  update needs a console or a reinstall.
+  defaults, and RAN IN VM). Without U0 settled in the module a host is installed
+  with, the first update needs another route (section 1.5, "Bootstrap"), a console
+  or a reinstall.
 - **H4. A new generation that does not boot.** The profile disables the emergency
   shell (`systemd.enableEmergencyMode = false`, `base.nix`); choosing the previous
   boot entry needs the provider's console, and how to reach it is **not determined
@@ -926,10 +1239,15 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
   `platform/production/app.nix` and [website host](website-host.md#runtime-and-migration-boundary)
   ("Startup rejects a missing/different revision marker") read as if both services
   were gated; only the CMS, its sweep and the operator tools are
-  (`requireMigration` in `platform/website.nix`). After a re-pin the website can run
-  the new bundle against a gated CMS; after a rollback, the old bundle against a CMS
-  that refuses to start. Neither loses data (the website holds no database
-  credential); what it serves meanwhile is not determined.
+  (`requireMigration` in `platform/website.nix`). After a re-pin the website runs
+  the new bundle against a gated CMS: RAN IN VM, the activation's switch starts it,
+  it fails its health check against the stopped CMS and restarts until its start
+  limit, three to four minutes; `activate` records it among `startingUnits` and says
+  to stop it. After a forced rollback the same happens with the old bundle against a
+  CMS that refuses to start (RAN IN VM). Neither loses data (the website holds no
+  database credential); what it serves meanwhile is not determined. A proposed
+  follow-up, not decided: give the website the CMS's `requireMigration` gate
+  ([backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24)).
 - **H8. Generations accumulate.** No garbage collection and no boot-entry limit by
   default (RAN); every update adds a boot entry to the EFI system partition, whose
   size the hardware module sets. Collecting garbage, by hand, removes rollback
@@ -948,19 +1266,20 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
 | --- | --- | --- | --- |
 | 2. Classify | none | none | READ only |
 | 3. Build | `infra/nixos/production-config.nix`; every production VM check builds the same roles | Evaluation invariants, archive hashes | VM rehearsal (synthetic data) for a fresh host; a build for a real private module: not exercised anywhere |
-| 4. Copy the closure | `copy_store` in `infra/nixos/rescue_install.py` (root, Rescue system, install only) | Install-time copy | Not an update path. Copy to an installed production host: not exercised anywhere |
+| 4. Copy the closure | `platform/production/terrace-deploy.sh` (opt-in deploy path); `copy_store` in `infra/nixos/rescue_install.py` (root, Rescue system, install only) | Signed copy as `operator` accepted; unsigned and foreign-signed copies refused by the host's Nix daemon | RAN IN VM (`deploy-test.nix`, app role, operator guest as build machine). The Rescue copy is not an update path. A real host and the relay: not exercised anywhere |
 | 5. Record state | `terrace-production status` in `base.nix`; `test.nix` asserts only the "adoption as new not finished" string | That string | The `adopted <time>` and `active` outputs: READ. The window checks: not exercised anywhere |
 | 6. Quiesce, back up | "back up, destroy the host" subtest, `test.nix` | Backup succeeds, snapshot listed | VM rehearsal (synthetic data); that subtest also stops Keycloak and nginx. Keeping Keycloak up, stopping and re-arming the backup timers, retention of the pre-update snapshot: not exercised anywhere |
-| 7. Activate | `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | No placeholder served, no failed units | VM rehearsal (synthetic data), relay only, same build. A new revision's closure, `switch`, `boot`, `systemd-run`, the system profile, the app role: not exercised anywhere |
-| 7. Gate closes on a re-pin | `requireMigration`; the tool refusal in `website-test.nix` | `CMS migration gate is closed` from the tool | VM rehearsal (synthetic data) for the tool, website module with the marker moved away, not a re-pin. The CMS and sweep refusals: READ |
+| 7. Activate | `terrace-production activate` (`deploy-test.nix`); `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | The refusals of section 1.5 with controls; the new generation runs, its record and `status`; the switch completes after the SSH client is killed | RAN IN VM for the app role, `switch` mode, a new release; the relay's same-build `test` switch as before. `boot`, a reboot into a new generation, the relay's update: not exercised anywhere |
+| 7. Gate closes on a re-pin | `requireMigration`; the tool refusal in `website-test.nix`; the re-pin in `deploy-test.nix` | `CMS migration gate is closed` from the tool; on a real re-pin the CMS's gate message, its `start-limit-hit`, the website's health-check failure and start limit, the switch's exit 4 recorded as `switched; down until the CMS migration` | VM rehearsal (synthetic data): the tool with the marker moved away (website module), and the CMS and website on a re-pin of the production app role. The sweep refusal: READ |
 | 8. Secrets after activation | `cmd_install`, `cmd_verify`; "rotate the intake secret" in `test.nix` | Push, verify, CMS and website restarted | VM rehearsal (synthetic data) for a push to an adopted host; an inventory change, a push with the CMS stopped: not exercised anywhere |
 | 9. Realm | "realm reconciliation" in `identity-admin-test.nix` | One planned change applied; users and credentials unchanged; converged; back to pinned keeps roles, clients, mappers, scopes | VM rehearsal (synthetic data); re-pin simulated by rewriting the tool's configuration |
-| 10. Migrate | "explicit migration gate" in `website-test.nix`; replacement subtest in `test.nix` | Pinned ledger; idempotent; refusals stop nothing; accepted migration stops the apps | VM rehearsal (synthetic data) on an empty database and on restored data of the same release. Upgrade of older data, a failed or timed-out migration: not exercised anywhere |
+| 10. Migrate | "explicit migration gate" in `website-test.nix`; replacement subtest in `test.nix`; upgrade in `deploy-test.nix` | Pinned ledger; idempotent; refusals stop nothing; accepted migration stops the apps; upgrade adds exactly the new pin's migration, data unchanged | VM rehearsal (synthetic data) on an empty database, on restored data of the same release, and an upgrade `680ad56` to `dd1aef7` on populated synthetic data. A failed or timed-out migration: not exercised anywhere |
 | 11. Start | `website-test.nix` (`reset-failed`, start after migrations); persistent sweep timer catch-up | Units active; missed sweep runs at once | VM rehearsal (synthetic data), website module |
 | 12. Checks | `terrace-tls check` (`tls-test.nix`), `verify` (`test.nix`), `realm plan` (`identity-admin-test.nix`) | Each check's own output | VM rehearsal (synthetic data), each separately; together after an update: not exercised anywhere |
 | 13. Re-arm timers | none | none | Not exercised anywhere |
 | R1-R5 Relay | "production relay role" subtest in `test.nix`; the relay switch in `tls-test.nix` | Adoption, HTTPS, backup; live switch | VM rehearsal (synthetic data) for boot and a same-build switch; an update: not exercised anywhere |
-| 4.1-4.4 Rollback | none, except the realm back-to-pinned block | Realm: kept items, exact-list removals | Not exercised anywhere, except the realm behaviour: VM rehearsal (synthetic data) |
+| 4.1-4.3 Rollback | `terrace-production rollback` (`deploy-test.nix`) | Case A: previous site back, data and ledger unchanged. Case B: refused without `--cms-stays-down`; with it, the previous CMS fails its gate; what reverts and what does not (4.1) | RAN IN VM, app role. Restore onto a replacement (4.3, item 2), the relay, a rollback after a Keycloak or Headscale change: not exercised anywhere |
+| 4.4 Realm | the realm back-to-pinned block | Realm: kept items, exact-list removals | VM rehearsal (synthetic data) |
 | 5. Reboot into a new generation | reboot subtests in `test.nix`, `tls-test.nix` (same generation) | Writers start alone; secrets return; certificate kept | VM rehearsal (synthetic data) for the same generation only |
 
 ## 7. What this document does not cover
@@ -983,6 +1302,16 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
   a Keycloak upgrade: not determined from the repository.
 
 ## 8. Drills to add
+
+Status 2026-11-24: the deploy VM rehearsal (`platform/production/deploy-test.nix`,
+section 1.5) covers drill 2 (both refusals), drill 3 (one release pair, small
+synthetic data), drill 4 (the CMS gate message at its start limit; the website,
+started ungated by the switch, recorded until it fails at its start limit; the sweep
+and `terrace-cms-tool`: not in it), drill 5, drill 6 without its H1 part (the old
+migration unit is never started) and drill 15 (the session dropped by killing the
+SSH client; the switch there does not restart sshd). Drill 1 is covered for the app
+role only, by its steps 3, 4, 7, 10 and 11 (no backup, realm or secrets step). The
+others are open. It is not a drill of this whole written procedure.
 
 Not implemented here. A later task would add a VM drill of **this written procedure**
 on the production profile, as a script whose commands are taken from this document,

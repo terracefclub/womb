@@ -93,6 +93,14 @@ in {
       writerTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
       # Off after `adopt --restored` until `terrace-production arm-timers` (docs/restore-promotion.md, steps 15 and 21).
       restoreHeldTimers = ["terrace-backup" "terrace-backup-check" "terrace-backup-freshness"];
+      manifestExtra = {
+        website = null;
+        versions = {
+          keycloak = null;
+          postgresql = null;
+          headscale = config.services.headscale.package.version;
+        };
+      };
     };
     terrace.relay = {
       enable = true;

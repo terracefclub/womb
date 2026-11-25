@@ -6,6 +6,9 @@ state in a file and honours the held timers' ConditionPathExists=! the way syste
 leaves the timer inactive). The production VM proof runs the real script.
 Run: python3 -B tests/platform/test_terrace_production.py -v
 """
+import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -16,7 +19,7 @@ import unittest
 
 SCRIPT = Path(os.environ.get("TERRACE_PRODUCTION_SCRIPT", Path(__file__).resolve().parents[2] / "platform/production/terrace-production.sh"))
 BASH = shutil.which("bash") or "/bin/bash"
-TOOLS_PATH = ":".join(sorted({os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("bash", "cat", "rm", "install", "chmod", "date", "grep", "tr")}))
+TOOLS_PATH = ":".join(sorted({os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("bash", "cat", "rm", "install", "chmod", "date", "grep", "tr", "readlink", "jq", "sort", "comm", "tail", "head", "ln", "tee", "wc", "python3")}))
 WRITERS = ["postgresql", "nginx", "terrace-cms"]
 APP_TIMERS = ["terrace-cms-sweep", "terrace-backup", "terrace-backup-check", "terrace-backup-freshness", "terrace-identity-health"]
 BACKUP = ["terrace-backup", "terrace-backup-check", "terrace-backup-freshness"]
@@ -41,10 +44,18 @@ case "$1" in
       "-p Result --value") echo success ;;
       *) exit 99 ;;
     esac ;;
-  is-failed) exit 1 ;;
+  is-failed) [[ $2 == --quiet && $(state "$3") == failed ]] ;;
   is-active)
     if [[ $2 == --quiet ]]; then [[ $(state "$3") == active ]]; else state "$2"; [[ $(state "$2") == active ]]; fi ;;
-  reset-failed) ;;
+  reset-failed) echo "$*" >>"$FAKE_DIR/reset-failed.log" ;;
+  list-units)
+    if [[ " $* " == *" terrace-cms-tool-* "* ]]; then
+      [[ ! -e $FAKE_DIR/tools-fail ]] || exit 1
+      cat "$FAKE_DIR/tools" 2>/dev/null || true
+    else
+      # Every unit after a switch: name load active sub description.
+      cat "$FAKE_DIR/failed-units" 2>/dev/null || true
+    fi ;;
   start)
     shift
     for unit in "$@"; do
@@ -61,11 +72,11 @@ esac
 '''
 
 
-class TerraceProduction(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.dir = Path(directory.name)
+        self.dir = Path(directory.name).resolve()
         self.bin = self.dir / "bin"
         self.units = self.dir / "units"
         self.state = self.dir / "var-lib-terrace-production"
@@ -90,14 +101,26 @@ class TerraceProduction(unittest.TestCase):
         self.hold = self.state / "timers-held"
         self.service_hold = self.state / "service-timers-held"
         self.adopted = self.state / "adopted"
+        # The deploy path's paths (the host's /nix/store, system profile, /run/current-system and /run/booted-system).
+        self.store = self.dir / "store"
+        self.profiles = self.dir / "profiles"
+        for path in (self.store, self.profiles):
+            path.mkdir()
+        self.profile = self.profiles / "system"
+        self.current = self.dir / "current-system"
+        self.booted = self.dir / "booted-system"
+        self.marker = self.dir / "migrated-revision"
+        self.deploy_keys = ["terrace-test-deploy-1:" + "A" * 43 + "="]
 
     def wrapper(self, timers, held, service_held):
         self.conditions.write_text("".join(f"{t}.timer={self.hold}\n" for t in held) + "".join(f"{t}.timer={self.service_hold}\n" for t in service_held))
         arrays = {"targets": ["primary"], "writers": WRITERS, "helpers": ["keycloakPostgreSQLInit"], "conditional": ["terrace-cms"],
-                  "timers": timers, "held": held, "service_held": service_held}
+                  "timers": timers, "held": held, "service_held": service_held, "deploy_keys": self.deploy_keys,
+                  "busy": ["terrace-switch", "terrace-backup", "terrace-backup-check", "terrace-cms-migrate", "terrace-cms-sweep"], "quiesce": ["terrace-cms", "terrace-web"]}
         settings = {"restored": self.restored, "populated": self.populated, "adopted": self.adopted, "adopting": self.state / "adopting",
                     "replacement": self.dir / "replacement", "state_dir": self.state, "hold": self.hold, "service_hold": self.service_hold,
-                    "hostname": "app", "stability_seconds": "15"}
+                    "hostname": "app", "stability_seconds": "15", "role": "app", "instance": "rehearsal", "cms_marker": self.marker,
+                    "store_dir": self.store, "profile": self.profile, "current_system": self.current, "booted_system": self.booted}
         prelude = "".join(f"{k}={shlex.quote(str(v))}\n" for k, v in settings.items()) + "".join(f"{k}=({' '.join(shlex.quote(x) for x in v)})\n" for k, v in arrays.items())
         path = self.dir / "terrace-production"
         path.write_text(prelude + SCRIPT.read_text())
@@ -106,7 +129,7 @@ class TerraceProduction(unittest.TestCase):
 
     def run_tool(self, *args, timers=APP_TIMERS, held=BACKUP, service_held=("terrace-cms-sweep",), uid="0"):
         script = self.wrapper(list(timers), list(held), list(service_held))
-        env = {"PATH": f"{self.bin}:{TOOLS_PATH}", "FAKE_UID": uid, "FAKE_UNITS": str(self.units), "FAKE_LOG": str(self.log),
+        env = {"PATH": f"{self.bin}:{TOOLS_PATH}", "FAKE_UID": uid, "FAKE_DIR": str(self.dir), "BASH_BIN": BASH, "FAKE_UNITS": str(self.units), "FAKE_LOG": str(self.log),
                "FAKE_CONDITIONS": str(self.conditions), "FAKE_WRITERS": " ".join(WRITERS), "FAKE_TIMERS": " ".join(timers)}
         return subprocess.run([BASH, "-euo", "pipefail", str(script), *args], capture_output=True, text=True, timeout=30, env=env)
 
@@ -114,6 +137,8 @@ class TerraceProduction(unittest.TestCase):
         path = self.units / unit
         return path.exists() and path.read_text().strip() == "active"
 
+
+class TerraceProduction(Harness):
     def adopt_restored(self, **kwargs):
         self.restored.write_text("RECONCILIATION OK\n")
         self.populated.write_text("18\n")
@@ -220,6 +245,425 @@ class TerraceProduction(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("the writers are not running", result.stderr)
         self.assertTrue(self.hold.exists())
+
+
+OLD_REV, NEW_REV = "1" * 40, "2" * 40
+M_OLD = ["20261028_080047", "20261119_063012_link_indexes"]
+M_NEW = M_OLD + ["20261119_165021_roster_journal"]
+DEPLOY_STUBS = {
+    # Valid unless listed in $FAKE_DIR/invalid; a closure is the path plus the lines of its `closure` file.
+    "nix-store": r"""case $1 in
+  --check-validity) if grep -qxF "$2" "$FAKE_DIR/invalid" 2>/dev/null; then exit 1; fi ;;
+  -qR) p=$(readlink -f "$2"); echo "$p"; cat "$p/closure" 2>/dev/null || true ;;
+  *) exit 99 ;;
+esac
+""",
+    # `nix store verify`: a path listed in $FAKE_DIR/unsigned has no valid signature by a trusted key.
+    "nix": r"""echo "$*" >>"$FAKE_DIR/nix.log"
+rc=0
+for a in "$@"; do if grep -qxF -- "$a" "$FAKE_DIR/unsigned" 2>/dev/null; then echo "path '$a' is untrusted" >&2; rc=2; fi; done
+exit $rc
+""",
+    "nix-env": r"""profile=$2
+case $3 in
+  --set) n=0; for l in "$profile"-*-link; do [[ -L $l ]] || continue; k=${l%-link}; k=${k##*-}; (( k > n )) && n=$k; done; n=$((n + 1))
+         ln -s "$4" "$profile-$n-link"; ln -sfn "${profile##*/}-$n-link" "$profile" ;;
+  --switch-generation) [[ -L $profile-$4-link ]] || exit 1; ln -sfn "${profile##*/}-$4-link" "$profile" ;;
+  *) exit 99 ;;
+esac
+""",
+    # Runs the unit's command in the foreground, as `--wait` would, and logs how it was asked.
+    "flock": r"""exec python3 -c 'import fcntl, sys
+try:
+    fcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)' "$@"
+""",
+    "systemd-run": r"""echo "$*" >>"$FAKE_DIR/systemd-run.log"
+# A decision made against a state that changes before the unit runs: another activation got there first.
+if [[ -e $FAKE_DIR/race ]]; then ln -sfn "$(cat "$FAKE_DIR/race")" "$FAKE_DIR/current-system"; fi
+while [[ $1 != -- ]]; do shift; done
+shift
+exec "$BASH_BIN" -euo pipefail "$@"
+""",
+    # psql as postgres: the CMS database exists while $FAKE_DIR/ledger does; its lines are the ledger.
+    "runuser": r"""q=""
+while (( $# )); do [[ $1 == -c ]] && q=$2; shift; done
+case $q in
+  *pg_database*) if [[ -e $FAKE_DIR/ledger ]]; then echo 1; else echo 0; fi ;;
+  *to_regclass*) echo t ;;
+  *payload_migrations*) cat "$FAKE_DIR/ledger" ;;
+  *) exit 99 ;;
+esac
+""",
+}
+
+
+class DeployPath(Harness):
+    """activate, rollback and the deploy part of status, against fake systems in a temporary store."""
+
+    def setUp(self):
+        super().setUp()
+        for name, body in DEPLOY_STUBS.items():
+            path = self.bin / name
+            path.write_text(f"#!{BASH}\n" + body)
+            path.chmod(0o700)
+        self.old = self.system("old")
+        (self.profiles / "system-1-link").symlink_to(self.old)
+        self.profile.symlink_to("system-1-link")
+        self.current.symlink_to(self.old)
+        self.booted.symlink_to(self.old)
+        self.new = self.system("new", website=NEW_REV, migrations=M_NEW, closure=[str(self.store / ("b" * 32 + "-cms-new")), str(self.store / ("c" * 32 + "-glibc"))])
+        # glibc is shared with the running system; only the CMS and the toplevel are new.
+        (self.old / "closure").write_text(str(self.store / ("c" * 32 + "-glibc")) + "\n")
+        self.set_unit("postgresql.service", "active")
+        self.marker.write_text(OLD_REV + "\n")
+        self.ledger(M_OLD)
+
+    def system(self, name, role="app", host="app", instance="rehearsal", website=OLD_REV, migrations=M_OLD, keycloak="26.4.1", postgresql="18.1", kernel="1",
+               closure=(), switch_rc=0, manifest=True, switchable=True, reported=""):
+        path = self.store / (hashlib.sha1(name.encode()).hexdigest()[:32] + "-nixos-system-" + name)
+        (path / "etc" / "terrace").mkdir(parents=True)
+        for item in ("kernel", "initrd", "kernel-modules"):
+            target = self.store / f"{item}-{kernel}"
+            target.touch()
+            (path / item).symlink_to(target)
+        if switchable:
+            (path / "bin").mkdir()
+            (path / "bin" / "switch-to-configuration").write_text(
+                f"#!{BASH}\necho \"{name} $1\" >>\"$FAKE_DIR/switch.log\"\n"
+                + (f"echo 'warning: the following units failed: {reported}'\n" if reported else "")
+                + ""
+                # Exit 4 is "switched, some units failed"; any other failure models the boot loader step, before the switch.
+                f"if [[ $1 == switch && ( {switch_rc} == 0 || {switch_rc} == 4 ) ]]; then ln -sfn {shlex.quote(str(path))} \"$FAKE_DIR/current-system\"; fi\nexit {switch_rc}\n")
+            (path / "bin" / "switch-to-configuration").chmod(0o700)
+        if manifest:
+            (path / "etc" / "terrace" / "system.json").write_text(json.dumps({
+                "schema": 1, "role": role, "hostName": host, "instance": instance, "wombRevision": hashlib.sha1(name.encode()).hexdigest(),
+                "website": {"revision": website, "migrations": migrations}, "versions": {"keycloak": keycloak, "postgresql": postgresql, "headscale": None}}))
+        (path / "closure").write_text("".join(line + "\n" for line in closure))
+        return path
+
+    def set_unit(self, unit, state):
+        (self.units / unit).write_text(state + "\n")
+
+    def ledger(self, names):
+        (self.dir / "ledger").write_text("".join(name + "\n" for name in names))
+
+    def generation(self):
+        return os.readlink(self.profile)
+
+    def records(self):
+        path = self.state / "deployments.log"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def accepted(self, *args, **kwargs):
+        result = self.run_tool(*args, **kwargs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def refused(self, needle, *args, **kwargs):
+        before = (self.generation(), os.readlink(self.current), len(self.records()))
+        result = self.run_tool(*args, **kwargs)
+        self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
+        self.assertIn(needle, result.stderr)
+        self.assertEqual((self.generation(), os.readlink(self.current), len(self.records())), before, "a refusal changed something")
+        self.assertFalse((self.dir / "systemd-run.log").exists(), "a refusal started the switch unit")
+        return result
+
+    def test_activate_then_rollback_through_the_switch_unit(self):
+        out = self.accepted("activate", str(self.new)).stdout
+        self.assertIn("Signatures: 2 new path(s) verified against 1 trusted deploy key(s).", out)
+        verify = (self.dir / "nix.log").read_text().split()
+        self.assertEqual(verify[:7], ["--extra-experimental-features", "nix-command", "store", "verify", "--sigs-needed", "1", "--option"])
+        self.assertEqual(verify[7:9], ["trusted-public-keys", self.deploy_keys[0]])
+        self.assertEqual(sorted(verify[9:]), sorted([str(self.new), str(self.store / ("b" * 32 + "-cms-new"))]), "only paths outside every generation are checked")
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.new)))
+        self.assertEqual((self.dir / "switch.log").read_text(), "new switch\n")
+        self.assertIn("--unit=terrace-switch --collect --service-type=exec --wait", (self.dir / "systemd-run.log").read_text())
+        record = self.records()[-1]
+        self.assertEqual({k: record[k] for k in ("action", "mode", "from", "to", "generationBefore", "generationAfter", "websiteRevision", "result")},
+                         {"action": "activate", "mode": "switch", "from": str(self.old), "to": str(self.new), "generationBefore": "1", "generationAfter": "2",
+                          "websiteRevision": NEW_REV, "result": "success"})
+        status = self.accepted("status").stdout
+        self.assertIn(f"running system: {self.new} (Womb {hashlib.sha1(b'new').hexdigest()}, website {NEW_REV})", status)
+        self.assertIn("generation: 2 (the boot default)\n", status)
+        self.assertNotIn("WARNING", status)
+        self.assertIn(f"previous generation: 1 {self.old} (Womb {hashlib.sha1(b'old').hexdigest()}, website {OLD_REV})", status)
+        self.assertIn("deploy path: on, 1 trusted deploy key(s)", status)
+        self.assertIn('"action":"activate"', status)
+        # Before any migration (case A) the way back is allowed; the switch runs in the same unit.
+        (self.dir / "systemd-run.log").unlink()
+        self.accepted("rollback")
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-1-link", str(self.old)))
+        self.assertEqual(self.records()[-1]["action"], "rollback")
+        self.assertIn("--unit=terrace-switch", (self.dir / "systemd-run.log").read_text())
+        self.assertEqual(self.records()[-1]["generationAfter"], "1")
+        # The older generation is the newest one below the current: nothing older than generation 1.
+        (self.dir / "systemd-run.log").unlink()
+        self.refused("no generation older than the current one (1)", "rollback")
+
+    def test_identity_and_form_of_the_target(self):
+        self.refused("terrace-production: run as root", "activate", str(self.new), uid="1000")
+        for needle, path in [("is not a store path", "relative/path"), ("is not a store path", str(self.new) + "/bin"),
+                             ("is not a store path", str(self.dir / ("d" * 32 + "-x"))), ("does not exist on this host", str(self.store / ("e" * 32 + "-absent")))]:
+            self.refused(needle, "activate", path)
+        (self.dir / "invalid").write_text(str(self.new) + "\n")
+        self.refused("is not a valid path in this host's Nix store", "activate", str(self.new))
+        (self.dir / "invalid").unlink()
+        self.refused("is not a NixOS system", "activate", str(self.system("noswitch", switchable=False)))
+        self.refused("has no Terrace system manifest", "activate", str(self.system("nomanifest", manifest=False)))
+        for kwargs, got in [({"role": "relay"}, "'1 relay app rehearsal'"), ({"host": "other"}, "'1 app other rehearsal'"), ({"instance": "production"}, "'1 app app production'")]:
+            result = self.refused("was built for (schema role host instance)", "activate", str(self.system("wrong-" + "-".join(kwargs.values()), **kwargs)))
+            self.assertIn(got + "; this host is '1 app app rehearsal'", result.stderr)
+        self.refused("is already the running system", "activate", str(self.old))
+        # Control: the same checks accept this host's own new system.
+        self.accepted("activate", str(self.new))
+
+    def test_deploy_path_off_without_a_trusted_key(self):
+        self.deploy_keys = []
+        self.refused("no deploy key is trusted on this host", "activate", str(self.new))
+        self.assertIn("deploy path: off", self.accepted("status").stdout)
+        self.deploy_keys = ["terrace-test-deploy-1:" + "A" * 43 + "="]
+        self.accepted("activate", str(self.new))
+
+    def test_unsigned_paths_are_refused(self):
+        (self.dir / "unsigned").write_text(str(self.store / ("b" * 32 + "-cms-new")) + "\n")
+        result = self.refused("not all carry a valid signature by a trusted deploy key", "activate", str(self.new))
+        self.assertIn("-cms-new' is untrusted", result.stderr)
+        (self.dir / "unsigned").unlink()
+        self.accepted("activate", str(self.new))
+
+    def test_a_running_switch_migration_or_backup_blocks(self):
+        for unit in ["terrace-switch", "terrace-cms-migrate", "terrace-backup"]:
+            self.set_unit(unit + ".service", "active")
+            self.refused(f"{unit}.service is active; wait until it has finished", "activate", str(self.new))
+            self.set_unit(unit + ".service", "inactive")
+        self.accepted("activate", str(self.new))
+
+    def test_a_kernel_change_needs_boot(self):
+        kernel = self.system("kernel", website=NEW_REV, migrations=M_NEW, kernel="2")
+        self.refused("kernel initrd kernel-modules differ(s) from the booted system; repeat with --boot", "activate", str(kernel))
+        out = self.accepted("activate", str(kernel), "--boot").stdout
+        self.assertIn("Generation 2 is the boot default.\nReboot to run it, or cancel it with terrace-production rollback.", out)
+        self.assertEqual((self.dir / "switch.log").read_text(), "kernel boot\n")
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
+        self.assertIn("is not the running system: a reboot boots generation 2. Expected after activate --boot", self.accepted("status").stdout)
+
+    def test_upstream_versions(self):
+        keycloak = self.system("keycloak", website=NEW_REV, migrations=M_NEW, keycloak="26.5.0")
+        self.refused("upstream version change: keycloak 26.4.1 -> 26.5.0", "activate", str(keycloak))
+        postgresql = self.system("postgresql", website=NEW_REV, migrations=M_NEW, postgresql="19.0")
+        self.refused("PostgreSQL major version changes (18.1 -> 19.0)", "activate", str(postgresql), "--accept-upstream-schema-change")
+        minor = self.system("minor", website=NEW_REV, migrations=M_NEW, postgresql="18.2")
+        self.accepted("activate", str(minor))
+        result = self.accepted("activate", str(keycloak), "--accept-upstream-schema-change")
+        self.assertIn("WARNING: upstream version change accepted (U3)", result.stderr)
+
+    def test_a_new_release_needs_the_cms_quiesced(self):
+        for unit in ["terrace-cms", "terrace-web"]:
+            self.set_unit(unit + ".service", "active")
+            self.refused(f"the release changes and {unit}.service is active; quiesce first", "activate", str(self.new))
+            self.set_unit(unit + ".service", "inactive")
+        # The same release (a Nix-only change) needs no quiesce.
+        self.set_unit("terrace-cms.service", "active")
+        self.accepted("activate", str(self.system("same-release")))
+
+    def test_the_ledger_needs_postgresql_when_a_marker_exists(self):
+        self.set_unit("postgresql.service", "inactive")
+        self.refused("PostgreSQL is not running, so the CMS migration ledger cannot be compared", "activate", str(self.new))
+        self.marker.unlink()
+        self.accepted("activate", str(self.new))
+
+    def test_forward_only_migrations(self):
+        self.accepted("activate", str(self.new))
+        # The new release migrated: ledger and marker say so.
+        self.ledger(M_NEW)
+        self.marker.write_text(NEW_REV + "\n")
+        (self.dir / "systemd-run.log").unlink()
+        result = self.refused("the CMS database has migrations the target release does not have (20261119_165021_roster_journal)", "rollback")
+        self.assertIn("--cms-stays-down", result.stderr)
+        result = self.accepted("rollback", "--cms-stays-down")
+        self.assertIn("WARNING: the CMS stays down", result.stderr)
+        self.assertEqual(os.readlink(self.current), str(self.old))
+        # Back to the new release: the ledger is a subset of its list, so no flag.
+        self.accepted("activate", str(self.new))
+
+    def test_a_failed_migration_never_rolls_back_onto_a_newer_schema(self):
+        self.accepted("activate", str(self.new))
+        # bin/migrate recorded the new migration but failed: the marker keeps the OLD revision (H9).
+        self.ledger(M_NEW)
+        (self.dir / "systemd-run.log").unlink()
+        result = self.refused("a failed or partial migration, H9", "rollback", "--cms-stays-down")
+        self.assertIn("Not allowed by any flag", result.stderr)
+        # An unknown migration list on the target refuses any ledger.
+        unknown = self.system("unknown", migrations=None)
+        self.marker.write_text(NEW_REV + "\n")
+        self.refused("records no CMS migration list", "activate", str(unknown), "--cms-stays-down")
+
+    def test_a_failed_switch_is_recorded(self):
+        broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
+        result = self.run_tool("activate", str(broken))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("activate FAILED (exit 1)", result.stderr)
+        self.assertEqual(self.records()[-1]["result"], "failed (exit 1)")
+        # As with nixos-rebuild, the generation is registered before the switch: the boot default moved.
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
+        status = self.accepted("status").stdout
+        self.assertIn(f"WARNING: the boot default, generation 2 ({broken}), is not the running system: a reboot boots generation 2.", status)
+        self.assertIn('"result":"failed (exit 1)"', status)
+
+    def test_a_release_switch_with_the_gate_closed(self):
+        # switch-to-configuration exits 4 when units failed: here the CMS (gate) and website (health check) of a release not yet migrated.
+        gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded failed failed web\n")
+        out = self.accepted("activate", str(gated)).stdout
+        self.assertIn("The CMS gate is closed for this release: terrace-cms.service terrace-web.service stay failed until the migration", out)
+        self.assertNotIn("Still starting", out)
+        record = self.records()[-1]
+        self.assertEqual((record["result"], record["failedUnits"], record["startingUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", ["terrace-cms.service", "terrace-web.service"], []))
+        self.assertIn("reset-failed terrace-cms.service terrace-web.service", (self.dir / "reset-failed.log").read_text())
+        # The website can still be retrying its health check (Restart=on-failure) when the switch returns.
+        self.accepted("rollback")
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded activating auto-restart web\n")
+        out = self.accepted("activate", str(gated)).stdout
+        self.assertIn("Still starting without a gate (H7): terrace-web.service; it retries its health check against the stopped CMS and fails within minutes. "
+                      "Stop it now: systemctl stop terrace-web.service (step 7).", out)
+        record = self.records()[-1]
+        self.assertEqual((record["result"], record["failedUnits"], record["startingUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service", ["terrace-cms.service"], ["terrace-web.service"]))
+
+    def test_other_failed_units_fail_the_switch(self):
+        gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        # Another unit failed too: a failed switch, whatever the CMS does.
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nnginx.service loaded failed failed nginx\n")
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.records()[-1]["result"], "failed (exit 4)")
+        self.assertEqual((self.records()[-1]["failedUnits"], self.records()[-1]["unexpectedUnits"]), (["terrace-cms.service"], ["nginx.service"]))
+        # The CMS failing where its gate is OPEN (the marker holds the target's revision) is a failed switch too.
+        self.marker.write_text(NEW_REV + "\n")
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\n")
+        (self.dir / "systemd-run.log").unlink()
+        self.accepted("rollback")
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual((result.returncode, self.records()[-1]["result"]), (1, "failed (exit 4)"))
+        # Exit 4 with no failed unit listed is not explained either.
+        (self.dir / "failed-units").unlink()
+        self.marker.write_text(OLD_REV + "\n")
+        self.accepted("activate", str(self.old))
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual((result.returncode, self.records()[-1]["result"]), (1, "failed (exit 4)"))
+
+    def test_a_failed_non_service_or_restarting_unit_fails_a_gated_switch(self):
+        cms = "terrace-cms.service loaded failed failed CMS\n"
+        cases = [("terrace-backup.timer loaded failed failed timer\n", "", ["terrace-backup.timer"]),
+                 ("keycloak.service loaded activating auto-restart Keycloak\n", "", ["keycloak.service"]),
+                 ("", "terrace-cms.service, nginx.service", ["nginx.service"])]
+        for index, (extra, reported, unexpected) in enumerate(cases):
+            gated = self.system(f"gated-{index}", website=NEW_REV, migrations=M_NEW, switch_rc=4, reported=reported)
+            (self.dir / "failed-units").write_text(cms + extra)
+            result = self.run_tool("activate", str(gated))
+            record = self.records()[-1]
+            self.assertEqual((result.returncode, record["result"], record["unexpectedUnits"]), (1, "failed (exit 4)", unexpected), (extra, reported))
+            self.assertIn("activate FAILED (exit 4)", result.stderr)
+            (self.dir / "failed-units").write_text("")
+            self.accepted("activate", str(self.old))
+        # Control: a unit merely activating (a timer's job) is not this switch's failure; the switch's own list naming only the CMS is fine.
+        gated = self.system("gated-control", website=NEW_REV, migrations=M_NEW, switch_rc=4, reported="terrace-cms.service")
+        (self.dir / "failed-units").write_text(cms + "terrace-identity-health.service loaded activating start health\n")
+        self.accepted("activate", str(gated))
+        self.assertEqual((self.records()[-1]["result"], self.records()[-1]["unexpectedUnits"]), ("switched; down until the CMS migration: terrace-cms.service", []))
+
+    def test_one_command_at_a_time(self):
+        lock = self.state / "deploy.lock"
+        lock.touch(mode=0o600)
+        with open(lock) as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.refused("another terrace-production activate or rollback is running on this host", "activate", str(self.new))
+        self.accepted("activate", str(self.new))
+
+    def test_a_decision_on_a_changed_state_is_not_applied(self):
+        # An earlier run left records; between the checks and the unit, another activation switched the host: the unit
+        # refuses and records nothing, and none of the earlier records is printed as this run's.
+        self.accepted("activate", str(self.new))
+        (self.dir / "switch.log").unlink()
+        earlier = self.records()
+        third = self.system("third", website=NEW_REV, migrations=M_NEW)
+        other = self.system("other-activation", website=NEW_REV, migrations=M_NEW)
+        (self.dir / "race").write_text(str(other))
+        result = self.run_tool("activate", str(third))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the running system or the profile changed after the checks", result.stderr)
+        self.assertEqual((self.generation(), self.records(), (self.dir / "switch.log").exists()), ("system-2-link", earlier, False))
+        self.assertNotIn('"action"', result.stdout, "no record of another run is printed as this one's")
+        (self.dir / "race").unlink()
+        self.current.unlink()
+        self.current.symlink_to(self.new)
+        self.accepted("activate", str(third))
+
+    def test_rollback_cancels_a_pending_boot_default(self):
+        kernel = self.system("kernel", website=NEW_REV, migrations=M_NEW, kernel="2")
+        self.accepted("activate", str(kernel), "--boot")
+        self.assertIn("WARNING: the boot default", self.accepted("status").stdout)
+        out = self.accepted("rollback").stdout
+        self.assertIn(f"the boot default goes back to generation 1, the running system {self.old}", out)
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-1-link", str(self.old)))
+        self.assertEqual((self.dir / "switch.log").read_text(), "kernel boot\nold boot\n")
+        self.assertEqual((self.records()[-1]["action"], self.records()[-1]["mode"], self.records()[-1]["result"]), ("cancel", "boot", "success"))
+        self.assertNotIn("WARNING", self.accepted("status").stdout)
+        # The same after a switch that failed after registering its generation.
+        broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
+        self.assertEqual(self.run_tool("activate", str(broken)).returncode, 1)
+        self.assertEqual(self.generation(), "system-3-link")
+        self.accepted("rollback")
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-1-link", str(self.old)))
+        self.assertNotIn("WARNING", self.accepted("status").stdout)
+
+    def test_started_and_finished_records(self):
+        self.set_unit("terrace-cms.service", "failed")
+        self.accepted("activate", str(self.system("same-release")))
+        started, finished = self.records()[-2:]
+        self.assertEqual((started["phase"], started["failedBefore"], finished["phase"]), ("started", ["terrace-cms.service"], "finished"))
+        # A unit killed mid-switch (or a reboot) leaves only the started record: status says so.
+        with open(self.state / "deployments.log", "a") as log:
+            log.write(json.dumps({"phase": "started", "time": "2026-11-24T00:00:00Z", "action": "activate"}) + "\n")
+        self.assertIn("WARNING: the last activation started at 2026-11-24T00:00:00Z and never finished", self.accepted("status").stdout)
+
+    def test_sweep_tools_and_unlistable_units_block(self):
+        self.set_unit("terrace-cms-sweep.service", "active")
+        self.refused("terrace-cms-sweep.service is active; wait until it has finished", "activate", str(self.new))
+        self.set_unit("terrace-cms-sweep.service", "inactive")
+        (self.dir / "tools").write_text("terrace-cms-tool-roster-invite-1.service loaded active running tool\n")
+        self.refused("an operator tool runs (terrace-cms-tool-roster-invite-1.service", "activate", str(self.new))
+        (self.dir / "tools").unlink()
+        (self.dir / "tools-fail").touch()
+        self.refused("cannot list the terrace-cms-tool units", "activate", str(self.new))
+        (self.dir / "tools-fail").unlink()
+        self.accepted("activate", str(self.new))
+
+    def test_quiesce_counts_a_restarting_unit_and_postgresql_versions_must_exist(self):
+        self.set_unit("terrace-web.service", "activating")
+        self.refused("the release changes and terrace-web.service is activating; quiesce first", "activate", str(self.new))
+        self.set_unit("terrace-web.service", "inactive")
+        self.refused("a manifest records no PostgreSQL version", "activate", str(self.system("no-postgresql", website=NEW_REV, migrations=M_NEW, postgresql=None)))
+        self.accepted("activate", str(self.new))
+
+    def test_dry_run_changes_nothing(self):
+        out = self.run_tool("activate", str(self.new), "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("Checks passed; activate", out.stdout)
+        self.assertIn("Dry run: nothing changed.", out.stdout)
+        self.assertEqual((self.generation(), os.readlink(self.current), self.records(), (self.dir / "systemd-run.log").exists()), ("system-1-link", str(self.old), [], False))
+        # The lock file the command created is root-only.
+        self.assertEqual(oct((self.state / "deploy.lock").stat().st_mode & 0o777), "0o600")
+
+    def test_usage(self):
+        for args in [("activate",), ("activate", str(self.new), str(self.new)), ("rollback", str(self.new)), ("activate", str(self.new), "--force")]:
+            result = self.run_tool(*args)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertIn("usage: terrace-production activate STORE_PATH", result.stderr)
 
 
 if __name__ == "__main__":

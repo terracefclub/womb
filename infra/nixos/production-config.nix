@@ -12,6 +12,9 @@
   # Evaluation checks pass prepared stand-ins instead of archives and source.
   release ? null,
   identityContract ? null,
+  # The Womb commit being built (`git rev-parse HEAD`), recorded in the system manifest for
+  # `terrace-production status`; informational, null when not given.
+  wombRevision ? null,
 }: let
   platform = builtins.getFlake "path:${toString ../../platform}";
   system = "x86_64-linux";
@@ -45,5 +48,5 @@ in
   assert lib.assertMsg (role != "app" || identityContract != null || tfcSource != null) "The app role requires the TFC source at the released revision (identity contract).";
     platform.inputs.nixpkgs.lib.nixosSystem {
       inherit system;
-      modules = [hardwareModule localModule] ++ roles.${role};
+      modules = [hardwareModule localModule {terrace.production.wombRevision = lib.mkIf (wombRevision != null) wombRevision;}] ++ roles.${role};
     }
