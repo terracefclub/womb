@@ -252,7 +252,10 @@ deploy_status() {
   running=$(readlink -f "$current_system")
   echo "running system: $running ($(describe "$running"))"
   generation=$(gen_of)
-  echo "generation: $generation$( [[ $generation == none || $(readlink -f "$profile") == "$running" ]] || echo ' (not the running system: activated with test, or a boot activation waits for a reboot)')"
+  echo "generation: $generation (the boot default)"
+  if [[ $generation != none && $(readlink -f "$profile") != "$running" ]]; then
+    echo "WARNING: the boot default, generation $generation ($(readlink -f "$profile")), is not the running system: a reboot boots generation $generation. Expected after activate --boot; otherwise a switch failed after registering it (see the last activation and docs/host-updates.md section 1.5)."
+  fi
   previous=$(previous_gen "$generation")
   if [[ -n $previous ]]; then echo "previous generation: $previous $(readlink -f "$profile-$previous-link") ($(describe "$(readlink -f "$profile-$previous-link")"))"; else echo 'previous generation: none'; fi
   if (( ${#deploy_keys[@]} )); then echo "deploy path: on, ${#deploy_keys[@]} trusted deploy key(s)"; else echo 'deploy path: off (no deploy key trusted)'; fi

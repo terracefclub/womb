@@ -561,6 +561,11 @@ marked so.
   `sudo nix-store --import`, the raw step 7 commands), and key rotation with two
   trusted keys ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   written, not run.
+- Decide (reviewer, then owner): whether `terrace-production activate` should set the
+  system profile back to the previous generation when `switch-to-configuration`
+  fails (today it leaves the failed generation as the boot default, as
+  `nixos-rebuild` does; `status` warns, and the host updates document gives the
+  manual commands, not run).
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.

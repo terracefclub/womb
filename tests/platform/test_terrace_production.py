@@ -315,7 +315,8 @@ class DeployPath(Harness):
             (path / "bin").mkdir()
             (path / "bin" / "switch-to-configuration").write_text(
                 f"#!{BASH}\necho \"{name} $1\" >>\"$FAKE_DIR/switch.log\"\n"
-                f"if [[ $1 == switch ]]; then ln -sfn {shlex.quote(str(path))} \"$FAKE_DIR/current-system\"; fi\nexit {switch_rc}\n")
+                # A failure models the boot loader step, which comes before the switch: nothing switched.
+                f"if [[ $1 == switch && {switch_rc} == 0 ]]; then ln -sfn {shlex.quote(str(path))} \"$FAKE_DIR/current-system\"; fi\nexit {switch_rc}\n")
             (path / "bin" / "switch-to-configuration").chmod(0o700)
         if manifest:
             (path / "etc" / "terrace" / "system.json").write_text(json.dumps({
@@ -367,7 +368,8 @@ class DeployPath(Harness):
                           "websiteRevision": NEW_REV, "result": "success"})
         status = self.accepted("status").stdout
         self.assertIn(f"running system: {self.new} (Womb {hashlib.sha1(b'new').hexdigest()}, website {NEW_REV})", status)
-        self.assertIn("generation: 2\n", status)
+        self.assertIn("generation: 2 (the boot default)\n", status)
+        self.assertNotIn("WARNING", status)
         self.assertIn(f"previous generation: 1 {self.old} (Womb {hashlib.sha1(b'old').hexdigest()}, website {OLD_REV})", status)
         self.assertIn("deploy path: on, 1 trusted deploy key(s)", status)
         self.assertIn('"action":"activate"', status)
@@ -427,7 +429,7 @@ class DeployPath(Harness):
         self.assertIn("Generation 2 is the boot default; reboot to run it.", out)
         self.assertEqual((self.dir / "switch.log").read_text(), "kernel boot\n")
         self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
-        self.assertIn("(not the running system", self.accepted("status").stdout)
+        self.assertIn("is not the running system: a reboot boots generation 2. Expected after activate --boot", self.accepted("status").stdout)
 
     def test_upstream_versions(self):
         keycloak = self.system("keycloak", website=NEW_REV, migrations=M_NEW, keycloak="26.5.0")
@@ -487,7 +489,10 @@ class DeployPath(Harness):
         self.assertIn("activate FAILED (exit 4)", result.stderr)
         self.assertEqual(self.records()[-1]["result"], "failed (exit 4)")
         # As with nixos-rebuild, the generation is registered before the switch: the boot default moved.
-        self.assertEqual(self.generation(), "system-2-link")
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
+        status = self.accepted("status").stdout
+        self.assertIn(f"WARNING: the boot default, generation 2 ({broken}), is not the running system: a reboot boots generation 2.", status)
+        self.assertIn('"result":"failed (exit 4)"', status)
 
     def test_usage(self):
         for args in [("activate",), ("activate", str(self.new), str(self.new)), ("rollback", str(self.new)), ("activate", str(self.new), "--force")]:

@@ -253,6 +253,25 @@ for 20 seconds (a probe activation script, rehearsal only); while
 `terrace-production` client on the host was gone before the switch finished, and the
 switch completed, ran the new generation and wrote its record.
 
+**A switch that fails.** `activate` registers the generation before it switches,
+exactly as `nixos-rebuild` does, and `switch-to-configuration` installs the boot
+loader before it changes the running system. So a switch that fails, for example
+at the boot loader step, leaves the system profile (the boot default) on the new
+generation while the old system keeps running. The command prints `FAILED`, the
+record says `failed (exit <n>)`, and `status` prints `WARNING: the boot default,
+generation <n> (...), is not the running system: a reboot boots generation <n>.`
+(unit test; a failed switch was seen in the VM while the proof was being built,
+when its test VM could not take GRUB, but no VM assertion checks it). In that state
+**a reboot boots the new, never-activated generation**. What to do (READ, not run):
+read `journalctl -u terrace-switch.service -o cat --no-pager`; if the cause is fixed,
+repeat `activate` with the same toplevel (a new generation for it); to make the old
+system the boot default again, `terrace-production rollback` refuses ("already the
+running system"), so run `nix-env -p /nix/var/nix/profiles/system --switch-generation
+<previous number>` and then the old system's `switch-to-configuration boot` in the
+`terrace-switch` unit (the step 7 form), and do not reboot until `status` prints no
+warning. The command does not revert the profile on its own; whether it should is an
+open question in the [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24).
+
 **Integrity, not a privilege boundary.** `operator` has passwordless `sudo`, so root
 on the host can still import any closure (`nix-store --import`, as the VM proof does
 for its refusal cases) and run `switch-to-configuration` by hand. The signatures
