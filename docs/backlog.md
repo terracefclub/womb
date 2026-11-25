@@ -585,6 +585,18 @@ marked so.
   file); `switch-to-configuration` also prints `Failed to start <unit>` lines,
   which the tool does not read (a unit whose start job failed but which recovered
   before the listing is not counted).
+- Notes from review round 2 of the deploy path follow-ups (PR 79; until now only in
+  its squash commit message), recorded 2026-11-25, none changed:
+  - The activation judgement relies on the switch starting
+    `terrace-production.target` (through `terrace-production-boot`) and on
+    `systemctl list-jobs` accepting unit patterns; if either changes upstream, the
+    wait for the CMS and website no longer sees their jobs.
+  - `terrace-production status` takes no lock, so while a rollback runs it can
+    briefly show that rollback's target as unfinished (a `started` record with no
+    `finished` record yet).
+  - A slow start job for any writer under the target, not only the CMS or website,
+    holds the wait for up to 300 s, and the attempt then ends as a named timeout
+    failure (`waitTimedOut`, `stillStarting`).
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.

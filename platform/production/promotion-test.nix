@@ -194,8 +194,12 @@ in {
     BACKUP_HELD = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
     SWEEP = "terrace-cms-sweep.timer"
     timings = {}
-    records = {}
-    decisions = {}
+    # Values the drill reads back, kept apart from the free-form records it only prints.
+    keep: dict[str, str] = {}
+    records: dict[str, object] = {}
+    decisions: dict[str, str] = {}
+    relay_users: list[str] = []
+    identity_before: dict[str, str] = {}
 
     class timed:
         # Seconds per procedure step (section 5 item 12), recorded, never asserted.
@@ -331,17 +335,17 @@ in {
             out = op(f"terrace-secrets check {host}")
             ok(re.search(host + r": [0-9]+ secrets encrypted to exactly the host key and the pinned escrow key\.", out) is not None, f"{host}: store complete without rehearsal entries")
             public = op(f"terrace-secrets public {host} backup/primary/sftp-key").strip()
-            records[host + " sftp public key"] = public
+            keep[host + " sftp public key"] = public
             repository = "repository" if host == "app" else "relay-repository"
             operator.succeed("install -d -o restic -g users -m 0700 /home/restic/.ssh /home/restic/" + repository + " && echo " + shlex.quote(public) + " >>/home/restic/.ssh/authorized_keys"
                              " && chown restic:users /home/restic/.ssh/authorized_keys && chmod 0600 /home/restic/.ssh/authorized_keys")
             stage(host)
-        records["original app key"] = staged_fingerprint("app")
+        keep["original app key"] = staged_fingerprint("app")
 
     with subtest("setup: original app adopted as new, first backup, synthetic content, media and outbox"):
         app.start()
         app.wait_for_unit("multi-user.target")
-        ok(fingerprint(app) == records["original app key"], "original app runs its operator-generated key")
+        ok(fingerprint(app) == keep["original app key"], "original app runs its operator-generated key")
         push("app")
         unstage("app")
         app.succeed("terrace-production adopt --new", timeout=600)
@@ -363,7 +367,7 @@ in {
         app.succeed("terrace-backup _stage >/dev/null 2>&1", timeout=300)
         app.succeed(f"echo invalid-dump >{dumps}/postgresql/broken.dump")
         app.succeed(f"terrace-backup restic primary backup --tag corrupt-restore --quiet {dumps} >/dev/null 2>&1", timeout=300)
-        records["damaged snapshot"] = json.loads(app.succeed("terrace-backup restic primary snapshots --tag corrupt-restore --json 2>/dev/null"))[0]["id"]
+        keep["damaged snapshot"] = json.loads(app.succeed("terrace-backup restic primary snapshots --tag corrupt-restore --json 2>/dev/null"))[0]["id"]
         app.succeed(f"rm -rf {dumps}")
 
     with subtest("setup: original relay adopted as new, two Headscale users, first backup"):
@@ -376,16 +380,16 @@ in {
         relay.succeed("terrace-backup init primary >/dev/null 2>&1 && systemctl start terrace-backup.service", timeout=300)
         relay.succeed("systemctl start terrace-backup-freshness.service")
         relay.succeed("headscale users create drill-alice >/dev/null && headscale users create drill-bob >/dev/null")
-        records["relay users"] = sorted(user["name"] for user in json.loads(relay.succeed("headscale users list -o json")))
-        ok(records["relay users"] == ["drill-alice", "drill-bob"], "original relay: two users")
-        records["relay keys"] = relay.succeed("cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key").strip()
-        ok(len(records["relay keys"].splitlines()) == 2, "original relay: both private keys exist")
+        relay_users = sorted(user["name"] for user in json.loads(relay.succeed("headscale users list -o json")))
+        ok(relay_users == ["drill-alice", "drill-bob"], "original relay: two users")
+        keep["relay keys"] = relay.succeed("cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key").strip()
+        ok(len(keep["relay keys"].splitlines()) == 2, "original relay: both private keys exist")
 
     # ---------------- App: the planned replacement (Part A with step 2) ----------------
 
     with subtest("app, step 1 (D1) and step 2: quiesce the original and take the final backup"):
         decisions["D1 app"] = "drill: planned replacement of a reachable original (synthetic; not the owner's decision)"
-        records["identity before"] = identity()
+        identity_before = identity()
         lines = BLOCK["step02-quiesce-and-final-backup"]
         with timed("app step 2"):
             app.succeed(lines[0])
@@ -399,7 +403,7 @@ in {
             app.succeed(INLINE["step02-age"])
             ok(True, "step 2 worked: terrace-backup age exits 0")
             ours = sorted((s for s in listed if s["hostname"] == "app" and "terrace" in s.get("tags", [])), key=lambda s: s["time"])
-            records["final snapshot"] = ours[-1]["id"]
+            keep["final snapshot"] = ours[-1]["id"]
             ok(len(ours) == 2, f"two scheduled-style snapshots of app before the restore ({len(ours)})")
             app.succeed(lines[4])
         ok(state(app, "postgresql.service", "ActiveState") == "inactive", "step 2: PostgreSQL stopped")
@@ -428,14 +432,14 @@ in {
         ok(re.search(r"app: [0-9]+ secrets encrypted to exactly the host key and the pinned escrow key\.", out) is not None, "step 4 worked: check passes")
         ok(op(f"sops decrypt --output-type json {STORE}/hosts/app/secrets.sops.json | jq -S -c . | sha256sum").strip() == plain, "item 8: the same values after the re-key")
         stage("app")
-        records["replacement app key"] = staged_fingerprint("app")
-        ok(records["replacement app key"] != records["original app key"], "step 4: a new host key")
+        keep["replacement app key"] = staged_fingerprint("app")
+        ok(keep["replacement app key"] != keep["original app key"], "step 4: a new host key")
 
     with subtest("app, steps 5 and 6: first boot without secrets, push, verify, replacement guards"):
         with timed("app step 5"):
             app.start()
             app.wait_for_unit("multi-user.target")
-        ok(fingerprint(app) == records["replacement app key"], "step 5 worked: the host runs the staged key")
+        ok(fingerprint(app) == keep["replacement app key"], "step 5 worked: the host runs the staged key")
         ok(state(app, "sops-install-secrets.service", "Result") != "success", "step 5 worked: no secrets")
         ok(status(app)[:2] == ["not adopted: no writer starts at boot", "inactive"], "step 5 worked: status not adopted, target inactive")
         with timed("app step 6"):
@@ -453,7 +457,7 @@ in {
             listed = snapshots(app)
         newest = max((s for s in listed if s["hostname"] == "app"), key=lambda s: s["time"])
         ok(all({"id", "time", "hostname"} <= set(s) for s in listed), "step 7 worked: entries have id, time and hostname")
-        ok(newest["id"] == records["final snapshot"], "step 7: the newest app entry is the final backup of step 2")
+        ok(newest["id"] == keep["final snapshot"], "step 7: the newest app entry is the final backup of step 2")
         decisions["D2 app"] = "drill: accept snapshot " + newest["id"][:8] + " of " + newest["time"] + " (synthetic; not the owner's decision)"
         with timed("app step 8"):
             app.succeed(BLOCK["step08-read-data"][0] + " >/dev/null 2>&1", timeout=900)
@@ -461,14 +465,14 @@ in {
 
     with subtest("app, step 9: a damaged snapshot fails, the documented clean-up, then the chosen snapshot reconciles"):
         records["free bytes before restore"] = int(app.succeed("df --output=avail -B1 /var/lib | tail -n 1").strip())
-        damaged = block("step09-restore", {"<SNAPSHOT_ID>": records["damaged snapshot"]})
+        damaged = block("step09-restore", {"<SNAPSHOT_ID>": keep["damaged snapshot"]})
         app.fail("bash -euo pipefail -c " + shlex.quote(damaged), timeout=600)
         ok("pg_restore failed" in app.succeed("cat /var/tmp/restore.log"), "item 4: the damaged snapshot fails the restore (pg_restore failed)")
         app.fail("grep -qx 'RECONCILIATION OK' " + RESTORE + "/reconciliation.txt")
         app.fail("pgrep -u terrace-restore postgres")
         ok(True, "item 4: no RECONCILIATION OK and no isolated database left running")
         ok(status(app)[0] == "not adopted: no writer starts at boot", "item 4: the host stays unadopted")
-        good = block("step09-restore", {"<SNAPSHOT_ID>": records["final snapshot"]})
+        good = block("step09-restore", {"<SNAPSHOT_ID>": keep["final snapshot"]})
         app.fail("bash -euo pipefail -c " + shlex.quote(good), timeout=600)
         ok("destination exists and is not empty" in app.succeed("cat /var/tmp/restore.log"), "item 4: a retry into the failed directory is refused")
         # The document's clean-up, in its order: (1) stop an isolated cluster, if any, (2) remove, (3) restore again.
@@ -563,7 +567,7 @@ in {
             ok(app.succeed(INLINE["step17-keycloak"]).strip() == "active", "step 17 worked: keycloak active")
             now = identity()
         for key in ["realm", "issuer", "keys"]:
-            ok(now[key] == records["identity before"][key], f"item 10: {key} unchanged")
+            ok(now[key] == identity_before[key], f"item 10: {key} unchanged")
         ok("terrace-identity-" not in app.succeed("systemctl --failed --plain --no-legend"), "step 17 worked: no terrace-identity unit failed")
         # Item 8: the delivered database password opens the restored role; another value does not (the control).
         login = "PGPASSWORD=\"$(cat {})\" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1' >/dev/null 2>&1"
@@ -592,7 +596,7 @@ in {
         ok(state(app, "terrace-backup.service", "Result") == "success" and state(app, "terrace-backup-freshness.service", "Result") == "success", "step 21 worked: backup and freshness succeed, age exits 0")
         listed = snapshots(app)
         group = sorted((s for s in listed if s["hostname"] == "app" and "terrace" in s.get("tags", [])), key=lambda s: s["time"])
-        ok(group[-1]["id"] != records["final snapshot"] and records["final snapshot"] in [s["id"] for s in group], "step 21 worked: a new snapshot under the same host name; the restored one still listed")
+        ok(group[-1]["id"] != keep["final snapshot"] and keep["final snapshot"] in [s["id"] for s in group], "step 21 worked: a new snapshot under the same host name; the restored one still listed")
         ok(out.strip().splitlines()[-2:] == OUTPUT["step21-output-app"], "step 21 worked: arm-timers prints the documented output")
         ok(app.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", OUTPUT["step21-output-app"][1]], "step 21: arm-timers repeated")
         ok(app.succeed("systemctl is-active " + " ".join(BACKUP_HELD)).split() == ["active"] * 3, "step 21: backup timers active")
@@ -605,16 +609,16 @@ in {
         app.succeed("systemctl stop terrace-backup.timer")
         app.succeed("systemctl start terrace-backup.service", timeout=600)
         group = [s for s in snapshots(app) if s["hostname"] == "app" and "terrace" in s.get("tags", [])]
-        ok(records["final snapshot"] in [s["id"] for s in group], "item 7: the snapshot restored from is still listed after two runs since the restore")
+        ok(keep["final snapshot"] in [s["id"] for s in group], "item 7: the snapshot restored from is still listed after two runs since the restore")
         app.succeed("systemctl start terrace-backup.service", timeout=600)
         after_third = [s for s in snapshots(app) if s["hostname"] == "app" and "terrace" in s.get("tags", [])]
         third = max(after_third, key=lambda s: s["time"])
-        predicted = retained_by_policy(group + [third], records["final snapshot"])
-        listed_now = records["final snapshot"] in [s["id"] for s in after_third]
+        predicted = retained_by_policy(group + [third], keep["final snapshot"])
+        listed_now = keep["final snapshot"] in [s["id"] for s in after_third]
         records["restored-from snapshot after a third run"] = "kept" if listed_now else "pruned"
-        records["third run on the same day as the restored-from snapshot"] = third["time"][:10] == [s for s in group if s["id"] == records["final snapshot"]][0]["time"][:10]
+        records["third run on the same day as the restored-from snapshot"] = third["time"][:10] == [s for s in group if s["id"] == keep["final snapshot"]][0]["time"][:10]
         ok(listed_now == predicted, f"item 7: after a third run the restored-from snapshot is {records['restored-from snapshot after a third run']}, as restic's keep rules predict")
-        ok(records["damaged snapshot"] in [s["id"] for s in snapshots(app)], "item 7: a snapshot of another tag is outside the group and not pruned")
+        ok(keep["damaged snapshot"] in [s["id"] for s in snapshots(app)], "item 7: a snapshot of another tag is outside the group and not pruned")
         app.succeed("systemctl start terrace-backup.timer")
         app.succeed("terrace-backup restic primary check --read-data >/dev/null 2>&1", timeout=900)
         ok(True, "item 7: restic check --read-data of the whole repository passes")
@@ -625,11 +629,11 @@ in {
         decisions["D5 app"] = "drill: declared (synthetic; no DNS exists to move; not the owner's decision)"
         lines = BLOCK["d5-app"]
         with timed("app D5"):
-            out = app.succeed(lines[0]).strip().splitlines()
+            said = app.succeed(lines[0]).strip().splitlines()
             after_status = app.succeed(lines[1]).strip().splitlines()
             active = app.succeed(lines[2]).split()
             timers = app.succeed(lines[3])
-        ok(out == ["Armed: terrace-cms-sweep.timer.", "Every writer timer is active now and at every boot."], f"D5 worked: arm-timers --in-service output {out}")
+        ok(said == ["Armed: terrace-cms-sweep.timer.", "Every writer timer is active now and at every boot."], f"D5 worked: arm-timers --in-service output {said}")
         ok(not any("timers held" in line for line in after_status), "D5 worked: status names no held timer")
         ok(active == ["active"] * 4, "D5 worked: four timers active")
         for unit in BACKUP_HELD + [SWEEP]:
@@ -643,7 +647,7 @@ in {
         # Section 5 item 11, relay only: a scheduled-style backup with Headscale and nginx running.
         ok(state(relay, "headscale.service", "ActiveState") == "active", "item 11: Headscale running during the backup")
         relay.succeed("systemctl start terrace-backup.service", timeout=300)
-        records["relay snapshot"] = max(snapshots(relay), key=lambda s: s["time"])["id"]
+        keep["relay snapshot"] = max(snapshots(relay), key=lambda s: s["time"])["id"]
         decisions["D1 relay"] = "drill: original lost, no final backup (synthetic; not the owner's decision)"
         # Lost: the VM is cut off without a shutdown and its disk deleted, the nearest a VM has to a host that is gone.
         relay.crash()
@@ -654,9 +658,8 @@ in {
     with subtest("relay, steps 4 to 6: re-key, first boot, push, verify, marker"):
         plain = op(f"sops decrypt --output-type json {STORE}/hosts/relay/secrets.sops.json | jq -S -c . | sha256sum").strip()
         with timed("relay step 4"):
-            for line in BLOCK["step04-rekey"]:
-                out = op(line.replace("app --role app", INLINE["relay-role"]).replace(" app", " relay"))
-        ok(re.search(r"relay: [0-9]+ secrets encrypted to exactly the host key and the pinned escrow key\.", out) is not None, "relay step 4 worked: check passes")
+            rekeyed = [op(line.replace("app --role app", INLINE["relay-role"]).replace(" app", " relay")) for line in BLOCK["step04-rekey"]]
+        ok(re.search(r"relay: [0-9]+ secrets encrypted to exactly the host key and the pinned escrow key\.", rekeyed[-1]) is not None, "relay step 4 worked: check passes")
         ok(op(f"sops decrypt --output-type json {STORE}/hosts/relay/secrets.sops.json | jq -S -c . | sha256sum").strip() == plain, "relay item 8: the same values after the re-key")
         stage("relay")
         key = staged_fingerprint("relay")
@@ -675,7 +678,7 @@ in {
     with subtest("relay, steps 7 to 10 and 13: snapshot, read, restore, writers off, Headscale state before its first start"):
         listed = snapshots(relay)
         newest = max(listed, key=lambda s: s["time"])
-        ok(newest["id"] == records["relay snapshot"] and newest["hostname"] == "relay", "relay step 7: the newest entry is the snapshot taken while it ran")
+        ok(newest["id"] == keep["relay snapshot"] and newest["hostname"] == "relay", "relay step 7: the newest entry is the snapshot taken while it ran")
         decisions["D2 relay"] = "drill: accept snapshot " + newest["id"][:8] + ", not quiesced (synthetic; not the owner's decision)"
         relay.succeed(BLOCK["step08-read-data"][0] + " >/dev/null 2>&1", timeout=600)
         ok(True, "relay step 8 worked")
@@ -688,7 +691,7 @@ in {
         with timed("relay step 13"):
             sh(relay, block("step13-headscale"))
         ok(relay.succeed(INLINE["step13-integrity"]).strip() == "ok", "relay step 13 worked: PRAGMA integrity_check ok")
-        ok(relay.succeed("cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key").strip() == records["relay keys"], "item 1: Headscale private key hashes equal the original's")
+        ok(relay.succeed("cd /var/lib/headscale && sha256sum noise_private.key derp_server_private.key").strip() == keep["relay keys"], "item 1: Headscale private key hashes equal the original's")
         ok(relay.succeed(INLINE["step13-owners"]).split() == ["headscale:headscale"] * 3, "relay step 13: the ownership check the document adds passes")
 
     with subtest("relay, step 15: adopt --restored; the held timers, also across a reboot"):
@@ -700,7 +703,7 @@ in {
         relay.fail("test -e /var/lib/terrace-secrets/replacement")
         ok("replacement marker is cleared" in push("relay"), "relay: the next push clears the store's replacement marker")
         relay.wait_for_unit("headscale.service")
-        ok(sorted(user["name"] for user in json.loads(relay.succeed("headscale users list -o json"))) == records["relay users"], "item 1: Headscale users equal the original's")
+        ok(sorted(user["name"] for user in json.loads(relay.succeed("headscale users list -o json"))) == relay_users, "item 1: Headscale users equal the original's")
         # The known gap: a restored relay's held timers across a reboot.
         relay.shutdown()
         relay.start()
@@ -723,8 +726,8 @@ in {
         armed = ["Armed: " + " ".join(BACKUP_HELD) + ".", "Every writer timer is active now and at every boot."]
         ok(out.strip().splitlines()[-2:] == armed, "relay step 21 worked: the Armed line and every timer active")
         ok(relay.succeed("terrace-production arm-timers").strip().splitlines() == ["Already armed: nothing to arm.", armed[1]], "relay step 21: arm-timers repeated")
-        out = relay.succeed(INLINE["relay-in-service"]).strip().splitlines()
-        ok(out == ["Already armed: nothing to arm.", "This role holds no timer until service (it has no sweep).", armed[1]], "relay D5: arm-timers --in-service says the role holds nothing")
+        said = relay.succeed(INLINE["relay-in-service"]).strip().splitlines()
+        ok(said == ["Already armed: nothing to arm.", "This role holds no timer until service (it has no sweep).", armed[1]], "relay D5: arm-timers --in-service says the role holds nothing")
         lines = BLOCK["d5-relay"]
         ok(not any("timers held" in line for line in relay.succeed(lines[0]).splitlines()), "relay D5 worked: status names no held timer")
         ok(relay.succeed(lines[1]).split() == ["active"] * 3, "relay D5 worked: three timers active")
@@ -747,7 +750,7 @@ in {
         before_return = operator_snapshots("repository", "app")
         app.start()
         app.wait_for_unit("multi-user.target")
-        ok(fingerprint(app) == records["original app key"], "item 6: the original runs its old host key")
+        ok(fingerprint(app) == keep["original app key"], "item 6: the original runs its old host key")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
         ok(state(app, "terrace-production-boot.service", "Result") == "success", "item 6 / step 2: the original's boot gate starts its writers again")
         ok(app.succeed("systemctl is-active " + " ".join(BACKUP_HELD + [SWEEP])).split() == ["active"] * 4, "item 6 / step 2: the reboot re-armed the backup, check, freshness and sweep timers")
@@ -770,7 +773,7 @@ in {
     with subtest("item 6: rotate the repository password and the SFTP key as docs/secrets.md says, from the replacement"):
         app.start()
         app.wait_for_unit("multi-user.target")
-        ok(fingerprint(app) == records["replacement app key"], "item 6: the replacement is back")
+        ok(fingerprint(app) == keep["replacement app key"], "item 6: the replacement is back")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
         address = " --address app --identity " + IDENTITY
         op("terrace-secrets rotate app backup/primary/repository-password --manual")
@@ -782,14 +785,14 @@ in {
         ok("Removed 1 old repository key(s)" in op("terrace-secrets apply app backup/primary/repository-password --finish --only-current --remove " + old_key[0][:12] + address), "rotation: old repository key removed")
         op("terrace-secrets rotate app backup/primary/sftp-key --manual")
         new_public = op("terrace-secrets public app backup/primary/sftp-key").strip()
-        ok(new_public != records["app sftp public key"], "rotation: a new SFTP key")
+        ok(new_public != keep["app sftp public key"], "rotation: a new SFTP key")
         operator.succeed("echo " + shlex.quote(new_public) + " >>/home/restic/.ssh/authorized_keys")
         push("app")
         app.succeed("systemctl start terrace-backup.service", timeout=600)
         ok(state(app, "terrace-backup.service", "Result") == "success", "rotation: a backup with the new key and password")
-        operator.succeed("grep -vxF " + shlex.quote(records["app sftp public key"]) + " /home/restic/.ssh/authorized_keys >/root/authorized_keys.new"
+        operator.succeed("grep -vxF " + shlex.quote(keep["app sftp public key"]) + " /home/restic/.ssh/authorized_keys >/root/authorized_keys.new"
                          " && install -o restic -g users -m 0600 /root/authorized_keys.new /home/restic/.ssh/authorized_keys && rm /root/authorized_keys.new")
-        operator.fail("grep -qxF " + shlex.quote(records["app sftp public key"]) + " /home/restic/.ssh/authorized_keys")
+        operator.fail("grep -qxF " + shlex.quote(keep["app sftp public key"]) + " /home/restic/.ssh/authorized_keys")
         ok(True, "rotation: the old SFTP public key removed at the repository")
         app.shutdown()
 
@@ -800,7 +803,7 @@ in {
         before_return = operator_snapshots("repository", "app")
         app.start()
         app.wait_for_unit("multi-user.target")
-        ok(fingerprint(app) == records["original app key"], "item 6: the original again")
+        ok(fingerprint(app) == keep["original app key"], "item 6: the original again")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
         app.wait_until_fails("systemctl is-active --quiet terrace-backup.service", timeout=600)
         app.fail("systemctl start terrace-backup.service", timeout=600)
