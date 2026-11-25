@@ -657,7 +657,9 @@ whose system also carried a unit that fails and restarts was recorded `failed (e
 4)` naming that unit; unit tests for a failed timer, a service in `auto-restart`
 and a unit named only in the switch's own list. **Stop the website now**
 (`systemctl stop terrace-web.service`) and keep it stopped until step 11; left alone
-it serves the new bundle without its CMS until it gives up.
+it serves the new bundle without its CMS until it gives up. Any later `activate` or
+`rollback` that changes the release again refuses while the CMS or the website is
+still retrying, and names `systemctl stop terrace-cms.service terrace-web.service`.
 
 Failed: anything else in `systemctl --failed` (Keycloak, PostgreSQL, nginx, sshd,
 an unexpected `sops-install-secrets`). Without a Keycloak or Headscale version
@@ -1060,7 +1062,12 @@ Step 10 not started (or the revision did not change), no realm `apply`, no Keycl
 Headscale or PostgreSQL version change. Then a generation rollback is the whole way
 back:
 
-1. Roll back as in 4.1.
+1. Stop the CMS and the website first: after a gated activation (step 7) they can
+   still be retrying (`Restart=on-failure`), and `terrace-production rollback`
+   refuses a release change while either is active, activating or reloading,
+   naming the command: `systemctl stop terrace-cms.service terrace-web.service`
+   (RAN IN VM: refused while the CMS retried, then accepted after the stop). Then
+   roll back as in 4.1.
 2. App: run "restart after quiesce" (step 6). The marker still holds the old
    revision, which the old generation's gate expects. Relay: run only `systemctl
    start terrace-backup.timer terrace-backup-check.timer` (R1 stopped nothing else;

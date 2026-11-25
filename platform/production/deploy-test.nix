@@ -438,7 +438,11 @@ in {
         app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
 
     with subtest("case A: rollback before the migration brings the previous site back"):
-        app.succeed("systemctl reset-failed terrace-cms.service")
+        # After the gated activation the CMS (and the website) can still be retrying: the rollback refuses until they are stopped.
+        app.succeed("systemctl start terrace-cms.service || true")
+        out = app.fail("terrace-production rollback 2>&1")
+        ok("quiesce first: systemctl stop terrace-cms.service terrace-web.service" in out, f"rollback refused while the CMS retries, naming the command: {out.strip()[-200:]}")
+        app.succeed("systemctl stop terrace-cms.service terrace-web.service && systemctl reset-failed terrace-cms.service terrace-web.service")
         out = app.succeed("terrace-production rollback")
         ok("Running generation 1" in out, "rollback accepted before the migration")
         ok(running() == BASE and generation() == "system-1-link", "generation 1 runs again")
@@ -502,7 +506,7 @@ in {
         held("after the forced rollback")
 
     with subtest("the way forward: the new generation serves again"):
-        app.succeed("systemctl reset-failed terrace-cms.service")
+        app.succeed("systemctl stop terrace-cms.service terrace-web.service && systemctl reset-failed terrace-cms.service terrace-web.service")
         app.succeed("terrace-production activate " + NEXT)
         ok(running() == NEXT and records()[-1]["result"] == "success" and records()[-1]["failedUnits"] == [], "the migrated release's system activated again (no flag: the ledger is its own), no unit failed")
         restart_after_quiesce()
@@ -531,7 +535,7 @@ in {
         ok("activate FAILED (exit 4)" in out and record["result"] == "failed (exit 4)" and "terrace-deploy-probe-broken.service" in record["unexpectedUnits"]
            and "terrace-cms.service" in record["failedUnits"], f"recorded FAILED, naming the extra failing unit next to the gated CMS: {record}")
         # Back to the migrated release (control: the same command succeeds once nothing else fails).
-        app.succeed("systemctl stop terrace-web.service terrace-deploy-probe-broken.service; systemctl reset-failed")
+        app.succeed("systemctl stop terrace-cms.service terrace-web.service terrace-deploy-probe-broken.service; systemctl reset-failed")
         app.succeed("terrace-production activate " + NEXT)
         ok(running() == NEXT and records()[-1]["result"] == "success", "the migrated release activated again, nothing failed")
         restart_after_quiesce()

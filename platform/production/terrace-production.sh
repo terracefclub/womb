@@ -200,7 +200,7 @@ check_cms() {
   [[ $(jq -c .website "$(manifest_file "$current_system")") != "$(jq -c .website "$(manifest_file "$target")")" ]] || return 0
   for unit in "${quiesce[@]}"; do
     state=$(systemctl show "$unit.service" -p ActiveState --value)
-    case $state in active | activating | reloading) deny "the release changes and $unit.service is $state; quiesce first (docs/host-updates.md step 6)" ;; esac
+    case $state in active | activating | reloading) deny "the release changes and $unit.service is $state; quiesce first: systemctl stop ${quiesce[*]/%/.service} (after a gated activation they can still be retrying; docs/host-updates.md step 6)" ;; esac
   done
   target_rev=$(field "$target" .website.revision)
   if [[ -e $cms_marker ]]; then marker=$(cat "$cms_marker"); fi
