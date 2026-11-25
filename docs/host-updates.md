@@ -37,12 +37,19 @@ generation whose last record is a failure and takes `--generation N`; a dry run
 before the quiesce reports what else would stop the update instead of stopping at
 the first check; the record is written once the gated units have stopped retrying,
 and a gated switch that `switch-to-configuration` reports as exit 0 is judged like one
-that exits 4. Section 1.5 says what ran for each. Results at Womb `c8f6f29` (builder,
-2026-11-25, synthetic data): the deploy VM proof PASS with 133 assertions in 697 s
-(migration 4.01 s); the production proof 263 (198 protocol), identity administration
-347 and TLS 148, the website and website gateway checks and the five rehearsal
-variants (default, `--documenso`, `--documenso-signing`, `--relay-peers`,
-`--all-services`, once each) all PASS; 442 unit tests and 65 of 65 mutants killed.
+that exits 4. Section 1.5 says what ran for each. Results (builder, 2026-11-25,
+synthetic data), at Womb `5f1a3bb` (after review round 1 of this change): the deploy
+VM proof PASS with 133 assertions in 704 s (migration 3.93 s), the production proof
+263 (198 protocol), identity administration 347 and TLS 148, the evaluation check
+(145 rejected variants), 445 unit tests and 76 of 76 mutants killed (the mutation
+run completed on the builder only). Carried over from `c8f6f29`, whose derivations are
+identical at `5f1a3bb` (three-way comparison): the website and website gateway checks
+and the five rehearsal variants (default, `--documenso`, `--documenso-signing`,
+`--relay-peers`, `--all-services`), each passed once there. The review-round changes
+(the wait for queued start jobs, the closed gate never passing as success, the
+named timeout, unfinished attempts skipped, `--generation` only going back) are
+unit-tested; the VM proof asserts only that its gated switches recorded no
+not-started unit and no timed-out wait.
 Two earlier runs of the deploy proof failed and are recorded here because the first
 found a defect in the command as merged on 2026-11-24 (still on trunk until this
 change merges): on a re-pin with the gated website, `switch-to-configuration` exited

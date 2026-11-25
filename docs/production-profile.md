@@ -462,7 +462,11 @@ this VM proof 263 assertions (198 protocol), the identity administration proof 3
 the TLS proof 148, the website and website gateway checks, and the five rehearsal
 variants once each, all PASS (every derivation changed with the website module).
 The evaluation check passes with 145 rejected variants (two new: the migration gate
-removed from the CMS or from the website).
+removed from the CMS or from the website). After review round 1 of that change, at Womb `5f1a3bb`
+(2026-11-25): the deploy VM proof PASS with 133 assertions in 704 s, this VM proof 263
+(198 protocol), identity administration 347 and TLS 148, all fresh; the website and
+gateway checks and the rehearsal drivers have derivations identical to `c8f6f29`'s and
+carry over from it.
 
 ## Keycloak administration
 
