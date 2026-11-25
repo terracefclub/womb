@@ -90,8 +90,9 @@ migration stops nothing. Only then does it stop the CMS, the website and a
 running sweep, apply the bundle's explicit migrations and record the successful
 revision under `/var/lib/terrace-cms`. A start of the CMS, website or sweep
 requested while it runs waits for it (all three are ordered after it; the website
-VM proof (proof run of this change pending) requests each start while a slowed migration runs and checks that each
-stays inactive with its start job waiting, then runs after the migration ended).
+VM proof requests each start while a slowed migration runs and checks that each
+stays inactive with its start job waiting, then runs after the migration ended;
+passed on 2026-11-24 with the derivation of Womb `9664be1`).
 It is never enabled at boot or called by normal startup.
 Repeat the migration action to check that the ledger is unchanged, then start
 both services again. Startup rejects a missing/different revision marker. This

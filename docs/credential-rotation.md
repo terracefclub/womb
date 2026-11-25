@@ -249,8 +249,8 @@ logging off, and restarts `keycloak.service`
 role keycloak updated with a SCRAM verifier and Keycloak restarted.`; Keycloak is
 active; `PGPASSWORD="$(cat /run/secrets/identity/database-password)" psql -X -h 127.0.0.1 -U keycloak -d keycloak -c 'select 1'`
 succeeds, and the previous password is refused (`password authentication failed`).
-The VM check asserts both (proof run of this change pending), the old password opening the role before the rotation as
-a control. Way back: if `apply` fails, the role still has the old password
+The VM check asserts both, the old password opening the role before the rotation as
+a control (passed at `9664be1`, 2026-11-24). Way back: if `apply` fails, the role still has the old password
 and the host file holds the new one, so Keycloak cannot log in on its next start.
 Restore the old value (saved copy), `push`, and restart Keycloak. If `apply` ran but
 Keycloak did not restart, restart it. **After a successful `apply` the role already
@@ -330,8 +330,7 @@ previous pair from the saved copy (preconditions) and push, which restarts nginx
 old pair. Revoke the old certificate at its issuer afterwards. Evidence: VM rehearsal
 (synthetic data), a delivered manual certificate passing the expiry check
 (`platform/production/tls-test.nix`); the production VM check's subtest "TLS pair"
-(proof run of this change pending)
-stores a new certificate for a new key (warning), has the push refused before
+(passed at `9664be1`, 2026-11-24) stores a new certificate for a new key (warning), has the push refused before
 sending, then refused by the host's install when pushed without an operator
 identity, with the host ciphertext, nginx's process and the served certificate
 unchanged, then sets the matching key (no warning) and pushes the new pair. Unit tests with the real OpenSSL
@@ -398,7 +397,7 @@ lists keys with `key list --json` and requires exactly one `current` key. Worked
 `Removed <n> old repository key(s) from primary; ...`; `key list --json` shows the
 intended keys; `terrace-backup restic primary snapshots` works with the new file; the
 next backup succeeds. Repeat with `secondary` for a second target (app role only).
-Evidence: VM rehearsal (synthetic data) (proof run of this change pending), the production VM check subtest "manual
+Evidence: VM rehearsal (synthetic data; passed at `9664be1`, 2026-11-24), the production VM check subtest "manual
 secrets: ... the old ones are refused": key add; `--finish` before `push` refused
 with both keys kept; after `push` both passwords open the repository (control);
 `--only-current` without `--remove` lists the keys and removes nothing; with

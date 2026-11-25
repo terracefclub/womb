@@ -370,9 +370,10 @@ file or coredump journal entry after a writer is aborted; `root:root 0400` on
 ramfs and nothing left after a reboot; rotation of the intake secret (old value
 refused, both services on the new one, PostgreSQL, Keycloak and nginx not
 restarted); the database-password and repository-password `apply` procedures,
-each previous password refused afterwards (proof run of this change pending), and `apply --finish` refused before the
+each previous password refused afterwards, and `apply --finish` refused before the
 `push` and, with `--only-current`, until every removed key is named; a mismatched
-TLS pair refused by `install` with nginx untouched;
+TLS pair refused by `push` before sending and by `install` with nginx untouched
+(these last checks first passed at `9664be1`, 2026-11-24);
 and a host replacement re-keyed from escrow (the retired key can no longer
 decrypt the new file), restored with reconciliation, identical data and the
 lifecycle continuing. The operator guest's disk and journal hold no value either.

@@ -70,7 +70,7 @@ marked done.
 - Done (production safeguards): `apply --finish` sends the store value and the host
   refuses it unless its delivered file holds exactly that value, before restic is
   asked (unit tests; the production VM check asserts it is refused before `push`
-  with both keys kept (proof run of this change pending)).
+  with both keys kept, passed at `9664be1`).
 - Code: no `client-secret sync` for the Documenso, Windmill and Vaultwarden OIDC
   clients (only the four production clients), no rotation of Headscale keys, host SSH
   key (in place), Keycloak realm keys, the Vaultwarden RSA key, or the ACME account key.
@@ -80,7 +80,8 @@ marked done.
   it before sending when `SOPS_AGE_KEY_FILE` lets it decrypt the store (otherwise
   it prints a note); the host's `install` refuses a mismatched pair before anything
   is installed or restarted (unit tests with stand-in and real OpenSSL, RSA, EC and
-  Ed25519; the production VM check asserts (proof run of this change pending): push refused before sending, and by the host's install
+  Ed25519; the production VM check, passed at `9664be1`, asserts: push refused
+  before sending, and by the host's install
   when pushed without an identity, nginx and the served certificate unchanged, then
   the matching pair delivered). Left: a host still running an older
   `terrace-secrets` has no install check; `check` does not decrypt and so does not
@@ -89,7 +90,7 @@ marked done.
   [secrets](secrets.md)).
 - Done (production safeguards): `--finish --only-current` without `--remove` lists
   every key and removes nothing; `--remove KEYID` must name exactly each key it
-  removes (unit tests; asserted in the production VM check (proof run of this change pending)). `--finish --keep PREFIX` refuses, with the
+  removes (unit tests; asserted in the production VM check, passed at `9664be1`). `--finish --keep PREFIX` refuses, with the
   key list and before removing anything, a prefix that matches no key or more than
   one (a typo would otherwise have removed the key meant to be kept; unit tests).
   It still removes every other non-current key without listing it first.
@@ -122,12 +123,24 @@ None of these was done in that pull request; the production safeguards follow-up
   what they armed and what is still held, and are idempotent; `status` prints one
   line per held group. `--in-service` refuses while the backup timers are held, so
   the order is enforced. A plain adoption is unchanged. The production VM check
-  asserts (proof run of this change pending): both paths, the refused order, a
+  asserts (passed at `9664be1`): both paths, the refused order, a
   failed and resumed restored adoption, both stages with a reboot between them, and
   the relay's `--in-service` answer. Not exercised: a restored relay's held timers
   (no relay replacement in the VM). The script is now
   `platform/production/terrace-production.sh` with unit tests
   (`tests/platform/test_terrace_production.py`, stub systemctl).
+- Proofs of the production safeguards (2026-11-24, Womb `9664be1`, on the build
+  machine): production VM proof 263 assertions, identity administration 347, TLS 148,
+  run fresh; the website and website gateway proofs passed at `fff40ce` with the same
+  derivations; the five rehearsal driver variants (default, `--documenso`,
+  `--documenso-signing`, `--relay-peers`, `--all-services`) each passed once and were
+  purged. One pass per variant shows no failure rate. An earlier head (`fff40ce`)
+  failed the production proof at build: `writeShellApplication`'s shellcheck reported
+  SC2016 on a message with backquotes in `terrace-production`; fixed before these runs.
+- `tests/platform/test_terrace_production.py` builds the script's settings prelude by
+  hand, parallel to the one `platform/production/base.nix` generates; a drift between
+  the two is caught only by the production VM proof. `terrace-production.sh` keeps
+  the indentation it had inside `base.nix` (cosmetic, left as is).
 - A restored host whose timers are never armed takes no scheduled backup and
   nothing says so: the hold markers never expire, the freshness timer that would
   report a missing backup is itself held, and only `terrace-production status`
@@ -417,9 +430,11 @@ known to affect a deployed host (none exists).
   (same inode as the path, owned by root); a wider mode is narrowed to `0600` under
   the lock; anything else is refused with exit 72. Unit tests (Linux only, they need
   GNU `stat` and `/dev/fd`; a stub `stat` drives the foreign-owner and swapped-inode
-  branches) fail against the earlier script; the website VM proof asserts (proof run of this change pending) the
-  narrowing on the same inode and the refusal of a foreign owner and of a link.
-- Done (production safeguards; (proof run of this change pending)): the website VM proof requests sweep, CMS and website
+  branches) fail against the earlier script; the website VM proof asserts the
+  narrowing on the same inode and the refusal of a foreign owner and of a link
+  (passed on 2026-11-24 with the derivation of Womb `9664be1`).
+- Done (production safeguards; passed on 2026-11-24 with the derivation of Womb
+  `9664be1`): the website VM proof requests sweep, CMS and website
   starts while a slowed migration runs, asserts that each stays inactive with its
   start job waiting, and that each runs after the migration ended. Still not tested:
   a migration preflight whose stop of the CMS, website and sweep fails partway
