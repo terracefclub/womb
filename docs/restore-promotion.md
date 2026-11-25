@@ -374,7 +374,8 @@ files in the directory, not the terminal.
 
 Worked: exit status 0, the `grep` succeeds, and `reconciliation.txt` ends with
 `RECONCILIATION OK` after one `OK database ...`, `OK file set ...` and, on the
-relay, `OK sqlite headscale` line per item (table names and counts only). Failed:
+relay, `OK sqlite headscale: integrity ok, table row counts match` line per item
+(table names and counts only). Failed:
 `RECONCILIATION FAILED: <n> mismatch(es)` and exit 1. Stop. Nothing live was
 touched. Diagnostics are root-only files in the restore directory
 (`restore-<db>.err`, `globals.err`, `diff-*.txt`, `hashfail-*.txt`). Try another

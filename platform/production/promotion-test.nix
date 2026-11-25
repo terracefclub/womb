@@ -483,6 +483,7 @@ in {
         with timed("app step 9"):
             sh(app, good, timeout=900)
         report = app.succeed(f"cat {RESTORE}/reconciliation.txt").strip().splitlines()
+        records["app reconciliation"] = report
         ok(report[-1] == "RECONCILIATION OK" and any(line.startswith("OK database ") for line in report) and any(line.startswith("OK file set ") for line in report),
            f"step 9 worked: {len([line for line in report if line.startswith('OK ')])} OK lines then RECONCILIATION OK")
         records["restore directory bytes"] = int(app.succeed(f"du -sb {RESTORE} | cut -f1").strip())
@@ -685,7 +686,8 @@ in {
         with timed("relay step 9"):
             sh(relay, block("step09-restore", {"<SNAPSHOT_ID>": newest["id"]}), timeout=600)
         report = relay.succeed(f"cat {RESTORE}/reconciliation.txt").strip().splitlines()
-        ok(report[-1] == "RECONCILIATION OK" and "OK sqlite headscale" in report, "relay step 9 worked: OK sqlite headscale, then RECONCILIATION OK")
+        records["relay reconciliation"] = report
+        ok(report[-1] == "RECONCILIATION OK" and any(line.startswith("OK sqlite headscale: ") for line in report), "relay step 9 worked: an OK sqlite headscale line, then RECONCILIATION OK")
         ok(status(relay)[:2] == ["not adopted: no writer starts at boot", "inactive"], "relay step 10 worked")
         ok(state(relay, "headscale.service", "ActiveState") == "inactive", "relay step 10: Headscale never started")
         with timed("relay step 13"):
