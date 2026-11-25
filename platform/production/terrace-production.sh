@@ -196,18 +196,33 @@ check_cms() {
   echo "WARNING: the CMS stays down on $target (marker ${marker:-absent}, gate wants $target_rev). Never start terrace-cms-migrate.service on it (H1)." >&2
 }
 # Inside the terrace-switch unit: register the generation, switch, and record the result.
+# A switch to a release whose migration has not run starts the CMS and website (terrace-production.target wants
+# them): the CMS fails its gate and the website its health check, and switch-to-configuration exits 4. That outcome,
+# and only it, is recorded as switched with those units down: exit 4, every failed unit one of the quiesce units,
+# and the marker not holding the target's revision. Anything else that failed is a failed switch.
 apply() {
-  local action=$1 mode=$2 target=$3 generation=${4:-} from before after rc=0 result
+  local action=$1 mode=$2 target=$3 generation=${4:-} from before after rc=0 result marker="" unit expected=1 failed=()
   from=$(readlink -f "$current_system"); before=$(gen_of)
+  # A start limit hit by an earlier gate refusal must not keep a unit from starting where its gate is open.
+  if (( ${#quiesce[@]} )); then systemctl reset-failed "${quiesce[@]/%/.service}" 2>/dev/null || true; fi
   if [[ $action == activate ]]; then nix-env -p "$profile" --set "$target" || rc=$?
   else nix-env -p "$profile" --switch-generation "$generation" || rc=$?; fi
   if [[ $rc == 0 ]]; then "$target/bin/switch-to-configuration" "$mode" || rc=$?; fi
   after=$(gen_of)
-  if [[ $rc == 0 ]]; then result=success; else result="failed (exit $rc)"; fi
+  if [[ $rc == 4 ]]; then
+    mapfile -t failed < <(systemctl list-units --state=failed --type=service --plain --no-legend | cut -d' ' -f1)
+    if [[ -n $cms_marker && -e $cms_marker ]]; then marker=$(cat "$cms_marker"); fi
+    [[ -n $cms_marker && $marker != "$(field "$target" .website.revision)" && ${#failed[@]} -gt 0 ]] || expected=0
+    for unit in "${failed[@]}"; do [[ " ${quiesce[*]/%/.service} " == *" $unit "* ]] || expected=0; done
+  fi
+  if [[ $rc == 0 ]]; then result=success
+  elif [[ $rc == 4 && $expected == 1 ]]; then result="switched; down until the CMS migration: ${failed[*]}"; rc=0
+  else result="failed (exit $rc)"; fi
   install -d -m 0700 "$state_dir"
   jq -cn --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" \
     --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" \
-    '{time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result}' >>"$records"
+    --arg failed "${failed[*]}" \
+    '{time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: ($failed | split(" ") | map(select(. != "")))}' >>"$records"
   chmod 0600 "$records"
   exit "$rc"
 }
@@ -246,6 +261,9 @@ deploy() {
     exit 1
   fi
   if [[ $mode == boot ]]; then echo "Generation $(gen_of) is the boot default; reboot to run it."; else echo "Running generation $(gen_of): $(readlink -f "$current_system")."; fi
+  if [[ $(tail -n 1 "$records" | jq -r .result) == "switched;"* ]]; then
+    echo "The CMS gate is closed for this release: $(tail -n 1 "$records" | jq -r '.failedUnits | join(" ")') stay failed until the migration (docs/host-updates.md steps 10 and 11)."
+  fi
 }
 deploy_status() {
   local running generation previous

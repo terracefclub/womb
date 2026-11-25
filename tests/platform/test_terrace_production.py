@@ -46,7 +46,8 @@ case "$1" in
   is-failed) exit 1 ;;
   is-active)
     if [[ $2 == --quiet ]]; then [[ $(state "$3") == active ]]; else state "$2"; [[ $(state "$2") == active ]]; fi ;;
-  reset-failed) ;;
+  reset-failed) echo "$*" >>"$FAKE_DIR/reset-failed.log" ;;
+  list-units) cat "$FAKE_DIR/failed-units" 2>/dev/null || true ;;
   start)
     shift
     for unit in "$@"; do
@@ -315,8 +316,8 @@ class DeployPath(Harness):
             (path / "bin").mkdir()
             (path / "bin" / "switch-to-configuration").write_text(
                 f"#!{BASH}\necho \"{name} $1\" >>\"$FAKE_DIR/switch.log\"\n"
-                # A failure models the boot loader step, which comes before the switch: nothing switched.
-                f"if [[ $1 == switch && {switch_rc} == 0 ]]; then ln -sfn {shlex.quote(str(path))} \"$FAKE_DIR/current-system\"; fi\nexit {switch_rc}\n")
+                # Exit 4 is "switched, some units failed"; any other failure models the boot loader step, before the switch.
+                f"if [[ $1 == switch && ( {switch_rc} == 0 || {switch_rc} == 4 ) ]]; then ln -sfn {shlex.quote(str(path))} \"$FAKE_DIR/current-system\"; fi\nexit {switch_rc}\n")
             (path / "bin" / "switch-to-configuration").chmod(0o700)
         if manifest:
             (path / "etc" / "terrace" / "system.json").write_text(json.dumps({
@@ -483,16 +484,49 @@ class DeployPath(Harness):
         self.refused("records no CMS migration list", "activate", str(unknown), "--cms-stays-down")
 
     def test_a_failed_switch_is_recorded(self):
-        broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
         result = self.run_tool("activate", str(broken))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("activate FAILED (exit 4)", result.stderr)
-        self.assertEqual(self.records()[-1]["result"], "failed (exit 4)")
+        self.assertIn("activate FAILED (exit 1)", result.stderr)
+        self.assertEqual(self.records()[-1]["result"], "failed (exit 1)")
         # As with nixos-rebuild, the generation is registered before the switch: the boot default moved.
         self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
         status = self.accepted("status").stdout
         self.assertIn(f"WARNING: the boot default, generation 2 ({broken}), is not the running system: a reboot boots generation 2.", status)
-        self.assertIn('"result":"failed (exit 4)"', status)
+        self.assertIn('"result":"failed (exit 1)"', status)
+
+    def test_a_release_switch_with_the_gate_closed(self):
+        # switch-to-configuration exits 4 when units failed: here the CMS (gate) and website (health check) of a release not yet migrated.
+        gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded failed failed web\n")
+        out = self.accepted("activate", str(gated)).stdout
+        self.assertIn("The CMS gate is closed for this release: terrace-cms.service terrace-web.service stay failed until the migration", out)
+        record = self.records()[-1]
+        self.assertEqual((record["result"], record["failedUnits"]), ("switched; down until the CMS migration: terrace-cms.service terrace-web.service",
+                                                                     ["terrace-cms.service", "terrace-web.service"]))
+        self.assertIn("reset-failed terrace-cms.service terrace-web.service", (self.dir / "reset-failed.log").read_text())
+
+    def test_other_failed_units_fail_the_switch(self):
+        gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        # Another unit failed too: a failed switch, whatever the CMS does.
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\nnginx.service loaded failed failed nginx\n")
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.records()[-1]["result"], "failed (exit 4)")
+        self.assertEqual(self.records()[-1]["failedUnits"], ["terrace-cms.service", "nginx.service"])
+        # The CMS failing where its gate is OPEN (the marker holds the target's revision) is a failed switch too.
+        self.marker.write_text(NEW_REV + "\n")
+        (self.dir / "failed-units").write_text("terrace-cms.service loaded failed failed CMS\n")
+        (self.dir / "systemd-run.log").unlink()
+        self.accepted("rollback")
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual((result.returncode, self.records()[-1]["result"]), (1, "failed (exit 4)"))
+        # Exit 4 with no failed unit listed is not explained either.
+        (self.dir / "failed-units").unlink()
+        self.marker.write_text(OLD_REV + "\n")
+        self.accepted("activate", str(self.old))
+        result = self.run_tool("activate", str(gated))
+        self.assertEqual((result.returncode, self.records()[-1]["result"]), (1, "failed (exit 4)"))
 
     def test_usage(self):
         for args in [("activate",), ("activate", str(self.new), str(self.new)), ("rollback", str(self.new)), ("activate", str(self.new), "--force")]:

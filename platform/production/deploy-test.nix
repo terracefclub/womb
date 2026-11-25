@@ -185,6 +185,7 @@ in {
     BASE, NEXT, OTHER, UNSIGNED, FOREIGN, RELAY = "${base}", "${deployNext}", "${deployOtherHost}", "${deployUnsigned}", "${deployForeign}", "${relaySystem}"
     OLD_PIN, NEW_PIN = "${previous.revision}", "${release.revision}"
     OLD_MIGRATIONS, NEW_MIGRATIONS = ${builtins.toJSON previous.migrations}, ${builtins.toJSON release.migrations}
+    GATED = ["terrace-cms.service", "terrace-web.service"]
     BACKUP_HELD = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
     SERVICE_HELD = ["terrace-cms-sweep.timer"]
     timings = {}
@@ -373,25 +374,32 @@ in {
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-done && ! systemctl is-active terrace-switch.service", timeout=300)
         ok(running() == NEXT and generation() == "system-2-link", "the new generation runs after the dropped session")
         record = records()[-1]
-        ok((record["action"], record["result"], record["generationBefore"], record["generationAfter"], record["to"], record["wombRevision"], record["websiteRevision"]) ==
-           ("activate", "success", "1", "2", NEXT, "${revisions.next}", NEW_PIN), f"the unit recorded the activation: {record}")
+        # The switch starts the stopped CMS and website (the active terrace-production.target wants them): the CMS fails its gate,
+        # the website its health check, switch-to-configuration exits 4, and exactly those two units count as expected.
+        ok((record["action"], record["result"], record["failedUnits"], record["generationBefore"], record["generationAfter"], record["to"], record["wombRevision"], record["websiteRevision"]) ==
+           ("activate", "switched; down until the CMS migration: terrace-cms.service terrace-web.service", GATED, "1", "2", NEXT, "${revisions.next}", NEW_PIN), f"the unit recorded the activation: {record}")
+        ok(app.succeed("systemctl list-units --state=failed --type=service --plain --no-legend | cut -d' ' -f1").split() == GATED, "after the switch exactly the CMS and the website are failed")
         status = app.succeed("terrace-production status")
         ok(f"running system: {NEXT} (Womb ${revisions.next}, website {NEW_PIN})" in status and f"previous generation: 1 {BASE} (Womb ${revisions.old}, website {OLD_PIN})" in status, "status shows both generations")
         held("after the update")
         ok(app.succeed("cat " + MARKER).strip() == OLD_PIN, "the marker still holds the previous release")
 
     with subtest("the gate: the new CMS refuses until the migration"):
-        app.fail("systemctl start terrace-cms.service", timeout=120)
         app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -q 'CMS migration gate is closed'")
+        ok(unit_state("terrace-cms.service", "Result") == "start-limit-hit", "the switch's starts of the new CMS hit its start limit on the gate")
+        app.succeed("systemctl reset-failed terrace-cms.service")
+        app.fail("systemctl start terrace-cms.service", timeout=120)
         ok(True, "the new CMS refuses with the gate message")
-        ok(unit_state("terrace-web.service", "ActiveState") == "inactive", "the website stays stopped (it has no gate, H7)")
+        # H7: the website has no gate; the switch started the new bundle, which then failed its health check against the stopped CMS.
+        ok((unit_state("terrace-web.service", "ActiveState"), unit_state("terrace-web.service", "Result")) == ("failed", "exit-code"), "the website, started ungated by the switch, failed its health check (H7)")
+        app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
 
     with subtest("case A: rollback before the migration brings the previous site back"):
         app.succeed("systemctl reset-failed terrace-cms.service")
         out = app.succeed("terrace-production rollback")
         ok("Running generation 1" in out, "rollback accepted before the migration")
         ok(running() == BASE and generation() == "system-1-link", "generation 1 runs again")
-        ok(records()[-1]["action"] == "rollback" and records()[-1]["result"] == "success", "rollback recorded")
+        ok(records()[-1]["action"] == "rollback" and records()[-1]["result"] == "success" and records()[-1]["failedUnits"] == [], "rollback recorded, no unit failed (the old CMS's gate is open)")
         restart_after_quiesce()
         cms_serves("after case A")
         ok(data() == before_upgrade and ledger() == OLD_MIGRATIONS, "case A: data and ledger unchanged")
@@ -401,6 +409,7 @@ in {
         quiesce()
         operator.succeed(SSH + "sudo terrace-production activate " + NEXT)
         ok(running() == NEXT and generation() == "system-3-link", "the signed system activated again as generation 3")
+        ok(records()[-1]["result"].startswith("switched; down until the CMS migration") and records()[-1]["failedUnits"] == GATED, "again exactly the CMS and website down until the migration")
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-done")
         t0 = time.monotonic()
         app.succeed("systemctl start terrace-cms-migrate.service", timeout=300)
@@ -427,6 +436,8 @@ in {
         ciphertext = app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip()
         out = app.succeed("terrace-production rollback --cms-stays-down 2>&1")
         ok("WARNING: the CMS stays down" in out and running() == BASE, "forced rollback ran generation 1 with a warning")
+        ok(records()[-1]["result"].startswith("switched; down until the CMS migration") and records()[-1]["failedUnits"] == GATED, f"forced rollback: exactly the CMS and website down: {records()[-1]}")
+        app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
         app.fail("systemctl start terrace-cms.service", timeout=120)
         app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -q 'CMS migration gate is closed'")
         ok(True, "forward-only: the previous CMS does not start on the migrated database")
@@ -445,7 +456,7 @@ in {
     with subtest("the way forward: the new generation serves again"):
         app.succeed("systemctl reset-failed terrace-cms.service")
         app.succeed("terrace-production activate " + NEXT)
-        ok(running() == NEXT, "the migrated release's system activated again (no flag: the ledger is its own)")
+        ok(running() == NEXT and records()[-1]["result"] == "success" and records()[-1]["failedUnits"] == [], "the migrated release's system activated again (no flag: the ledger is its own), no unit failed")
         restart_after_quiesce()
         cms_serves("after the way forward")
         ok(data() == migrated, "data unchanged across rollback and re-activation")

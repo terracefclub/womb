@@ -38,6 +38,8 @@ MUTANTS = [
     ("rollback goes to an OLDER generation", PRODUCTION, "(( n < $1 ))", "(( n != $1 ))"),
     ("switch runs in the terrace-switch unit", PRODUCTION, "systemd-run --unit=terrace-switch --collect", "systemd-run --unit=other --collect"),
     ("result recorded", PRODUCTION, "}' >>\"$records\"", "}' >/dev/null"),
+    ("only the quiesce units may fail at a gated switch", PRODUCTION, '[[ " ${quiesce[*]/%/.service} " == *" $unit "* ]] || expected=0', "true"),
+    ("a gated switch needs the gate closed for the target", PRODUCTION, '[[ -n $cms_marker && $marker != "$(field "$target" .website.revision)" && ${#failed[@]} -gt 0 ]] || expected=0', "true"),
     ("helper: secret key only", DEPLOY, "grep -Eq '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{86}==$' \"$key\" ||", "true ||"),
     ("helper: pinned host key", DEPLOY, "-o StrictHostKeyChecking=yes", "-o StrictHostKeyChecking=no"),
     ("helper: sign before copying", DEPLOY, "store sign --key-file \"$key\" --recursive \"$toplevel\"", "store sign --key-file \"$key\" --recursive \"$toplevel\" || true"),
