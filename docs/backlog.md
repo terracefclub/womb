@@ -577,7 +577,9 @@ marked so.
   symlinked key file; the exit-4 logic's reading of the switch's "the following
   units failed" line is commented and pinned by a unit test and a VM assertion;
   the record waits (at most 300 s) for the gated units to stop retrying, which
-  removed the two timing dependences of the VM proof; a dry run before the quiesce
+  removed the `failedUnits` timing dependence of the VM proof (the case A one is made
+  detectable, not removed: the check counts only when the CMS was retrying before and
+  after it, and is repeated up to five times); a dry run before the quiesce
   runs every other check and reports NOT READY with exit 3. Left: the race of two
   first-ever runs on the lock file is not exercised (only reuse of an existing
   file); `switch-to-configuration` also prints `Failed to start <unit>` lines,

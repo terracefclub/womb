@@ -221,8 +221,8 @@ comparison); **READ**; **NOT EXERCISED**. Nothing here ran on a real host.
 | The system manifest | `/etc/terrace/system.json`, so `<toplevel>/etc/terrace/system.json` in every production system: `schema`, `role`, `hostName`, `instance`, `wombRevision`, the app's `website.revision` and `website.migrations` (the release's migration list: `terrace.production.app.releaseMigrations`, by default the pin's list when the host runs the pinned revision, otherwise unknown), and `versions` of Keycloak, PostgreSQL and Headscale. `wombRevision` comes from the new `wombRevision` argument of `infra/nixos/production-config.nix` ([production profile](production-profile.md#building-a-host)) | RAN (eval) for both roles; RAN IN VM (read by `activate` and `status`) |
 | `platform/production/terrace-deploy.sh` (operator machine) | Refuses unless given a Nix **secret** key file, an SSH identity and a built production toplevel with a manifest; then `nix store sign --recursive` (needs a user the build machine's Nix daemon lets add signatures: root or a trusted user), `nix copy --to ssh-ng://operator@<host>` with strict host key checking, and prints the activation command. It activates nothing | RAN IN VM (the operator guest stands in for the build machine); unit test |
 | `terrace-production activate <toplevel> [--boot] [--cms-stays-down] [--accept-upstream-schema-change]` | Root only (`sudo` from `operator`). The checks below, then **inside the transient unit** `systemd-run --unit=terrace-switch --collect --service-type=exec --wait`: `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`, `<toplevel>/bin/switch-to-configuration switch` (or `boot` with `--boot`), and a record | RAN IN VM; unit test |
-| `terrace-production rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]` | Without `--generation`: the newest generation older than the current one whose last finished record is **not a failure**. A generation's records are the `finished` lines whose `generationAfter` is its number and whose `to` is its system; a generation with no such line (the installation's generation 1, one made by hand, one whose records were lost) stays eligible, since nothing says it failed. Each generation passed over is named (`Skipping generation <n>: its last record is 'failed (exit <n>)' ...`, and in `status`); if none is left, or the log cannot be read, it refuses and asks for `--generation N`. With `--generation N`: that generation (it must exist and not be the boot default itself), with a WARNING if its last record is a failure; every check of a rollback still runs. Same checks as `activate` except the signatures (a generation is already root-trusted), same unit: `nix-env --switch-generation <n>`, then that generation's `switch-to-configuration`. When the boot default is **not** the running system (after `activate --boot`, or a switch that failed after registering its generation), a plain `rollback` instead makes the running system's generation the boot default again: `nix-env --switch-generation <that generation>` and the running system's `switch-to-configuration boot`, in the same unit, recorded as `cancel`; nothing running changes | RAN IN VM (both forms: the second as `activate --boot` cancelled before a reboot); RAN IN VM: after the gated switch that also broke a unit (recorded `failed (exit 4)`) and a new activation, `rollback --dry-run` named that generation as skipped and targeted the one before, and `status` named it; unit test (both forms, the failed-switch case, the skip, a record of another system under the same number not counting, a generation without records eligible, all older ones failed, an unreadable log, `--generation` with its refusals) |
-| The records and `status` | The unit appends two JSON lines to `/var/lib/terrace-production/deployments.log` (root, 0600): a `started` line before it changes anything (time, action, mode, from, to, generation before, and `failedBefore`: which of the CMS and website were already failed; the unit then clears their failed state so a start limit hit earlier cannot block a unit whose gate is open), and a `finished` line after (generation after, Womb and website revision, result `success`, `switched; down until the CMS migration: <units>` or `failed (exit <n>)`, `switchExit` (the switch's own exit code, `null` when it did not run), `failedUnits`, `unexpectedUnits`; the field `startingUnits` of records written before 2026-11-25 is gone, see step 7). The unit writes them, so they exist even when the SSH session dropped. `terrace-production status` adds the running system and its revisions, the profile's generation (the boot default) with a WARNING when it is not the running system, the previous generation and its revisions, whether the deploy path is on, and the last record, with a WARNING when the last activation started and never finished (its unit stopped, or the host rebooted mid-switch) | RAN IN VM (records and `status` lines); unit test (both WARNINGs, `failedBefore`) |
+| `terrace-production rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]` | Without `--generation`: the newest generation older than the current one whose last record is **neither a failure nor an unfinished attempt**. A generation's records are the `finished` lines whose `generationAfter` is its number and whose `to` is its system, and any `started` line for its system that no `finished` line follows (the unit was killed or the host lost power mid-switch: `unfinished (started <time>, never finished)`, skipped like a failure); a generation with none of these (the installation's generation 1, one made by hand, one whose records were lost) stays eligible, since nothing says it failed. So does one whose last record is `switched; down until the CMS migration`: that switch did what it should, its gate refusing a database not yet migrated, and rolling back to it brings that release back with its gate. Each generation passed over is named (`Skipping generation <n>: its last record is 'failed (exit <n>)' ...`, and in `status`); if none is left, or the log cannot be read, it refuses and asks for `--generation N`. With `--generation N`: that generation, with a WARNING if its last record is a failure or unfinished; every check of a rollback still runs. It must exist and be **older than the current generation**, which is the running system's (newest) generation, or the boot default's when the running system is in no generation; so with a pending boot default (after `activate --boot` or a switch that failed after registering), the pending generation and anything between counts as newer. A newer one is refused: going forward is `activate` with that generation's system path, which the refusal prints. Same checks as `activate` except the signatures (a generation is already root-trusted), same unit: `nix-env --switch-generation <n>`, then that generation's `switch-to-configuration`. When the boot default is **not** the running system (after `activate --boot`, or a switch that failed after registering its generation), a plain `rollback` instead makes the running system's generation the boot default again: `nix-env --switch-generation <that generation>` and the running system's `switch-to-configuration boot`, in the same unit, recorded as `cancel`; nothing running changes | RAN IN VM (both forms: the second as `activate --boot` cancelled before a reboot); RAN IN VM: after the gated switch that also broke a unit (recorded `failed (exit 4)`) and a new activation, `rollback --dry-run` named that generation as skipped and targeted the one before, and `status` named it; unit test (both forms, the failed-switch case, the skip, an unfinished attempt skipped and choosable with a warning, a record of another system under the same number not counting, a generation without records eligible, all older ones failed, an unreadable log, `--generation` with its refusals, a newer generation refused in the normal and the pending-boot-default state) |
+| The records and `status` | The unit appends two JSON lines to `/var/lib/terrace-production/deployments.log` (root, 0600): a `started` line before it changes anything (time, action, mode, from, to, generation before, and `failedBefore`: which of the CMS and website were already failed; the unit then clears their failed state so a start limit hit earlier cannot block a unit whose gate is open), and a `finished` line after (generation after, Womb and website revision, result `success`, `switched; down until the CMS migration: <units>` or `failed (exit <n>)`, `switchExit` (the switch's own exit code, `null` when it did not run), `failedUnits`, `unexpectedUnits`, `notStartedUnits`, `waitTimedOut`, `stillStarting` (step 7); the field `startingUnits` of records written before 2026-11-25 is gone, see step 7). The unit writes them, so they exist even when the SSH session dropped. `terrace-production status` adds the running system and its revisions, the profile's generation (the boot default) with a WARNING when it is not the running system, the previous generation and its revisions, whether the deploy path is on, and the last record, with a WARNING when the last activation started and never finished (its unit stopped, or the host rebooted mid-switch) | RAN IN VM (records and `status` lines); unit test (both WARNINGs, `failedBefore`) |
 
 **What `activate` and `rollback` refuse, before anything changes.** Each refusal
 prints `terrace-production: nothing changed: ...` and exits 1; the unit tests check
@@ -374,7 +374,12 @@ window (steps 5, 6, 13); a failed switch's state (seen while the proof was built
 when the VM could not take GRUB, but asserted only by unit tests); the bootstrap
 route and key rotation; real data sizes; the 300 s wait for the CMS and website
 reaching its limit (unit test only); a gated switch with the gated website that exits
-4 for the gated units alone (only exit 0 was seen); `rollback --generation N`, a plain
+4 for the gated units alone (only exit 0 was seen); the window in which the CMS and
+website start jobs are still queued when the switch returns (waited for since review
+round 1; unit test only, the VM never caught it open); a closed gate with the units
+never started (unit test only); an unfinished `started` record (unit test only);
+`--generation` refusing a newer generation, also with a pending boot default (unit
+test only); `rollback --generation N`, a plain
 `rollback` that actually switches past a failed generation (the VM shows the choice
 with `--dry-run` only), the lock under two concurrent SSH sessions and the race of
 two first-ever runs on the lock file, and a symlinked signing key (unit tests only).
@@ -725,7 +730,20 @@ rehearsal observed a re-pin from `680ad56` to `dd1aef7` on the app role):
   does not depend on either: after exit 0 or 4 it waits (at most 300 s, about 30 s
   in practice) until neither unit is starting, stopping or reloading, and if either
   is then failed or still starting it judges the switch as below, whatever the exit
-  code. The record keeps the switch's own code as `switchExit`. The first VM run
+  code. Since review round 1 of this change (2026-11-25) the wait also lasts while a
+  start job for the CMS, the website, `terrace-production.target` or
+  `terrace-production-boot` is queued or running (`systemctl list-jobs`; a listing
+  that fails counts as a queued job): those starts come from the boot unit's
+  `systemctl start --no-block`, so they are not the switch's own jobs and can still be
+  queued when it returns (the VM log shows the switch finishing about a second after
+  the first gate refusal; nothing orders the two). And in `switch` mode with the gate
+  closed for the target (the marker exists and does not hold its revision) the
+  command always judges the switch: a CMS or website left merely `inactive` is
+  recorded `failed (exit <n>, then not started though the gate is closed for this
+  release, THE SITE IS DOWN: <units>)` in `notStartedUnits`, never as `success`; one
+  running is unexpected (a bypassed gate). With no marker at all (never migrated),
+  both are skipped by their start condition and count as down until the migration.
+  The record keeps the switch's own code as `switchExit`. The first VM run
   recorded such a switch as a plain `success` (the command then looked only at exit
   4); that is what this wait and judgement fix. In that run the bundles never
   started (each start was refused by the gate's control process).
@@ -750,7 +768,13 @@ and records `switched; down until the CMS migration: <units>`, with `failedUnits
 (the CMS and website, failed) and `unexpectedUnits` (empty). A CMS or website still
 starting after the wait is recorded in `unexpectedUnits` and fails the switch; after
 exit 0, a failed CMS or website that does not meet these conditions is recorded
-`failed (exit 0, then units failed: <units>)` and the command exits 1. The client
+`failed (exit 0, then units failed: <units>)` and the command exits 1. When the
+300 s wait runs out, the record says `waitTimedOut: true`, lists `stillStarting`
+(units, and `jobs:<units>` for queued start jobs), and the result names it: `failed
+(exit <n>, then the wait for the CMS and website timed out after 300 s, still
+starting: <...>)`; a healthy start slower than 300 s therefore shows as such, not as
+a bare failure. On any failure the client prints the record's result line on
+standard error before `FAILED`. The client
 then prints `THE SITE IS DOWN until the CMS migration: the gate is closed for this
 release, so terrace-cms.service terrace-web.service stay failed until it`. That
 line is read by its exact text, `warning: the following units failed: `: if
@@ -767,7 +791,11 @@ unexpected, and a gated switch whose system also carried a unit that fails and
 restarts was recorded `failed (exit 4)` naming exactly that unit, which the real
 switch's own line named too; unit tests for a failed timer, a service in
 `auto-restart`, a unit named only in the switch's own list, a website that stops
-retrying during the wait, and one still starting after it. Nothing needs stopping
+retrying during the wait, and one still starting after it (named as a timed-out wait), start jobs still queued
+when the switch returns (waited for), a gate closed with the units never started
+(failed, `THE SITE IS DOWN`), a job listing that fails, and a gated unit running
+with the gate closed. The queued-job window itself was not made to occur in a VM.
+Nothing needs stopping
 now: both units stay failed until step 11. Any later `activate` or `rollback` that
 changes the release again refuses while the CMS or the website is still retrying
 (a start by hand, a reboot or a push can start them), and names `systemctl stop

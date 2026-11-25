@@ -216,6 +216,7 @@ in {
     def gated_record(record, label):
         # Both units fail their migration gate; the record is written once they stopped retrying (at their start limit).
         ok(record["failedUnits"] == GATED and record["unexpectedUnits"] == [] and "startingUnits" not in record
+           and record["notStartedUnits"] == [] and record["waitTimedOut"] is False and record["stillStarting"] == []
            and record["result"] == "switched; down until the CMS migration: " + " ".join(GATED),
            f"{label}: switched with exactly the gated CMS and website down: {record}")
 
