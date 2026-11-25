@@ -108,10 +108,31 @@ From the review of the written [restore promotion](restore-promotion.md) procedu
 None of these was done in that pull request; the production safeguards follow-up
 (2026-11-24) did the items marked done.
 
-- Drill: run the procedure's commands verbatim in a VM on the production profile
-  for both roles with the original disks destroyed, and add the assertions in its
-  "Drill to add" section. Until then it is written from the rehearsals and has not
-  been run as written.
+- Done 2026-11-25 (promotion drill): `platform/production/promotion-test.nix`
+  (`platform/production-promotion-check`) runs section 2 with the document's own
+  commands (`promotion-commands.json`; evaluation and
+  `tests/platform/test_promotion_drill.py` refuse a command that is not verbatim
+  in the document) on the production app role as a planned replacement and the
+  relay as a lost original, then boots the retired original app before and after
+  the credential rotations. Section 5 of the document lists each item it asserts
+  and each it leaves out, with the reason. Corrections the runs made to the
+  document: `adopt --restored` prints the `terrace-secrets verify` PASS line
+  before the documented lines, and the relay prints three lines after it, not
+  two; the relay's reconciliation line is `OK sqlite headscale: integrity ok,
+  table row counts match`; READ-only statements now run (step 9 clean-up, step
+  13 ownership check, step 14 before adoption, the original re-arming its timers
+  at boot, retention after two and three runs, a returning original's backup and
+  prune, and the rotations cutting it off). Failed runs on the way: `d688ae1`
+  (the test driver's type check: three diagnostics, a mixed-type dictionary and a
+  reused variable; no VM started) and `775727e` (the app part passed; the relay
+  assertion expected the bare line `OK sqlite headscale`, which the tool never
+  writes, and the document had named it that way).
+- Left by the promotion drill (section 5 of the document has the reasons): Headscale
+  peers on a replaced production relay; acceptance of an adoption with the media
+  copy skipped; a promotion from the S3 secondary target; a whole regenerated store;
+  an old token and session across the move; the app restored from a snapshot taken
+  with writes in flight; real names, addresses and DNS; a clean-up policy for a
+  successful restore directory.
 - Done (production safeguards; decision: leave them off): `adopt --restored` holds
   the backup, check and freshness timers (`restoreHeldTimers`) and on the app the
   sweep (`restoreServiceHeldTimers`), each group by a `ConditionPathExists=!` on its
@@ -124,8 +145,8 @@ None of these was done in that pull request; the production safeguards follow-up
   the order is enforced. A plain adoption is unchanged. The production VM check
   asserts (passed at `9664be1`): both paths, the refused order, a
   failed and resumed restored adoption, both stages with a reboot between them, and
-  the relay's `--in-service` answer. Not exercised: a restored relay's held timers
-  (no relay replacement in the VM). The script is now
+  the relay's `--in-service` answer. A restored relay's held timers (also across a
+  reboot) are asserted by the promotion drill (2026-11-25). The script is now
   `platform/production/terrace-production.sh` with unit tests
   (`tests/platform/test_terrace_production.py`, stub systemctl).
 - Proofs of the production safeguards (2026-11-24, Womb `9664be1`, on the build
