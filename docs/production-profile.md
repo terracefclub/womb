@@ -441,6 +441,16 @@ policy reads back admin events on and details off from Keycloak's database, and
 the restored host's signature now includes those two flags. The evaluation check
 passes with 123 rejected variants and the cloud rehearsal check passes.
 
+Verified 2026-11-25 for the deploy path at Womb `22f4542` (fresh results, builder):
+the deploy VM proof PASS in 869 s with 107 assertions (an upgrade of a populated app
+host from the kept `680ad56` release to the pinned `dd1aef7`, its migration, the
+refusals and rollbacks of [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in));
+this VM proof 263 assertions (198 protocol), the identity administration proof 347
+and the TLS proof 148, all PASS (their derivations changed: every production system
+now carries the manifest and the extended `terrace-production`). The evaluation
+check passes with 142 rejected variants. The other checks and the five rehearsal
+drivers have derivations equal to trunk's and were not rerun.
+
 ## Keycloak administration
 
 The app role also installs `terrace-identity-admin` (root-only wrapper) and the

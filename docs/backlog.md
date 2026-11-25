@@ -516,7 +516,14 @@ marked so.
   revision mismatch still fails through the existing gate"), the comment in
   `platform/production/app.nix` and `docs/website-host.md` ("Startup rejects a
   missing/different revision marker") read as if both were gated. Decide whether
-  the website should be gated too, then correct the text.
+  the website should be gated too, then correct the text. **Observed 2026-11-25**
+  (deploy VM rehearsal): on a re-pin the activation's switch starts the new website
+  against the stopped CMS; it fails its health check and restarts until its start
+  limit, three to four minutes later. **Proposed follow-up change, not decided**:
+  add the module's `requireMigration` to `terrace-web.service`'s `ExecStartPre`
+  (one line in `platform/website.nix`), so the website fails at once like the CMS;
+  it changes the website module, so the website and gateway checks and the
+  rehearsal drivers would have to run again.
 - Decide: the order between activating a revision that adds an inventory secret
   and pushing it (the host refuses unknown names before activation; after it, a
   reboot before the push leaves the writers gated), and how a removed inventory
