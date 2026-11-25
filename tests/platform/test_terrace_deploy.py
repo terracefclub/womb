@@ -14,7 +14,7 @@ import unittest
 
 SCRIPT = Path(os.environ.get("TERRACE_DEPLOY_SCRIPT", Path(__file__).resolve().parents[2] / "platform/production/terrace-deploy.sh"))
 BASH = shutil.which("bash") or "/bin/bash"
-TOOLS_PATH = ":".join(sorted({os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("bash", "cat", "grep")}))
+TOOLS_PATH = ":".join(sorted({os.path.dirname(shutil.which(name) or "/bin/" + name) for name in ("bash", "cat", "grep", "stat", "readlink")}))
 SECRET = "terrace-test-deploy-1:" + "A" * 86 + "=="
 PUBLIC = "terrace-test-deploy-1:" + "A" * 43 + "="
 
@@ -23,7 +23,7 @@ class TerraceDeploy(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.dir = Path(directory.name)
+        self.dir = Path(directory.name).resolve()
         self.bin = self.dir / "bin"
         self.bin.mkdir()
         (self.bin / "nix").write_text(f"#!{BASH}\nprintf '%s\\n' \"NIX_SSHOPTS=${{NIX_SSHOPTS:-}} $*\" >>\"$FAKE_LOG\"\nexit ${{FAKE_NIX_RC:-0}}\n")
@@ -31,6 +31,9 @@ class TerraceDeploy(unittest.TestCase):
         self.log = self.dir / "nix.log"
         self.key = self.dir / "deploy.sec"
         self.key.write_text(SECRET + "\n")
+        self.key.chmod(0o600)
+        self.known = self.dir / "known_hosts"
+        self.known.write_text("app.example.net ssh-ed25519 AAAA\n")
         self.identity = self.dir / "operator"
         self.identity.write_text("synthetic\n")
         self.system = self.dir / "store" / ("a" * 32 + "-nixos-system-app")
@@ -45,15 +48,15 @@ class TerraceDeploy(unittest.TestCase):
         return subprocess.run([BASH, str(SCRIPT), *args], capture_output=True, text=True, timeout=30, env=env)
 
     def args(self, **override):
-        values = {"--key": str(self.key), "--address": "app.example.net", "--identity": str(self.identity)} | override
+        values = {"--key": str(self.key), "--address": "app.example.net", "--identity": str(self.identity), "--known-hosts": str(self.known)} | override
         return [item for pair in values.items() for item in pair if pair[1] is not None] + [str(self.system)]
 
     def test_signs_copies_and_prints_the_activation(self):
-        result = self.run_helper(*self.args(**{"--known-hosts": str(self.identity)}))
+        result = self.run_helper(*self.args())
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text().splitlines()
         self.assertEqual(calls[0], f"NIX_SSHOPTS= --extra-experimental-features nix-command store sign --key-file {self.key} --recursive {self.system}")
-        self.assertEqual(calls[1], f"NIX_SSHOPTS=-i {self.identity} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={self.identity}"
+        self.assertEqual(calls[1], f"NIX_SSHOPTS=-i {self.identity} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={self.known} -o GlobalKnownHostsFile=/dev/null"
                                    f" --extra-experimental-features nix-command copy --to ssh-ng://operator@app.example.net {self.system}")
         self.assertEqual(len(calls), 2, "the helper never activates")
         self.assertTrue(result.stdout.startswith('Manifest: {"schema":1,"role":"app"}\n'))
@@ -61,6 +64,8 @@ class TerraceDeploy(unittest.TestCase):
 
     def test_refusals_before_signing(self):
         self.key.with_name("deploy.pub").write_text(PUBLIC + "\n")
+        self.key.with_name("deploy.pub").chmod(0o600)
+        (self.dir / "with space").write_text("app.example.net ssh-ed25519 AAAA\n")
         cases = [
             (self.args(**{"--key": None}), 2, "usage:"),
             (self.args(**{"--address": "app;rm"}), 1, "is not a host name or IP address"),
@@ -68,6 +73,8 @@ class TerraceDeploy(unittest.TestCase):
             (self.args(**{"--key": str(self.key.with_name("deploy.pub"))}), 1, "is not a Nix secret signing key"),
             (self.args(**{"--identity": str(self.dir / "absent")}), 1, "SSH identity"),
             (self.args(**{"--known-hosts": str(self.dir / "absent")}), 1, "known hosts file"),
+            (self.args(**{"--known-hosts": None}), 2, "usage:"),
+            (self.args(**{"--known-hosts": str(self.dir / "with space")}), 1, "known hosts file"),
         ]
         for args, code, needle in cases:
             result = self.run_helper(*args)
@@ -79,6 +86,21 @@ class TerraceDeploy(unittest.TestCase):
         result = self.run_helper(*self.args())
         self.assertIn("is not a built NixOS system", result.stderr)
         self.assertFalse(self.log.exists(), "nothing was signed or copied")
+
+    def test_a_readable_key_is_refused(self):
+        self.key.chmod(0o640)
+        result = self.run_helper(*self.args())
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is readable by group or others (mode 640)", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_a_result_link_becomes_its_store_path(self):
+        link = self.dir / "result"
+        link.symlink_to(self.system)
+        result = self.run_helper(*self.args()[:-1], str(link))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.endswith(f"sudo terrace-production activate {self.system.resolve()}\n"))
+        self.assertIn(f"--recursive {self.system.resolve()}", self.log.read_text())
 
     def test_a_failed_signature_stops_before_the_copy(self):
         result = self.run_helper(*self.args(), rc="1")

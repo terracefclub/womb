@@ -474,11 +474,11 @@ known to affect a deployed host (none exists).
 ## Host update follow-ups (G-37 / 9.7), recorded 2026-11-24
 
 From the written [host updates](host-updates.md) procedure. None is done in that
-pull request; the deploy path pull request (2026-11-25) closes or narrows the items
+pull request; the deploy path pull request (2026-11-24) closes or narrows the items
 marked so.
 
 - Decide (owner, before any production install): how a new system closure reaches
-  an installed production host. **Narrowed 2026-11-25**: option 1 (a signing key
+  an installed production host. **Narrowed 2026-11-24**: option 1 (a signing key
   trusted by the host) now exists as an opt-in, `terrace.production.deploy.trustedKeys`
   ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)),
   VM-proven on the app role; the owner has not chosen it, and the decision stays
@@ -489,7 +489,7 @@ marked so.
   on such a host. The choice (a signing key trusted by the host, a trusted
   `operator`, or something else) must be in the module a host is installed with,
   or its first update has no path.
-- Done (deploy path, 2026-11-25): `terrace-production activate` and `rollback`
+- Done (deploy path, 2026-11-24): `terrace-production activate` and `rollback`
   record the generations, activate with `switch` or `boot` in the `terrace-switch`
   unit, and refuse while a switch, a migration or a backup runs; VM drill
   `platform/production/deploy-test.nix`. Left: no `test` mode (deliberately: the
@@ -502,7 +502,7 @@ marked so.
   reopen the CMS gate. The gate compares revisions, not schemas. Make the marker or
   the migration unit refuse a downgrade (for example compare the ledger with the
   bundle's migration list), or test and document what Payload does. **Narrowed
-  2026-11-25**: `terrace-production rollback` and `activate` refuse to move to a
+  2026-11-24**: `terrace-production rollback` and `activate` refuse to move to a
   release whose manifest lacks a migration the ledger holds (unless
   `--cms-stays-down`, which warns against starting the old migration unit); the
   old unit itself still has no such check.
@@ -516,7 +516,7 @@ marked so.
   revision mismatch still fails through the existing gate"), the comment in
   `platform/production/app.nix` and `docs/website-host.md` ("Startup rejects a
   missing/different revision marker") read as if both were gated. Decide whether
-  the website should be gated too, then correct the text. **Observed 2026-11-25**
+  the website should be gated too, then correct the text. **Observed 2026-11-24**
   (deploy VM rehearsal): on a re-pin the activation's switch starts the new website
   against the stopped CMS; it fails its health check and restarts until its start
   limit, three to four minutes later. **Proposed follow-up change, not decided**:
@@ -545,7 +545,7 @@ marked so.
   possibly partly migrated database. Decide whether the migration unit should mark
   a failed attempt (so no generation's gate opens), and whether 180 s is right for
   real data (measured only on empty or small synthetic databases). **Narrowed
-  2026-11-25**: `terrace-production rollback` refuses, with no flag, when the ledger
+  2026-11-24**: `terrace-production rollback` refuses, with no flag, when the ledger
   holds a migration the target lacks while the marker holds the target's revision
   (unit test); a migration killed before it recorded anything is not detected.
 - Not determined, needs a test: what sops-nix does at activation when the new
@@ -553,7 +553,7 @@ marked so.
   `sops-install-secrets`; whether the previous secrets stay), and whether a push's
   `restartUnits` starts a stopped `terrace-cms.service` or `terrace-web.service`
   (the website would then run ungated on a stopped CMS).
-- Drill: the 16 items in the document's "Drills to add". **Narrowed 2026-11-25**:
+- Drill: the 16 items in the document's "Drills to add". **Narrowed 2026-11-24**:
   the deploy VM rehearsal covers drills 2, 3 (one release pair, small synthetic
   data), 4 (without the sweep and tool refusals), 5, 6 (without H1) and 15, and drill
   1 for the app role without backup, realm and secrets steps. Open: the rest.

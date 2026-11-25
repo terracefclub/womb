@@ -145,7 +145,7 @@
         role=${lib.escapeShellArg cfg.role}
         instance=${lib.escapeShellArg cfg.instance}
         deploy_keys=(${lib.escapeShellArgs cfg.deploy.trustedKeys})
-        busy=(${lib.escapeShellArgs (["terrace-switch" "terrace-backup" "terrace-backup-check"] ++ lib.optional (cfg.role == "app") "terrace-cms-migrate")})
+        busy=(${lib.escapeShellArgs (["terrace-switch" "terrace-backup" "terrace-backup-check"] ++ lib.optionals (cfg.role == "app") ["terrace-cms-migrate" "terrace-cms-sweep"])})
         quiesce=(${lib.escapeShellArgs (lib.optionals (cfg.role == "app") ["terrace-cms" "terrace-web"])})
         cms_marker=${lib.escapeShellArg (lib.optionalString (cfg.role == "app") "/var/lib/terrace-cms/migrated-revision")}
         store_dir=${builtins.storeDir}
@@ -263,9 +263,11 @@ in {
         Each is added to the host's Nix trusted public keys, so a system closure signed with the matching
         secret key can be copied in over the `operator` login, and `terrace-production activate` accepts only
         closures whose new paths carry one of these signatures. `operator` stays an untrusted Nix user and
-        signatures stay required. Empty (the default): the host's Nix settings are unchanged and nothing
-        built elsewhere can be put in its store. It must be set in the configuration a host is installed
-        with, or the first update has no path.
+        signatures stay required. Empty (the default): the host's Nix settings are unchanged; a copy as
+        `operator` of a closure built elsewhere is refused unless it is signed by a key Nix trusts by default
+        (the nixpkgs cache key; a system closure built from a private module is not), and `activate` refuses
+        everything. Root (and so `operator` through `sudo`) can still import paths. It must be set in the
+        configuration a host is installed with, or the first update has no path.
       '';
     };
     wombRevision = lib.mkOption {
@@ -374,8 +376,9 @@ in {
           message = "Terrace production units must not carry secrets in Environment=: ${toString serviceEnvironmentLeaks}.";
         }
         {
-          assertion = lib.all deployKey cfg.deploy.trustedKeys && lib.unique cfg.deploy.trustedKeys == cfg.deploy.trustedKeys;
-          message = "Terrace production deploy keys must be distinct Nix public keys (name:base64, as `nix key convert-secret-to-public` prints them), never a secret key.";
+          # A key Nix already trusts by default (the nixpkgs cache key) must not double as a deploy key: activate would then accept anything it signs.
+          assertion = lib.all deployKey cfg.deploy.trustedKeys && lib.unique cfg.deploy.trustedKeys == cfg.deploy.trustedKeys && !(lib.any (key: lib.elem key config.nix.settings.trusted-public-keys) cfg.deploy.trustedKeys);
+          message = "Terrace production deploy keys must be distinct Nix public keys (name:base64, as `nix key convert-secret-to-public` prints them), never a secret key, and none of the keys Nix trusts by default (nix.settings.trusted-public-keys).";
         }
         {
           assertion = config.networking.firewall.enable && lib.sort lib.lessThan (lib.unique config.networking.firewall.allowedTCPPorts) == lib.sort lib.lessThan cfg.publicTCPPorts && lib.unique config.networking.firewall.allowedUDPPorts == cfg.publicUDPPorts && config.networking.firewall.allowedTCPPortRanges == [] && config.networking.firewall.allowedUDPPortRanges == [] && config.networking.firewall.interfaces == {} && lib.subtractLists ["lo"] config.networking.firewall.trustedInterfaces == [];

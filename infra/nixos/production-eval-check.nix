@@ -435,6 +435,7 @@ let
     (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["not-a-key"];}))
     (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["terrace-eval-deploy-1:${lib.concatStrings (lib.replicate 86 "A")}=="];}))
     (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = [deployKey deployKey];}))
+    (rejects "none of the keys Nix trusts by default" (app {terrace.production.deploy.trustedKeys = [cacheKey];}))
     # Secrets.
     (rejects "secret(s) not declared: website/lifecycle-intake" (app ({config, ...}: {
       sops.secrets = lib.mkForce (lib.genAttrs (lib.remove "website/lifecycle-intake" config.terrace.production.secrets.required) (_: {mode = "0400";}));

@@ -84,7 +84,7 @@ Optional, with defaults:
 
 | Option (`terrace.production.*`) | Role | Meaning |
 | --- | --- | --- |
-| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required) and nothing built elsewhere can enter its store. Set it in the module a host is **installed** with, or its first update has no path. It is one way to settle owner decision U0, which the owner has not taken |
+| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. It is one way to settle owner decision U0, which the owner has not taken |
 | `wombRevision` | both | the Womb commit built, recorded in the system manifest; `production-config.nix` sets it from its `wombRevision` argument; default `null` |
 | `app.releaseMigrations` | app | the release's CMS migration list, recorded in the manifest; default the pin's list when the host runs the pinned revision, otherwise `null` (`activate` and `rollback` then refuse any release change on a migrated database) |
 
@@ -441,7 +441,7 @@ policy reads back admin events on and details off from Keycloak's database, and
 the restored host's signature now includes those two flags. The evaluation check
 passes with 123 rejected variants and the cloud rehearsal check passes.
 
-Verified 2026-11-25 for the deploy path at Womb `22f4542` (fresh results, builder):
+Verified 2026-11-24 for the deploy path at Womb `22f4542` (fresh results, builder):
 the deploy VM proof PASS in 869 s with 107 assertions (an upgrade of a populated app
 host from the kept `680ad56` release to the pinned `dd1aef7`, its migration, the
 refusals and rollbacks of [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in));

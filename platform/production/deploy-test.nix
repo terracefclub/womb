@@ -32,16 +32,18 @@
     age-keygen -y $out/escrow.age >$out/escrow.pub
   '';
   escrowRecipient = lib.removeSuffix "\n" (builtins.readFile "${escrow}/escrow.pub");
-  # Two Nix signing keys: the trusted deploy key and a foreign one the host does not trust.
+  # Three Nix signing keys: the trusted deploy key, a foreign one the host does not trust, and one the host trusts
+  # through plain Nix settings but not as a deploy key (as it trusts the nixpkgs cache key).
   signing = pkgs.runCommand "terrace-deploy-proof-signing-keys" {nativeBuildInputs = [pkgs.nix];} ''
     mkdir $out
     export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/state NIX_CONF_DIR=$TMPDIR/conf
-    for name in deploy foreign; do
+    for name in deploy foreign cachelike; do
       nix --extra-experimental-features nix-command key generate-secret --key-name terrace-rehearsal-$name-1 >$out/$name.sec
       nix --extra-experimental-features nix-command key convert-secret-to-public <$out/$name.sec >$out/$name.pub
     done
   '';
   deployPublic = lib.removeSuffix "\n" (builtins.readFile "${signing}/deploy.pub");
+  cachelikePublic = lib.removeSuffix "\n" (builtins.readFile "${signing}/cachelike.pub");
   users = pkgs.runCommand "terrace-deploy-proof-users" {} ''
     mkdir $out
     cp -r ${contract}/. $out/
@@ -88,7 +90,7 @@ in {
         cores = 2;
         diskSize = 4096;
         # Registered in this guest's store, so it can sign and copy them like a builder its own outputs.
-        additionalPaths = with nodes.app.system.build; [nodes.app.system.build.toplevel deployNext deployOtherHost deployUnsigned deployForeign nodes.relay.system.build.toplevel];
+        additionalPaths = with nodes.app.system.build; [nodes.app.system.build.toplevel deployNext deployOtherHost deployUnsigned deployForeign deployCachelike deployBoot deployBroken nodes.relay.system.build.toplevel];
       };
       environment.systemPackages = [tool deploy pkgs.sops pkgs.age pkgs.ssh-to-age pkgs.openssl pkgs.bun pkgs.jq];
     };
@@ -128,6 +130,8 @@ in {
           };
         };
       };
+      # A key Nix trusts on this host that is NOT a deploy key: activate must not accept its signatures.
+      nix.settings.extra-trusted-public-keys = [cachelikePublic];
       terrace.website = {
         webPackage = previous.web;
         cmsPackage = previous.cms;
@@ -138,6 +142,22 @@ in {
         deployOtherHost = variant [{networking.hostName = lib.mkForce "app-other";}];
         deployUnsigned = etcVariant "unsigned";
         deployForeign = etcVariant "foreign";
+        deployCachelike = etcVariant "cachelike";
+        # The next release once more, activated with --boot and cancelled before any reboot.
+        deployBoot = variant [nextModule {environment.etc."terrace-deploy-variant".text = "boot";}];
+        # The previous release plus a unit that fails and restarts: a gated switch that ALSO breaks something else.
+        deployBroken = variant [
+          {
+            systemd.services.terrace-deploy-probe-broken = {
+              wantedBy = ["multi-user.target"];
+              serviceConfig = {
+                ExecStart = "${pkgs.coreutils}/bin/false";
+                Restart = "on-failure";
+                RestartSec = 2;
+              };
+            };
+          }
+        ];
       };
     };
     # Built for its toplevel only (a closure for the other role); never started.
@@ -164,7 +184,7 @@ in {
   };
   testScript = {nodes, ...}: let
     base = nodes.app.system.build.toplevel;
-    inherit (nodes.app.system.build) deployNext deployOtherHost deployUnsigned deployForeign;
+    inherit (nodes.app.system.build) deployNext deployOtherHost deployUnsigned deployForeign deployCachelike deployBoot deployBroken;
     relaySystem = nodes.relay.system.build.toplevel;
   in ''
     import json, shlex, time
@@ -183,6 +203,8 @@ in {
     SSH = "ssh -i /root/.ssh/operator -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/app_known_hosts operator@app "
     NIX = "nix --extra-experimental-features nix-command "
     BASE, NEXT, OTHER, UNSIGNED, FOREIGN, RELAY = "${base}", "${deployNext}", "${deployOtherHost}", "${deployUnsigned}", "${deployForeign}", "${relaySystem}"
+    CACHELIKE, BOOT, BROKEN = "${deployCachelike}", "${deployBoot}", "${deployBroken}"
+    DEPLOY = "terrace-deploy --key /root/signing/deploy.sec --address app --identity /root/.ssh/operator --known-hosts /root/app_known_hosts "
     OLD_PIN, NEW_PIN = "${previous.revision}", "${release.revision}"
     OLD_MIGRATIONS, NEW_MIGRATIONS = ${builtins.toJSON previous.migrations}, ${builtins.toJSON release.migrations}
     GATED = ["terrace-cms.service", "terrace-web.service"]
@@ -234,8 +256,7 @@ in {
     def cms_serves(label):
         body = json.loads(app.succeed("curl -sf --max-time 20 'http://127.0.0.1:13048/api/posts?limit=1'"))
         ok(body.get("totalDocs", 0) > 0, label + ": the CMS serves the synthetic post")
-        app.succeed("curl -sf --max-time 20 -o /dev/null http://127.0.0.1:14294/events/")
-        ok(True, label + ": the website answers")
+        ok(app.execute("curl -sf --max-time 20 -o /dev/null http://127.0.0.1:14294/events/")[0] == 0, label + ": the website answers")
 
     def refused(command, needle, label, machine=None):
         machine = machine or app
@@ -314,6 +335,7 @@ in {
         ok(app.succeed(NIX + "config show require-sigs").strip() == "true", "signatures required")
         keys = app.succeed(NIX + "config show trusted-public-keys").split()
         ok("${deployPublic}" in keys and not any(k.startswith("terrace-rehearsal-foreign-1:") for k in keys), "the deploy key is trusted, the foreign key is not")
+        ok("${cachelikePublic}" in keys, "a second key is trusted through plain Nix settings (not a deploy key)")
         ok("deploy path: on, 1 trusted deploy key(s)" in app.succeed("terrace-production status"), "status: deploy path on")
 
     with subtest("the host refuses unsigned and foreign-signed copies from operator"):
@@ -324,15 +346,13 @@ in {
         operator.succeed(NIX + "store sign --key-file /root/signing/foreign.sec --recursive " + FOREIGN)
         out = operator.fail(copy + FOREIGN + " 2>&1")
         ok("lacks a signature by a trusted key" in out, "closure signed by an untrusted key refused by the host's Nix daemon")
-        app.fail("nix-store --check-validity " + FOREIGN)
-        ok(True, "neither refused closure is in the host's store")
+        ok(all(app.execute("nix-store --check-validity " + path)[0] != 0 for path in [UNSIGNED, FOREIGN]), "neither refused closure is in the host's store")
 
     with subtest("signed copies of systems for another host and the other role pass the copy, not the activation"):
         for path in [OTHER, RELAY]:
-            out = op("terrace-deploy --key /root/signing/deploy.sec --address app --identity /root/.ssh/operator --known-hosts /root/app_known_hosts " + path)
+            out = op(DEPLOY + path)
             ok(out.strip().endswith("ssh -t operator@app sudo terrace-production activate " + path), "helper prints the activation command")
-            app.succeed("nix-store --check-validity " + path)
-        ok(True, "signed copies accepted as operator (control for the refused copies)")
+            ok(app.execute("nix-store --check-validity " + path)[0] == 0, "signed copy accepted as operator (control for the refused copies)")
         sigs = app.succeed(NIX + "path-info --sigs " + OTHER)
         ok("terrace-rehearsal-deploy-1:" in sigs, "the copied toplevel carries the deploy signature on the host")
         refused("terrace-production activate " + OTHER, "this host is '1 app app rehearsal'", "a system built for another host name")
@@ -353,8 +373,20 @@ in {
         refused("terrace-production activate " + UNSIGNED, "not all carry a valid signature by a trusted deploy key", "an unsigned closure")
         refused("terrace-production activate " + FOREIGN, "not all carry a valid signature by a trusted deploy key", "a closure signed by an untrusted key")
 
+    with subtest("a key Nix trusts but that is not a deploy key does not count"):
+        operator.succeed(NIX + "store sign --key-file /root/signing/cachelike.sec --recursive " + CACHELIKE)
+        operator.succeed(copy + CACHELIKE)
+        ok(app.execute("nix-store --check-validity " + CACHELIKE)[0] == 0, "the host's Nix daemon accepts a copy signed by the non-deploy key it trusts")
+        refused("terrace-production activate " + CACHELIKE, "not all carry a valid signature by a trusted deploy key", "a closure signed only by a non-deploy trusted key")
+        # Control: the same closure's new paths also signed with the deploy key pass every check (dry run: nothing changes).
+        operator.succeed("nix-store -qR " + CACHELIKE + " | grep -vxF -f /tmp/base.paths >/tmp/shared/cachelike.paths && cp /root/signing/deploy.sec /tmp/shared/deploy.sec")
+        app.succeed(NIX + "store sign --key-file /tmp/shared/deploy.sec $(cat /tmp/shared/cachelike.paths) && rm /tmp/shared/deploy.sec /tmp/shared/cachelike.paths")
+        before = (running(), generation(), len(records()))
+        out = app.succeed("terrace-production activate " + CACHELIKE + " --dry-run")
+        ok("Signatures: " in out and "Dry run: nothing changed." in out and (running(), generation(), len(records())) == before, "control: with the deploy key's signature added, the checks pass (dry run, nothing changed)")
+
     with subtest("refused: the running system, a non-root caller, a switch in progress, a release change with the CMS up"):
-        out = op("terrace-deploy --key /root/signing/deploy.sec --address app --identity /root/.ssh/operator --known-hosts /root/app_known_hosts " + NEXT)
+        out = op(DEPLOY + NEXT)
         ok("Signed the closure of " + NEXT in out and "Copied to operator@app." in out, "the next system signed and copied as operator")
         refused("terrace-production activate " + BASE, "is already the running system", "the running system")
         refused(SSH + "terrace-production activate " + NEXT, "terrace-production: run as root", "operator without sudo", machine=operator)
@@ -402,8 +434,7 @@ in {
         app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -q 'CMS migration gate is closed'")
         ok(unit_state("terrace-cms.service", "Result") == "start-limit-hit", "the switch's starts of the new CMS hit its start limit on the gate")
         app.succeed("systemctl reset-failed terrace-cms.service")
-        app.fail("systemctl start terrace-cms.service", timeout=120)
-        ok(True, "the new CMS refuses with the gate message")
+        ok(app.execute("systemctl start terrace-cms.service", timeout=120)[0] != 0, "the new CMS refuses to start (its gate)")
         app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
 
     with subtest("case A: rollback before the migration brings the previous site back"):
@@ -456,9 +487,9 @@ in {
         gated_record(records()[-1], "forced rollback")
         app.succeed("systemctl stop terrace-web.service")
         app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
-        app.fail("systemctl start terrace-cms.service", timeout=120)
-        app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -q 'CMS migration gate is closed'")
-        ok(True, "forward-only: the previous CMS does not start on the migrated database")
+        gate_messages = lambda: int(app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -c 'CMS migration gate is closed' || true").strip())
+        seen = gate_messages()
+        ok(app.execute("systemctl start terrace-cms.service", timeout=120)[0] != 0 and gate_messages() > seen, "forward-only: the previous CMS does not start on the migrated database, refused by its gate")
         # What a generation rollback reverted (docs/host-updates.md table 4.1) ...
         ok(json.loads(app.succeed("cat /etc/terrace/system.json"))["website"]["revision"] == OLD_PIN, "reverted: the pinned revision the gate expects")
         ok("${previous.cms}" in app.succeed("systemctl cat terrace-cms.service"), "reverted: the unit definitions name the previous bundle")
@@ -467,8 +498,7 @@ in {
         ok(ledger() == NEW_MIGRATIONS, "not reverted: the database schema and its ledger")
         ok(data()["media files"] == migrated["media files"], "not reverted: media files")
         ok(app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip() == ciphertext, "not reverted: the host ciphertext")
-        app.succeed("test -e /var/lib/terrace-production/adopted")
-        ok(True, "not reverted: the adopted marker")
+        ok(app.execute("test -e /var/lib/terrace-production/adopted")[0] == 0, "not reverted: the adopted marker")
         held("after the forced rollback")
 
     with subtest("the way forward: the new generation serves again"):
@@ -480,6 +510,32 @@ in {
         ok(data() == migrated, "data unchanged across rollback and re-activation")
         out = app.succeed("terrace-production arm-timers && terrace-production arm-timers --in-service")
         ok("Every writer timer is active now and at every boot." in out, "the held timers armed once the update is done")
+
+    with subtest("activate --boot, then rollback cancels it before any reboot"):
+        op(DEPLOY + BOOT)
+        current = generation()
+        out = app.succeed("terrace-production activate " + BOOT + " --boot")
+        ok("is the boot default." in out and "cancel it with terrace-production rollback" in out and running() == NEXT and generation() != current, f"--boot registered {generation()} as the boot default, the running system unchanged")
+        ok("WARNING: the boot default" in app.succeed("terrace-production status"), "status warns that the boot default is not the running system")
+        out = app.succeed("terrace-production rollback")
+        ok("the boot default goes back to generation" in out and generation() == current and running() == NEXT, f"rollback made the running system's generation the boot default again: {generation()}")
+        ok(records()[-1]["action"] == "cancel" and records()[-1]["mode"] == "boot" and records()[-1]["result"] == "success", f"the cancel is recorded: {records()[-1]}")
+        ok("WARNING" not in app.succeed("terrace-production status"), "status is clean again")
+        ok(app.succeed("readlink -f /nix/var/nix/profiles/system").strip() == NEXT, "the boot default is the running system")
+
+    with subtest("a gated switch that also breaks another unit is a failed switch"):
+        quiesce()
+        op(DEPLOY + BROKEN)
+        out = app.fail("terrace-production activate " + BROKEN + " --cms-stays-down 2>&1")
+        record = records()[-1]
+        ok("activate FAILED (exit 4)" in out and record["result"] == "failed (exit 4)" and "terrace-deploy-probe-broken.service" in record["unexpectedUnits"]
+           and "terrace-cms.service" in record["failedUnits"], f"recorded FAILED, naming the extra failing unit next to the gated CMS: {record}")
+        # Back to the migrated release (control: the same command succeeds once nothing else fails).
+        app.succeed("systemctl stop terrace-web.service terrace-deploy-probe-broken.service; systemctl reset-failed")
+        app.succeed("terrace-production activate " + NEXT)
+        ok(running() == NEXT and records()[-1]["result"] == "success", "the migrated release activated again, nothing failed")
+        restart_after_quiesce()
+        cms_serves("after the failed switch")
 
     with subtest("stop owned guests"):
         app.shutdown()
