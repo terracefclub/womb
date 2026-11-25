@@ -394,7 +394,7 @@ in {
         app.succeed("systemd-run --collect --unit=terrace-switch ${pkgs.coreutils}/bin/sleep 600")
         refused("terrace-production activate " + NEXT, "terrace-switch.service is active; wait until it has finished", "another terrace-switch running")
         app.succeed("systemctl stop terrace-switch.service")
-        refused("terrace-production activate " + NEXT, "the release changes and terrace-cms.service is running; quiesce first", "a release change with the CMS running")
+        refused("terrace-production activate " + NEXT, "the release changes and terrace-cms.service is active; quiesce first", "a release change with the CMS running")
 
     with subtest("upgrade: activation of the signed system survives a dropped SSH session; held timers stay held"):
         quiesce()
