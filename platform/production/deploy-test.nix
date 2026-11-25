@@ -414,6 +414,7 @@ in {
         # A start of a held timer (as the target's at boot) is skipped while its marker exists.
         app.succeed("systemctl start " + " ".join(BACKUP_HELD + SERVICE_HELD))
         held("before the update")
+        bundle_starts = {unit: unit_state(unit, "ExecMainStartTimestampMonotonic") for unit in GATED}
         # `-tt`: a terminal, as `ssh -t` gives an operator, so a dropped connection hangs up the remote side.
         operator.succeed("(" + SSH.replace("ssh ", "ssh -tt ", 1) + "sudo terrace-production activate " + NEXT + " >/tmp/activate.log 2>&1 </dev/null; echo $? >/tmp/activate.rc) >/dev/null 2>&1 </dev/null & echo $! >/tmp/activate.pid")
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-started", timeout=180)
@@ -425,14 +426,18 @@ in {
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-done && ! systemctl is-active terrace-switch.service", timeout=300)
         ok(running() == NEXT and generation() == "system-2-link", "the new generation runs after the dropped session")
         record = records()[-1]
-        # The switch starts the stopped CMS and website (the active terrace-production.target wants them): both fail their
-        # migration gate and switch-to-configuration exits 4; the record is written after they stopped retrying.
+        # The switch starts the stopped CMS and website again (terrace-production-boot restarts and starts the target that wants
+        # them): both fail their migration gate; switch-to-configuration exits 0 or 4 (recorded as switchExit), and the record is
+        # written after they stopped retrying.
         ok((record["action"], record["generationBefore"], record["generationAfter"], record["to"], record["wombRevision"], record["websiteRevision"]) ==
            ("activate", "1", "2", NEXT, "${revisions.next}", NEW_PIN), f"the unit recorded the activation: {record}")
         gated_record(record, "upgrade activation")
         ok(failed_units() == GATED, "when the command returns, exactly the CMS and the website are failed")
         ok(all(unit_state(unit, "Result") == "start-limit-hit" for unit in GATED), "both stopped at their start limit")
         ok(gate_messages("terrace-web.service") > 0, "the website, started by the switch, was refused by its migration gate (H7 closed)")
+        ok({unit: unit_state(unit, "ExecMainStartTimestampMonotonic") for unit in GATED} == bundle_starts
+           and app.execute("ss -ltn | grep -E '127.0.0.1:(13048|14294) '")[0] != 0,
+           f"neither bundle ran: no main process started since the quiesce, nothing listens on their ports (switch exit {record.get('switchExit')})")
         status = app.succeed("terrace-production status")
         ok(f"running system: {NEXT} (Womb ${revisions.next}, website {NEW_PIN})" in status and f"previous generation: 1 {BASE} (Womb ${revisions.old}, website {OLD_PIN})" in status, "status shows both generations")
         held("after the update")

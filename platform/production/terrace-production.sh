@@ -266,18 +266,22 @@ settle() {
 }
 # Inside the terrace-switch unit: check that the state the decision was made against still holds, record the start,
 # register the generation, switch, and record the result.
-# A switch to a release whose migration has not run starts the CMS and website (terrace-production.target wants
-# them): both fail their migration gate (requireMigration, platform/website.nix), and switch-to-configuration exits 4
-# (their start jobs failed). That outcome, and only it, is recorded as switched with those units down: exit 4, the
-# marker not holding the target's revision, the CMS or website failed once they have stopped retrying (settle), neither
-# of them still starting after that wait, and no other unit of any type failed, in auto-restart, or named in
-# switch-to-configuration's own list of failed units. A unit outside that set that is merely "activating" when the
+# A switch to a release whose migration has not run starts the CMS and website again (terrace-production-boot is
+# restarted and starts terrace-production.target, which wants them): both fail their migration gate (requireMigration,
+# platform/website.nix) and retry until their start limit. Those start jobs are not the switch's own, and when it lists
+# the units they are usually in their restart delay with no failed main process, so switch-to-configuration can exit 0
+# (seen in the deploy VM proof since the website is gated) or 4 (when something held it until they had failed). So after
+# exit 0 or 4 the command waits until the CMS and website stop retrying (settle) and, if either then failed or is still
+# starting, classifies the switch. Recorded as switched with those units down only when: the marker does not hold the
+# target's revision, the CMS or website failed, neither is still starting after the wait, and no other unit of any type
+# failed, is in auto-restart, or is named in switch-to-configuration's own list of failed units. Anything else with a
+# failed CMS or website is a failed switch, even after exit 0. A unit outside that set that is merely "activating" when the
 # switch has returned is not counted: switch-to-configuration waits for the jobs it queued, so such a unit was started
 # by something else (a timer) and says nothing about this switch.
 apply() {
   local action=$1 mode=$2 target=$3 generation=$4 expected_from=$5 expected_gen=$6
   local from before after rc=0 result marker="" unit name active sub line expected=1
-  local failed=() unexpected=() prefailed=() reported=() quiesced=()
+  local failed=() unexpected=() prefailed=() reported=() quiesced=() names=() switch_exit=null
   from=$(readlink -f "$current_system"); before=$(gen_of)
   [[ $from == "$expected_from" && $before == "$expected_gen" ]] || deny "the running system or the profile changed after the checks (checked: $expected_from, generation $expected_gen; now: $from, generation $before); run the command again"
   check_idle terrace-switch
@@ -298,16 +302,24 @@ apply() {
   if [[ $rc == 0 ]]; then
     install -m 0600 /dev/null "$switch_log"
     "$target/bin/switch-to-configuration" "$mode" 2>&1 | tee "$switch_log" || rc=${PIPESTATUS[0]}
+    switch_exit=$rc
   fi
   after=$(gen_of)
-  if [[ $rc == 4 ]]; then
+  local classify=0
+  if [[ $rc == 0 || $rc == 4 ]]; then
+    settle
+    if [[ $rc == 4 ]]; then classify=1; fi
+    for unit in "${quiesced[@]}"; do
+      case $(systemctl show "$unit" -p ActiveState --value) in failed | activating | deactivating | reloading) classify=1 ;; esac
+    done
+  fi
+  if (( classify )); then
     # switch-to-configuration's own list, by its exact text (nixpkgs switch-to-configuration-ng: `warning: the following
     # units failed: a, b`; pinned by a unit test and asserted against the real switch in the deploy VM proof). If upstream
     # changes the text, this list stays empty and only the listing below remains, which still sees every failed unit
     # and every unit in auto-restart: the check gets weaker, it does not let a failure it can see through.
     line=$(grep -m 1 '^warning: the following units failed: ' "$switch_log" || true)
     if [[ -n $line ]]; then IFS=',' read -r -a reported <<<"${line#warning: the following units failed: }"; fi
-    settle
     while read -r name _ active sub _; do
       [[ $active == failed || $sub == auto-restart || ( $active == activating && -n $name ) ]] || continue
       if in_list "$name" "${quiesced[@]}"; then
@@ -325,14 +337,15 @@ apply() {
     if [[ -n $cms_marker && -e $cms_marker ]]; then marker=$(cat "$cms_marker"); fi
     [[ -n $cms_marker && $marker != "$(field "$target" .website.revision)" && ${#failed[@]} -gt 0 && ${#unexpected[@]} -eq 0 ]] || expected=0
   fi
-  if [[ $rc == 0 ]]; then result=success
-  elif [[ $rc == 4 && $expected == 1 ]]; then result="switched; down until the CMS migration: ${failed[*]}"; rc=0
+  if (( classify && expected )); then result="switched; down until the CMS migration: ${failed[*]}"; rc=0
+  elif [[ $rc == 0 ]] && (( classify )); then names=("${failed[@]}" "${unexpected[@]}"); result="failed (exit 0, then units failed: ${names[*]})"; rc=1
+  elif [[ $rc == 0 ]]; then result=success
   else result="failed (exit $rc)"; fi
   # shellcheck disable=SC2016 # jq variables, not shell
   record --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" \
-    --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" \
+    --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" --argjson switch_exit "$switch_exit" \
     --argjson failed "$(words "${failed[@]}")" --argjson unexpected "$(words "${unexpected[@]}")" \
-    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: $failed, unexpectedUnits: $unexpected}'
+    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, switchExit: $switch_exit, failedUnits: $failed, unexpectedUnits: $unexpected}'
   exit "$rc"
 }
 deploy() {
@@ -425,7 +438,7 @@ deploy() {
   if [[ $mode == boot ]]; then echo "Generation $(gen_of) is the boot default."; else echo "Running generation $(gen_of): $(readlink -f "$current_system")."; fi
   if [[ $action == activate && $mode == boot ]]; then echo 'Reboot to run it, or cancel it with terrace-production rollback.'; fi
   if [[ -n $last && $(jq -r .result <<<"$last") == "switched;"* ]]; then
-    echo "The CMS gate is closed for this release: $(jq -r '.failedUnits | join(" ")' <<<"$last") stay failed until the migration (docs/host-updates.md steps 10 and 11)."
+    echo "THE SITE IS DOWN until the CMS migration: the gate is closed for this release, so $(jq -r '.failedUnits | join(" ")' <<<"$last") stay failed until it (docs/host-updates.md steps 10 and 11)."
   fi
 }
 deploy_status() {

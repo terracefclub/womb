@@ -47,7 +47,9 @@ case "$1" in
   is-failed) [[ $2 == --quiet && $(state "$3") == failed ]] ;;
   is-active)
     if [[ $2 == --quiet ]]; then [[ $(state "$3") == active ]]; else state "$2"; [[ $(state "$2") == active ]]; fi ;;
-  reset-failed) echo "$*" >>"$FAKE_DIR/reset-failed.log" ;;
+  reset-failed)
+    echo "$*" >>"$FAKE_DIR/reset-failed.log"
+    for unit in "${@:2}"; do if [[ $(state "$unit") == failed ]]; then echo inactive >"$FAKE_UNITS/$unit"; fi; done ;;
   list-units)
     if [[ " $* " == *" terrace-cms-tool-* "* ]]; then
       [[ ! -e $FAKE_DIR/tools-fail ]] || exit 1
@@ -528,7 +530,7 @@ class DeployPath(Harness):
         both = "terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded failed failed web\n"
         (self.dir / "failed-units").write_text(both)
         out = self.accepted("activate", str(gated)).stdout
-        self.assertIn("The CMS gate is closed for this release: terrace-cms.service terrace-web.service stay failed until the migration", out)
+        self.assertIn("THE SITE IS DOWN until the CMS migration: the gate is closed for this release, so terrace-cms.service terrace-web.service stay failed until it", out)
         record = self.records()[-1]
         self.assertEqual((record["result"], record["failedUnits"], record["unexpectedUnits"]),
                          ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", ["terrace-cms.service", "terrace-web.service"], []))
@@ -555,6 +557,44 @@ class DeployPath(Harness):
         self.assertEqual((result.returncode, record["result"], record["failedUnits"], record["unexpectedUnits"]),
                          (1, "failed (exit 4)", ["terrace-cms.service"], ["terrace-web.service"]))
         self.assertEqual(len((self.dir / "slept").read_text().split()), 150, "waited 150 times 2 s, then gave up")
+
+    def test_a_gated_switch_that_exits_0(self):
+        # The gated units' starts are not the switch's own jobs (terrace-production-boot starts the target again), and when
+        # it lists the units they are in their restart delay with no failed main process: it exits 0 (deploy VM proof).
+        gated = self.system("gated0", website=NEW_REV, migrations=M_NEW, switch_rc=0)
+        both = "terrace-cms.service loaded failed failed CMS\nterrace-web.service loaded failed failed web\n"
+        (self.dir / "on-switch").write_text(f"echo activating >{self.units}/terrace-cms.service; echo activating >{self.units}/terrace-web.service\n")
+        (self.dir / "on-sleep").write_text(f"echo failed >{self.units}/terrace-cms.service; echo failed >{self.units}/terrace-web.service; printf %s {shlex.quote(both)} >{self.dir}/failed-units\n")
+        out = self.accepted("activate", str(gated)).stdout
+        self.assertIn("THE SITE IS DOWN until the CMS migration", out)
+        record = self.records()[-1]
+        self.assertEqual(record["switchExit"], 0)
+        self.assertEqual((record["result"], record["failedUnits"], record["unexpectedUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", ["terrace-cms.service", "terrace-web.service"], []))
+        # The same with another unit failing too: a failed switch, though the switch itself exited 0.
+        (self.dir / "on-switch").unlink()
+        (self.dir / "on-sleep").unlink()
+        (self.dir / "failed-units").write_text("")
+        self.accepted("rollback")
+        (self.dir / "on-switch").write_text(f"echo failed >{self.units}/terrace-cms.service; echo failed >{self.units}/terrace-web.service\n"
+                                            f"printf %s {shlex.quote(both + 'nginx.service loaded failed failed nginx' + chr(10))} >{self.dir}/failed-units\n")
+        again = self.system("gated0-again", website=NEW_REV, migrations=M_NEW, switch_rc=0)
+        result = self.run_tool("activate", str(again))
+        record = self.records()[-1]
+        self.assertEqual((result.returncode, record["result"], record["unexpectedUnits"]),
+                         (1, "failed (exit 0, then units failed: terrace-cms.service terrace-web.service nginx.service)", ["nginx.service"]))
+        self.assertIn("activate FAILED", result.stderr)
+        # And the CMS failing where its gate is open (the marker holds the target's revision) after exit 0: failed too.
+        (self.dir / "on-switch").unlink()
+        (self.dir / "failed-units").write_text("")
+        for unit in ("terrace-cms.service", "terrace-web.service"):
+            self.set_unit(unit, "inactive")
+        self.accepted("activate", str(self.old))
+        self.marker.write_text(NEW_REV + "\n")
+        (self.dir / "on-switch").write_text(f"echo failed >{self.units}/terrace-cms.service; printf 'terrace-cms.service loaded failed failed CMS\\n' >{self.dir}/failed-units\n")
+        third = self.system("gated0-open", website=NEW_REV, migrations=M_NEW, switch_rc=0)
+        result = self.run_tool("activate", str(third))
+        self.assertEqual((result.returncode, self.records()[-1]["result"]), (1, "failed (exit 0, then units failed: terrace-cms.service)"))
 
     def test_other_failed_units_fail_the_switch(self):
         gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4)
