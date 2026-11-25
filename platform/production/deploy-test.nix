@@ -420,7 +420,9 @@ in {
     with subtest("the upgrade migration on the populated data runs once"):
         quiesce()
         operator.succeed(SSH + "sudo terrace-production activate " + NEXT)
-        ok(running() == NEXT and generation() == "system-3-link", "the signed system activated again as generation 3")
+        # nix-env --set reuses the newest generation when it already points to the same path (Nix's createGeneration): 2, not 3.
+        ok(running() == NEXT and generation() == "system-2-link" and (records()[-1]["generationBefore"], records()[-1]["generationAfter"]) == ("1", "2"),
+           f"the signed system activated again, as its existing generation 2: {records()[-1]}")
         gated_record(records()[-1], "re-activation")
         # Step 7's instruction: stop the website; then only the CMS is failed.
         app.succeed("systemctl stop terrace-web.service")
