@@ -377,6 +377,8 @@ let
       ++ check "sweep and backup timers" (builtins.elem "terrace-cms-sweep" (gatedUnits cfg "timers") && builtins.elem "terrace-backup" (gatedUnits cfg "timers") && cfg.systemd.timers.terrace-cms-sweep.timerConfig.Persistent)
       ++ check "env files from templates" (cfg.terrace.website.inputFiles.cms == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-cms.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/cms.env" && services.terrace-web.serviceConfig.EnvironmentFile == "/run/secrets/rendered/terrace-website/web.env")
       ++ check "backup excludes secrets" (!(cfg.terrace.backup.extraPaths ? website-inputs) && lib.all (path: !(lib.hasPrefix "/run" path) && !(lib.hasPrefix "/var/lib/terrace-secrets" path)) (lib.attrValues cfg.terrace.backup.extraPaths))
+      # Both the CMS and the website start only for the migrated release (requireMigration, platform/website.nix).
+      ++ check "migration gate on the CMS and website" (lib.all (unit: lib.any (command: lib.hasInfix "terrace-require-cms-migration" (toString command)) (lib.toList (services.${unit}.serviceConfig.ExecStartPre or []))) ["terrace-cms" "terrace-web"])
     )
     ++ lib.optionals (role == "relay") (
       check "relay listeners" (cfg.services.headscale.address == "127.0.0.1" && lib.hasPrefix "127.0.0.1:" cfg.services.headscale.settings.metrics_listen_addr && lib.hasPrefix "127.0.0.1:" cfg.services.headscale.settings.grpc_listen_addr)
@@ -534,6 +536,8 @@ let
     (rejects "listeners" (app {systemd.services.terrace-web.environment.HOST = "0.0.0.0";}))
     (rejects "listeners" (app {systemd.services.terrace-web.serviceConfig.Environment = "HOST=0.0.0.0";}))
     (rejects "listeners" (app {sops.templates."terrace-website/web.env".content = lib.mkAfter "HOST=0.0.0.0\n";}))
+    (rejects "migration gate on the CMS and website" (app {systemd.services.terrace-web.serviceConfig.ExecStartPre = lib.mkForce [];}))
+    (rejects "migration gate on the CMS and website" (app {systemd.services.terrace-cms.serviceConfig.ExecStartPre = lib.mkForce [];}))
     (rejects "Keycloak database init logs no statements" (app {systemd.services.keycloakPostgreSQLInit.environment.PGOPTIONS = lib.mkForce "-c log_statement=all";}))
     (rejects "unit dependencies: rogue.service" (app {systemd.services.sshd.wants = ["rogue.service"];}))
     (rejects "unit dependencies: rogue.service" (app {systemd.services.terrace-web.bindsTo = ["rogue.service"];}))

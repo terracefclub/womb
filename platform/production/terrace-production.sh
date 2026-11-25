@@ -8,7 +8,7 @@
 #   terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored
 #   terrace-production arm-timers [--in-service] | status
 #   terrace-production activate STORE_PATH [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]
-#   terrace-production rollback [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]
+#   terrace-production rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]
 #
 # Settings: restored populated adopted adopting replacement state_dir hold service_hold hostname stability_seconds
 # role instance cms_marker store_dir profile current_system booted_system and the arrays targets writers helpers
@@ -78,7 +78,7 @@ records=$state_dir/deployments.log
 lock=$state_dir/deploy.lock
 switch_log=$state_dir/last-switch.log
 deny() { echo "terrace-production: nothing changed: $*" >&2; exit 1; }
-deploy_usage() { echo 'usage: terrace-production activate STORE_PATH [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run] | rollback [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]' >&2; exit 2; }
+deploy_usage() { echo 'usage: terrace-production activate STORE_PATH [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run] | rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]' >&2; exit 2; }
 manifest_file() { printf '%s/etc/terrace/system.json' "$1"; }
 # A manifest field as text ("" for null or missing).
 field() { jq -r "$2 // \"\" | tostring" "$(manifest_file "$1")"; }
@@ -97,14 +97,26 @@ generations() {
     if [[ $n =~ ^[0-9]+$ ]]; then echo "$n"; fi
   done
 }
-# The newest generation older than $1 ("" if none).
-previous_gen() {
-  local n best=""
-  [[ $1 =~ ^[0-9]+$ ]] || { echo ""; return 0; }
-  for n in $(generations); do
-    if (( n < $1 )) && { [[ -z $best ]] || (( n > best )); }; then best=$n; fi
+# The result of the last finished record that left generation $1 holding system $2 ("" when no record did: the
+# installation's generation, or one made by hand). Exit 1 when the log cannot be read.
+gen_result() {
+  [[ -s $records ]] || return 0
+  jq -rs --arg n "$1" --arg to "$2" '[.[] | select(.phase == "finished" and .generationAfter == $n and .to == $to)] | last | .result // ""' "$records" 2>/dev/null
+}
+# What `rollback` goes to from generation $1: the newest older generation whose last finished record is not a failure.
+# Sets rollback_gen ("" if none) and skipped (the failed ones passed over, "N:result"); exit 1 when the log cannot be read.
+# A generation without any record stays eligible: nothing says it failed.
+rollback_target() {
+  local n result
+  rollback_gen="" skipped=()
+  [[ $1 =~ ^[0-9]+$ ]] || return 0
+  for n in $(generations | LC_ALL=C sort -rn); do
+    (( n < $1 )) || continue
+    result=$(gen_result "$n" "$(readlink -f "$profile-$n-link")") || return 1
+    if [[ $result == failed* ]]; then skipped+=("$n:$result"); continue; fi
+    rollback_gen=$n
+    return 0
   done
-  echo "$best"
 }
 # The newest generation whose system is $1 ("" if none).
 gen_for() {
@@ -200,7 +212,15 @@ check_cms() {
   [[ $(jq -c .website "$(manifest_file "$current_system")") != "$(jq -c .website "$(manifest_file "$target")")" ]] || return 0
   for unit in "${quiesce[@]}"; do
     state=$(systemctl show "$unit.service" -p ActiveState --value)
-    case $state in active | activating | reloading) deny "the release changes and $unit.service is $state; quiesce first: systemctl stop ${quiesce[*]/%/.service} (after a gated activation they can still be retrying; docs/host-updates.md step 6)" ;; esac
+    case $state in
+      active | activating | reloading)
+        # A dry run goes on with the other checks (step 6 stops the site only later) and reports it; the real run refuses.
+        if (( dry_run )); then
+          not_quiesced+=("$unit.service:$state")
+        else
+          deny "the release changes and $unit.service is $state; quiesce first: systemctl stop ${quiesce[*]/%/.service} (after a gated activation they can still be retrying; docs/host-updates.md step 6)"
+        fi ;;
+    esac
   done
   target_rev=$(field "$target" .website.revision)
   if [[ -e $cms_marker ]]; then marker=$(cat "$cms_marker"); fi
@@ -228,19 +248,36 @@ check_cms() {
 record() { jq -cn "$@" >>"$records"; chmod 0600 "$records"; }
 words() { printf '%s\n' "$@" | jq -R . | jq -cs 'map(select(. != ""))'; }
 in_list() { local item=$1; shift; [[ " $* " == *" $item "* ]]; }
+# Until none of the CMS and website units is starting, stopping or reloading, for at most settle_seconds: after a
+# gated switch they fail their gate at once and restart (Restart=on-failure, 10 s apart) until their start limit, so
+# the switch returns while they are still retrying, and the record must say how they ended, not where they were.
+settle_seconds=300
+settle() {
+  local unit waited=0 moving
+  while :; do
+    moving=0
+    for unit in "${quiesced[@]}"; do
+      case $(systemctl show "$unit" -p ActiveState --value) in activating | deactivating | reloading) moving=1 ;; esac
+    done
+    if (( ! moving || waited >= settle_seconds )); then return 0; fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+}
 # Inside the terrace-switch unit: check that the state the decision was made against still holds, record the start,
 # register the generation, switch, and record the result.
 # A switch to a release whose migration has not run starts the CMS and website (terrace-production.target wants
-# them): the CMS fails its gate, the website its health check (it restarts on failure, so it may still be retrying),
-# and switch-to-configuration exits 4. That outcome, and only it, is recorded as switched with those units down:
-# exit 4, the marker not holding the target's revision, the CMS or website failed, and no other unit of any type
-# failed, in auto-restart, or named in switch-to-configuration's own list of failed units. A unit outside that set that
-# is merely "activating" when the switch has returned is not counted: switch-to-configuration waits for the jobs it
-# queued, so such a unit was started by something else (a timer) and says nothing about this switch.
+# them): both fail their migration gate (requireMigration, platform/website.nix), and switch-to-configuration exits 4
+# (their start jobs failed). That outcome, and only it, is recorded as switched with those units down: exit 4, the
+# marker not holding the target's revision, the CMS or website failed once they have stopped retrying (settle), neither
+# of them still starting after that wait, and no other unit of any type failed, in auto-restart, or named in
+# switch-to-configuration's own list of failed units. A unit outside that set that is merely "activating" when the
+# switch has returned is not counted: switch-to-configuration waits for the jobs it queued, so such a unit was started
+# by something else (a timer) and says nothing about this switch.
 apply() {
   local action=$1 mode=$2 target=$3 generation=$4 expected_from=$5 expected_gen=$6
   local from before after rc=0 result marker="" unit name active sub line expected=1
-  local failed=() starting=() unexpected=() prefailed=() reported=() quiesced=()
+  local failed=() unexpected=() prefailed=() reported=() quiesced=()
   from=$(readlink -f "$current_system"); before=$(gen_of)
   [[ $from == "$expected_from" && $before == "$expected_gen" ]] || deny "the running system or the profile changed after the checks (checked: $expected_from, generation $expected_gen; now: $from, generation $before); run the command again"
   check_idle terrace-switch
@@ -264,12 +301,18 @@ apply() {
   fi
   after=$(gen_of)
   if [[ $rc == 4 ]]; then
+    # switch-to-configuration's own list, by its exact text (nixpkgs switch-to-configuration-ng: `warning: the following
+    # units failed: a, b`; pinned by a unit test and asserted against the real switch in the deploy VM proof). If upstream
+    # changes the text, this list stays empty and only the listing below remains, which still sees every failed unit
+    # and every unit in auto-restart: the check gets weaker, it does not let a failure it can see through.
     line=$(grep -m 1 '^warning: the following units failed: ' "$switch_log" || true)
     if [[ -n $line ]]; then IFS=',' read -r -a reported <<<"${line#warning: the following units failed: }"; fi
+    settle
     while read -r name _ active sub _; do
       [[ $active == failed || $sub == auto-restart || ( $active == activating && -n $name ) ]] || continue
       if in_list "$name" "${quiesced[@]}"; then
-        if [[ $active == failed ]]; then failed+=("$name"); else starting+=("$name"); fi
+        # Still starting after the wait: not the gate's prompt refusal, so not explained by it.
+        if [[ $active == failed ]]; then failed+=("$name"); else unexpected+=("$name"); fi
       elif [[ $active == failed || $sub == auto-restart ]]; then
         unexpected+=("$name")
       fi
@@ -288,16 +331,20 @@ apply() {
   # shellcheck disable=SC2016 # jq variables, not shell
   record --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" \
     --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" \
-    --argjson failed "$(words "${failed[@]}")" --argjson starting "$(words "${starting[@]}")" --argjson unexpected "$(words "${unexpected[@]}")" \
-    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: $failed, startingUnits: $starting, unexpectedUnits: $unexpected}'
+    --argjson failed "$(words "${failed[@]}")" --argjson unexpected "$(words "${unexpected[@]}")" \
+    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, failedUnits: $failed, unexpectedUnits: $unexpected}'
   exit "$rc"
 }
 deploy() {
-  local action=$1 target="" generation="" rc=0 dry_run=0 running lines last pending
+  local action=$1 target="" generation="" chosen="" rc=0 running lines last result item old_umask
   shift
-  mode=switch cms_stays_down=0 accept_upstream=0
+  mode=switch cms_stays_down=0 accept_upstream=0 dry_run=0 not_quiesced=()
   while (( $# )); do
     case $1 in
+      --generation)
+        [[ $action == rollback && -z $chosen && ${2:-} =~ ^[1-9][0-9]*$ ]] || deploy_usage
+        chosen=$2
+        shift ;;
       --boot) mode=boot ;;
       --cms-stays-down) cms_stays_down=1 ;;
       --accept-upstream-schema-change) accept_upstream=1 ;;
@@ -308,13 +355,17 @@ deploy() {
     shift
   done
   [[ $action != activate || -n $target ]] || deploy_usage
-  # One command at a time, from its first check to its record: a root-only lock file, created once, never replaced.
+  # One command at a time, from its first check to its record: a root-only lock file. Opened for append, it is created
+  # if absent and never replaced, so two first-ever runs lock the same file; chmod fixes the mode on that same inode.
   install -d -m 0700 "$state_dir"
-  [[ -e $lock ]] || install -m 0600 /dev/null "$lock"
-  exec 9<>"$lock"
+  old_umask=$(umask)
+  umask 077
+  exec 9>>"$lock"
+  umask "$old_umask"
+  chmod 0600 "$lock"
   flock -n 9 || deny 'another terrace-production activate or rollback is running on this host; wait for it to finish'
   running=$(readlink -f "$current_system")
-  if [[ $action == rollback && $(gen_of) != none && $(readlink -f "$profile") != "$running" ]]; then
+  if [[ $action == rollback && -z $chosen && $(gen_of) != none && $(readlink -f "$profile") != "$running" ]]; then
     # The boot default is not the running system (activate --boot before its reboot, or a switch that failed after
     # registering its generation): rollback makes the running system's generation the boot default again.
     action=cancel mode=boot target=$running
@@ -324,9 +375,19 @@ deploy() {
     check_idle
     echo "Checks passed; the boot default goes back to generation $generation, the running system $target (switch-to-configuration boot in unit terrace-switch; nothing running changes)."
   else
-    if [[ $action == rollback ]]; then
-      generation=$(previous_gen "$(gen_of)")
-      [[ -n $generation ]] || deny "no generation older than the current one ($(gen_of)) in $profile"
+    if [[ $action == rollback && -n $chosen ]]; then
+      # An explicit choice: any generation but the boot default itself, with every check of a rollback.
+      [[ -L $profile-$chosen-link ]] || deny "generation $chosen does not exist in $profile"
+      [[ $chosen != "$(gen_of)" ]] || deny "generation $chosen is the current generation (the boot default); give another"
+      generation=$chosen
+      target=$(readlink -f "$profile-$generation-link")
+      result=$(gen_result "$generation" "$target") || result="(the deployments log $records cannot be read)"
+      if [[ $result == failed* || $result == "(the"* ]]; then echo "WARNING: generation $generation was chosen explicitly; its last record: $result" >&2; fi
+    elif [[ $action == rollback ]]; then
+      rollback_target "$(gen_of)" || deny "the deployments log $records cannot be read, so nothing shows which generations failed; choose one with rollback --generation N"
+      for item in "${skipped[@]}"; do echo "Skipping generation ${item%%:*}: its last record is '${item#*:}' (rollback --generation ${item%%:*} chooses it anyway)."; done
+      [[ -n $rollback_gen ]] || deny "no generation older than the current one ($(gen_of)) in $profile whose last record is not a failure; choose one with rollback --generation N"
+      generation=$rollback_gen
       target=$(readlink -f "$profile-$generation-link")
     fi
     check_system "$target"
@@ -335,9 +396,21 @@ deploy() {
     check_boot "$target"
     check_upstream "$target"
     check_cms "$target"
-    echo "Checks passed; ${action} $target ($(describe "$target")) with switch-to-configuration $mode in unit terrace-switch."
+    if (( ${#not_quiesced[@]} )); then
+      echo "Every other check passed; ${action} $target ($(describe "$target")) with switch-to-configuration $mode in unit terrace-switch."
+    else
+      echo "Checks passed; ${action} $target ($(describe "$target")) with switch-to-configuration $mode in unit terrace-switch."
+    fi
   fi
-  if (( dry_run )); then echo 'Dry run: nothing changed.'; return 0; fi
+  if (( dry_run )); then
+    echo 'Dry run: nothing changed.'
+    if (( ${#not_quiesced[@]} )); then
+      # Exit 3, never 0: not a clean pass.
+      echo "terrace-production: dry run NOT READY: the release changes and ${not_quiesced[*]} still run(s); the real command is refused until you stop them: systemctl stop ${quiesce[*]/%/.service} (docs/host-updates.md step 6)" >&2
+      exit 3
+    fi
+    return 0
+  fi
   lines=0
   if [[ -e $records ]]; then lines=$(wc -l <"$records"); fi
   systemd-run --unit=terrace-switch --collect --service-type=exec --wait --quiet -p "Description=terrace-production $action" -- "$self" __apply "$action" "$mode" "$target" "$generation" "$running" "$(gen_of)" || rc=$?
@@ -353,14 +426,10 @@ deploy() {
   if [[ $action == activate && $mode == boot ]]; then echo 'Reboot to run it, or cancel it with terrace-production rollback.'; fi
   if [[ -n $last && $(jq -r .result <<<"$last") == "switched;"* ]]; then
     echo "The CMS gate is closed for this release: $(jq -r '.failedUnits | join(" ")' <<<"$last") stay failed until the migration (docs/host-updates.md steps 10 and 11)."
-    pending=$(jq -r '.startingUnits | join(" ")' <<<"$last")
-    if [[ -n $pending ]]; then
-      echo "Still starting without a gate (H7): $pending; it retries its health check against the stopped CMS and fails within minutes. Stop it now: systemctl stop $pending (step 7)."
-    fi
   fi
 }
 deploy_status() {
-  local running generation previous last
+  local running generation last item
   running=$(readlink -f "$current_system")
   echo "running system: $running ($(describe "$running"))"
   generation=$(gen_of)
@@ -368,8 +437,15 @@ deploy_status() {
   if [[ $generation != none && $(readlink -f "$profile") != "$running" ]]; then
     echo "WARNING: the boot default, generation $generation ($(readlink -f "$profile")), is not the running system: a reboot boots generation $generation. Expected after activate --boot; otherwise a switch failed after registering it. terrace-production rollback makes the running system the boot default again (docs/host-updates.md section 1.5)."
   fi
-  previous=$(previous_gen "$generation")
-  if [[ -n $previous ]]; then echo "previous generation: $previous $(readlink -f "$profile-$previous-link") ($(describe "$(readlink -f "$profile-$previous-link")"))"; else echo 'previous generation: none'; fi
+  # The generation a plain `rollback` goes to.
+  if ! rollback_target "$generation"; then
+    echo "previous generation: unknown (the deployments log $records cannot be read)"
+  elif [[ -n $rollback_gen ]]; then
+    echo "previous generation: $rollback_gen $(readlink -f "$profile-$rollback_gen-link") ($(describe "$(readlink -f "$profile-$rollback_gen-link")"))"
+  else
+    echo 'previous generation: none'
+  fi
+  for item in "${skipped[@]}"; do echo "skipped by rollback, its last record failed: generation ${item%%:*} ('${item#*:}')"; done
   if (( ${#deploy_keys[@]} )); then echo "deploy path: on, ${#deploy_keys[@]} trusted deploy key(s)"; else echo 'deploy path: off (no deploy key trusted)'; fi
   if [[ -s $records ]]; then
     last=$(tail -n 1 "$records")
@@ -513,5 +589,5 @@ case "${1:-}" in
     ;;
   activate | rollback) deploy "$@" ;;
   __apply) shift; apply "$@" ;;
-  *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | arm-timers [--in-service] | status | activate STORE_PATH [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run] | rollback [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]' >&2; exit 2 ;;
+  *) echo 'usage: terrace-production adopt --new [--first-deployment-without-repository HOSTNAME] | adopt --restored | arm-timers [--in-service] | status | activate STORE_PATH [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run] | rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]' >&2; exit 2 ;;
 esac

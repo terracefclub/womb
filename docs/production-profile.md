@@ -260,7 +260,9 @@ shows an unfinished adoption.
    terrace-cms-migrate.service`, then `systemctl start terrace-cms.service
    terrace-web.service`. Until the first migration the CMS and website are
    skipped, not failed (`ConditionPathExists` on the migration marker; a
-   revision mismatch still fails through the existing gate).
+   revision mismatch still fails through the module's gate, `requireMigration`,
+   which both services carry: the website's was added on 2026-11-25, see
+   [host updates](host-updates.md), H7).
 6. `terrace-backup init primary`. The first scheduled backup before this step
    fails visibly (`systemctl --failed`); after it, backups succeed.
 

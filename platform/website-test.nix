@@ -246,6 +246,21 @@ in {
         source.fail("systemctl is-failed --quiet terrace-cms.service")
         source.fail("systemctl is-active --quiet terrace-web.service")
         assert sql(source, "select name || ':' || batch from payload_migrations order by id") == before_ledger
+        # The website has the CMS's gate too: without the marker, or with another revision in it, its start fails before
+        # the bundle runs (nothing listens on its port), with the gate's message.
+        gate_messages = lambda: int(source.succeed("journalctl --namespace=terrace-apps -u terrace-web.service -o cat --no-pager | grep -c 'CMS migration gate is closed' || true").strip())
+        seen = gate_messages()
+        source.succeed("cp -a /var/lib/terrace-cms/migrated-revision /root/migrated-revision")
+        for change in ["rm /var/lib/terrace-cms/migrated-revision", "cp -a /root/migrated-revision /var/lib/terrace-cms/migrated-revision && echo " + "0" * 40 + " >/var/lib/terrace-cms/migrated-revision"]:
+            source.succeed(change)
+            source.fail("systemctl start terrace-web.service")
+            source.fail("ss -ltn | grep -F '127.0.0.1:14294' >/dev/null")
+            # Stop the restarts (Restart=on-failure) of the website and of the CMS its start pulled in (Wants=, same gate),
+            # and clear their failures and start counters before the next case.
+            source.succeed("systemctl stop terrace-web.service terrace-cms.service && systemctl reset-failed terrace-web.service terrace-cms.service")
+            assert gate_messages() > seen, change
+            seen = gate_messages()
+        source.succeed("mv /root/migrated-revision /var/lib/terrace-cms/migrated-revision")
         source.succeed("systemctl start terrace-cms.service terrace-web.service")
 
     with subtest("synthetic actual schema, published/private data and native image cache"):

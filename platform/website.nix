@@ -521,7 +521,10 @@ in {
           User = webUser;
           Group = webUser;
           EnvironmentFile = envFiles.web;
-          ExecStartPre = identityGuard "web";
+          # The CMS's migration gate: the website starts only for the release the database was migrated to, so after a
+          # re-pin it fails at once (and stops at its start limit) instead of serving the new bundle against a gated
+          # CMS. "+": the marker is in the CMS account's private state directory, which this account cannot read.
+          ExecStartPre = [(identityGuard "web") "+${requireMigration}"];
           WorkingDirectory = cfg.webPackage;
           MemoryHigh = "512M";
           MemoryMax = "768M";

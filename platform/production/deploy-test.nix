@@ -146,6 +146,7 @@ in {
         # The next release once more, activated with --boot and cancelled before any reboot.
         deployBoot = variant [nextModule {environment.etc."terrace-deploy-variant".text = "boot";}];
         # The previous release plus a unit that fails and restarts: a gated switch that ALSO breaks something else.
+        # RestartSec 30: when the switch lists the units it is in its restart delay (auto-restart, main process failed).
         deployBroken = variant [
           {
             systemd.services.terrace-deploy-probe-broken = {
@@ -153,7 +154,7 @@ in {
               serviceConfig = {
                 ExecStart = "${pkgs.coreutils}/bin/false";
                 Restart = "on-failure";
-                RestartSec = 2;
+                RestartSec = 30;
               };
             };
           }
@@ -213,10 +214,13 @@ in {
         return app.succeed("systemctl list-units --state=failed --type=service --plain --no-legend | cut -d' ' -f1").split()
 
     def gated_record(record, label):
-        # The two legitimate outcomes when the switch returns: the website already failed, or still retrying.
-        outcomes = [(GATED, []), (["terrace-cms.service"], ["terrace-web.service"])]
-        ok((record["failedUnits"], record["startingUnits"]) in outcomes and record["result"] == "switched; down until the CMS migration: " + " ".join(record["failedUnits"]),
-           f"{label}: switched with only the gated CMS down and the website failed or still starting: {record}")
+        # Both units fail their migration gate; the record is written once they stopped retrying (at their start limit).
+        ok(record["failedUnits"] == GATED and record["unexpectedUnits"] == [] and "startingUnits" not in record
+           and record["result"] == "switched; down until the CMS migration: " + " ".join(GATED),
+           f"{label}: switched with exactly the gated CMS and website down: {record}")
+
+    def gate_messages(unit):
+        return int(app.succeed(f"journalctl --namespace=terrace-apps -u {unit} -o cat --no-pager | grep -c 'CMS migration gate is closed' || true").strip())
     BACKUP_HELD = ["terrace-backup.timer", "terrace-backup-check.timer", "terrace-backup-freshness.timer"]
     SERVICE_HELD = ["terrace-cms-sweep.timer"]
     timings = {}
@@ -395,6 +399,12 @@ in {
         refused("terrace-production activate " + NEXT, "terrace-switch.service is active; wait until it has finished", "another terrace-switch running")
         app.succeed("systemctl stop terrace-switch.service")
         refused("terrace-production activate " + NEXT, "the release changes and terrace-cms.service is active; quiesce first", "a release change with the CMS running")
+        # A dry run before the stops (step 4): every other check runs, and it reports not ready (exit 3), changing nothing.
+        before = (running(), generation(), len(records()))
+        rc, out = app.execute("terrace-production activate " + NEXT + " --dry-run 2>&1")
+        ok(rc == 3 and "Signatures: " in out and "Every other check passed; activate " + NEXT in out and "Checks passed" not in out
+           and "dry run NOT READY" in out and "systemctl stop terrace-cms.service terrace-web.service" in out and (running(), generation(), len(records())) == before,
+           f"dry run with the site up: other checks passed, not ready, exit 3, nothing changed ({rc}, {out.strip()[-300:]!r})")
 
     with subtest("upgrade: activation of the signed system survives a dropped SSH session; held timers stay held"):
         quiesce()
@@ -415,33 +425,41 @@ in {
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-done && ! systemctl is-active terrace-switch.service", timeout=300)
         ok(running() == NEXT and generation() == "system-2-link", "the new generation runs after the dropped session")
         record = records()[-1]
-        # The switch starts the stopped CMS and website (the active terrace-production.target wants them): the CMS fails its gate and
-        # switch-to-configuration exits 4. The website has no gate; it fails its health check against the stopped CMS and restarts
-        # (Restart=on-failure), so when the switch returns it is either failed or still retrying.
+        # The switch starts the stopped CMS and website (the active terrace-production.target wants them): both fail their
+        # migration gate and switch-to-configuration exits 4; the record is written after they stopped retrying.
         ok((record["action"], record["generationBefore"], record["generationAfter"], record["to"], record["wombRevision"], record["websiteRevision"]) ==
            ("activate", "1", "2", NEXT, "${revisions.next}", NEW_PIN), f"the unit recorded the activation: {record}")
         gated_record(record, "upgrade activation")
-        # Left alone, the website gives up at its start limit: then exactly the CMS and the website are failed.
-        app.wait_until_succeeds("test $(systemctl show terrace-web.service -p ActiveState --value) = failed", timeout=600)
-        ok(unit_state("terrace-web.service", "Result") == "start-limit-hit", "the ungated website, started by the switch, failed at its start limit (H7)")
-        ok(failed_units() == GATED, "then exactly the CMS and the website are failed")
+        ok(failed_units() == GATED, "when the command returns, exactly the CMS and the website are failed")
+        ok(all(unit_state(unit, "Result") == "start-limit-hit" for unit in GATED), "both stopped at their start limit")
+        ok(gate_messages("terrace-web.service") > 0, "the website, started by the switch, was refused by its migration gate (H7 closed)")
         status = app.succeed("terrace-production status")
         ok(f"running system: {NEXT} (Womb ${revisions.next}, website {NEW_PIN})" in status and f"previous generation: 1 {BASE} (Womb ${revisions.old}, website {OLD_PIN})" in status, "status shows both generations")
         held("after the update")
         ok(app.succeed("cat " + MARKER).strip() == OLD_PIN, "the marker still holds the previous release")
 
     with subtest("the gate: the new CMS refuses until the migration"):
-        app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -q 'CMS migration gate is closed'")
-        ok(unit_state("terrace-cms.service", "Result") == "start-limit-hit", "the switch's starts of the new CMS hit its start limit on the gate")
-        app.succeed("systemctl reset-failed terrace-cms.service")
-        ok(app.execute("systemctl start terrace-cms.service", timeout=120)[0] != 0, "the new CMS refuses to start (its gate)")
-        app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
+        ok(gate_messages("terrace-cms.service") > 0 and unit_state("terrace-cms.service", "Result") == "start-limit-hit", "the switch's starts of the new CMS hit its start limit on the gate")
+        for unit in GATED:
+            seen = gate_messages(unit)
+            app.succeed("systemctl reset-failed " + unit)
+            ok(app.execute("systemctl start " + unit, timeout=120)[0] != 0 and gate_messages(unit) > seen, f"the new {unit} refuses to start (its gate)")
+            app.succeed("systemctl stop terrace-cms.service terrace-web.service && systemctl reset-failed terrace-cms.service terrace-web.service")
 
     with subtest("case A: rollback before the migration brings the previous site back"):
-        # After the gated activation the CMS (and the website) can still be retrying: the rollback refuses until they are stopped.
-        app.succeed("systemctl start terrace-cms.service || true")
-        out = app.fail("terrace-production rollback 2>&1")
-        ok("quiesce first: systemctl stop terrace-cms.service terrace-web.service" in out, f"rollback refused while the CMS retries, naming the command: {out.strip()[-200:]}")
+        # A CMS retrying its gate (a start by hand here, as a reboot or a push could start it) blocks a release change. Made
+        # independent of timing: the dry run's check counts only when the CMS was activating both before and after it (it
+        # cannot leave that state and come back without a new start), and is repeated otherwise.
+        for attempt in range(5):
+            app.succeed("systemctl reset-failed terrace-cms.service && (systemctl start terrace-cms.service || true)")
+            before_state = unit_state("terrace-cms.service", "ActiveState")
+            rc, out = app.execute("terrace-production rollback --dry-run 2>&1")
+            after_state = unit_state("terrace-cms.service", "ActiveState")
+            if before_state == after_state == "activating":
+                break
+        ok(before_state == after_state == "activating", f"the CMS was retrying throughout the check (attempt {attempt + 1})")
+        ok(rc == 3 and "dry run NOT READY" in out and "terrace-cms.service:activating" in out and "systemctl stop terrace-cms.service terrace-web.service" in out,
+           f"while the CMS retries, the rollback is reported not ready, naming the stop command: {out.strip()[-300:]}")
         app.succeed("systemctl stop terrace-cms.service terrace-web.service && systemctl reset-failed terrace-cms.service terrace-web.service")
         out = app.succeed("terrace-production rollback")
         ok("Running generation 1" in out, "rollback accepted before the migration")
@@ -459,9 +477,7 @@ in {
         ok(running() == NEXT and generation() == "system-2-link" and (records()[-1]["generationBefore"], records()[-1]["generationAfter"]) == ("1", "2"),
            f"the signed system activated again, as its existing generation 2: {records()[-1]}")
         gated_record(records()[-1], "re-activation")
-        # Step 7's instruction: stop the website; then only the CMS is failed.
-        app.succeed("systemctl stop terrace-web.service")
-        ok(failed_units() in [["terrace-cms.service"], GATED], f"after stopping the website the CMS is failed: {failed_units()}")
+        ok(failed_units() == GATED, f"the CMS and website are failed, nothing else: {failed_units()}")
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-done")
         t0 = time.monotonic()
         app.succeed("systemctl start terrace-cms-migrate.service", timeout=300)
@@ -491,9 +507,8 @@ in {
         gated_record(records()[-1], "forced rollback")
         app.succeed("systemctl stop terrace-web.service")
         app.succeed("systemctl reset-failed terrace-cms.service terrace-web.service")
-        gate_messages = lambda: int(app.succeed("journalctl --namespace=terrace-apps -u terrace-cms.service -o cat --no-pager | grep -c 'CMS migration gate is closed' || true").strip())
-        seen = gate_messages()
-        ok(app.execute("systemctl start terrace-cms.service", timeout=120)[0] != 0 and gate_messages() > seen, "forward-only: the previous CMS does not start on the migrated database, refused by its gate")
+        seen = gate_messages("terrace-cms.service")
+        ok(app.execute("systemctl start terrace-cms.service", timeout=120)[0] != 0 and gate_messages("terrace-cms.service") > seen, "forward-only: the previous CMS does not start on the migrated database, refused by its gate")
         # What a generation rollback reverted (docs/host-updates.md table 4.1) ...
         ok(json.loads(app.succeed("cat /etc/terrace/system.json"))["website"]["revision"] == OLD_PIN, "reverted: the pinned revision the gate expects")
         ok("${previous.cms}" in app.succeed("systemctl cat terrace-cms.service"), "reverted: the unit definitions name the previous bundle")
@@ -532,14 +547,27 @@ in {
         op(DEPLOY + BROKEN)
         out = app.fail("terrace-production activate " + BROKEN + " --cms-stays-down 2>&1")
         record = records()[-1]
-        ok("activate FAILED (exit 4)" in out and record["result"] == "failed (exit 4)" and "terrace-deploy-probe-broken.service" in record["unexpectedUnits"]
-           and "terrace-cms.service" in record["failedUnits"], f"recorded FAILED, naming the extra failing unit next to the gated CMS: {record}")
+        ok("activate FAILED (exit 4)" in out and record["result"] == "failed (exit 4)" and record["unexpectedUnits"] == ["terrace-deploy-probe-broken.service"]
+           and record["failedUnits"] == GATED, f"recorded FAILED, naming the extra failing unit next to the gated CMS and website: {record}")
+        # The text the exit-4 logic reads: the real switch printed it, naming the broken unit, and its binary holds it.
+        switch_lines = app.succeed("cat /var/lib/terrace-production/last-switch.log").splitlines()
+        ok(any(line.startswith("warning: the following units failed: ") and "terrace-deploy-probe-broken.service" in line for line in switch_lines),
+           "switch-to-configuration's own line, by its exact text, names the broken unit")
+        app.succeed("grep -RaqF 'warning: the following units failed: ' $(readlink -f /run/current-system)/bin/")
+        broken_generation = generation()
         # Back to the migrated release (control: the same command succeeds once nothing else fails).
         app.succeed("systemctl stop terrace-cms.service terrace-web.service terrace-deploy-probe-broken.service; systemctl reset-failed")
         app.succeed("terrace-production activate " + NEXT)
         ok(running() == NEXT and records()[-1]["result"] == "success", "the migrated release activated again, nothing failed")
         restart_after_quiesce()
         cms_serves("after the failed switch")
+        # A plain rollback now passes over the failed attempt's generation, and says so (dry run: nothing changes).
+        failed_number = broken_generation.removeprefix("system-").removesuffix("-link")
+        before = (running(), generation(), len(records()))
+        out = app.succeed("terrace-production rollback --dry-run")
+        ok(f"Skipping generation {failed_number}: its last record is 'failed (exit 4)'" in out and "Checks passed; rollback " in out and BROKEN not in out.split("Checks passed")[1]
+           and (running(), generation(), len(records())) == before, f"rollback skips the failed generation {failed_number}: {out.strip()[-400:]}")
+        ok(f"skipped by rollback, its last record failed: generation {failed_number}" in app.succeed("terrace-production status"), "status names the skipped generation")
 
     with subtest("stop owned guests"):
         app.shutdown()
