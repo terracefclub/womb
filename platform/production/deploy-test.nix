@@ -160,7 +160,7 @@ in {
     inherit (nodes.app.system.build) deployNext deployOtherHost deployUnsigned deployForeign;
     relaySystem = nodes.relay.system.build.toplevel;
   in ''
-    import json, re, shlex, time
+    import json, shlex, time
 
     checks = []
     def ok(condition, label):
