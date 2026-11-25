@@ -239,7 +239,7 @@ in {
 
     def held(label):
         for unit in BACKUP_HELD + SERVICE_HELD:
-            ok((unit_state(unit, "ActiveState"), unit_state(unit, "ConditionResult")) in [("inactive", "no"), ("inactive", "")], f"{label}: {unit} held")
+            ok((unit_state(unit, "ActiveState"), unit_state(unit, "ConditionResult")) == ("inactive", "no"), f"{label}: {unit} held (inactive, start condition not met)")
         status = app.succeed("terrace-production status")
         ok("timers held after a restored adoption" in status and "timers held until the replacement is declared in service" in status, f"{label}: status names the held timers")
 
@@ -342,7 +342,7 @@ in {
         refused("terrace-production activate " + BASE, "is already the running system", "the running system")
         refused(SSH + "terrace-production activate " + NEXT, "terrace-production: run as root", "operator without sudo", machine=operator)
         refused("runuser -u nobody -- terrace-production activate " + NEXT, "terrace-production: run as root", "a non-root caller")
-        app.succeed("systemd-run --unit=terrace-switch ${pkgs.coreutils}/bin/sleep 600")
+        app.succeed("systemd-run --collect --unit=terrace-switch ${pkgs.coreutils}/bin/sleep 600")
         refused("terrace-production activate " + NEXT, "terrace-switch.service is active; wait until it has finished", "another terrace-switch running")
         app.succeed("systemctl stop terrace-switch.service")
         refused("terrace-production activate " + NEXT, "the release changes and terrace-cms.service is running; quiesce first", "a release change with the CMS running")
@@ -352,8 +352,11 @@ in {
         # The markers `adopt --restored` writes, placed by hand on this adopted host: a restored host's hold.
         app.succeed("install -m 0600 /dev/null /var/lib/terrace-production/timers-held && install -m 0600 /dev/null /var/lib/terrace-production/service-timers-held")
         app.succeed("systemctl stop terrace-backup-freshness.timer")
+        # A start of a held timer (as the target's at boot) is skipped while its marker exists.
+        app.succeed("systemctl start " + " ".join(BACKUP_HELD + SERVICE_HELD))
         held("before the update")
-        operator.succeed("(" + SSH + "sudo terrace-production activate " + NEXT + " >/tmp/activate.log 2>&1; echo $? >/tmp/activate.rc) & echo $! >/tmp/activate.pid")
+        # `-tt`: a terminal, as `ssh -t` gives an operator, so a dropped connection hangs up the remote side.
+        operator.succeed("(" + SSH.replace("ssh ", "ssh -tt ", 1) + "sudo terrace-production activate " + NEXT + " >/tmp/activate.log 2>&1 </dev/null; echo $? >/tmp/activate.rc) >/dev/null 2>&1 </dev/null & echo $! >/tmp/activate.pid")
         app.wait_until_succeeds("test -e /run/terrace-deploy-probe-started", timeout=180)
         ok(app.succeed("systemctl is-active terrace-switch.service").strip() == "active", "the switch runs in the terrace-switch unit")
         # Drop the session: kill the SSH client mid-switch.
@@ -411,10 +414,10 @@ in {
         ok(len(added) > 0 and set(tables_before) <= set(tables()), f"the migration added tables and dropped none: {added}")
 
     with subtest("rollback after the migration: refused by default; forced, the old CMS refuses to start"):
+        quiesce()
         out = refused("terrace-production rollback", "the CMS database has migrations the target release does not have", "a rollback over a newer schema")
         ok("--cms-stays-down" in out and "restore onto a replacement" in out, "the refusal names the flag and the way back")
         ciphertext = app.succeed("sha256sum </var/lib/terrace-secrets/secrets.sops.json").strip()
-        quiesce()
         out = app.succeed("terrace-production rollback --cms-stays-down 2>&1")
         ok("WARNING: the CMS stays down" in out and running() == BASE, "forced rollback ran generation 1 with a warning")
         app.fail("systemctl start terrace-cms.service", timeout=120)
