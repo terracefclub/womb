@@ -477,6 +477,13 @@ deploy() {
   last=""
   if [[ -e $records ]]; then last=$(tail -n +"$((lines + 1))" "$records"); fi
   if [[ -n $last ]]; then printf '%s\n' "$last"; last=$(tail -n 1 <<<"$last"); fi
+  # The unit's exit status alone does not show that the switch ended: a unit stopped mid-switch (`systemctl stop`)
+  # ends "successfully" for systemd (SIGTERM is a clean exit), so systemd-run --wait returns 0. Only this run's
+  # finished record does (seen in the update drill, platform/production/update-drill-test.nix).
+  if [[ $rc == 0 && $(jq -r '.phase // ""' <<<"${last:-null}" 2>/dev/null) != finished ]]; then
+    echo "terrace-production: the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch); the system may be half switched: read terrace-production status" >&2
+    rc=1
+  fi
   if [[ $rc != 0 ]]; then
     if [[ -n $last ]]; then echo "terrace-production: $action result: $(jq -r '.result // "none"' <<<"$last" 2>/dev/null)" >&2; fi
     echo "terrace-production: $action FAILED (exit $rc). Read: journalctl -u terrace-switch.service -o cat --no-pager; systemctl --failed; terrace-production status" >&2

@@ -77,6 +77,7 @@ MUTANTS = [
     ("rollback cancels a pending boot default", PRODUCTION, "if [[ $action == rollback && -z $chosen && $(gen_of) != none", "if [[ $action == never && -z $chosen && $(gen_of) != none"),
     ("dry run changes nothing", PRODUCTION, "  if (( dry_run )); then\n    echo 'Dry run: nothing changed.'", "  if false; then\n    echo 'Dry run: nothing changed.'"),
     ("switch runs in the terrace-switch unit", PRODUCTION, "systemd-run --unit=terrace-switch --collect", "systemd-run --unit=other --collect"),
+    ("a unit stopped mid-switch is not a success", PRODUCTION, "if [[ $rc == 0 && $(jq -r '.phase // \"\"' <<<\"${last:-null}\" 2>/dev/null) != finished ]]; then", "if false; then"),
     ("only this run's records are printed", PRODUCTION, 'last=$(tail -n +"$((lines + 1))" "$records")', 'last=$(cat "$records")'),
     ("result recorded", PRODUCTION, "stillStarting: $still}'", "stillStarting: $still} | empty'"),
     ("started record", PRODUCTION, "'{phase: \"started\"", "'empty | {phase: \"started\""),

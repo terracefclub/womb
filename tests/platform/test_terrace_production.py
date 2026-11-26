@@ -299,6 +299,14 @@ except OSError:
 if [[ -e $FAKE_DIR/race ]]; then ln -sfn "$(cat "$FAKE_DIR/race")" "$FAKE_DIR/current-system"; fi
 while [[ $1 != -- ]]; do shift; done
 shift
+# A unit stopped in the middle of its switch (`systemctl stop terrace-switch.service`): systemd counts the SIGTERM as a
+# clean exit, so `systemd-run --wait` returns 0 (seen in the update drill). The switch stub sends the signal.
+if [[ -e $FAKE_DIR/stop-mid-switch ]]; then
+  "$BASH_BIN" -euo pipefail "$@" &
+  echo $! >"$FAKE_DIR/unit.pid"
+  wait $! || true
+  exit 0
+fi
 exec "$BASH_BIN" -euo pipefail "$@"
 """,
     # psql as postgres: the CMS database exists while $FAKE_DIR/ledger does; its lines are the ledger.
@@ -347,6 +355,7 @@ class DeployPath(Harness):
             (path / "bin").mkdir()
             (path / "bin" / "switch-to-configuration").write_text(
                 f"#!{BASH}\necho \"{name} $1\" >>\"$FAKE_DIR/switch.log\"\n"
+                + "if [[ -e $FAKE_DIR/stop-mid-switch ]]; then kill -TERM \"$(cat \"$FAKE_DIR/unit.pid\")\"; sleep 1; fi\n"
                 # The gated CMS and website the switch starts (through terrace-production.target): refused by their gate (failed)
                 # when the marker exists and is not this system's revision; otherwise left as they were (a running unit is
                 # not modelled). Off with $FAKE_DIR/no-gate-emulation, for tests that set unit states themselves.
@@ -813,6 +822,25 @@ class DeployPath(Harness):
         self.assertIn(f"Checks passed; rollback {self.new} (", out)
         result = self.accepted("rollback", "--generation", "3", "--dry-run")
         self.assertIn("WARNING: generation 3 was chosen explicitly; its last record: unfinished (started", result.stderr)
+
+    def test_a_switch_unit_stopped_mid_switch_is_not_a_success(self):
+        # `systemctl stop terrace-switch.service` mid-switch: systemd-run --wait returns 0, and only the missing finished
+        # record shows that the switch never ended (update drill, platform/production/update-drill-test.nix).
+        (self.dir / "stop-mid-switch").touch()
+        result = self.run_tool("activate", str(self.new))
+        self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
+        self.assertIn("the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch)", result.stderr)
+        self.assertIn("terrace-production: activate FAILED (exit 1).", result.stderr)
+        self.assertNotIn("Running generation", result.stdout)
+        self.assertEqual([record["phase"] for record in self.records()], ["started"])
+        self.assertIn('"phase":"started"', result.stdout, "the client prints the started record it found")
+        status = self.accepted("status").stdout
+        self.assertIn("WARNING: the last activation started at", status)
+        # Control: the same activation, not stopped, succeeds.
+        (self.dir / "stop-mid-switch").unlink()
+        self.current.unlink()
+        self.current.symlink_to(self.old)
+        self.accepted("activate", str(self.new))
 
     def test_rollback_generation_only_goes_back(self):
         self.accepted("activate", str(self.new))

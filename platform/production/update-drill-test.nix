@@ -497,8 +497,11 @@ in {
         app.wait_until_succeeds("test -e /tmp/probe.rc", timeout=120)
         rc, out = int(app.succeed("cat /tmp/probe.rc").strip()), app.succeed("cat /tmp/probe.log")
         last = records(app)[-1]
-        ok(rc != 0 and "activate FAILED" in out and (last["phase"], last["action"], last["to"], last["generationBefore"]) == ("started", "activate", PROBE, "2"),
-           f"the client reported FAILED (exit {rc}) and the log ends with the attempt's started record, no finished one: {last}")
+        # systemd counts the stopped unit as a clean exit (systemd-run --wait returns 0); the client reads the missing
+        # finished record instead (the first run of this drill found the client reporting success here).
+        ok(rc == 1 and "the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch)" in out and "activate FAILED (exit 1)" in out
+           and "Running generation" not in out and (last["phase"], last["action"], last["to"], last["generationBefore"]) == ("started", "activate", PROBE, "2"),
+           f"the client reported FAILED (exit {rc}), and the log ends with the attempt's started record, no finished one: {last}; {out.strip()[-400:]!r}")
         ok(app.execute("test -e /run/terrace-drill-probe-done")[0] != 0, "the activation never completed")
         ok(running(app) == GOOD and generation(app) == "3" and boot_default(app) == PROBE, "running: generation 2's system; the boot default: the attempt's generation 3")
         # The activation had replaced /etc before it was stopped (NixOS runs its etc step before this probe).
