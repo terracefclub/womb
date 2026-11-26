@@ -277,8 +277,12 @@ cannot do:
   the repository password after promotion and remove the old public key at the
   Storage Box ([secrets](secrets.md#revoke-after-a-host-compromise),
   [rotation](secrets.md#rotation)). The promotion drill ran both rotations for
-  this purpose once, in a VM: afterwards the returning original's backup failed
-  and changed nothing in the repository (step 21 has what it did before them).
+  this purpose in a VM, with the commands of [credential rotation](credential-rotation.md)
+  R7 and R8 as written (the Storage Box console steps done on the test repository
+  host): afterwards the returning original's SFTP login, snapshot listing,
+  `forget --prune` and backup were each refused at authentication (`Permission
+  denied`), its old repository password was refused as a wrong password, and no
+  file of the repository changed (step 21 has what it could do before them).
 - The replacement marker and repository check (step 6) stop the replacement being
   adopted as a new host. They do nothing about the original.
 - Public traffic: pointing DNS at the replacement is the practical fence for
@@ -572,7 +576,10 @@ conditions and the `adopt`/`arm-timers` commands are in
 the production target, and each held timer has `ConditionPathExists=!` on its
 group's marker, so no start of the target arms them while the marker exists: not this adoption, not
 a failed adoption you then resume (it writes the marker again before starting the
-target), and not a reboot of the replacement. The adoption's own completeness check
+target), and not a reboot of the replacement (evidence: a resumed adoption and a
+further start of the target, app role, in the production VM check; a reboot of the
+app replacement with both groups held, and on the relay a failed adoption, the same
+command again and a reboot, in the promotion drill). The adoption's own completeness check
 does not wait for the held timers. Until you arm them nothing schedules a backup:
 every backup run ends in `forget --prune` against the repository the restore came
 from (`platform/backup/backup.sh`; what that can remove is in step 21), and the
@@ -590,9 +597,12 @@ fails on nginx and its resumed run both leave the four timers inactive (conditio
 not met), a second start of the target and of the backup timer leaves them so, the
 identity health timer is armed, and `status` reports both held groups. The relay's
 held timers are not in that check; the promotion drill (2026-11-25) asserts
-them on a restored relay: held after `adopt --restored` and after a reboot, with
-`status` naming the group, then armed by `arm-timers` and still armed after a
-second reboot.
+them on a restored relay: held after a failed `adopt --restored` (port 443 taken),
+after the same command run again, and after a reboot, with `status` naming the
+group, then armed by `arm-timers` and still armed after a second reboot; and on the
+app replacement, held across a reboot between steps 17 and 19. "Held" there means
+the group's marker exists and the timer, wanted by the production target, is
+inactive with its start condition failed.
 
 **There is no documented way back after this step.** The snapshot still exists in
 the repository and the original's disk exists if you kept it, so a second
@@ -824,8 +834,9 @@ Consequences:
   after the next two runs, so under the default settings one or two backups cannot
   remove it. The promotion drill showed this on the app replacement: still listed
   after step 21's backup and one more, and removed by the third run, which fell on
-  the same day (keep-last 3; it was no longer the newest of its day, week or month).
-  On different days keep-daily keeps it longer. If you restored from an older snapshot because the newest was bad, it
+  the same day. Only keep-last 3 decided that, because every run fell on one day;
+  the drill compares what restic did with its own reading of the keep rules, and the
+  daily, weekly and monthly rules are not exercised. If you restored from an older snapshot because the newest was bad, it
   is already not among the newest: one more run can push it out, unless it is the
   kept newest snapshot of its day, week or month. Settings lower than the defaults
   change this; the effect of a changed policy is **not determined from the
@@ -837,13 +848,15 @@ Consequences:
 - The same applies to a returning original, which has the same host name and
   credentials. The promotion drill booted the retired original's disk after the
   promotion: its boot gate started its writers and re-armed every timer, a
-  `terrace-secrets push` to it was refused (the store pins the replacement's host
-  key), and its backup run succeeded into the repository, became the newest
-  snapshot of the host name (so `latest` would now restore its stale data) and
-  pruned one of the replacement's snapshots. After the repository password and
-  the SFTP key were rotated as [secrets](secrets.md#rotation) says (old public key
-  removed at the repository), its backup failed and the snapshot list did not
-  change. A prune by it while you are restoring could remove a snapshot you
+  `terrace-secrets push` to it was refused (`Host key verification failed`: the
+  store pins the replacement's host key), and with its old credentials it could log
+  in over SFTP, list the replacement's snapshots, run a `forget` (dry run) and back
+  up; that backup became the newest snapshot of the host name (so `latest` would
+  now restore its stale data) and its prune removed one of the replacement's
+  snapshots. After the repository password and the SFTP key were rotated (R7, R8
+  of [credential rotation](credential-rotation.md); old public key removed at the
+  repository), each of those was refused at authentication, the old password was
+  refused as a wrong password, and no repository file changed. A prune by it while you are restoring could remove a snapshot you
   chose: whether restic refuses to prune while your restore holds a lock on the
   repository is restic behaviour, **not determined from the repository**. Fence
   first (step 3).
@@ -943,7 +956,7 @@ a few passing runs are not a failure rate).
 | 18. Vaultwarden | `START_APPLICATIONS`; `vault_browser('restore')`, `vault_attachments('verify')` | Same two vault items and attachment bytes decrypt for a retained user device; the server-side copy of master passwords is absent | VM rehearsal (synthetic data). Hetzner once: migrated, started, bootstrap unit run, `/alive` answers; liveness only. Production profile: not exercised anywhere |
 | 19. TLS and CA | `install_runtime` and `INSTALL_INPUT` in `rehearsal_services.py`; CA by store path in `scenario.py`; `platform/production/tls-test.nix`; manual mode in `test.nix` | Rehearsal: operator supplies CA, certificate, key and repository password again, each checked by digest; served chain verifies. Production VMs: manual `tls/*` re-delivered by `push`; ACME state not in the backup and a restored host registers a new account and gets a new certificate from a local test ACME server | Re-supplied by operator tooling: VM rehearsal (synthetic data) and also on temporary Hetzner hosts once (synthetic data; **not restored from backup**). Manual and local-ACME replacement: VM rehearsal (synthetic data). A public CA, real DNS, a real first issuance: not exercised anywhere. **VM drill of this procedure**: both roles, manual mode, `terrace-tls check` exits 0. No ACME |
 | 20. Health checks | `protocol` (198 assertions) and `lifecycle` in `rehearsal_services.py`; `check_app` in `scenario.py`; `terrace-tls check` in `tls-test.nix` | Native HTTPS SSO, roles, publication, privacy; member lifecycle before and after | VM rehearsal (synthetic data); the 198 assertions and lifecycle also on temporary Hetzner hosts once (synthetic data). These scripts exist only in the rehearsal harness; the production host has `systemctl --failed`, `terrace-tls check` and `terrace-secrets verify`. **VM drill of this procedure**: both roles: the block as written; no failed unit, `terrace-backup age` exits 1 |
-| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` (about line 738); the freshness assertions for a first adopted app host at about lines 434-436 | Replacement: the backup service succeeds into the same repository under the same host name and the freshness unit then passes. First adopted app host (not the replacement): the freshness unit fails before its first backup and passes after. "The restore did not bring the old host's backup status" is a code comment there, not an assertion. Nothing asserts the snapshot series or retention across the promotion; on the restored app replacement ("replacement" subtest in `test.nix`): `arm-timers --in-service` first is refused with `the backup timers are still held (...); run terrace-production arm-timers first ...; nothing armed` and both markers kept; a backup by hand succeeds; `arm-timers` prints `Armed: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer.` and the `Still held ... terrace-cms-sweep.timer ...` line, the three are active and the sweep held, a repeat prints `Already armed: nothing to arm.` and the same line; after a reboot the three are active, the sweep held and `status` names it; `arm-timers --in-service` prints `Armed: terrace-cms-sweep.timer.` and `Every writer timer is active now and at every boot.`, all four are active, `status` names nothing held, and a repeat prints `Already armed: nothing to arm.` and the same line. On an adopted (not restored) relay `arm-timers --in-service` prints `Already armed: nothing to arm.`, `This role holds no timer until service (it has no sweep).` and the same line | VM rehearsal (synthetic data), local repository, for the backup itself; the `arm-timers` assertions passed at `9664be1` (2026-11-24). The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Retention and pruning across a promotion, the freshness behaviour on a replacement, a restored relay's held timers, and an original that comes back: not exercised anywhere. **VM drill of this procedure**: both roles: the block as written, outputs as documented, repeat idempotent; app retention after two and three more runs, whole-repository `check --read-data` |
+| 21. First backup from the replacement | `first_backup(app, "replacement", init=False)` in `platform/production/tls-test.nix` (about line 738); the freshness assertions for a first adopted app host at about lines 434-436 | Replacement: the backup service succeeds into the same repository under the same host name and the freshness unit then passes. First adopted app host (not the replacement): the freshness unit fails before its first backup and passes after. "The restore did not bring the old host's backup status" is a code comment there, not an assertion. Nothing asserts the snapshot series or retention across the promotion; on the restored app replacement ("replacement" subtest in `test.nix`): `arm-timers --in-service` first is refused with `the backup timers are still held (...); run terrace-production arm-timers first ...; nothing armed` and both markers kept; a backup by hand succeeds; `arm-timers` prints `Armed: terrace-backup.timer terrace-backup-check.timer terrace-backup-freshness.timer.` and the `Still held ... terrace-cms-sweep.timer ...` line, the three are active and the sweep held, a repeat prints `Already armed: nothing to arm.` and the same line; after a reboot the three are active, the sweep held and `status` names it; `arm-timers --in-service` prints `Armed: terrace-cms-sweep.timer.` and `Every writer timer is active now and at every boot.`, all four are active, `status` names nothing held, and a repeat prints `Already armed: nothing to arm.` and the same line. On an adopted (not restored) relay `arm-timers --in-service` prints `Already armed: nothing to arm.`, `This role holds no timer until service (it has no sweep).` and the same line | VM rehearsal (synthetic data), local repository, for the backup itself; the `arm-timers` assertions passed at `9664be1` (2026-11-24). The rehearsal harnesses (`scenario.py`, `rehearsal_services.py`) take no backup after restoring, and the backup timers stay disabled in them. Before the promotion drill, nothing exercised retention and pruning across a promotion, the freshness behaviour on a replacement, a restored relay's held timers, or an original that comes back; the drill covers them as follows (retention: keep-last 3 with same-day runs only). **VM drill of this procedure**: both roles: the block as written, outputs as documented, repeat idempotent; app retention after two and three more runs, whole-repository `check --read-data` |
 | 21. Declared in service, DNS cut-over | none (every rehearsal ends by stopping all guests) | none | not exercised anywhere. **VM drill of this procedure**: both roles: the D5 blocks as written and their outputs, timers active after a reboot (relay). Not DNS, not an owner's declaration |
 
 ## 4. What a production promotion needs that nothing has exercised
@@ -1060,15 +1073,54 @@ It prints `PROMOTION-PROOF` with the assertion count, the seconds of each step,
 records (reconciliation lines, the restore directory's listing, free space) and
 the decision points, and `PROMOTION-CHECKS` with every assertion's label.
 
-**How it keeps to the document.** Every command it runs is in
-`platform/production/promotion-commands.json`. Evaluation fails unless each
-shell block there is a fenced block of section 2, each expected output a fenced
-block, and each inline command a phrase of this document, character for
-character; `tests/platform/test_promotion_drill.py` (CI) checks the same and also
-that every shell block of section 2 is either run or listed as excluded with a
-reason (only step 18, which the production profile refuses). Substituted are
-only the documented placeholders (`<SNAPSHOT_ID>`, `<path>`, `<replacement
-address>`, `<operator ssh key>`) and, for the relay, `relay --role relay`.
+**Status.** The drill runs by hand on the build machine; it is **not in CI**
+(CI runs only `tests/platform/test_promotion_drill.py`). Its runs are listed in
+[the backlog](backlog.md#restore-promotion-follow-ups-g-22-recorded-2026-11-24).
+A few passing runs are not a failure rate.
+
+**How it keeps to the documents.** Every documented command the drill runs is an
+entry of `platform/production/promotion-commands.json` naming its document
+(this one, or `docs/credential-rotation.md` for R7 and R8) and its step. What is
+checked:
+
+- evaluation of the drill fails unless each entry is verbatim in its document: a
+  block or output exactly once as a fenced block of section 2 (or of the named
+  section), an inline command as a phrase of it (line wrapping allowed);
+- `tests/platform/test_promotion_drill.py` (CI) checks the same per step, that the
+  entries are listed in the order the documents give them, that every fenced block
+  of section 2 of any kind is an entry or excluded with a reason (only step 18,
+  which the production profile refuses), and that the drill's code (not a comment)
+  uses every entry through its accessors;
+- at run time the drill records each use and asserts that each role (app, relay,
+  the rotations) first used its entries in the documents' order and that every
+  entry was used.
+
+What is not guaranteed: a command written only in prose that the drill does not
+run (for example the relay's timer stop in step 2) is not an entry and not
+checked; warnings and conditions in prose ("do not add `--keep-running`") are not
+checked; that a block's every line ran is true today but asserted only by the
+run's own steps; and a step the document adds without a fenced block or a named
+inline command would go unnoticed.
+
+**What the drill adds around the documented commands**, so what it runs is not
+exactly what an operator types:
+
+- multi-line blocks run as one `bash -euo pipefail -c` script (stops at the first
+  failing line); blocks 2, 14, 16, 20 and the D5 blocks run line by line so each
+  answer can be checked;
+- the test driver's timeouts; `2>&1` added only where a refusal's message is
+  asserted (the first, failed relay adoption; the returning original's refused
+  commands); no documented command has its error output discarded;
+- placeholders substituted (`<SNAPSHOT_ID>`, `<path>`, `<replacement address>`,
+  `<operator ssh key>`, `<app address>`, `<key>`, `<id> ...`), and for the relay
+  `app` lines rewritten as the document says (`relay --role relay`, the host name);
+- the operator environment of step 4 exported before every operator command;
+- the installer stand-in (`rehearsal-stage.nix`) staging the host key at first
+  boot, and the Storage Box console steps of R8 done by editing the test
+  repository's `authorized_keys`;
+- setup and checks of its own between steps (original hosts, the damaged snapshot,
+  guards, signatures, a port held to make an adoption fail), which are not the
+  procedure.
 
 **What it does.** An operator guest holds the store, the escrow key and the SFTP
 repositories (the Storage Box's stand-in). An original app (adopted as new, a
@@ -1077,8 +1129,9 @@ tagged damaged snapshot) and an original relay (two Headscale users, a backup)
 are set up first. Then, in the document's order: the app as a **planned
 replacement** (steps 1 to 21 and D5, with step 2), and the relay as a **lost
 original** (steps 1, 3 to 10, 13, 15, 19 to 21 and D5; step 2 skipped, its
-snapshot taken while Headscale ran). Last, the retired original app is booted again
-twice, before and after the credential rotations (item 6).
+snapshot taken while Headscale ran; its first adoption is made to fail and the same
+command run again). Last, the retired original app is booted again twice, before
+and after the credential rotations (item 6).
 
 **What it does differently from a real promotion.** No provider: fencing is a VM
 power-off and moving or deleting the disk image. No real DNS: names are `.invalid`
@@ -1101,13 +1154,13 @@ after the fencing check, the relay's at once.
 
 | Item | Status | Where |
 | --- | --- | --- |
-| 1. Both roles | Asserted, without peers: `host create --replace`, `rekey`, `push`, step 13 before the first start, `adopt --restored`, key hashes and users equal. Left out: Headscale clients (the `--relay-peers` rehearsal has them, on the rehearsal profile) | relay subtests |
+| 1. Both roles | Asserted, without peers: `host create --replace`, `rekey`, `push`, step 13 before the first start, a failed `adopt --restored` run again, key hashes and users equal. Left out: Headscale clients (the `--relay-peers` rehearsal has them, on the rehearsal profile) | relay subtests |
 | 2. Commands verbatim | Asserted: section 2's blocks as written (above), with their documented outputs and `status` before and after. Left out: step 18 (refused by the production profile) and the relay's step 2 (the relay is the lost case) | every subtest; the evaluation check and CI test |
 | 3. The guards | Refusals asserted: no `RECONCILIATION OK` line, a `RECONCILIATION FAILED` report, no state witness. Left out: acceptance with the media or outbox copy skipped (it would start writers on a half-restored host; the code reads only the line and the witness, section 4) | "app, steps 10 to 14" |
 | 4. A failed restore | Asserted: a damaged snapshot (its own tag) fails step 9, the host stays unadopted, a retry into the directory is refused, the documented clean-up, the chosen snapshot then reconciles. Left out: a retry from `--target secondary` (item 5) | "app, step 9" |
 | 5. Second target | Left out: the production profile requires an `s3:https://` secondary; no S3 endpoint with trusted TLS is built in a VM. `platform/backup-test.nix` restores from a second SFTP target | none |
-| 6. Fencing | Asserted: the retired original boots with its old key, its boot gate restarts its writers and re-arms every timer, `push` to it is refused, its backup succeeds and becomes the newest snapshot of the host name (one replacement snapshot pruned, recorded); after the repository password and SFTP key rotations its backup fails and the snapshot list is unchanged | the three "item 6" subtests |
-| 7. Backups after promotion | Asserted: step 21, the series continues under the same host name, the restored-from snapshot still listed after two runs and pruned or kept after a third as restic's keep rules predict (pruned in the runs so far: same day), a snapshot of another tag untouched, `check --read-data` of the whole repository, `age` and freshness pass | "item 7" |
+| 6. Fencing | Asserted: the retired original boots with its old key, its boot gate restarts its writers and re-arms every timer, `push` to it is refused (`Host key verification failed`); before the rotations it logs in over SFTP, lists snapshots, runs a `forget` dry run and a backup that becomes the newest snapshot (one replacement snapshot pruned, recorded); after R7 and R8 as written, its SFTP login, listing, `forget --prune` and backup are each refused at authentication, its old password is refused as wrong, and no repository file changes | the three "item 6" subtests |
+| 7. Backups after promotion | Asserted: step 21, the series continues under the same host name, the restored-from snapshot still listed after two runs and, after a third, pruned or kept as the drill's reading of restic's keep rules predicts (pruned in every run so far: same day, so only keep-last 3 is exercised, not the daily, weekly or monthly rules), a snapshot of another tag untouched, `check --read-data` of the whole repository, `age` and freshness pass | "item 7" |
 | 8. Same values | Asserted: the decrypted store is equal before and after `rekey` (both roles); the delivered database password opens the restored Keycloak role and a regenerated value is refused. Left out: a whole regenerated store pushed to a replacement | "app, step 4", "app, steps 16 and 17" |
 | 9. No stale state | Asserted: no `/var/lib/acme` (manual mode), no CMS migration marker until step 16, the replacement marker gone after step 15 and the store's cleared by the next `push`. ACME mode: `platform/production/tls-test.nix` | "app, steps 10 to 14", "app, step 15" |
 | 10. Identity continuity | Asserted: realm ID, issuer and public signing keys equal. Left out: an old token and session (no realm client that the drill can get a token from without the rehearsal protocol harness) | "app, steps 16 and 17" |
