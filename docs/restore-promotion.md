@@ -280,10 +280,11 @@ cannot do:
   this purpose in a VM, with the commands of [credential rotation](credential-rotation.md)
   R7 and R8 as written (the Storage Box console steps done on the test repository
   host): afterwards the returning original's SFTP login, snapshot listing,
-  `forget --prune` and backup were each refused at SSH authentication (its own
-  error says `Permission denied (publickey, ...)`, and the repository host's sshd
-  logs the connection closed before authentication), so it never reached the
-  repository password; the old password, tried by the operator directly on the
+  `forget --prune` and backup were each refused at SSH authentication (the SFTP
+  login's own error says `Permission denied (publickey, ...)`, restic's says it
+  cannot start the SFTP session, and the repository host's sshd logs each
+  connection closed before authentication), so it never reached the repository
+  password; the old password, tried by the operator directly on the
   repository, was refused as a wrong password; and no file of the repository
   changed (step 21 has what it could do before them).
 - The replacement marker and repository check (step 6) stop the replacement being
@@ -859,8 +860,9 @@ Consequences:
   snapshots. After the repository password and the SFTP key were rotated (R7, R8
   of [credential rotation](credential-rotation.md); old public key removed at the
   repository), each of those was refused at SSH authentication (`Permission denied
-  (publickey, ...)` on the old host, the session closed before authentication on
-  the repository host), the old password tried by the operator directly was refused
+  (publickey, ...)` from the SFTP login and restic's "unable to start the sftp
+  session" on the old host, each session closed before authentication on the
+  repository host), the old password tried by the operator directly was refused
   as a wrong password, and no repository file changed. A prune by it while you are restoring could remove a snapshot you
   chose: whether restic refuses to prune while your restore holds a lock on the
   repository is restic behaviour, **not determined from the repository**. Fence
@@ -1164,7 +1166,7 @@ after the fencing check, the relay's at once.
 | 3. The guards | Refusals asserted: no `RECONCILIATION OK` line, a `RECONCILIATION FAILED` report, no state witness. Left out: acceptance with the media or outbox copy skipped (it would start writers on a half-restored host; the code reads only the line and the witness, section 4) | "app, steps 10 to 14" |
 | 4. A failed restore | Asserted: a damaged snapshot (its own tag) fails step 9, the host stays unadopted, a retry into the directory is refused, the documented clean-up, the chosen snapshot then reconciles. Left out: a retry from `--target secondary` (item 5) | "app, step 9" |
 | 5. Second target | Left out: the production profile requires an `s3:https://` secondary; no S3 endpoint with trusted TLS is built in a VM. `platform/backup-test.nix` restores from a second SFTP target | none |
-| 6. Fencing | Asserted: the retired original boots with its old key, its boot gate restarts its writers and re-arms every timer, `push` to it is refused (`Host key verification failed`); before the rotations it logs in over SFTP, lists snapshots, runs a `forget` dry run and a backup that becomes the newest snapshot (one replacement snapshot pruned, recorded); after R7 and R8 as written, its SFTP login, listing, `forget --prune` and backup are each refused at SSH authentication (client `Permission denied (publickey, ...)`, server session closed before authentication), the old password tried by the operator directly is refused as wrong (the old host never reaches the password), and no repository file changes | the three "item 6" subtests |
+| 6. Fencing | Asserted: the retired original boots with its old key, its boot gate restarts its writers and re-arms every timer, `push` to it is refused (`Host key verification failed`); before the rotations it logs in over SFTP, lists snapshots, runs a `forget` dry run and a backup that becomes the newest snapshot (one replacement snapshot pruned, recorded); after R7 and R8 as written, its SFTP login, listing, `forget --prune` and backup are each refused at SSH authentication (client: `Permission denied (publickey, ...)` from the SFTP login, restic's "unable to start the sftp session" for the others; server: each session closed before authentication), the old password tried by the operator directly is refused as wrong (the old host never reaches the password), and no repository file changes | the three "item 6" subtests |
 | 7. Backups after promotion | Asserted: step 21, the series continues under the same host name, the restored-from snapshot still listed after two runs and, after a third, pruned or kept as the drill's reading of restic's keep rules predicts (pruned in every run so far: same day, so only keep-last 3 is exercised, not the daily, weekly or monthly rules), a snapshot of another tag untouched, `check --read-data` of the whole repository, `age` and freshness pass | "item 7" |
 | 8. Same values | Asserted: the decrypted store is equal before and after `rekey` (both roles); the delivered database password opens the restored Keycloak role and a regenerated value is refused. Left out: a whole regenerated store pushed to a replacement | "app, step 4", "app, steps 16 and 17" |
 | 9. No stale state | Asserted: no `/var/lib/acme` (manual mode), no CMS migration marker until step 16, the replacement marker gone after step 15 and the store's cleared by the next `push`. ACME mode: `platform/production/tls-test.nix` | "app, steps 10 to 14", "app, step 15" |

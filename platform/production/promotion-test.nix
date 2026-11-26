@@ -392,8 +392,25 @@ in {
                         kept.add(s["id"])
         return snapshot_id in kept
 
-    def wait_idle_backup(machine):
-        machine.wait_until_fails("systemctl is-active --quiet terrace-backup.service", timeout=600)
+    def settle_backup(machine):
+        # Until no backup run is queued, starting or running (`is-active` being false is also true before a timer's start).
+        machine.wait_until_succeeds("test -z \"$(systemctl list-jobs --no-legend terrace-backup.service)\" && test \"$(systemctl show terrace-backup.service -p ActiveState --value)\" != activating"
+                                    " && test \"$(systemctl show terrace-backup.service -p ActiveState --value)\" != active", timeout=600)
+
+    def invocation_journal(machine, unit, invocation):
+        # One invocation's own lines, after journald has written everything it received.
+        machine.succeed("journalctl --sync")
+        return machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} -o cat --no-pager")
+
+    def own_backup_attempt(machine, label, expect_success):
+        # The drill's own attempt: `systemctl start` of the oneshot returns when the run has ended; it must be a new
+        # invocation, and only that invocation's journal is read.
+        previous = state(machine, "terrace-backup.service", "InvocationID")
+        status, _ = machine.execute("systemctl start terrace-backup.service", timeout=600)
+        ok((status == 0) == expect_success, f"{label} (exit {status})")
+        invocation = state(machine, "terrace-backup.service", "InvocationID")
+        ok(invocation not in ["", previous], f"{label}: a new run of the unit")
+        return invocation_journal(machine, "terrace-backup.service", invocation)
 
     started_at = time.time()
     operator.start()
@@ -472,9 +489,10 @@ in {
             app.succeed(step2[1], timeout=180)
             before = signature()
             ok_run(app, step2[2], "step 2: the final backup", timeout=600)
+            step2_journal = invocation_journal(app, "terrace-backup.service", state(app, "terrace-backup.service", "InvocationID"))
             listed = json.loads(app.succeed(step2[3]))
             ok(app.succeed(text("step02-result", "app")).strip() == "success", "step 2 worked: the backup unit's Result is success")
-            ok(text("step02-log", "app") in app.succeed("journalctl -u terrace-backup.service -o cat --no-pager"), "step 2 worked: the backup log line")
+            ok(text("step02-log", "app") in step2_journal, "step 2 worked: the backup log line, in that run's journal")
             ok_run(app, text("step02-age", "app"), "step 2 worked: terrace-backup age exits 0")
             ours = sorted(terrace_group(listed, "app"), key=lambda s: s["time"])
             keep["final snapshot"] = ours[-1]["id"]
@@ -841,13 +859,16 @@ in {
         ok(app.succeed("systemctl is-active " + " ".join(BACKUP_HELD + [SWEEP])).split() == ["active"] * 4, "item 6 / step 2: the reboot re-armed the backup, check, freshness and sweep timers")
         refused = ok_refused(operator, ENV + f"terrace-secrets push app --address app --identity {IDENTITY} 2>&1", "item 6: a push to the returning original is refused")
         ok("Host key verification failed" in refused, "item 6: refused by the pinned host key")
-        wait_idle_backup(app)
+        settle_backup(app)
+        # From here on the drill's own attempts are the only runs: its timer (re-armed by the boot, asserted above) is stopped.
+        app.succeed("systemctl stop terrace-backup.timer")
         # What the old host can still do: the hazard section 2 warns about.
         ok_run(app, SFTP_LOGIN, "item 6 before rotation: SFTP login with its old key works")
         could_list = raw_snapshots(app)
         ok(len(terrace_group(could_list, "app")) >= 3, "item 6 before rotation: it lists the replacement's snapshots")
         ok_run(app, "terrace-backup restic primary forget --tag terrace --group-by host,tags --keep-last 1 --dry-run", "item 6 before rotation: a forget would run (dry run)")
-        ok_run(app, "systemctl start terrace-backup.service", "item 6 before rotation: its backup succeeds into the repository", timeout=600)
+        journal = own_backup_attempt(app, "item 6 before rotation: its backup succeeds into the repository", True)
+        ok("target primary: backup succeeded in" in journal, "item 6 before rotation: that run's journal says it succeeded")
         after_return = operator_snapshots("repository", "app")
         newest = max(terrace_group(after_return, "app"), key=lambda s: s["time"])
         ok(newest["id"] not in [s["id"] for s in before_return], "item 6: the original's stale data is now the newest snapshot of the host name (`latest`)")
@@ -866,7 +887,7 @@ in {
         ok(fingerprint(app) == keep["replacement app key"], "item 6: the replacement is back")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
         ok(app.succeed("systemctl is-active " + " ".join(BACKUP_HELD + [SWEEP])).split() == ["active"] * 4, "the replacement after its last reboot: every timer armed")
-        wait_idle_backup(app)
+        settle_backup(app)
         op(text("r7-rotate", "rotation"))
         ok("Added the new repository key" in op(text("r7-apply", "rotation", place)), "R7: new repository key added")
         op(text("r7-push", "rotation", place))
@@ -902,26 +923,34 @@ in {
         app.wait_for_unit("multi-user.target")
         ok(fingerprint(app) == keep["original app key"], "item 6: the original again")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
-        wait_idle_backup(app)
-        # Each refusal is shown on both ends: the client's own error (sshd here also offers password methods, so the
-        # list after "publickey" varies) and the repository host's sshd closing the session before authentication.
+        settle_backup(app)
+        app.succeed("systemctl stop terrace-backup.timer")
+        # Each refusal is shown on both ends. Client side: ssh's own error for the direct SFTP login (sshd here also offers
+        # password methods, so the list after "publickey" varies); restic's own error for the restic commands. restic
+        # relays ssh's message asynchronously and can exit before it is written (one run at 510b8d3 lost it), so for
+        # them that line is recorded, not asserted. Server side: the repository host's sshd closes each session before
+        # authentication.
         denied = re.compile(r"Permission denied \(publickey[,)]")
+        restic_refused = "unable to start the sftp session"
         closed = "journalctl --no-pager -o cat | grep -c 'Connection closed by authenticating user restic .* \\[preauth\\]' || true"
-        def refused_at_ssh(command, label, **kwargs):
-            server_before = int(operator.succeed(closed).strip())
-            out = ok_refused(app, command, label, **kwargs)
-            records["returning original after rotation: " + label] = [line for line in out.splitlines() if "denied" in line.lower()][:2]
-            ok(denied.search(out) is not None, label + ": the client reports Permission denied (publickey...)")
-            operator.wait_until_succeeds(f"test $({closed}) -gt {server_before}", timeout=30)
-            ok(int(operator.succeed(closed).strip()) > server_before, label + ": the repository host's sshd closed it before authentication")
-        refused_at_ssh(SFTP_LOGIN, "SFTP login with the old key")
-        refused_at_ssh("terrace-backup restic primary snapshots --json 2>&1", "listing snapshots")
-        refused_at_ssh(FORGET, "forget --prune")
+        def server_closed(before_count, label):
+            operator.wait_until_succeeds(f"test $({closed}) -gt {before_count}", timeout=30)
+            ok(int(operator.succeed(closed).strip()) > before_count, label + ": the repository host's sshd closed it before authentication")
         server_before = int(operator.succeed(closed).strip())
-        ok_refused(app, "systemctl start terrace-backup.service", "item 6 after rotation: its backup fails", timeout=600)
-        journal = app.succeed("journalctl -b -u terrace-backup.service -o cat --no-pager")
-        ok("target primary: backup FAILED" in journal and denied.search(journal) is not None, "item 6 after rotation: the backup's journal says FAILED and Permission denied (publickey...)")
-        ok(int(operator.succeed(closed).strip()) > server_before, "item 6 after rotation: the backup's login was closed before authentication by the repository host")
+        out = ok_refused(app, SFTP_LOGIN, "item 6 after rotation: SFTP login with the old key fails")
+        ok(denied.search(out) is not None, "item 6 after rotation: ssh reports Permission denied (publickey...)")
+        server_closed(server_before, "item 6 after rotation: SFTP login")
+        for command, label in [("terrace-backup restic primary snapshots --json 2>&1", "listing snapshots"), (FORGET, "forget --prune")]:
+            server_before = int(operator.succeed(closed).strip())
+            out = ok_refused(app, command, f"item 6 after rotation: {label} fails")
+            ok(restic_refused in out, f"item 6 after rotation: {label}: restic cannot start the SFTP session")
+            records[f"returning original after rotation, {label}: ssh's message relayed by restic"] = denied.search(out) is not None
+            server_closed(server_before, f"item 6 after rotation: {label}")
+        server_before = int(operator.succeed(closed).strip())
+        journal = own_backup_attempt(app, "item 6 after rotation: its backup fails", False)
+        ok("target primary: backup FAILED" in journal and restic_refused in journal, "item 6 after rotation: that run's journal says FAILED, restic cannot start the SFTP session")
+        records["returning original after rotation, backup: ssh's message relayed by restic"] = denied.search(journal) is not None
+        server_closed(server_before, "item 6 after rotation: its backup")
         # The operator's own check, not the old host's (which never gets past SSH): the old password opens nothing.
         out = ok_refused(operator, "restic --no-lock --no-cache -r /home/restic/repository --password-file /dev/shm/old-repo-pass cat config 2>&1", "item 6 after rotation: the old repository password no longer opens the repository")
         ok("wrong password" in out.lower(), "item 6 after rotation: refused as a wrong password")
