@@ -9,7 +9,9 @@ the tools' own scripts. On 2026-11-25 its section 2 was run as written, in
 a VM, by the promotion drill (`platform/production/promotion-test.nix`, run with
 `platform/production-promotion-check`, section 5): the production app role as a
 planned replacement and the production relay role as a lost original, on
-synthetic data, with the commands taken from this document. Where that run showed
+synthetic data, with the commands taken from this document (by hand on the build
+machine, not in CI; five passes of five at `f5fd61c`, 230 assertions each, section
+5). Where the runs showed
 the text was wrong, the text was corrected; each correction says "the promotion
 drill showed". It has never been used with real data or on a production host
 (none exists), and nothing in it has run on a real host, at a provider, with real
@@ -936,8 +938,10 @@ network).
 The promotion drill (`platform/production/promotion-test.nix`, section 5) adds
 one more level, given last in the evidence column: **VM drill of this procedure**
 (2026-11-25; production profile for both roles, synthetic data, the document's
-commands; the runs and their results are listed in [the backlog](backlog.md#restore-promotion-follow-ups-g-22-recorded-2026-11-24);
-a few passing runs are not a failure rate).
+commands; five passes out of five at `f5fd61c`, 230 assertions each, run by hand on
+the build machine, not in CI; five passes are not a failure rate; section 5 and
+[the backlog](backlog.md#restore-promotion-follow-ups-g-22-recorded-2026-11-24)
+list every run).
 
 | Step | Rehearsal code that does the equivalent | What the rehearsal asserts | Evidence, and how it differs from a promotion |
 | --- | --- | --- | --- |
@@ -1081,9 +1085,13 @@ records (reconciliation lines, the restore directory's listing, free space) and
 the decision points, and `PROMOTION-CHECKS` with every assertion's label.
 
 **Status.** The drill runs by hand on the build machine; it is **not in CI**
-(CI runs only `tests/platform/test_promotion_drill.py`). Its runs are listed in
-[the backlog](backlog.md#restore-promotion-follow-ups-g-22-recorded-2026-11-24).
-A few passing runs are not a failure rate.
+(CI runs only `tests/platform/test_promotion_drill.py`). In its present form it
+passed five times out of five (2026-11-25, Womb `f5fd61c`, separate builds of one
+derivation, 230 assertions each, about 11 minutes each); five passes are not a
+failure rate. An earlier form of the same assertions failed once in three runs on
+a message read too early; that run, the fix and the other failed runs are listed
+in [the backlog](backlog.md#restore-promotion-follow-ups-g-22-recorded-2026-11-24).
+All of it on synthetic data of small size.
 
 **How it keeps to the documents.** Every documented command the drill runs is an
 entry of `platform/production/promotion-commands.json` naming its document
