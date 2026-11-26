@@ -134,7 +134,8 @@ None of these was done in that pull request; the production safeguards follow-up
   of section 2 covered; the rotations taken from `docs/credential-rotation.md` R7
   and R8; held timers checked by marker and failed start condition; an app reboot
   while held; a failed relay adoption run again; the returning original tried with
-  SFTP login, listing, `forget --prune` and backup before and after the rotations;
+  SFTP login, listing, `forget` (a dry run before the rotations, `--prune` after
+  them) and backup before and after the rotations;
   no `ok(True)` counted. Runs of the strengthened drill on the build machine:
   `78fd2e6` failed (the test expected `Permission denied (publickey)`; the test
   repository's sshd also offers password methods, so ssh prints
@@ -162,6 +163,11 @@ None of these was done in that pull request; the production safeguards follow-up
   an old token and session across the move; the app restored from a snapshot taken
   with writes in flight; real names, addresses and DNS; a clean-up policy for a
   successful restore directory.
+- Open (promotion drill): the server-side evidence for the returning original's
+  refused attempts is a count of the repository host's sshd "closed before
+  authentication" lines over its whole journal, before and after each attempt; make
+  it per attempt (for example match the source port or a per-attempt marker) so
+  each refusal is tied to its own connection.
 - Done (production safeguards; decision: leave them off): `adopt --restored` holds
   the backup, check and freshness timers (`restoreHeldTimers`) and on the app the
   sweep (`restoreServiceHeldTimers`), each group by a `ConditionPathExists=!` on its
