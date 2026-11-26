@@ -461,7 +461,7 @@ half you saved in step 2 shows which key to keep enrolled. Evidence: the store a
 `public` path are VM rehearsal (synthetic data); the whole sequence ran in the
 restore promotion drill (VM, synthetic data, steps 2 to 6 as written, the Storage
 Box steps 4 and 7 done on the test repository's `authorized_keys`), after which the
-old key is refused (`Permission denied (publickey)`); a real Storage Box: not
+old key is refused at SSH authentication (`Permission denied (publickey, ...)`); a real Storage Box: not
 exercised anywhere. The relay has its own key and repository (repeat
 for `relay`).
 

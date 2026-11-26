@@ -903,15 +903,26 @@ in {
         ok(fingerprint(app) == keep["original app key"], "item 6: the original again")
         app.wait_until_succeeds("systemctl is-active terrace-production.target", timeout=300)
         wait_idle_backup(app)
-        out = ok_refused(app, SFTP_LOGIN, "item 6 after rotation: SFTP login with the old key fails")
-        ok("Permission denied (publickey)" in out, "item 6 after rotation: refused as an authentication failure")
-        out = ok_refused(app, "terrace-backup restic primary snapshots --json 2>&1", "item 6 after rotation: listing snapshots fails")
-        ok("Permission denied" in out, "item 6 after rotation: the listing is refused at authentication")
-        out = ok_refused(app, FORGET, "item 6 after rotation: forget --prune fails")
-        ok("Permission denied" in out, "item 6 after rotation: forget is refused at authentication")
+        # Each refusal is shown on both ends: the client's own error (sshd here also offers password methods, so the
+        # list after "publickey" varies) and the repository host's sshd closing the session before authentication.
+        denied = re.compile(r"Permission denied \(publickey[,)]")
+        closed = "journalctl --no-pager -o cat | grep -c 'Connection closed by authenticating user restic .* \\[preauth\\]' || true"
+        def refused_at_ssh(command, label, **kwargs):
+            server_before = int(operator.succeed(closed).strip())
+            out = ok_refused(app, command, label, **kwargs)
+            records["returning original after rotation: " + label] = [line for line in out.splitlines() if "denied" in line.lower()][:2]
+            ok(denied.search(out) is not None, label + ": the client reports Permission denied (publickey...)")
+            operator.wait_until_succeeds(f"test $({closed}) -gt {server_before}", timeout=30)
+            ok(int(operator.succeed(closed).strip()) > server_before, label + ": the repository host's sshd closed it before authentication")
+        refused_at_ssh(SFTP_LOGIN, "SFTP login with the old key")
+        refused_at_ssh("terrace-backup restic primary snapshots --json 2>&1", "listing snapshots")
+        refused_at_ssh(FORGET, "forget --prune")
+        server_before = int(operator.succeed(closed).strip())
         ok_refused(app, "systemctl start terrace-backup.service", "item 6 after rotation: its backup fails", timeout=600)
         journal = app.succeed("journalctl -b -u terrace-backup.service -o cat --no-pager")
-        ok("target primary: backup FAILED" in journal and "Permission denied" in journal, "item 6 after rotation: the backup failed at authentication")
+        ok("target primary: backup FAILED" in journal and denied.search(journal) is not None, "item 6 after rotation: the backup's journal says FAILED and Permission denied (publickey...)")
+        ok(int(operator.succeed(closed).strip()) > server_before, "item 6 after rotation: the backup's login was closed before authentication by the repository host")
+        # The operator's own check, not the old host's (which never gets past SSH): the old password opens nothing.
         out = ok_refused(operator, "restic --no-lock --no-cache -r /home/restic/repository --password-file /dev/shm/old-repo-pass cat config 2>&1", "item 6 after rotation: the old repository password no longer opens the repository")
         ok("wrong password" in out.lower(), "item 6 after rotation: refused as a wrong password")
         operator.succeed("rm -f /dev/shm/old-repo-pass")
