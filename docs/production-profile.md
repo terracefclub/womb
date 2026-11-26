@@ -389,6 +389,10 @@ the built toplevel reaches an installed host by
   `python3 -B tests/platform/test_terrace_deploy.py -v`; mutation check (any
   machine, several minutes): `python3 -B tests/platform/deploy_mutants.py`. What it
   proves: [host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)
+- Restore promotion drill (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-promotion-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`,
+  the written [restore promotion](restore-promotion.md#5-the-promotion-drill)
+  procedure run with its own commands on both roles; unit test (CI):
+  `python3 -B tests/platform/test_promotion_drill.py -v`
 
 The VM proof boots the **same** app role and, briefly, the **same** relay role
 (secrets pushed, adopted, Headscale and HTTPS answering, redirect on port 80,

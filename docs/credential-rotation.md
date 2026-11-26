@@ -402,8 +402,10 @@ secrets: ... the old ones are refused": key add; `--finish` before `push` refuse
 with both keys kept; after `push` both passwords open the repository (control);
 `--only-current` without `--remove` lists the keys and removes nothing; with
 `--remove` the old key goes; afterwards the new password opens the repository and the
-previous one is refused (`wrong password`). Not exercised anywhere: a backup or a
-restore after the rotation.
+previous one is refused (`wrong password`). The restore promotion drill
+(`platform/production/promotion-test.nix`, VM, synthetic data) runs steps 1 to 5 as
+written, with `--finish --keep`, and a backup after them. Not exercised anywhere:
+a restore after the rotation.
 
 **Recoveries, from the code; if the state is not one of these, do not proceed.**
 
@@ -456,8 +458,11 @@ rewrites `public/backup--primary--sftp-key.pub` (`generate_value`, `replace=True
 Worked: step 6 succeeds with the new key. Way back before step 7: the old private
 key is in the saved store copy: restore it (preconditions) and push; the old public
 half you saved in step 2 shows which key to keep enrolled. Evidence: the store and
-`public` path are VM rehearsal (synthetic data); the Storage Box side and the whole
-sequence: not exercised anywhere. The relay has its own key and repository (repeat
+`public` path are VM rehearsal (synthetic data); the whole sequence ran in the
+restore promotion drill (VM, synthetic data, steps 2 to 6 as written, the Storage
+Box steps 4 and 7 done on the test repository's `authorized_keys`), after which the
+old key's SFTP login is refused at SSH authentication (`Permission denied (publickey, ...)`); a real Storage Box: not
+exercised anywhere. The relay has its own key and repository (repeat
 for `relay`).
 
 ### R9. The escrow identity (`escrow replace`)

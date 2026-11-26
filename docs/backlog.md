@@ -108,10 +108,66 @@ From the review of the written [restore promotion](restore-promotion.md) procedu
 None of these was done in that pull request; the production safeguards follow-up
 (2026-11-24) did the items marked done.
 
-- Drill: run the procedure's commands verbatim in a VM on the production profile
-  for both roles with the original disks destroyed, and add the assertions in its
-  "Drill to add" section. Until then it is written from the rehearsals and has not
-  been run as written.
+- Done 2026-11-25 (promotion drill): `platform/production/promotion-test.nix`
+  (`platform/production-promotion-check`) runs section 2 with the document's own
+  commands (`promotion-commands.json`; evaluation and
+  `tests/platform/test_promotion_drill.py` refuse a command that is not verbatim
+  in the document) on the production app role as a planned replacement and the
+  relay as a lost original, then boots the retired original app before and after
+  the credential rotations. Section 5 of the document lists each item it asserts
+  and each it leaves out, with the reason. Corrections the runs made to the
+  document: `adopt --restored` prints the `terrace-secrets verify` PASS line
+  before the documented lines, and the relay prints three lines after it, not
+  two; the relay's reconciliation line is `OK sqlite headscale: integrity ok,
+  table row counts match`; READ-only statements now run (step 9 clean-up, step
+  13 ownership check, step 14 before adoption, the original re-arming its timers
+  at boot, retention after two and three runs, a returning original's backup and
+  prune, and the rotations cutting it off). Failed runs on the way: `d688ae1`
+  (the test driver's type check: three diagnostics, a mixed-type dictionary and a
+  reused variable; no VM started) and `775727e` (the app part passed; the relay
+  assertion expected the bare line `OK sqlite headscale`, which the tool never
+  writes, and the document had named it that way). That first drill (155
+  assertions) passed three times with one derivation, once at `9db302a` and twice
+  at `8a80cd3`.
+- Strengthened in the same pull request after review (2026-11-25): entries tied to
+  their document and step, checked in order (CI and at run time); every fenced block
+  of section 2 covered; the rotations taken from `docs/credential-rotation.md` R7
+  and R8; held timers checked by marker and failed start condition; an app reboot
+  while held; a failed relay adoption run again; the returning original tried with
+  SFTP login, listing, `forget` (a dry run before the rotations, `--prune` after
+  them) and backup before and after the rotations;
+  no `ok(True)` counted. Runs of the strengthened drill on the build machine:
+  `78fd2e6` failed (the test expected `Permission denied (publickey)`; the test
+  repository's sshd also offers password methods, so ssh prints
+  `Permission denied (publickey,password,keyboard-interactive)`); `510b8d3` passed
+  twice and failed once with one derivation (227 assertions): the failed run read
+  the returning original's backup journal for ssh's `Permission denied` line, which
+  restic relays asynchronously and had not written before it exited; restic's own
+  `unable to start the sftp session` line was there. Fixed at `f5fd61c`: the drill
+  waits for no queued or running backup job instead of `is-active` being false,
+  stops the returning original's timer after asserting it re-armed, starts each
+  attempt itself, requires a new invocation and reads only that invocation's
+  journal after `journalctl --sync`; it asserts ssh's message only for the direct
+  SFTP login and restic's own message for the restic commands, and records whether
+  restic relayed ssh's line. At `f5fd61c` it passed five times out of five as
+  separate builds of one derivation, 230 assertions each, 627 to 659 s; in every
+  run the restored-from snapshot was pruned by the third run after the restore
+  (same day) and the returning original pruned one replacement snapshot. Five
+  passes are not a failure rate. Every other proof derivation, flake check,
+  rehearsal driver and the production `nix.conf` evaluated equal to trunk
+  `b41d168`, so none was rerun. The drill is run by hand on the build machine; CI
+  runs only its unit test.
+- Left by the promotion drill (section 5 of the document has the reasons): Headscale
+  peers on a replaced production relay; acceptance of an adoption with the media
+  copy skipped; a promotion from the S3 secondary target; a whole regenerated store;
+  an old token and session across the move; the app restored from a snapshot taken
+  with writes in flight; real names, addresses and DNS; a clean-up policy for a
+  successful restore directory.
+- Open (promotion drill): the server-side evidence for the returning original's
+  refused attempts is a count of the repository host's sshd "closed before
+  authentication" lines over its whole journal, before and after each attempt; make
+  it per attempt (for example match the source port or a per-attempt marker) so
+  each refusal is tied to its own connection.
 - Done (production safeguards; decision: leave them off): `adopt --restored` holds
   the backup, check and freshness timers (`restoreHeldTimers`) and on the app the
   sweep (`restoreServiceHeldTimers`), each group by a `ConditionPathExists=!` on its
@@ -124,8 +180,8 @@ None of these was done in that pull request; the production safeguards follow-up
   the order is enforced. A plain adoption is unchanged. The production VM check
   asserts (passed at `9664be1`): both paths, the refused order, a
   failed and resumed restored adoption, both stages with a reboot between them, and
-  the relay's `--in-service` answer. Not exercised: a restored relay's held timers
-  (no relay replacement in the VM). The script is now
+  the relay's `--in-service` answer. A restored relay's held timers (also across a
+  reboot) are asserted by the promotion drill (2026-11-25). The script is now
   `platform/production/terrace-production.sh` with unit tests
   (`tests/platform/test_terrace_production.py`, stub systemctl).
 - Proofs of the production safeguards (2026-11-24, Womb `9664be1`, on the build
@@ -585,6 +641,18 @@ marked so.
   file); `switch-to-configuration` also prints `Failed to start <unit>` lines,
   which the tool does not read (a unit whose start job failed but which recovered
   before the listing is not counted).
+- Notes from review round 2 of the deploy path follow-ups (PR 79; until now only in
+  its squash commit message), recorded 2026-11-25, none changed:
+  - The activation judgement relies on the switch starting
+    `terrace-production.target` (through `terrace-production-boot`) and on
+    `systemctl list-jobs` accepting unit patterns; if either changes upstream, the
+    wait for the CMS and website no longer sees their jobs.
+  - `terrace-production status` takes no lock, so while a rollback runs it can
+    briefly show that rollback's target as unfinished (a `started` record with no
+    `finished` record yet).
+  - A slow start job for any writer under the target, not only the CMS or website,
+    holds the wait for up to 300 s, and the attempt then ends as a named timeout
+    failure (`waitTimedOut`, `stillStarting`).
 - Decide (owner): whether to keep an offline spare deploy key trusted from the
   first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
   means the manual bootstrap route.

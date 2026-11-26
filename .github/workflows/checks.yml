@@ -32,5 +32,6 @@ jobs:
           python3 -B tests/platform/test_cms_tool.py -v
           python3 -B tests/platform/test_terrace_production.py -v
           python3 -B tests/platform/test_terrace_deploy.py -v
+          python3 -B tests/platform/test_promotion_drill.py -v
       - name: Run the pinned contract environment
         run: python3 tools/github-ci.py "${{ matrix.job }}"
