@@ -554,7 +554,13 @@ before any step that takes the lease lock. SIGINT, SIGTERM and SIGHUP only set a
 handler writes nothing); the main flow reports them at the end. The running child is then
 stopped (SIGTERM to its process group, a grace period, SIGKILL; the host steps get 240 s for their own clean-up) and
 its real exit status is kept, its output is still read while it shuts down (a child that prints a lot on SIGTERM is
-not mistaken for a hung one); further signals are ignored. A child that exits while a descendant still holds its
+not mistaken for a hung one); further signals are ignored. After the child exits, the rest of its process group is
+watched for 1 s, then sent SIGTERM and watched for 3 s, then SIGKILL and 5 s; only a group verified empty counts as
+gone, and a group the operator may not signal is "unknown", never gone. A descendant that leaves the process group
+(for example a backgrounded ssh forward in a new session) is not tracked by the driver; the host-steps driver owns
+and verifies its own forwards and reports through its exit status. The PATH-directory digest uses each entry's
+target, size and modification time, not its content: a same-size edit that keeps the modification time is not seen,
+which is why only root-owned directories belong in `--child-path` and `--unit-path`. A child that exits while a descendant still holds its
 output pipe is reported with its own status and the descendants in its group are stopped.
 
 Exit codes: 0 pass; 1 a step failed and every clean-up was verified; 2 inputs refused before anything was armed;
@@ -604,7 +610,7 @@ absence has been confirmed twice.
 |---|---|---|---|
 | Before 1.1a: checks, bootstrap key, inputs, availability, read-only inventory, window | Nothing armed or created: unit check, deletion of the token copy and all run secrets, closing receipt, pointer removed | exit 1 or 4 | A deletion or unit check that fails: exit 3, nothing at the provider |
 | During 1.1a `prepare` | If `lease.json` was written: cleanup finds nothing, inventory, audit, disarm (no timer yet) | verified-clean | Exit 3; nothing was created |
-| 1.1b arm to 1.2a preview | Cleanup (nothing owned), inventory, audit, disarm stops the timer | verified-clean | Exit 3, timer armed; it fires at expiry and finds nothing |
+| 1.1b arm to 1.2a preview | Cleanup (nothing owned), inventory, audit, disarm stops the timer | verified-clean | Exit 3, timer armed (as read); it fires at expiry and finds nothing |
 | During 1.2b foundation create | Waits for the apply unit (up to 240 s). If it wrote `foundation-created.json`, cleanup deletes the key and firewall | verified-clean | Cut off or failed after dispatch: unresolved dispatch, **exit 3, timer armed** (row below) |
 | 1.3a to 1.3c (foundation exists) | Cleanup deletes the key and firewall | verified-clean | Exit 3, timer armed; expiry cleanup deletes them |
 | During 1.3d cohort create, including a create refused for stock after the availability check | As 1.2b: wait, then cleanup deletes server, IPv4, firewall, key | verified-clean if `original-created.json` was written | **Unresolved dispatch: exit 3, timer left armed.** The person: let the timer fire at expiry (its cleanup deletes anything run-owned it finds), then run `resume-teardown --delete-after-person-check`: it stops the SFTP endpoint if needed, checks the writer units, runs the independent inventory and requires it to equal the baseline and both timer units to read `not-found`, and only then deletes the run material, writes `lease-closed.json` and removes the pointer. If the inventory shows a run resource, delete only `terrace-r-<run>-…` resources in the console and record it |

@@ -357,7 +357,11 @@ class Runner:
     """Runs a child in its own process group, reading its output with a cap while it runs. Signals never interrupt it:
     the driver's handler sets a flag that `interrupted` reads, and the runner then stops the child itself."""
 
-    def __init__(self):
+    def __init__(self, killpg=None, monotonic=None, sleep=None):
+        # Injected only by tests, to script the group's answers and the clock of the stop stages.
+        self.killpg = killpg or os.killpg
+        self.monotonic = monotonic or time.monotonic
+        self.sleep = sleep or time.sleep
         self.current = None
         self.lock = threading.Lock()
         self.leftovers = []
@@ -435,11 +439,10 @@ class Runner:
             chunks.append(data[:OUTPUT_LIMIT - size])
         return True, size + len(data)
 
-    @staticmethod
-    def group_alive(pgid):
+    def group_alive(self, pgid):
         """True, False, or None when it cannot be told (a member we may not signal, such as sudo)."""
         try:
-            os.killpg(pgid, 0)
+            self.killpg(pgid, 0)
             return True
         except ProcessLookupError:
             return False
@@ -453,13 +456,13 @@ class Runner:
         if process.poll() is None:
             for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10)):
                 try:
-                    os.killpg(pgid, sig)
+                    self.killpg(pgid, sig)
                 except ProcessLookupError:
                     break
                 except OSError:
                     return False  # cannot signal it: cannot verify
-                end = time.monotonic() + wait
-                while process.poll() is None and time.monotonic() < end:
+                end = self.monotonic() + wait
+                while process.poll() is None and self.monotonic() < end:
                     drain()
                 if process.poll() is not None:
                     break
@@ -472,18 +475,18 @@ class Runner:
         for sig, wait in ((None, 1), (signal.SIGTERM, 3), (signal.SIGKILL, 5)):
             if sig is not None:
                 try:
-                    os.killpg(pgid, sig)
+                    self.killpg(pgid, sig)
                 except ProcessLookupError:
                     return True
                 except OSError:
                     pass
-            end = time.monotonic() + wait
+            end = self.monotonic() + wait
             while True:
                 if self.group_alive(pgid) is False:
                     return True
-                if time.monotonic() >= end:
+                if self.monotonic() >= end:
                     break
-                time.sleep(0.05)
+                self.sleep(0.05)
         return False
 
     def abort_current(self):
@@ -491,7 +494,7 @@ class Runner:
             process = self.current
         if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                self.killpg(process.pid, signal.SIGTERM)
             except OSError:
                 pass  # the foreground step then ends at its bound or by the interrupt flag
 

@@ -899,6 +899,23 @@ class TeardownFailure(Harness):
             self.assertFalse(os.path.lexists(self.R / name), name)
         self.assertIn("deploy-key.sec", self.err.getvalue())
 
+    def test_main_net_falls_back_to_the_fixed_text(self):
+        args = ["run", "--run-directory", str(self.R), "--revision", REV, "--source-manifest-sha256", "0" * 64,
+                "--kexec-archive", "/x", "--kexec-archive-sha256", "0" * 64, "--ssh-cidr", "198.51.100.9/32",
+                "--unit-path", "/x", "--expect-baseline", "servers=1", "--ssh-keygen", "/x", "--nix", "/x",
+                "--nix-store", "/x", "--rclone", "/x", "--restic", "/x", "--sops", "/x", "--terrace-secrets", "/x",
+                "--approved-plan-sha", "0" * 64]
+        originals = driver.Driver.run, driver.recovery_text
+        driver.Driver.run = lambda self, sha: (_ for _ in ()).throw(RuntimeError("boom"))
+        driver.recovery_text = lambda cfg, summary: (_ for _ in ()).throw(KeyError("x"))
+        try:
+            lease.write_private(self.R / "lease.json", {"schema": 1})
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(driver.main(args, runner=self.tools), driver.EXIT_ESCALATE)
+            self.assertIn("full recovery text could not be built", err.getvalue())
+        finally:
+            driver.Driver.run, driver.recovery_text = originals
+
     def test_main_maps_an_error_after_the_start_to_escalate(self):
         args = ["run", "--run-directory", str(self.R), "--revision", REV, "--source-manifest-sha256", "0" * 64,
                 "--kexec-archive", "/x", "--kexec-archive-sha256", "0" * 64, "--ssh-cidr", "198.51.100.9/32",
@@ -1089,6 +1106,7 @@ class Refusals(Harness):
         self.refused("free", self.config(min_free_bytes=1 << 62))
         self.refused("absolute path", self.config(nix="nix"))
         self.refused("child-path", self.config(child_path="relative/bin"))
+        self.refused("unit-path", self.config(unit_path=str(self.tmp / "no-such-dir")))
         self.tools.overrides["idle-units"] = lambda argv: (0, b"terrace-cloud-x.timer loaded active waiting\n")
         self.refused("not idle")
         del self.tools.overrides["idle-units"]
@@ -1233,6 +1251,24 @@ class Refresher(Harness):
         self.assertNotIn("1.7a", self.labels())
         self.assertIn("7.3", self.labels())
 
+    def test_a_refresher_that_raises_is_a_failed_refresh(self):
+        cfg = self.config(refresh_seconds=0.05)
+        self.tools.hang.add("1.6b")
+        original = driver.Driver.run_child
+
+        def raising(this, argv, bound, *, label, **kwargs):
+            if label == "1.4-refresh":
+                raise OSError("cannot start the binding child")
+            return original(this, argv, bound, label=label, **kwargs)
+        driver.Driver.run_child = raising
+        try:
+            self.assertEqual(self.drive(cfg), driver.EXIT_STEP_FAILED)
+        finally:
+            driver.Driver.run_child = original
+        failed = [json.loads(path.read_text()) for path in (self.R / "driver/receipts").glob("1.[56]*.json")]
+        self.assertIn("binding refresh failed", [r for r in failed if r["status"] == "failed"][0]["error"])
+        self.assertNotIn("1.7a", self.labels())
+
     def test_refresher_runs_only_around_the_binding_consumers(self):
         cfg = self.config(refresh_seconds=0.01)
         original = self.tools.effect
@@ -1329,7 +1365,10 @@ class Verification(Harness):
             with self.subTest(answer=answer):
                 self.setUp()
                 self.lease_baseline = dict(BASELINE, ssh_keys={})  # fails at 1.1a, before arming
-                self.tools.overrides["7.7-timer"] = lambda argv, answer=answer: answer
+                # The service answers differently, so reading the wrong unit fails.
+                other = (0, b"inactive\n") if answer == (0, b"active\n") else (0, b"active\n")
+                self.tools.overrides["7.7-timer"] = (
+                    lambda argv, answer=answer, other=other: answer if argv[2].endswith(".timer") else other)
                 self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
                 self.assertNotIn("1.1b", self.labels())
                 self.assertIn(text, self.err.getvalue())
@@ -1408,6 +1447,161 @@ class Draining(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 8)
 
 
+class ScriptedGroup:
+    """A fake killpg: scripted answers for the probe (signal 0) and for each real signal, on a fake clock."""
+
+    def __init__(self, probe, on_signal=None):
+        self.now = 0.0
+        self.probe = probe            # callable(now, signals_sent) -> None (alive), or an exception to raise
+        self.on_signal = on_signal or (lambda sig: None)
+        self.sent = []                # (time, signal)
+
+    def killpg(self, pgid, sig):
+        if sig == 0:
+            answer = self.probe(self.now, [s for _, s in self.sent])
+            if answer is not None:
+                raise answer
+            return
+        self.sent.append((round(self.now, 2), sig))
+        answer = self.on_signal(sig)
+        if answer is not None:
+            raise answer
+
+    def runner(self):
+        return driver.Runner(killpg=self.killpg, monotonic=lambda: self.now, sleep=self.advance)
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class ExitedChild:
+    pid = 4242
+    returncode = 0
+
+    def poll(self):
+        return 0
+
+
+EPERM = PermissionError(1, "Operation not permitted")
+ESRCH = ProcessLookupError(3, "No such process")
+
+
+class GroupStop(unittest.TestCase):
+    """Runner.stop after the child has exited: probe 1 s, then SIGTERM and 3 s, then SIGKILL and 5 s."""
+
+    def stop(self, group):
+        return group.runner().stop(ExitedChild(), 1)
+
+    def test_group_alive_answers(self):
+        for answer, expected in ((None, True), (ESRCH, False), (EPERM, None)):
+            group = ScriptedGroup(lambda now, sent, answer=answer: answer)
+            self.assertIs(group.runner().group_alive(1), expected)
+
+    def test_empty_group_is_gone_without_a_signal(self):
+        group = ScriptedGroup(lambda now, sent: ESRCH)
+        self.assertTrue(self.stop(group))
+        self.assertEqual(group.sent, [])
+
+    def test_permission_denied_probe_is_never_gone_and_the_bound_returns_not_gone(self):
+        group = ScriptedGroup(lambda now, sent: EPERM, on_signal=lambda sig: EPERM)
+        self.assertFalse(self.stop(group))
+        self.assertEqual([sig for _, sig in group.sent], [signal.SIGTERM, signal.SIGKILL])
+        self.assertAlmostEqual(group.sent[0][0], 1.0, delta=0.06)   # the 1 s observation stage first
+        self.assertAlmostEqual(group.sent[1][0], 4.0, delta=0.11)   # then SIGTERM and 3 s
+        self.assertAlmostEqual(group.now, 9.0, delta=0.2)           # then SIGKILL and 5 s, then not gone
+
+    def test_a_live_group_that_never_empties_is_not_gone(self):
+        group = ScriptedGroup(lambda now, sent: None)
+        self.assertFalse(self.stop(group))
+        self.assertEqual([sig for _, sig in group.sent], [signal.SIGTERM, signal.SIGKILL])
+
+    def test_a_group_that_empties_during_observation_gets_no_signal(self):
+        group = ScriptedGroup(lambda now, sent: ESRCH if now >= 0.5 else None)
+        self.assertTrue(self.stop(group))
+        self.assertEqual(group.sent, [])
+
+    def test_a_group_that_empties_after_sigterm(self):
+        group = ScriptedGroup(lambda now, sent: ESRCH if signal.SIGTERM in sent and now >= 2 else None)
+        self.assertTrue(self.stop(group))
+        self.assertEqual([sig for _, sig in group.sent], [signal.SIGTERM])
+
+    def test_a_group_that_empties_only_after_sigkill(self):
+        group = ScriptedGroup(lambda now, sent: ESRCH if signal.SIGKILL in sent and now >= 6 else None)
+        self.assertTrue(self.stop(group))
+        self.assertEqual([sig for _, sig in group.sent], [signal.SIGTERM, signal.SIGKILL])
+
+    def test_permission_denied_that_clears_to_empty_is_gone(self):
+        group = ScriptedGroup(lambda now, sent: EPERM if now < 0.5 else ESRCH)
+        self.assertTrue(self.stop(group))
+
+    def test_permission_denied_then_live_is_not_gone(self):
+        group = ScriptedGroup(lambda now, sent: EPERM if now < 0.5 else None)
+        self.assertFalse(self.stop(group))
+
+    def test_no_such_group_at_the_signal_step_means_gone(self):
+        group = ScriptedGroup(lambda now, sent: None, on_signal=lambda sig: ESRCH)
+        self.assertTrue(self.stop(group))
+        self.assertEqual([sig for _, sig in group.sent], [signal.SIGTERM])
+
+
+class DirectoryIdentity(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store = self.tmp / "store"
+        self.store.mkdir()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        for name in ("a", "b"):
+            (self.bin / name).write_text("12345")
+            os.utime(self.bin / name, ns=(10 ** 18, 10 ** 18))
+        (self.bin / "tool").symlink_to(self.bin / "a")
+
+    def identity(self):
+        return driver.directory_identity(str(self.bin), str(self.store))
+
+    def assert_changes(self, change):
+        before = self.identity()
+        change()
+        self.assertNotEqual(self.identity(), before)
+
+    def test_unchanged_directory_is_stable(self):
+        self.assertEqual(self.identity(), self.identity())
+
+    def test_a_re_pointed_link_changes_it(self):
+        def repoint():  # same name, same size, same mtime: only the target differs
+            (self.bin / "tool").unlink()
+            (self.bin / "tool").symlink_to(self.bin / "b")
+        self.assert_changes(repoint)
+
+    def test_a_size_change_changes_it(self):
+        def grow():
+            (self.bin / "a").write_text("123456")
+            os.utime(self.bin / "a", ns=(10 ** 18, 10 ** 18))
+        self.assert_changes(grow)
+
+    def test_an_mtime_change_changes_it(self):
+        self.assert_changes(lambda: os.utime(self.bin / "a", ns=(10 ** 18, 10 ** 18 + 1)))
+
+    def test_a_rename_changes_it(self):
+        def rename():  # the link keeps its target, size and mtime; only its name differs
+            (self.bin / "tool").rename(self.bin / "tool2")
+        self.assert_changes(rename)
+
+    def test_a_store_directory_is_its_real_path(self):
+        first, second = self.store / ("a" * 32 + "-path"), self.store / ("b" * 32 + "-path")
+        for directory in (first, second):
+            (directory / "bin").mkdir(parents=True)
+        link = self.tmp / "profile"
+        link.symlink_to(first / "bin")
+        before = driver.directory_identity(str(link), str(self.store))
+        self.assertEqual(before, {"real": os.path.realpath(first / "bin")})
+        link.unlink()
+        link.symlink_to(second / "bin")  # a profile switch
+        self.assertEqual(driver.directory_identity(str(link), str(self.store)),
+                         {"real": os.path.realpath(second / "bin")})
+
+
 class RealRunner(unittest.TestCase):
     def test_bound_stops_the_child(self):
         started = time.monotonic()
@@ -1443,18 +1637,12 @@ class RealRunner(unittest.TestCase):
         self.assertEqual(driver.Runner().run(["/bin/sh", "-c", "kill -9 $$"], 5, label="t").code, -9)
 
     def test_a_child_that_cannot_be_signalled_is_not_called_gone(self):
-        runner = driver.Runner()
-        original = os.killpg
-
         def denied(pgid, sig):
             if sig:
                 raise PermissionError(1, "Operation not permitted")
-            return original(pgid, sig)
-        os.killpg = denied
-        try:
-            outcome = runner.run(["/bin/sh", "-c", "sleep 2"], 0.3, label="t", grace=0.2)
-        finally:
-            os.killpg = original
+            return os.killpg(pgid, sig)
+        runner = driver.Runner(killpg=denied)
+        outcome = runner.run(["/bin/sh", "-c", "sleep 2"], 0.3, label="t", grace=0.2)
         self.assertFalse(outcome.gone)
         self.assertTrue(runner.leftovers)
         self.assertTrue(runner.settle(10))
