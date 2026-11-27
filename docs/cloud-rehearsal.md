@@ -226,8 +226,11 @@ adoption, a reboot and the signed deploy path. **Lease 6 has not run.** What
 follows is the committed install side only. It has been evaluated and built on
 the Linux builder; nothing of it has run at a provider, and no VM has booted
 these systems yet. The provider side is the single-host cohort shape above
-(`"roles": ["app"]`, tested offline only); the throwaway SFTP endpoint, the VM
-rehearsal of the run sheet and the lease driver are separate, later work.
+(`"roles": ["app"]`, tested offline only) and the backup repository is the
+[throwaway SFTP repository](#throwaway-sftp-repository-for-the-production-lease-host)
+below (`infra/cloud/rehearsal_sftp.py prepare|start|status|stop|forward`; defaults
+7200 s runtime, 2048 MiB, 200000 entries); the VM rehearsal of the run sheet and
+the lease driver are separate, later work.
 
 **Hardware.** `nixosModules.hetzner-production-hardware` (`infra/nixos/flake.nix`):
 the cloud disk module (GPT, 512 MiB ESP, ext4, systemd-boot with
@@ -255,7 +258,7 @@ are the run's, passed at build time and never committed:
 | `escrowRecipient` | the run's throwaway escrow key, public recipient |
 | `deployKeys` | the two Nix public keys |
 | `runCa` | the run CA certificate, as a path |
-| `backupPort`, `backupHostKey` (`backupAddress`, default `127.0.0.1`) | the throwaway SFTP endpoint as the host reaches it: the near end of a reverse SSH forward from the build machine, pinned to that endpoint's ed25519 host key. The repository is `sftp:terrace@<address>:app`; the known_hosts line is `[<address>]:<port> <key>`; the SFTP client key is the store's `backup/primary/sftp-key` (its public half from `terrace-secrets public app backup/primary/sftp-key`) |
+| `backupPort`, `backupHostKey` (`backupAddress`, default `127.0.0.1`) | the throwaway SFTP endpoint (`rehearsal_sftp.py`, below) as the host reaches it: the near end of the reverse SSH forward `rehearsal_sftp.py forward` prints, pinned to the endpoint's ed25519 host key (the `knownHosts` key in the receipt `start` prints). The repository is `sftp:terrace@<address>:app`, as that receipt names it; the known_hosts line is `[<address>]:<port> <key>`; the SFTP client key is the store's `backup/primary/sftp-key` (its public half from `terrace-secrets public app backup/primary/sftp-key`) |
 | `previousWebArchive`, `previousCmsArchive` | the kept `680ad56` release the host is installed at |
 | `webArchive`, `cmsArchive`, `tfcSource` | the pinned `dd1aef7` release it is updated to, and the TFC source at that pin for the identity contract |
 | `wombRevision` | optional, recorded in each manifest |
@@ -339,8 +342,8 @@ and a stand-in disk receipt at a documentation address: the plan passed
 and the pin carried it. The comparison of derivations with trunk showed every
 flake check, VM proof and rehearsal driver unchanged. Not run
 anywhere: an install of these systems, a boot (VM or provider), DHCP on the
-production closure, any activation of a variant, the backup endpoint, and the
-lease itself.
+production closure, any activation of a variant, a backup from these systems to the SFTP
+endpoint, and the lease itself.
 
 ## Throwaway SFTP repository for the production lease host
 
