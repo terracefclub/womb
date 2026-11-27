@@ -271,7 +271,9 @@ planted inside the repository, client-created symlinks, writes outside, an unlis
 authentication and a non-ed25519 host key; `stop` left no listener, process or unit; a 300 s runtime limit ended the
 unit by itself. Evidence is kept on the build machine, not in the repository.
 
-**What was only read:** that the production profile's sshd permits the reverse forward (it sets no
-`AllowTcpForwarding`, `PermitListen`, `GatewayPorts` or `Match`, so the OpenSSH defaults apply: forwarding on,
-remote forwards bound to loopback); and that the lease host's evaluation accepts a loopback repository address.
-Neither has been exercised on a booted host.
+**What was only read or evaluated:** the production profile's sshd settings were read in `platform/production/base.nix`
+and evaluated on the build machine for the lease host of the unmerged lease-host change (the V0 system, repository
+`sftp:terrace@127.0.0.1:app`, port 22433, no failed assertion out of 1624): sshd sets no `AllowTcpForwarding`,
+`PermitListen` or `Match`, and `GatewayPorts` is `no`, so the OpenSSH defaults apply (forwarding on, remote forwards
+bound to the host's loopback). That evaluation is not the full production evaluation check, which did not finish
+within its 25 minute bound. Nothing was exercised on a booted host.
