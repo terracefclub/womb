@@ -635,12 +635,21 @@ in {
         # A leftover object with the name the new migration creates (as a hand-made experiment could leave), so the
         # release's own migration fails on its first statement.
         sql("create type public.enum_roster_runs_status as enum ('drill-leftover')")
+        mark = app.succeed("date +%s").strip()
         migrate_rc, invocation = migrate_invocation("A1", block=True)
         ok(migrate_rc != 0 and state(app, "terrace-cms-migrate.service", "Result") == "exit-code", f"A1: the migration failed (exit {migrate_rc}, Result exit-code)")
-        app.wait_until_succeeds("journalctl --namespace=terrace-apps --sync; journalctl --namespace=terrace-apps _SYSTEMD_INVOCATION_ID=" + invocation
-                                + " -o cat --no-pager | grep -qF 'CMS release migration failed; inspect the protected runtime configuration and database state.'", timeout=60)
-        ok(app.succeed("journalctl --namespace=terrace-apps _SYSTEMD_INVOCATION_ID=" + invocation + " -o cat --no-pager").count("CMS release migration failed") == 1,
-           "A1: this run's journal says 'CMS release migration failed' once (the cause is hidden by the tool)")
+        # This run's lines: the unit in its journal namespace since just before this start (the fifth run of the drill
+        # found no line under _SYSTEMD_INVOCATION_ID in the namespace journal; the dump below says what the entries carry).
+        lines = "journalctl --namespace=terrace-apps -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager"
+        try:
+            app.wait_until_succeeds("journalctl --namespace=terrace-apps --sync >/dev/null 2>&1 || true; " + lines
+                                    + " | grep -qF 'CMS release migration failed; inspect the protected runtime configuration and database state.'", timeout=60)
+        except Exception:
+            print("UPDATE-DRILL-DIAGNOSTICS " + json.dumps({"invocation": invocation, "sync": app.execute("journalctl --namespace=terrace-apps --sync 2>&1; echo exit $?")[1],
+                  "lines": app.execute(lines + " 2>&1")[1], "entries": app.execute("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -n 3 -o json --no-pager 2>&1")[1],
+                  "system": app.execute("journalctl -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager 2>&1")[1]}))
+            raise
+        ok(app.succeed(lines).count("CMS release migration failed") == 1, "A1: this run's journal says 'CMS release migration failed' once (the cause is hidden by the tool)")
         ok(marker() == OLD_PIN and ledger() == OLD_MIGRATIONS, "A1: the marker holds the old revision and the ledger lists no new migration")
         ok(tables() == tables_before and sql("select to_regclass('public.roster_runs') is null") == "t" and data() == before_upgrade, "A1: no table added, every table and media file unchanged (the migration's transaction rolled back)")
         site_down("A1")
