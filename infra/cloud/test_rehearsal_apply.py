@@ -26,8 +26,24 @@ def create_foundation(data):
     data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key=FOUNDATION["sshPublicKey"]))
 
 
-def digest(phase, *, probe_only=False):
-    targets = apply.phase_targets(phase, RUN, probe_only=probe_only)
+SINGLE = {"run": RUN, "phase": "original", "roles": ["app"], "sshKeyId": 9, "firewallId": 8,
+          "image": "debian-13", "location": "nbg1", "appType": "cpx42", "relayType": "cpx22"}
+
+
+def create_single_host(data):
+    name = PREFIX + "-original-app"
+    data["servers"].append(resource(
+        4, name, volumes=[], private_net=[], load_balancers=[], server_type={"name": "cpx42"},
+        image={"name": "debian-13"}, location={"name": "nbg1"}, rescue_enabled=False, backup_window=None,
+        protection={"delete": False, "rebuild": False}, status="running",
+        public_net={"ipv4": {"id": 5, "ip": "93.184.215.14"}, "ipv6": None,
+                    "firewalls": [{"id": 8, "status": "applied"}], "floating_ips": []}))
+    data["primary_ips"].append(resource(5, name + "-ip", assignee_id=4, assignee_type="server", auto_delete=False,
+                                        protection={"delete": False}, ip="93.184.215.14"))
+
+
+def digest(phase, *, probe_only=False, single_app=False):
+    targets = apply.phase_targets(phase, RUN, probe_only=probe_only, single_app=single_app)
     prefix = f"urn:pulumi:{phase}::{apply.PROJECT}::"
     return {
         "steps": [{"urn": urn, "op": "create", "newState": {"inputs": {"name": name, "labels": {lease.LABEL: RUN}}}}
@@ -39,9 +55,9 @@ def digest(phase, *, probe_only=False):
     }
 
 
-def saved_plan(phase, *, probe_only=False):
+def saved_plan(phase, *, probe_only=False, single_app=False):
     return {"resourcePlans": {step["urn"]: {"steps": ["create"]}
-                              for step in digest(phase, probe_only=probe_only)["steps"]}}
+                              for step in digest(phase, probe_only=probe_only, single_app=single_app)["steps"]}}
 
 
 class RehearsalApplyTest(unittest.TestCase):
@@ -310,6 +326,183 @@ class RehearsalApplyTest(unittest.TestCase):
             data["servers"][1]["public_net"]["ipv4"]["id"] = 2
             with self.assertRaises(lease.Rejected):
                 apply.observe_server(api, root, manifest, "original", "app")
+
+
+class SingleHostApplyTest(unittest.TestCase):
+    """Create gates for the original-only `"roles": ["app"]` cohort."""
+
+    def test_targets_are_exactly_one_named_app_and_its_ipv4(self):
+        targets = apply.phase_targets("original", RUN, single_app=True)
+        prefix = f"urn:pulumi:original::{apply.PROJECT}::"
+        self.assertEqual(targets, {
+            prefix + "hcloud:index/primaryIp:PrimaryIp::app-ip": ("primary_ips", PREFIX + "-original-app-ip"),
+            prefix + "hcloud:index/server:Server::app": ("servers", PREFIX + "-original-app"),
+        })
+        for phase in ("foundation", "replacement"):
+            with self.assertRaises(lease.Rejected):
+                apply.phase_targets(phase, RUN, single_app=True)
+        with self.assertRaises(lease.Rejected):
+            apply.phase_targets("original", RUN, single_app=True, probe_only=True)
+
+    def test_preview_and_saved_plan_are_create_only_and_exactly_scoped(self):
+        data = digest("original", single_app=True)
+        report = apply.validate_preview(data, "original", RUN, "1.42.0", single_app=True)
+        self.assertEqual({urn.rsplit("::", 1)[1] for urn in report["creates"]}, {"app", "app-ip"})
+        apply.validate_saved_plan(saved_plan("original", single_app=True), "original", RUN, "1.42.0", single_app=True)
+        # The other shapes' plans do not pass this gate, nor this plan theirs.
+        for other in ({}, {"probe_only": True}):
+            with self.assertRaises(lease.Rejected):
+                apply.validate_preview(digest("original", **other), "original", RUN, "1.42.0", single_app=True)
+            with self.assertRaises(lease.Rejected):
+                apply.validate_saved_plan(saved_plan("original", **other), "original", RUN, "1.42.0",
+                                          single_app=True)
+            with self.assertRaises(lease.Rejected):
+                apply.validate_preview(data, "original", RUN, "1.42.0", **other)
+        for index in range(len(data["steps"])):
+            for key, value in (("op", "update"), ("op", "delete"), ("op", "same"), ("op", "replace"),
+                               ("op", "create-replacement"), ("urn", "unplanned")):
+                changed = copy.deepcopy(data)
+                changed["steps"][index][key] = value
+                with self.assertRaises(lease.Rejected):
+                    apply.validate_preview(changed, "original", RUN, "1.42.0", single_app=True)
+        for index in range(2):
+            for inputs in ({"name": PREFIX + "-original-relay", "labels": {lease.LABEL: RUN}},
+                           {"name": data["steps"][index]["newState"]["inputs"]["name"], "labels": {}},
+                           {"name": data["steps"][index]["newState"]["inputs"]["name"],
+                            "labels": {lease.LABEL: "b" * 32}}):
+                changed = copy.deepcopy(data)
+                changed["steps"][index]["newState"]["inputs"] = inputs
+                with self.assertRaisesRegex(lease.Rejected, "name or label"):
+                    apply.validate_preview(changed, "original", RUN, "1.42.0", single_app=True)
+        plan = saved_plan("original", single_app=True)
+        for urn in plan["resourcePlans"]:
+            for steps in (["update"], ["delete"], ["create", "delete"], ["same"]):
+                changed = copy.deepcopy(plan)
+                changed["resourcePlans"][urn]["steps"] = steps
+                with self.assertRaises(lease.Rejected):
+                    apply.validate_saved_plan(changed, "original", RUN, "1.42.0", single_app=True)
+
+    def test_bootstrap_proofs_cover_only_the_app(self):
+        nonce = b"0123456789abcdef" * 4 + b"\n"
+        operator = "ssh-ed25519 " + "y" * 68
+        proof = {"nonceSha256": hashlib.sha256(nonce).hexdigest()}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lease.write_private(root / "foundation-input.json", {"sshPublicKey": operator})
+            path = root / "original-app-bootstrap-nonce"
+            path.write_bytes(nonce)
+            path.chmod(0o600)
+            cfg = {"bootstrapOperatorPublicKey": operator, "bootstrapProofs": {"app": proof}}
+            self.assertEqual(apply.bootstrap_material(root, "original", cfg, probe_only=False, single_app=True),
+                             (b"PRIVATE KEY-----",))
+            for proofs in ({"relay": proof}, {"app": proof, "relay": proof}, {}):
+                with self.assertRaisesRegex(lease.Rejected, "proof scope"):
+                    apply.bootstrap_material(root, "original", {**cfg, "bootstrapProofs": proofs},
+                                             probe_only=False, single_app=True)
+
+    def test_single_host_original_does_not_authorize_replacement(self):
+        data = inventory()
+        manifest = {"run": RUN, "baseline": lease.baseline_from(data)}
+        create_foundation(data)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            lease.write_private(root / "foundation-created.json",
+                                {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]})
+            lease.write_private(root / "foundation-input.json", FOUNDATION)
+            write_reviewed_input(root, SINGLE, roles=["app"])
+            original = {"servers": [4], "primary_ips": [5], "firewalls": [], "ssh_keys": []}
+            lease.write_private(root / "original-created.json", original)
+            lease.write_private(root / "original-absence-1.json", {
+                "run": RUN, "phase": "original", "baselinePreserved": True, "absenceReads": 3,
+                "unresolvedDispatches": [], "verifiedAbsent": original,
+            })
+            with self.assertRaisesRegex(lease.Rejected, "single-host cohort does not authorize replacement"):
+                apply.expected_before(FakeApi(data), manifest, root, "replacement", SINGLE)
+
+    def test_created_host_must_have_only_its_ipv4_and_the_run_firewall(self):
+        data = inventory()
+        create_foundation(data)
+        create_single_host(data)
+        created = {"servers": [4], "primary_ips": [5], "firewalls": [], "ssh_keys": []}
+        manifest = {"run": RUN, "baseline": lease.baseline_from(inventory())}
+        owned, collisions = lease.select_owned(RUN, manifest["baseline"], data, "final")
+        self.assertFalse(collisions)
+        apply.verify_cohort(owned, data, SINGLE, created)
+        for change in (lambda s: s["public_net"].update(ipv6={"id": 77}),
+                       lambda s: s["public_net"]["firewalls"].append({"id": 3, "status": "applied"}),
+                       lambda s: s["public_net"].update(floating_ips=[66]),
+                       lambda s: s.update(volumes=[55]),
+                       lambda s: s.update(server_type={"name": "cpx22"}),
+                       lambda s: s.update(location={"name": "ash"})):
+            changed = copy.deepcopy(data)
+            change(changed["servers"][-1])
+            owned, _ = lease.select_owned(RUN, manifest["baseline"], changed, "final")
+            with self.assertRaises(lease.Rejected):
+                apply.verify_cohort(owned, changed, SINGLE, created)
+
+    def test_preview_then_create_one_app_host(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            lease.write_private(root / "original-input.json", SINGLE)
+            lease.write_private(root / "foundation-input.json", FOUNDATION)
+            foundation = {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]}
+            lease.write_private(root / "foundation-created.json", foundation)
+            parent = root / "project"
+            (parent / "rehearsal-create").mkdir(parents=True)
+            lease.write_private(parent / "package.json", {"dependencies": {"@pulumi/hcloud": "1.42.0"}})
+            data = inventory()
+            manifest = {"run": RUN, "baseline": lease.baseline_from(data)}
+            create_foundation(data)
+            api = FakeApi(data)
+            created = {"servers": [4], "primary_ips": [5], "firewalls": [], "ssh_keys": []}
+            calls = []
+            preview_digest = [digest("original", single_app=True)]
+
+            def pulumi(_project, _env, args, **_options):
+                calls.append(args)
+                if args[0] == "preview":
+                    lease.write_private(Path(args[-1]), saved_plan("original", single_app=True))
+                    return preview_digest[0]
+                if args[0] == "up":
+                    self.assertEqual([args[i + 1] for i, value in enumerate(args) if value == "--target"],
+                                     list(apply.phase_targets("original", RUN, single_app=True)))
+                    create_single_host(api.data)
+                if args[:2] == ["stack", "output"]:
+                    return created
+
+            source = "1" * 64
+            with (patch.object(apply.lease, "Api", return_value=api), patch.object(apply, "source_sha", return_value=source),
+                  patch.object(apply, "pulumi", pulumi), patch.object(apply, "require_run_unit"),
+                  patch.object(apply.timer, "check_ready"), patch("builtins.print")):
+                args = (root, manifest, b"synthetic", "original", root / "credential")
+                # A preview that would also create the relay is refused for this input.
+                preview_digest[0] = digest("original")
+                with self.assertRaises(lease.Rejected):
+                    apply.operate("preview", *args, None, source)
+                for path in sorted((root / "original").rglob("*"), reverse=True):
+                    path.rmdir() if path.is_dir() else path.unlink()
+                (root / "original").rmdir()
+                preview_digest[0] = digest("original", single_app=True)
+                apply.operate("preview", *args, None, source)
+                review_path = root / "original/review.json"
+                review = apply.read_json(review_path)
+                self.assertEqual((review["probeOnly"], review["roles"]), (False, ["app"]))
+                # A review whose roles differ from the input never dispatches.
+                review_path.unlink()
+                lease.write_private(review_path, {**review, "roles": ["app", "relay"]})
+                tampered = hashlib.sha256(review_path.read_bytes()).hexdigest()
+                with self.assertRaisesRegex(lease.Rejected, "approved preview binding"):
+                    apply.operate("create", *args, tampered, source)
+                self.assertFalse((root / "original-dispatched.json").exists())
+                review_path.unlink()
+                lease.write_private(review_path, review)
+                review_sha = hashlib.sha256(review_path.read_bytes()).hexdigest()
+                apply.operate("create", *args, review_sha, source)
+                self.assertEqual(apply.read_json(root / "original-created.json"), created)
+                self.assertEqual(lease.reviewed_roles(root, "original"), ("app",))
+                self.assertEqual(sum(args[0] == "up" for args in calls), 1)
+            self.assertEqual([row["id"] for row in api.data["servers"]], [1, 4])
+            self.assertEqual(api.deleted, [])
 
 
 if __name__ == "__main__":

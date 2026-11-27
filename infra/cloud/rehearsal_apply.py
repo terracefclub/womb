@@ -42,8 +42,8 @@ PROVIDER_ERROR_CODES = re.compile(
 )
 
 
-def phase_targets(phase, run, *, probe_only=False):
-    if phase not in PHASES or (probe_only and phase != "original"):
+def phase_targets(phase, run, *, probe_only=False, single_app=False):
+    if phase not in PHASES or ((probe_only or single_app) and phase != "original") or (probe_only and single_app):
         raise lease.Rejected("phase rejected")
     lease.expected_names(run)
     prefix = "terrace-r-" + run
@@ -51,6 +51,8 @@ def phase_targets(phase, run, *, probe_only=False):
     names = ("key", "firewall") if phase == "foundation" else ("app-ip", "relay-ip", "app", "relay")
     if probe_only:
         names = ("relay-ip", "relay")
+    if single_app:
+        names = ("app-ip", "app")
     return {urn_prefix + RESOURCE_TYPES[name][1] + "::" + name:
             (RESOURCE_TYPES[name][0], f"{prefix}-{name}" if phase == "foundation" else f"{prefix}-{phase}-{name}")
             for name in names}
@@ -69,8 +71,8 @@ def parse_json(data):
     return json.loads(data, object_pairs_hook=unique, parse_constant=invalid)
 
 
-def validate_preview(digest, phase, run, provider_version, *, probe_only=False):
-    targets = phase_targets(phase, run, probe_only=probe_only)
+def validate_preview(digest, phase, run, provider_version, *, probe_only=False, single_app=False):
+    targets = phase_targets(phase, run, probe_only=probe_only, single_app=single_app)
     prefix = f"urn:pulumi:{phase}::{PROJECT}::"
     stack = prefix + f"pulumi:pulumi:Stack::{PROJECT}-{phase}"
     provider = prefix + "pulumi:providers:hcloud::default_" + provider_version.replace(".", "_")
@@ -91,8 +93,8 @@ def validate_preview(digest, phase, run, provider_version, *, probe_only=False):
     return {"creates": sorted(targets), "providerAndStackCreates": len(steps) - len(targets)}
 
 
-def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False):
-    targets = phase_targets(phase, run, probe_only=probe_only)
+def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False, single_app=False):
+    targets = phase_targets(phase, run, probe_only=probe_only, single_app=single_app)
     prefix = f"urn:pulumi:{phase}::{PROJECT}::"
     stack = prefix + f"pulumi:pulumi:Stack::{PROJECT}-{phase}"
     provider = prefix + "pulumi:providers:hcloud::default_" + provider_version.replace(".", "_")
@@ -103,7 +105,7 @@ def validate_saved_plan(plan, phase, run, provider_version, *, probe_only=False)
         raise lease.Rejected("saved plan contains an unexpected operation")
 
 
-def bootstrap_material(directory, phase, config, *, probe_only):
+def bootstrap_material(directory, phase, config, *, probe_only, single_app=False):
     """Validate the reviewed host-key proof scope and return private-key needles.
 
     Bootstrap hosts generate their own SSH host key. User data carries only a one-use
@@ -123,7 +125,7 @@ def bootstrap_material(directory, phase, config, *, probe_only):
             raise lease.Rejected("bootstrap operator key is outside a bootstrap phase")
         return ()
     proofs = config["bootstrapProofs"]
-    roles = {"relay"} if probe_only else set(lease.ROLES)
+    roles = {"relay"} if probe_only else {"app"} if single_app else set(lease.ROLES)
     if phase not in lease.PHASES or not isinstance(proofs, dict) or set(proofs) != roles:
         raise lease.Rejected("bootstrap proof scope rejected")
     operator = config.get("bootstrapOperatorPublicKey", "")
@@ -272,6 +274,8 @@ def expected_before(api, manifest, directory, phase, config):
     if phase == "replacement":
         if lease.reviewed_probe_mode(directory, "original"):
             raise lease.Rejected("console probe does not authorize replacement")
+        if lease.reviewed_roles(directory, "original") != lease.ROLES:
+            raise lease.Rejected("single-host cohort does not authorize replacement")
         receipts = sorted(directory.glob("original-absence-*.json"))
         if not receipts:
             raise lease.Rejected("original absence missing")
@@ -414,8 +418,13 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     probe_only = "probeOnly" in config
     if probe_only and config["probeOnly"] is not True:
         raise lease.Rejected("console probe flag rejected")
-    scope = phase_targets(phase, manifest["run"], probe_only=probe_only)
-    needles = bootstrap_material(directory, phase, config, probe_only=probe_only)
+    single_app = "roles" in config
+    roles = [] if phase == "foundation" else list(lease.cohort_roles(config, phase))
+    if single_app and roles != ["app"]:
+        raise lease.Rejected("single-host cohort roles rejected")
+    shape = {"probe_only": probe_only, "single_app": single_app}
+    scope = phase_targets(phase, manifest["run"], **shape)
+    needles = bootstrap_material(directory, phase, config, **shape)
     server_urns = [urn for urn, (kind, _) in scope.items() if kind == "servers"]
     if os.path.lexists(directory / "closed.json"):
         raise lease.Rejected("lease closed")
@@ -453,15 +462,15 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
         pulumi(project, env, ["stack", "init", phase, "--non-interactive"], seconds=25, needles=needles)
         digest = pulumi(project, env, ["preview", *fixed, "--json", "--show-secrets=false", "--save-plan", str(plan)],
                         seconds=120, output=True, needles=needles)
-        report = validate_preview(digest, phase, manifest["run"], version, probe_only=probe_only)
+        report = validate_preview(digest, phase, manifest["run"], version, **shape)
         plan_data = lease.read_private(plan, 4 * 1024 * 1024)
         planned = parse_json(plan_data)
-        validate_saved_plan(planned, phase, manifest["run"], version, probe_only=probe_only)
+        validate_saved_plan(planned, phase, manifest["run"], version, **shape)
         if needles:
             reject_plaintext(plan_data, needles)
             check_secret_plan(planned, server_urns)
             check_pulumi_artifacts(stage, needles)
-        report.update(probeOnly=probe_only, sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
+        report.update(probeOnly=probe_only, roles=roles, sourceSha256=source, inputSha256=hashlib.sha256(config_data).hexdigest(),
                       planSha256=hashlib.sha256(plan_data).hexdigest(),
                       stackConfigSha256=optional_sha(stack_config))
         lease.write_private(review_path, report)
@@ -472,7 +481,7 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     report = parse_json(review_data)
     plan_data = lease.read_private(plan, PULUMI_OUTPUT_LIMIT)
     if (approval != hashlib.sha256(review_data).hexdigest() or report["sourceSha256"] != source
-            or report["probeOnly"] is not probe_only
+            or report["probeOnly"] is not probe_only or report["roles"] != roles
             or report["inputSha256"] != hashlib.sha256(config_data).hexdigest()
             or report["stackConfigSha256"] != optional_sha(stack_config)
             or report["planSha256"] != hashlib.sha256(plan_data).hexdigest()):

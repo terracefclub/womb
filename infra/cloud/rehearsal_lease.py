@@ -106,6 +106,28 @@ def write_private(path, value):
         os.close(fd)
 
 
+def cohort_roles(config, phase):
+    """Return the exact host roles of a reviewed cohort input.
+
+    The default cohort is the app and relay pair. An original input may instead
+    select the relay-only console probe (`"probeOnly": true`) or the single
+    installable app host (`"roles": ["app"]`), never both.
+    """
+    probe_only = "probeOnly" in config
+    single_app = "roles" in config
+    if phase not in PHASES or (probe_only and single_app):
+        raise Rejected("cohort shape rejected")
+    if probe_only:
+        if phase != "original" or config["probeOnly"] is not True:
+            raise Rejected("console probe flag rejected")
+        return ("relay",)
+    if single_app:
+        if phase != "original" or type(config["roles"]) is not list or config["roles"] != ["app"]:
+            raise Rejected("single-host cohort roles rejected")
+        return ("app",)
+    return ROLES
+
+
 def reviewed_phase_input(directory, phase):
     """Read only the phase input that authorized the recorded dispatch."""
     if phase not in PHASES:
@@ -122,12 +144,22 @@ def reviewed_phase_input(directory, phase):
             or type(probe_only) is not bool or ("probeOnly" in config) != probe_only
             or (probe_only and (phase != "original" or config["probeOnly"] is not True))):
         raise Rejected("phase no longer matches its dispatched review")
+    roles = cohort_roles(config, phase)
+    # Reviews always record their roles now. One written before the single-host
+    # shape has none, and can only have authorized an input without `roles`.
+    if (review["roles"] != list(roles)) if "roles" in review else ("roles" in config):
+        raise Rejected("phase no longer matches its dispatched review")
     return config, review
 
 
 def reviewed_probe_mode(directory, phase):
     config, _ = reviewed_phase_input(directory, phase)
     return "probeOnly" in config
+
+
+def reviewed_roles(directory, phase):
+    config, _ = reviewed_phase_input(directory, phase)
+    return cohort_roles(config, phase)
 
 
 def expected_names(run):
@@ -356,6 +388,18 @@ def clean(api, manifest, phase, known, *, deadline, delay, pending=(),
     raise Rejected("cleanup deadline elapsed")
 
 
+def require_retirement_scope(directory, manifest):
+    """Retirement precedes a replacement, which only the two-role cohort has."""
+    if reviewed_roles(directory, "original") != ROLES:
+        raise Rejected("retire-original requires the reviewed two-role cohort")
+    backup = json.loads(read_private(directory / "backup-verified.json", 16384))
+    original = json.loads(read_private(directory / "original-created.json", 16384))
+    if (backup["run"] != manifest["run"] or backup["verified"] is not True
+            or sorted(backup["servers"]) != sorted(original["servers"])
+            or len(set(original["servers"])) != len(ROLES)):
+        raise Rejected("off-host backup receipt rejected")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "retire-original", "cleanup"))
@@ -391,12 +435,7 @@ def main():
                 raise Rejected("credential does not match the lease")
             phase = "original" if args.action == "retire-original" else "final"
             if phase == "original":
-                backup = json.loads(read_private(directory / "backup-verified.json", 16384))
-                original = json.loads(read_private(directory / "original-created.json", 16384))
-                if (backup["run"] != manifest["run"] or backup["verified"] is not True
-                        or sorted(backup["servers"]) != sorted(original["servers"])
-                        or len(set(original["servers"])) != len(ROLES)):
-                    raise Rejected("off-host backup receipt rejected")
+                require_retirement_scope(directory, manifest)
             if phase == "final" and not (directory / "closed.json").exists():
                 write_private(directory / "closed.json", {"closedAt": int(time.time())})
             # Recorded numeric IDs survive a lost label or changed provider name.

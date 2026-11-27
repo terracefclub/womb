@@ -130,7 +130,8 @@ the builder restarts or loses API access.
 
 The separate `rehearsal-create` project has three isolated stacks. The
 foundation creates only the operator key and SSH firewall. Each cohort
-creates an application server and relay with explicitly labelled IPv4s.
+creates an application server and relay with explicitly labelled IPv4s,
+unless its reviewed input selects one of the one-host shapes below.
 `rehearsal_apply.py` requires a bounded Falcon service for each preview and
 apply. It checks both the preview and the saved plan for exact create-only
 scope. Apply consumes the reviewed digest under the lease lock, and binds
@@ -160,6 +161,15 @@ compare the SSH host key through the authenticated provider console, then
 use the confirmed pin for a read-only SSH check. Keep password entry private.
 This mode cannot format a disk, boot an installation, or authorize
 replacement. Clean up and verify the project baseline as with a full lease.
+
+For one installable app host, add `"roles": ["app"]` to the reviewed
+`original` input instead. The creator, preview and saved plan require exactly
+the app server and its IPv4; the review records the roles and apply refuses a
+review whose roles differ from the input. Binding, Rescue, console and the
+installed boot accept only the app. `retire-original` and the `replacement`
+phase are refused; end the lease with `cleanup`. `"roles"` cannot be combined
+with `"probeOnly"`. This shape has offline tests only and has not run at a
+provider. See [the cohort shapes](../../docs/cloud-rehearsal.md#cohort-shapes).
 
 For the known-host bootstrap, each host generates its own Ed25519 host key on
 first boot. The reviewed cohort input carries `bootstrapProofs` for its exact

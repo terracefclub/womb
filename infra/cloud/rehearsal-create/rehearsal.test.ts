@@ -74,6 +74,24 @@ test("allows only explicit original console probe mode", () => {
   expect(() => parseInput({ ...foundation, probeOnly: true }, "foundation")).toThrow();
 });
 
+test("allows only an explicit original single-host app cohort", () => {
+  const single = { ...cohort, roles: ["app"] as ["app"] };
+  expect(parseInput(single, "original")).toEqual(single);
+  for (const roles of [["relay"], ["app", "relay"], ["relay", "app"], ["app", "app"], [], "app", null,
+    { 0: "app" }, [["app"]], undefined]) {
+    expect(() => parseInput({ ...cohort, roles }, "original")).toThrow();
+  }
+  expect(() => parseInput({ ...single, probeOnly: true }, "original")).toThrow();
+  expect(() => parseInput({ ...single, phase: "replacement" }, "replacement")).toThrow();
+  expect(() => parseInput({ ...foundation, roles: ["app"] }, "foundation")).toThrow();
+  const appProof = proof(createHash("sha256").update("fedcba9876543210".repeat(4) + "\n").digest("hex"));
+  const bootstrapped = { ...single, bootstrapOperatorPublicKey: sshPublicKey, bootstrapProofs: { app: appProof } };
+  expect(parseInput(bootstrapped, "original")).toEqual(bootstrapped);
+  for (const bootstrapProofs of [{ relay: relayProof }, { app: appProof, relay: relayProof }, {}]) {
+    expect(() => parseInput({ ...bootstrapped, bootstrapProofs }, "original")).toThrow();
+  }
+});
+
 test("requires exactly the planned bootstrap roles and distinct proof nonces", () => {
   const probe = { ...cohort, probeOnly: true as const, ...bootstrapFields };
   expect(parseInput(probe, "original")).toEqual(probe);
@@ -201,8 +219,42 @@ test("marks provider user data secret before registering the only probe server",
   }
 });
 
-test.each(["foundation", "original", "replacement", "console probe"] as const)("declares only the %s cohort", async mode => {
-  const phase = mode === "console probe" ? "original" : mode;
+test("marks user data secret on the only single-host app server", async () => {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "terrace-single-host-test-"));
+  try {
+    const resources = new Map<string, pulumi.runtime.MockResourceArgs>();
+    await pulumi.runtime.setMocks({
+      newResource(args) {
+        resources.set(args.name, args);
+        return { id: args.name === "app" ? "15" : "13", state: args.inputs };
+      },
+      call() {
+        throw new Error("provider lookup is outside the rehearsal declarations");
+      },
+    }, "terrace-cloud-rehearsal", "original", false);
+    const appProof = proof(createHash("sha256").update(nonceFile).digest("hex"));
+    const inputPath = join(directory, "original-input.json");
+    writeFileSync(inputPath, JSON.stringify({ ...cohort, roles: ["app"], bootstrapOperatorPublicKey: sshPublicKey,
+      bootstrapProofs: { app: appProof } }), { mode: 0o600 });
+    writeFileSync(join(directory, "original-app-bootstrap-nonce"), nonceFile, { mode: 0o600 });
+    // A relay nonce beside the input must not be read or rendered for this shape.
+    writeFileSync(join(directory, "original-relay-bootstrap-nonce"), "x", { mode: 0o644 });
+    const output = declareResources(readInput(inputPath, "original"), inputPath);
+    expect(await new Promise(resolve => output.apply(resolve))).toEqual({
+      servers: [15], primary_ips: [13], firewalls: [], ssh_keys: [],
+    });
+    expect([...resources.keys()].sort()).toEqual(["app", "app-ip"]);
+    const userData = resources.get("app")?.inputs.userData;
+    expect(isRpcSecret(userData)).toBe(true);
+    expect(unwrapRpcSecret(userData)).toEqual(renderBootstrapCloudConfig(
+      { nonce: syntheticNonce, run, phase: "original", role: "app" }, sshPublicKey));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["foundation", "original", "replacement", "console probe", "single host"] as const)("declares only the %s cohort", async mode => {
+  const phase = mode === "console probe" || mode === "single host" ? "original" : mode;
   const resources = new Map<string, pulumi.runtime.MockResourceArgs>();
   const ids: Record<string, string> = {
     key: "11", firewall: "12", "app-ip": "13", "relay-ip": "14", app: "15", relay: "16",
@@ -218,7 +270,8 @@ test.each(["foundation", "original", "replacement", "console probe"] as const)("
   }, "terrace-cloud-rehearsal", phase, false);
 
   const value = phase === "foundation" ? foundation
-    : { ...cohort, phase, ...(mode === "console probe" ? { probeOnly: true } : {}) };
+    : { ...cohort, phase, ...(mode === "console probe" ? { probeOnly: true } : {}),
+      ...(mode === "single host" ? { roles: ["app"] } : {}) };
   const output = declareResources(parseInput(value, phase));
   const owned = await new Promise(resolve => output.apply(resolve));
   const labels = { "terrace-rehearsal": run };
@@ -236,7 +289,8 @@ test.each(["foundation", "original", "replacement", "console probe"] as const)("
     return;
   }
 
-  const roles = mode === "console probe" ? (["relay"] as const) : (["app", "relay"] as const);
+  const roles = mode === "console probe" ? (["relay"] as const)
+    : mode === "single host" ? (["app"] as const) : (["app", "relay"] as const);
   expect([...resources.keys()].sort()).toEqual(roles.flatMap(role => [role, role + "-ip"]));
   for (const role of roles) {
     const name = prefix + "-" + phase + "-" + role;
@@ -258,5 +312,6 @@ test.each(["foundation", "original", "replacement", "console probe"] as const)("
   }
   expect(owned).toEqual(mode === "console probe"
     ? { servers: [16], primary_ips: [14], firewalls: [], ssh_keys: [] }
+    : mode === "single host" ? { servers: [15], primary_ips: [13], firewalls: [], ssh_keys: [] }
     : { servers: [15, 16], primary_ips: [13, 14], firewalls: [], ssh_keys: [] });
 });

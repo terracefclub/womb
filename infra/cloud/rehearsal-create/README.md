@@ -8,7 +8,9 @@ parent's locked dependencies, `budget.ts` and `tsconfig.json`.
 
 The foundation declares the run SSH key and an SSH-only firewall. Each
 cohort declares two servers with two explicitly attached Primary IPv4
-addresses. The sole output, `owned`, has numeric ID arrays for `servers`,
+addresses. An `original` input may instead declare one host: the relay with
+`"probeOnly": true`, or the installable app with `"roles": ["app"]` (never
+both). The sole output, `owned`, has numeric ID arrays for `servers`,
 `primary_ips`, `firewalls` and `ssh_keys`. Cohort arrays are ordered app
 then relay. The lease runner verifies those IDs against provider inventory.
 

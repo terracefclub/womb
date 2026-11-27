@@ -40,7 +40,7 @@ export function declareResources(input: RehearsalInput, inputPath?: string): pul
   }
 
   const bootstrap = readBootstrapUserData(inputPath, input);
-  const hosts = cohortRoles(input.probeOnly).map(role => {
+  const hosts = cohortRoles(input).map(role => {
     const name = prefix + "-" + input.phase + "-" + role;
     const ip = new hcloud.PrimaryIp(role + "-ip", {
       name: name + "-ip",

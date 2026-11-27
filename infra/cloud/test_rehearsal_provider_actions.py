@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -145,6 +146,65 @@ class ProviderActionsTest(unittest.TestCase):
                 actions.operate("rescue", *args)
                 self.assertEqual([call.args[-2:] for call in dispatch.call_args_list],
                                  [("enable_rescue", {"type": "linux64", "ssh_keys": []}), ("reboot", {})])
+
+
+    def test_single_host_actions_use_only_the_app_and_the_run_key(self):
+        data = inventory()
+        manifest = {"run": RUN, "baseline": lease.baseline_from(data), "expires": int(time.time()) + 1200}
+        populate(data, "original", 4, 5)
+        row = data["servers"][1]
+        row.update(rescue_enabled=False, status="running")
+        row["public_net"]["ipv4"]["ip"] = "93.184.215.14"
+        data["firewalls"] = [resource(8, PREFIX + "-firewall", applied_to=[])]
+        data["ssh_keys"].append(resource(9, PREFIX + "-key", public_key="ssh-ed25519 synthetic"))
+        api = FakeApi(data)
+        payloads = []
+
+        def dispatch(_api, _directory, _phase, server_id, action, payload):
+            self.assertEqual(server_id, 4)
+            payloads.append((action, payload))
+            if action == "enable_rescue":
+                row["rescue_enabled"] = True
+                return {"root_password": "synthetic-root-password"}
+            return {}
+
+        config = {"phase": "original", "run": RUN, "roles": ["app"]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_reviewed_input(root, config, roles=["app"])
+            lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
+            lease.write_private(root / "foundation-input.json", {"sshPublicKey": "ssh-ed25519 synthetic"})
+            with (patch.object(actions.lease, "Api", return_value=api), patch.object(actions.apply, "require_run_unit"),
+                  patch.object(actions.timer, "check_ready"), patch.object(actions, "dispatch", side_effect=dispatch)):
+                args = (root, manifest, root / "credential", b"synthetic", "original")
+                # The owner's pre-existing key is a baseline ID and is never passed to Rescue.
+                lease.write_private(root / "foundation-created.json", {"ssh_keys": [3]})
+                with self.assertRaisesRegex(lease.Rejected, "not owned by the lease"):
+                    actions.operate("rescue", *args, "app")
+                self.assertEqual(payloads, [])
+                (root / "foundation-created.json").unlink()
+                lease.write_private(root / "foundation-created.json", {"ssh_keys": [9]})
+                # A relay of the same run is outside this cohort even if one appeared.
+                relay = copy.deepcopy(row)
+                relay.update(id=6, name=PREFIX + "-original-relay")
+                relay["public_net"]["ipv4"]["id"] = 7
+                data["servers"].append(relay)
+                data["primary_ips"].append(resource(7, PREFIX + "-original-relay-ip", assignee_id=6))
+                with (patch.object(actions.apply, "observe_server", return_value={
+                        "run": RUN, "phase": "original", "role": "relay", "serverId": 6, "ipv4": "93.184.215.14",
+                        "expires": manifest["expires"], "observedAt": int(time.time())})):
+                    for mode in ("rescue", "console", "boot-installed"):
+                        with self.assertRaisesRegex(lease.Rejected, "outside the reviewed cohort"):
+                            actions.operate(mode, *args, "relay")
+                self.assertEqual(payloads, [])
+                data["servers"].pop()
+                data["primary_ips"].pop()
+                actions.operate("rescue", *args, "app")
+                binding = json.loads(lease.read_private(root / "original-app-rescue-boot.json", 4096))
+                lease.write_private(root / "original-app-installed.json", {"binding": binding, "mountedExt4Verified": True})
+                actions.operate("boot-installed", *args, "app")
+            self.assertEqual(payloads, [("enable_rescue", {"type": "linux64", "ssh_keys": [9]}), ("reboot", {}),
+                                        ("disable_rescue", {}), ("reboot", {})])
 
 
 if __name__ == "__main__":
