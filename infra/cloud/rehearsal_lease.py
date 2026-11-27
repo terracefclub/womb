@@ -301,6 +301,22 @@ class Api:
                 raise Rejected("inventory exceeds limit")
         return inventory
 
+    def listing(self, endpoint, query=None):
+        """Read every page of one collection; GET only."""
+        items = []
+        for page in range(1, 21):
+            body = self.request(endpoint + "?" + urlencode({**(query or {}), "per_page": 50, "page": page}))
+            rows = body[endpoint]
+            if not isinstance(rows, list):
+                raise Rejected("listing rejected")
+            items.extend(rows)
+            next_page = body["meta"]["pagination"]["next_page"]
+            if next_page is None:
+                return items
+            if next_page != page + 1:
+                raise Rejected("pagination rejected")
+        raise Rejected("listing exceeds limit")
+
     def delete(self, kind, rid):
         if kind not in DELETION_ORDER:
             raise Rejected("delete kind rejected")
@@ -388,6 +404,36 @@ def clean(api, manifest, phase, known, *, deadline, delay, pending=(),
     raise Rejected("cleanup deadline elapsed")
 
 
+def availability(api, server_type, location):
+    """Read-only stock check: is the server type available in some datacenter of the location?
+
+    Two GET listings (server types by name, datacenters). Passing it does not guarantee that a
+    later create succeeds; stock can change between the check and the create.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9]{1,15}", server_type) or not re.fullmatch(r"[a-z]{3}[0-9]{1,2}", location):
+        raise Rejected("availability query rejected")
+    types = [row for row in api.listing("server_types", {"name": server_type}) if row["name"] == server_type]
+    if len(types) != 1:
+        raise Rejected("server type unknown")
+    type_id = positive_id(types[0]["id"])
+    in_location = []
+    for row in api.listing("datacenters"):
+        if not isinstance(row["name"], str) or not isinstance(row["location"]["name"], str):
+            raise Rejected("datacenter rejected")
+        if row["location"]["name"] != location:
+            continue
+        available = row["server_types"]["available"]
+        if not isinstance(available, list) or any(type(item) is not int for item in available):
+            raise Rejected("datacenter availability rejected")
+        in_location.append((row["name"], type_id in available))
+    if not in_location:
+        raise Rejected("location has no datacenter")
+    names = sorted(name for name, ok in in_location if ok)
+    if not names:
+        raise Rejected("server type unavailable in location")
+    return {"serverType": server_type, "location": location, "serverTypeId": type_id, "availableIn": names}
+
+
 def require_retirement_scope(directory, manifest):
     """Retirement precedes a replacement, which only the two-role cohort has."""
     if reviewed_roles(directory, "original") != ROLES:
@@ -402,11 +448,13 @@ def require_retirement_scope(directory, manifest):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "retire-original", "cleanup"))
+    parser.add_argument("action", choices=("prepare", "retire-original", "cleanup", "availability"))
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--credential-file", required=True, type=Path)
     parser.add_argument("--run")
     parser.add_argument("--expires", type=int)
+    parser.add_argument("--server-type", help="availability only")
+    parser.add_argument("--location", help="availability only")
     args = parser.parse_args()
     try:
         directory = private_directory(args.directory)
@@ -415,6 +463,18 @@ def main():
             raise Rejected("credential format rejected")
         digest = hashlib.sha256(token).hexdigest()
         api = Api(token.decode("ascii"))
+        if args.action == "availability":
+            # Read-only: GET listings only, no lock file, no manifest, nothing written.
+            if args.server_type is None or args.location is None:
+                raise Rejected("availability needs --server-type and --location")
+            try:
+                found = availability(api, args.server_type, args.location)
+            except Rejected as refusal:
+                # Fixed refusal texts from availability(); nothing from the provider is echoed.
+                print(f"Availability check refused: {refusal}.", file=sys.stderr)
+                return 1
+            print(f"Server type {found['serverType']} available in {found['location']}: {', '.join(found['availableIn'])}.")
+            return 0
         manifest_path = directory / "lease.json"
         with os.fdopen(os.open(directory / "lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "wb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

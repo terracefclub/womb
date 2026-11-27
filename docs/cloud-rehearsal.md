@@ -229,8 +229,8 @@ these systems yet. The provider side is the single-host cohort shape above
 (`"roles": ["app"]`, tested offline only) and the backup repository is the
 [throwaway SFTP repository](#throwaway-sftp-repository-for-the-production-lease-host)
 below (`infra/cloud/rehearsal_sftp.py prepare|start|status|stop|forward`; defaults
-7200 s runtime, 2048 MiB, 200000 entries); the VM rehearsal of the run sheet and
-the lease driver are separate, later work.
+7200 s runtime, 2048 MiB, 200000 entries); the VM rehearsal of the run sheet is
+separate work, and the lease driver is [below](#production-lease-driver-lease-6).
 
 **Hardware.** `nixosModules.hetzner-production-hardware` (`infra/nixos/flake.nix`):
 the cloud disk module (GPT, 512 MiB ESP, ext4, systemd-boot with
@@ -436,3 +436,154 @@ and evaluated on the build machine for the lease host of the unmerged lease-host
 `PermitListen` or `Match`, and `GatewayPorts` is `no`, so the OpenSSH defaults apply (forwarding on, remote forwards
 bound to the host's loopback). That evaluation is not the full production evaluation check. Nothing was exercised on
 a booted host.
+
+## Production lease driver (lease 6)
+
+`infra/cloud/rehearsal_lease_driver.py` sequences the existing lease tools for one single-host production app lease:
+run sheet steps 0.3 to 1.7, then the host-steps driver `infra/nixos/lease_host_steps.py` (`pin`, then `run` for steps
+2.1 to 6), then teardown (step 7). It adds no provider or host logic of its own: every step is a subprocess of an
+existing tool with its documented arguments, and the driver writes only the inputs those tools read (the bootstrap
+root key, the foundation and cohort inputs, the proof nonce through `rescue_install.write_proof_nonce`, and the
+private `rehearsal_lease.py` copy the timer runs).
+
+**Status.** The driver has run only offline: unit tests with a fake tool layer and a mutation check (below). It has
+never contacted a provider or a host. Lease 6 was approved once on 2026-11-26 and has not run. The driver is usable
+only once `infra/nixos/lease_host_steps.py` is on trunk (it lands with the host-steps change); until then `plan`
+refuses with that message.
+
+**Fixed choices.** CPX42 in nbg1, `debian-13` then kexec, one IPv4, no IPv6; the single-host cohort
+(`"roles": ["app"]`); the provider firewall allows TCP 22 from the build machine's /32 only; the lease expires at
+`now + 14400` and its cleanup timer is armed before anything is created; no build inside the lease; a lease that
+stops early is finished (no second attempt in the same run). The host steps start their own SFTP endpoint and
+forwards; the driver does not.
+
+**One change to an existing tool.** `infra/cloud/rehearsal_lease.py availability --directory D --credential-file F
+--server-type cpx42 --location nbg1` is new. It makes two GET listings (server types by name, datacenters), writes
+nothing (no lock file, no manifest) and exits 0 only if the type is listed as available in a datacenter of that
+location. The driver calls it at 0.8, before anything is armed, and again right before the cohort preview. **Passing
+it does not guarantee that the create succeeds**: stock can change in between, and a create that fails after its
+dispatch still ends in the documented unresolved-dispatch state, in which cleanup cannot verify absence and disarm
+stays refused (see the table below).
+
+### Before the plan
+
+On the build machine, as the operator, in a private 0700 directory named by a fresh 32-hex run id (outside any Git
+checkout, on scratch storage that is not snapshotted):
+
+1. Stage the revision: `git archive <rev> | tar -x -C STAGE`. Compute its digest on both machines from the same
+   archive and compare: `python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py manifest STAGE`.
+2. Build the kexec archive from `STAGE/infra/nixos/kexec-installer.nix` (see
+   [cloud-rescue-install.md](cloud-rescue-install.md#pinned-debian-to-ram-bootstrap)) and record its sha256.
+3. `python3 -B STAGE/infra/nixos/lease_host_steps.py prepare RUN ...` (step 0.6), then build `install` and
+   `variants` with out-links `RUN/lease` and `RUN/variants` (step 0.7, under the shared lock).
+4. Copy the provider token by file to `RUN/provider-token` (mode 0600). Never print it.
+5. `python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py stage-project --run-directory RUN --source STAGE --bun BUN`
+   (copies the reviewed creator with 0600 files and runs `bun install --frozen-lockfile --ignore-scripts`, which
+   fetches the locked packages).
+
+### Plan (contacts nothing)
+
+```sh
+python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py plan --run-directory RUN --source STAGE \
+  --revision <40-hex> --source-manifest-sha256 <digest> \
+  --kexec-archive <store path>/nixos-kexec-installer-x86_64-linux.tar.gz --kexec-archive-sha256 <sha256> \
+  --ssh-cidr <build machine IPv4>/32 --unit-path <pulumi bin>:<node bin> \
+  --expect-baseline servers=N,primary_ips=N,ssh_keys=N \
+  --rclone R --restic R --sops S --terrace-secrets T [--queue-idle-command Q] [--start YYYY-MM-DDTHH:MM]
+```
+
+It refuses (exit 2) unless: the run directory is fresh and private and no other lease beside it is open (a
+`<run>.open` pointer or a lease directory without `lease-closed.json`); the token copy is a 0600 file in the run
+directory (it is never opened by the driver); the host-steps `prepare` layout is complete and was made for this
+revision; the staged tree's manifest equals the approved digest and contains `lease_host_steps.py`; the staged
+creator equals the tree's (G2, 0.4); the kexec archive is exactly the output of this revision's
+`infra/nixos/kexec-installer.nix` (evaluated offline), its digest matches and its path names no diagnostic build
+(G5); the install and the seven variants are valid store paths, rooted by `RUN/lease` and `RUN/variants`, so nothing
+is built inside the lease (G6); the tools exist; free space suffices; no `terrace-cloud-*` or `terrace-lease-sftp-*`
+unit is loaded; and the planned lease, from start to the timer's own cleanup after expiry (4.5 h worst case), does
+not overlap 03:30 UTC +-15 min or 22:25 to 03:10 UTC (G7). The latest start is therefore 17:55 UTC and the earliest
+03:45 UTC. It prints the cost (expected about 0.55 USD, cap 5 USD; if the driver and the timer both failed, up to
+the monthly price until deleted), the expiry, every check (the heavy-queue check shows `NOT MADE` when no command was
+supplied) and the ordered steps, each with its exact command, guard, expected observation, evidence and stop
+condition, and writes `RUN/lease-plan.json`. Its last line is the digest to approve.
+
+**What a person checks before approving:** the revision and manifest digest are the reviewed ones; the kexec digest
+is the one recorded at build time; the SSH source is the build machine's own /32; the expected baseline is the
+current provider inventory (the existing server, its addresses and key); the window and expiry; the heavy-queue
+line; and that every command names only the run directory, the staged tree and the expected tools.
+
+### Run
+
+```sh
+python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py run <the same arguments> --approved-plan-sha <digest>
+```
+
+`run` recomputes the plan and refuses if the inputs or steps differ from the approved file. It then creates the
+`<run>.open` pointer beside the run directory and executes the steps in order, recording each command (paths only),
+exit code, duration and output in `RUN/driver/` (`steps.log`, `receipts/`, `transcripts/`, `closing.json`,
+`SHA256SUMS`). It stops at the first non-zero exit or failed guard, with no retry, and goes to teardown (G1). Before
+each step after 1.1a it requires the step's bound plus 1500 s (teardown reserve and margin) before expiry. It
+refreshes the provider binding every 40 s while pin, dispatch, verify, inspect, plan and install run (a failed
+refresh stops the running step), and stops the refresher before any step that takes the lease lock. Exit codes: 0
+pass; 1 a step failed and teardown was verified; 2 inputs refused, nothing contacted; 3 teardown not verified:
+escalate to a person, the timer is left armed, recovery commands are printed; 4 interrupted (SIGINT, SIGTERM or
+SIGHUP) and teardown verified. The host steps' own exit codes are recorded with their meaning (0 pass, 1 step
+failed, 2 inputs refused, 3 clean-up unverified, 4 interrupted); a host-steps exit 3 makes the driver exit 3 too.
+
+**Teardown** runs whenever `RUN/lease.json` exists, after a pass, a failure, an interrupt or a crash: wait up to
+240 s for a running writer unit to finish, then stop the run's five writer units by exact name; stop the SFTP
+endpoint if its receipt shows it still started; `rehearsal_lease.py cleanup` (three absence reads); an independent
+read-only inventory (`rehearsal_lease.py prepare` in a fresh `RUN/audit-*` directory under a new run id) that must
+equal the lease's baseline; only then `rehearsal_timer.py disarm`; a final audit of the receipts and unit states;
+deletion by exact path inside the run directory of the token copy, every key, the escrow identity, the store, the
+SFTP directory, the host stage and the Pulumi passphrases, backends and plans; a check that no unit of ours remains;
+`RUN/lease-closed.json`; and removal of the pointer. The inventory runs before disarm (a change from the run sheet's
+order), so the timer stays armed until absence has been confirmed twice. Signals are ignored during teardown.
+
+### Interruption and failure analysis
+
+| State when interrupted or failed | What teardown does | Ends | If teardown itself fails |
+|---|---|---|---|
+| Before 1.1a: checks, bootstrap key, inputs, availability, read-only inventory, window | Nothing armed or created (no `lease.json`): unit check, closing receipt, pointer removed | verified-clean (exit 1 or 4) | Nothing at the provider; only local files remain |
+| During 1.1a `prepare` | If `lease.json` was written: cleanup finds nothing, inventory, disarm (no timer yet) | verified-clean | Exit 3; nothing was created; the timer was never armed |
+| 1.1b arm to 1.2a preview | Cleanup (nothing owned), inventory, disarm stops the timer | verified-clean | Exit 3, timer armed; it fires at expiry and finds nothing |
+| During 1.2b foundation create | Waits for the apply unit (up to 240 s). If it wrote `foundation-created.json`, cleanup deletes the key and firewall | verified-clean | If the create was cut off or failed after dispatch: unresolved dispatch, cleanup exits 1, **exit 3, timer armed** (row below) |
+| 1.3a to 1.3c (foundation exists) | Cleanup deletes the key and firewall | verified-clean | Exit 3, timer armed; expiry cleanup deletes them |
+| During 1.3d cohort create, including a create refused for stock after the availability check | As 1.2b: wait, then cleanup deletes server, IPv4, firewall, key | verified-clean if `original-created.json` was written | **Unresolved dispatch: exit 3, timer left armed.** The person: let the timer fire at expiry (its cleanup reconciles and deletes anything run-owned it finds), then run the independent inventory; if it equals the baseline and `systemctl show terrace-cloud-<run>.timer --property=LoadState` is `not-found`, run `resume-teardown --delete-after-person-check` (which repeats both checks, then deletes the run material). If the inventory shows a run resource, delete only `terrace-r-<run>-…` resources in the console and record it |
+| 1.4 to 1.6b (server exists; pin, dispatch, verify, inspect, plan, install) | Refresher stopped; child process group sent SIGTERM; cleanup deletes server, IPv4, firewall, key (the disk dies with the server) | verified-clean | Exit 3, timer armed; expiry cleanup deletes them |
+| 1.7a boot, 1.7b TCP wait, 1.7c, 2.0 | Wait for the boot unit, then cleanup | verified-clean | As above |
+| 2.1 to 6 host steps | SIGTERM to the host steps, up to 240 s for their own clean-up (forwards, second session, SFTP endpoint); the driver stops the SFTP endpoint itself if its receipt is still open; then cleanup | verified-clean (exit 4 or 1) | Host-steps exit 3 or a failed SFTP stop: exit 3 after the provider side is verified and disarmed; `sftp/` is kept for a person to stop and delete |
+| During teardown | Signals ignored; teardown continues | as above | — |
+| Driver killed hard (SIGKILL, lost machine) after 1.1b | Nothing runs; the transient timer fires at expiry and runs cleanup. A reboot of the build machine loses the transient timer | timer-clean, unverified by the driver | The `<run>.open` pointer stays, so no new plan passes; a person runs `resume-teardown` |
+| Teardown: cleanup fails, inventory differs, a writer unit stays active | No disarm; nothing deleted; recovery commands printed | **exit 3, timer armed** | `resume-teardown` |
+| Teardown: disarm or the final audit fails | Nothing deleted | exit 3 | `resume-teardown`; check the timer by hand |
+
+### Recovery for a lost runner
+
+```sh
+python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py resume-teardown --run-directory RUN --source STAGE
+```
+
+This is the documented recovery sequence (controller cleanup, then disarm, then the final audit) with the
+independent inventory before disarm, the deletion of the run material and the closing receipt. It exits 0 when
+everything verified, 3 otherwise (the timer is left armed and the commands are printed). After an unresolved
+dispatch, see the table row above.
+
+### Offline proof
+
+```sh
+python3 -B infra/cloud/test_rehearsal_lease_driver.py -v   # also in the check-supervision CI job
+python3 -B infra/cloud/test_rehearsal_lease.py -v          # includes the availability action
+python3 -B infra/cloud/lease_driver_mutants.py             # each mutant must fail the tests
+```
+
+The tests replace every tool with a fake layer that records each call with its arguments, writes the receipts the
+real tool would write, and can fail, hang or deliver a real SIGINT, SIGTERM or SIGHUP at any step. They pin the
+happy-path call sequence as a literal list; fail every step and every guard in turn and check that teardown follows
+and no later step runs; interrupt each phase; fail the teardown (cleanup, unresolved dispatch, inventory, disarm, a
+unit that stays active) and check the timer is never disarmed and nothing is deleted; check the G7 window at its
+edges and across midnight, G5 and G6 refusals and the open-lease refusal; check that no step is retried, that
+planted token and key values appear in no argument, log or receipt, and that files outside the run directory (and
+behind links inside it) survive deletion; and check the bounded units against what `rehearsal_apply.require_run_unit`
+requires. Not verified: anything at a provider or a host, the real tools under the driver, `systemd-run` and `sudo`
+on the build machine, and the timings.
