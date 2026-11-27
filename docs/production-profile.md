@@ -84,7 +84,7 @@ Optional, with defaults:
 
 | Option (`terrace.production.*`) | Role | Meaning |
 | --- | --- | --- |
-| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. It is one way to settle owner decision U0, which the owner has not taken |
+| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. The owner chose this signed deploy path (owner decision U0) on 2026-11-26; it has run only in VMs |
 | `wombRevision` | both | the Womb commit built, recorded in the system manifest; `production-config.nix` sets it from its `wombRevision` argument; default `null` |
 | `app.releaseMigrations` | app | the release's CMS migration list, recorded in the manifest; default the pin's list when the host runs the pinned revision, otherwise `null` (`activate` and `rollback` then refuse any release change on a migrated database) |
 
@@ -116,6 +116,23 @@ systemd-boot fallback path), which leases 3 and 5 installed and booted (lease 4 
 on-prem server's hardware is unknown, so no layout is written for it; the
 profile refuses to evaluate as production without a root filesystem and a boot
 loader.
+
+The committed Hetzner hardware module is the flake export
+`nixosModules.hetzner-production-hardware` of `infra/nixos`: the cloud disk
+module plus `infra/nixos/hetzner-hardware.nix`, which adds only the QEMU guest
+profile's virtio drivers to the initrd (virtio-net, virtio-pci, virtio-scsi for
+`/dev/sda` and the rest of that profile) and `networking.useDHCP = true` (dhcpcd
+on every interface; no interface name is pinned). That hardware part is what
+leases 3 and 5 installed with the rehearsal profile on Hetzner CPX servers (UEFI,
+`/dev/sda`, DHCP, the fallback boot loader). The host module still sets
+`terrace.cloudDisk.device` to the disk the Rescue probe verified. DHCP needs no
+change to the evaluation rules: `dhcpcd` was already on the allowlist of units
+wanted at boot, and the default `useDHCP` of every Hetzner variant in the check
+already started it. The evaluation check now also evaluates the production app
+on this module (no violation; DHCP, the virtio drivers, systemd-boot without
+firmware variables and the disk asserted). **The production profile has not
+booted on a provider or in a VM with this module**; see
+[cloud rehearsal](cloud-rehearsal.md#production-lease-host-prepared-for-lease-6).
 
 ## Invariants enforced at evaluation
 
@@ -373,11 +390,23 @@ optional and informational (`terrace-production status` shows it). With the depl
 path, the private module also sets `terrace.production.deploy.trustedKeys`, and
 the built toplevel reaches an installed host by
 `platform/production/terrace-deploy.sh` ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+The owner chose this signed deploy path on 2026-11-26 and keeps an offline spare
+deploy key trusted from the first install.
+
+For the one provider lease the owner approved on 2026-11-26, the committed
+builder `infra/nixos/lease-host.nix` composes this same file with the Hetzner
+hardware module and a lease host module (`instance = "rehearsal"`, `.invalid`
+names, a run CA, two deploy keys) from run inputs, and builds the install
+outputs and update variants; `infra/nixos/lease_install_plan.py` writes the
+install plan `rescue_install.py` checks, with the host key `terrace-secrets host
+create` made. See [cloud rehearsal](cloud-rehearsal.md#production-lease-host-prepared-for-lease-6).
 
 ## Verification
 
 - Evaluation check (no builds; builder, shared lock):
   `nix eval --raw --impure --option builders "" --file infra/nixos/production-eval-check.nix`
+  (also the Hetzner hardware module and the lease host with its variants)
+- Lease install plan tool (CI): `python3 -B infra/nixos/test_lease_install_plan.py -v`
 - VM proof (builder; the wrapper takes the shared lock itself):
   `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`
 - Tool unit tests (CI): `python3 platform/production/test_terrace_secrets.py -v`

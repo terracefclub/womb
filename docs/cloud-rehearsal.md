@@ -218,6 +218,117 @@ day, on one choice of server types. Not proven by this lease: anything in produc
 profile mode (`terrace.production`), ACME, the Keycloak administration tool, real
 data migration, cutover, alerting.
 
+## Production lease host (prepared for lease 6)
+
+The owner approved one more lease (lease 6) on 2026-11-26, to install the
+**production** app profile on one Hetzner server and exercise its first boot,
+adoption, a reboot and the signed deploy path. **Lease 6 has not run.** What
+follows is the committed install side only. It has been evaluated and built on
+the Linux builder; nothing of it has run at a provider, and no VM has booted
+these systems yet (the VM rehearsal of the run sheet is separate, later work, as
+are the single-host cohort, the throwaway SFTP endpoint and the lease driver).
+
+**Hardware.** `nixosModules.hetzner-production-hardware` (`infra/nixos/flake.nix`):
+the cloud disk module (GPT, 512 MiB ESP, ext4, systemd-boot with
+`canTouchEfiVariables = false`, so the removable `EFI/BOOT/BOOTX64.EFI`) and
+`infra/nixos/hetzner-hardware.nix` (the QEMU guest profile's virtio drivers in the
+initrd, DHCP on every interface). This is the hardware part leases 3 and 5
+installed with the rehearsal profile; see the
+[hardware module interface](production-profile.md#hardware-module-interface).
+
+**The builder.** `infra/nixos/lease-host.nix` composes
+`infra/nixos/production-config.nix` (role `app`) with that hardware module and a
+lease host module: `instance = "rehearsal"`, host name `app`,
+`web.terrace.invalid`, `cms.terrace.invalid`, `identity.terrace.invalid`,
+`memoryMiB = 15360`, manual TLS (the leaf and key are pushed as `tls/*`) with the
+run CA trusted by the CMS, website and expiry check, and **two** trusted deploy
+keys, the build machine's and the offline spare the owner keeps (owner decision
+2026-11-26; the builder refuses any other count). There is no rehearsal harness:
+no synthetic users, no bootstrap administrator, no protocol scripts. Its inputs
+are the run's, passed at build time and never committed:
+
+| Input | Meaning |
+| --- | --- |
+| `disk` | the whole disk the Rescue probe recorded (`/dev/sda` on every CPX server leased so far) |
+| `operatorKeys` | the run's installed operator key (not the bootstrap root key) |
+| `escrowRecipient` | the run's throwaway escrow key, public recipient |
+| `deployKeys` | the two Nix public keys |
+| `runCa` | the run CA certificate, as a path |
+| `backupPort`, `backupHostKey` (`backupAddress`, default `127.0.0.1`) | the throwaway SFTP endpoint as the host reaches it: the near end of a reverse SSH forward from the build machine, pinned to that endpoint's ed25519 host key. The repository is `sftp:terrace@<address>:app`; the known_hosts line is `[<address>]:<port> <key>`; the SFTP client key is the store's `backup/primary/sftp-key` (its public half from `terrace-secrets public app backup/primary/sftp-key`) |
+| `previousWebArchive`, `previousCmsArchive` | the kept `680ad56` release the host is installed at |
+| `webArchive`, `cmsArchive`, `tfcSource` | the pinned `dd1aef7` release it is updated to, and the TFC source at that pin for the identity contract |
+| `wombRevision` | optional, recorded in each manifest |
+
+Outputs: `install`, a JSON file naming the role, the disk device, and V0's
+toplevel, Disko script and installer; `variants`, a JSON file naming the six
+toplevels below; `systems`, the evaluated systems (for the evaluation check).
+Each variant extends the one the lease runs before it, the way
+`platform/production/deploy-test.nix` makes its variants (`extendModules`), so it
+differs from the running system by its change alone:
+
+| System | Lease step | Change | What `activate` should do (not run) |
+| --- | --- | --- | --- |
+| V0 | install | the production app at `680ad56` | installed by `rescue_install.py` |
+| V1 | plain switch, then rollback | an `/etc` marker | switch |
+| release | release change with migration | `680ad56` to `dd1aef7`, its migration list | switch; down until the CMS migration |
+| V2 | boot into a new generation | one more initrd driver (`virtio_input`) | refuse without `--boot`, then `--boot` and a reboot |
+| V3 | a switch that restarts sshd | `services.openssh.settings.LogLevel = "VERBOSE"` (sshd's restart trigger is its config file) | switch, restarting sshd |
+| V4 | a failed switch | a unit wanted at boot that fails and restarts, as in the update drill | register the generation, fail (exit 4) |
+
+The evaluation check (`infra/nixos/production-eval-check.nix`) asserts that V0
+to V3 and the release change break no production invariant and V4 breaks exactly
+one (its unit); that the kernel, initrd and modules are V0's in V1 and the
+release change and differ from it only in V2's initrd; that only V3 changes the
+sshd configuration; the manifests' release and migration list; the two trusted
+keys with Nix's defaults otherwise; the backup repository and its pin; and that
+the lease host with the production instance, free-form sshd configuration, an
+extra unit at boot, password login, an extra port, an extra service or a
+container daemon is rejected, as are builder inputs with one deploy key, a
+repeated key, a privileged or non-IPv4 backup endpoint, another host key type or
+a CA given as a string.
+
+**The host key and the plan.** `terrace-secrets host create app --role app`
+stages the host's private key and stores its public half. After
+`rescue_install.py ... --inspect-disk` has recorded `<phase>-app-disk.json`,
+`infra/nixos/lease_install_plan.py` writes, in the lease directory, exactly what
+`rescue_install.py --install-approved-sha` checks: `<phase>-app-install.json`
+(the disk receipt's digest and V0's three store paths),
+`<phase>-app-installed-ed25519` (the staged private key, byte for byte) and
+`<phase>-app-installed-known-hosts` (`<IPv4> ssh-ed25519 <key>`, from the
+store's public half at the receipt's address). It refuses a staged key that is
+not the stored one, the installer's own key, build outputs for another disk than
+the receipt's (the Disko script formats the device it was built for) or another
+role, store paths that are not a system, a Disko script and an installer, and
+any existing file; it then validates the plan with `rescue_install.checked_plan`
+and prints the digest to approve. The installer writes that key to
+`/mnt/etc/ssh/ssh_host_ed25519_key`, the only host key the production sshd and
+sops use, and `terrace-secrets push` pins the same stored key, so no step trusts
+a key on first use. `rescue_install.py` itself is unchanged.
+
+```sh
+# Build machine, in the run directory's terms (paths are examples):
+terrace-secrets host create app --role app   # prints the staging directory, e.g. $STAGE
+# Repository root, shared lock; the inputs file is private to the run:
+nix build --impure --option builders "" --out-link "$RUN/lease" \
+  --expr '(import ./infra/nixos/lease-host.nix (import /run-dir/lease-inputs.nix)).install'
+nix build --impure --option builders "" --out-link "$RUN/variants" \
+  --expr '(import ./infra/nixos/lease-host.nix (import /run-dir/lease-inputs.nix)).variants'
+# After the disk receipt exists:
+python3 -B infra/nixos/lease_install_plan.py "$LEASE" original app --outputs "$RUN/lease" \
+  --host-stage "$STAGE" --host-public "$TERRACE_SECRETS_STORE/hosts/app/ssh_host_ed25519_key.pub"
+python3 -B infra/nixos/rescue_install.py "$LEASE" original app --install-approved-sha <printed digest>
+```
+
+Unit tests (CI): `python3 -B infra/nixos/test_lease_install_plan.py -v`, which
+also runs `rescue_install.install` on the written files through its authority,
+disk receipt, plan and installed-key stages (it stops at the first remote
+command).
+
+What ran on 2026-11-26 is in the pull request that added these files. Not run
+anywhere: an install of these systems, a boot (VM or provider), DHCP on the
+production closure, any activation of a variant, the backup endpoint, and the
+lease itself.
+
 ## Throwaway SFTP repository for the production lease host
 
 The production backup module accepts only an `sftp:` restic repository with a pinned known-hosts entry, so a lease
