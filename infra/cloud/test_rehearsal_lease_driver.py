@@ -1,8 +1,9 @@
 """Offline proof of the production lease driver (rehearsal_lease_driver.py).
 
-A fake tool layer stands in for every tool: it records each call with its exact argv, writes the receipts the real
-tool would write, and can fail, raise an interrupt (by a real signal to this process) or hang at any chosen step.
-Nothing here contacts a provider or a host. Run: python3 -B infra/cloud/test_rehearsal_lease_driver.py -v
+A fake tool layer stands in for every tool: it records each call with its exact argv and environment, writes the
+receipts the real tool would write, and can fail, hang, deliver a real signal to this process, or hand a step to the
+REAL Runner with a real child process (a sleeper past its bound, a child trapping SIGTERM, a grandchild holding the
+pipe). Nothing here contacts a provider or a host. Run: python3 -B infra/cloud/test_rehearsal_lease_driver.py -v
 """
 
 import contextlib
@@ -41,6 +42,7 @@ ADDRESS = "203.0.113.7"
 FIXED = datetime(2026, 12, 1, 8, 0, tzinfo=timezone.utc).timestamp()
 USER = "operator-test"
 UNIT_PATH = "/fake/pulumi/bin:/fake/node/bin"
+HOST_LIST = b"2.1  first-boot window\n3.1  throwaway SFTP endpoint and reverse forward\n6  final evidence\n"
 PLANTED = {"token": "PLANTEDtokenVALUE0123456789abcdefXYZ", "bootstrap": "PLANTED-BOOTSTRAP-PRIVATE-KEY-material",
            "deploy": "PLANTED-DEPLOY-SECRET-material", "spare": "PLANTED-SPARE-SECRET-material",
            "escrow": "AGE-SECRET-KEY-1PLANTEDESCROWVALUE", "hostkey": "PLANTED-HOST-OPERATOR-PRIVATE"}
@@ -50,29 +52,45 @@ BASELINE.update(servers={"1": {"name": "existing"}}, primary_ips={"2": {"name": 
 COUNTS = {kind: len(rows) for kind, rows in BASELINE.items()}
 SYSTEMCTL = "/run/current-system/sw/bin/systemctl"
 SYSTEMD_RUN = "/run/current-system/sw/bin/systemd-run"
+FLAGS = ["-E", "-s", "-B"]
+WRITERS = ("foundation-preview", "foundation-apply", "original-preview", "original-apply", "original-app-apply")
+SECRETS = ("operator-ed25519", "deploy-key.sec", "spare-key.sec", "escrow.age", "host-operator-ed25519", "secrets",
+           "host-stage", "original-app-bootstrap-nonce", "foundation/passphrase.json", "original/passphrase.json",
+           "run-ca.pem")
 
 
 class FakeTools:
-    """The fake tool layer. Each call is recorded as (label, argv)."""
+    """The fake tool layer. Each call is recorded as (label, argv); environments are kept in `envs`."""
 
     def __init__(self, case):
         self.case = case
         self.calls = []
+        self.envs = []
         self.fail = {}          # label -> exit code
-        self.signal_at = {}     # label -> signal sent to this process while the tool "runs"
+        self.signal_at = {}     # label -> signal(s) sent to this process while the tool "runs"
         self.after_fail = set()  # labels whose side effects happen before the non-zero exit
-        self.hang = set()       # labels that block until abort_current
+        self.hang = set()       # labels that block until abort_current (0 if never aborted)
+        self.real = {}          # label -> argv run by the REAL Runner instead
         self.aborted = threading.Event()
         self.overrides = {}
+        self.real_runner = driver.Runner()
 
-    def run(self, argv, timeout, *, label, foreground=True, grace=30, cwd=None):
+    def run(self, argv, timeout, *, label, foreground=True, grace=30, cwd=None, env=None, interrupted=None):
         self.calls.append((label, list(argv)))
+        self.envs.append(env)
+        if label in self.real:
+            outcome = self.real_runner.run(self.real[label], timeout, label=label, grace=grace, env=None,
+                                           interrupted=interrupted)
+            if outcome.code == 0 and outcome.reason is None:
+                self.effect(label, argv)
+            return outcome
         if label in self.signal_at:
-            os.kill(os.getpid(), self.signal_at[label])
-            time.sleep(0.3)
+            for sig in (self.signal_at[label] if isinstance(self.signal_at[label], tuple) else (self.signal_at[label],)):
+                os.kill(os.getpid(), sig)
+                time.sleep(0.1)
         if label in self.hang:
-            self.aborted.wait(10)
-            return -15, b"terminated\n"
+            aborted = self.aborted.wait(3)
+            return (-15, b"terminated\n") if aborted else (0, b"ran to the end\n")
         if label in self.fail:
             if label in self.after_fail:
                 self.effect(label, argv)
@@ -84,9 +102,14 @@ class FakeTools:
     def abort_current(self):
         self.aborted.set()
 
+    def settle(self, seconds):
+        return True
+
     def effect(self, label, argv):
         c = self.case
         R = c.R
+        if label == "plan-host-steps-list":
+            return 0, HOST_LIST
         if label == "plan-kexec-eval":
             return 0, (KEXEC + "\n").encode()
         if label == "plan-store-roots":
@@ -95,8 +118,10 @@ class FakeTools:
             return 0, f"{link} -> {target}\n".encode()
         if label == "idle-units":
             return 0, b""
-        if label in ("7.1-wait", "7.1-show", "7.6-show"):
+        if label in ("7.1-wait", "7.1-show", "7.5-show", "7.6-show", "resume-units"):
             return 0, b"inactive\n"
+        if label == "resume-load":
+            return 0, b"not-found\n"
         if label == "0.6a":
             key = Path(argv[-1])
             key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n" + PLANTED["bootstrap"] + "\n")
@@ -106,11 +131,11 @@ class FakeTools:
             c.planted.append((R / "original-app-bootstrap-nonce").read_text().strip())
         elif label == "0.8b":
             lease.write_private(R / "preflight/lease.json", {"schema": 1, "run": argv[argv.index("--run") + 1],
-                                                             "baseline": BASELINE})
+                                                             "baseline": c.preflight_baseline})
         elif label == "1.1a":
             lease.write_private(R / "lease.json", {"schema": 1, "run": RUN, "credentialSha256": "0" * 64,
                                                    "expires": int(argv[argv.index("--expires") + 1]),
-                                                   "baseline": BASELINE})
+                                                   "baseline": c.lease_baseline})
         elif label == "1.1b":
             lease.write_private(R / "timer-armed.json", {"run": RUN})
         elif label in ("1.2a", "1.3c"):
@@ -142,12 +167,15 @@ class FakeTools:
                 "binding": {"run": RUN, "phase": "original", "role": "app", "serverId": 21, "ipv4": ADDRESS,
                             "expires": int(FIXED) + 14400}, "system": SYSTEM, "mountedExt4Verified": True})
         elif label == "2.1-6":
+            (R / "host-steps").mkdir(mode=0o700, exist_ok=True)
             (R / "sftp" / "sftp-listener.json").write_text("{}")
-            (R / "sftp" / "sftp-stopped.json").write_text("{}")
+            if not c.sftp_left_running:
+                (R / "sftp" / "sftp-stopped.json").write_text("{}")
         elif label == "7.3":
             lease.write_private(R / "closed.json", {"closedAt": 1})
             lease.write_private(R / f"final-absence-{time.time_ns()}.json", {
-                "run": RUN, "phase": "final", "baselinePreserved": True, "absenceReads": 3, "unresolvedDispatches": []})
+                "run": RUN, "phase": "final", "baselinePreserved": True, "absenceReads": c.absence_reads,
+                "unresolvedDispatches": []})
         elif label == "7.4":
             audit = Path(argv[argv.index("--directory") + 1])
             lease.write_private(audit / "lease.json", {"schema": 1, "baseline": c.audit_baseline})
@@ -158,12 +186,25 @@ class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="lease-driver-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        original_root = driver.running_as_root
+        driver.running_as_root = lambda: False  # CI runs these tests as root; the refusal has its own test
+        self.addCleanup(setattr, driver, "running_as_root", original_root)
         self.planted = list(PLANTED.values())
         self.audit_baseline = BASELINE
+        self.preflight_baseline = BASELINE
+        self.lease_baseline = BASELINE
+        self.absence_reads = 3
+        self.sftp_left_running = False
         self.leases = self.tmp / "leases"
         self.leases.mkdir(mode=0o700)
         self.R = self.leases / RUN
         self.R.mkdir(mode=0o700)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        for name in ("ssh-keygen", "nix", "nix-store", "sudo", "rclone", "restic", "sops", "terrace-secrets",
+                     "queue-idle"):
+            (self.bin / name).write_text("#!/bin/sh\nexit 0\n")
+            (self.bin / name).chmod(0o755)
         self.source = self.make_source()
         self.source_sha = apply.fingerprint_source(lambda path: (self.source / "infra/cloud" / path).read_bytes())
         self.make_prepare_layout()
@@ -232,13 +273,14 @@ class Harness(unittest.TestCase):
             lambda path: (self.source / "infra/cloud" / path).read_bytes()))
 
     def config(self, **changes):
-        values = dict(run_directory=self.R, source=self.source, python="/py/python3", revision=REV,
-                      manifest_sha256=self.manifest, ssh_keygen="/bin/ssh-keygen", nix="/nix/bin/nix",
-                      nix_store="/nix/bin/nix-store", kexec_archive=self.archive,
+        b = str(self.bin)
+        values = dict(run_directory=self.R, source=self.source, python=sys.executable, revision=REV,
+                      manifest_sha256=self.manifest, ssh_keygen=b + "/ssh-keygen", nix=b + "/nix",
+                      nix_store=b + "/nix-store", sudo=b + "/sudo", kexec_archive=self.archive,
                       kexec_sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(), ssh_cidr="198.51.100.9/32",
-                      unit_path=UNIT_PATH, rclone=sys.executable, restic=sys.executable, sops=sys.executable,
-                      terrace_secrets=sys.executable, expect_baseline=COUNTS, min_free_bytes=0,
-                      store_dir=str(self.store), user=USER)
+                      unit_path=UNIT_PATH, child_path=f"{b}:/usr/bin:/bin", rclone=b + "/rclone",
+                      restic=b + "/restic", sops=b + "/sops", terrace_secrets=b + "/terrace-secrets",
+                      expect_baseline=COUNTS, min_free_bytes=0, store_dir=str(self.store), user=USER)
         values.update(changes)
         return driver.Config(**values)
 
@@ -256,21 +298,24 @@ class Harness(unittest.TestCase):
         digest = self.plan(cfg)
         self.tools.calls.clear()
         d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: now, sleep=lambda _: None)
-        self.code = d.run(digest)
         self.driver = d
+        self.code = d.run(digest)
         return self.code
 
     def labels(self):
         return [label for label, _ in self.tools.calls]
 
     def py(self, *parts):
-        return ["/py/python3", "-B", str(self.source.joinpath(*parts))]
+        return [sys.executable, *FLAGS, str(self.source.joinpath(*parts))]
 
     def unit(self, name, argv):
-        return ["sudo", "-n", SYSTEMD_RUN, "--quiet", "--collect", "--wait", "--pipe",
+        return [str(self.bin / "sudo"), "-n", SYSTEMD_RUN, "--quiet", "--collect", "--wait", "--pipe",
                 f"--unit=terrace-cloud-{RUN}-{name}.service", "--uid=" + USER, "--service-type=exec",
                 "--property=KillMode=control-group", "--property=RuntimeMaxSec=230", "--property=TimeoutStopSec=10s",
                 "--property=UMask=0077", "--property=NoNewPrivileges=yes", "--setenv=PATH=" + UNIT_PATH, *argv]
+
+    def assert_teardown_complete(self):
+        self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
 
 
 def normalize(argv):
@@ -280,18 +325,21 @@ def normalize(argv):
     return json.loads(text)
 
 
-TEARDOWN_LABELS = [*["7.1-wait"] * 5, "7.1", *["7.1-show"] * 5, "7.3", "7.4", "7.5", *["7.6-show"] * 7, "idle-units", "idle-units"]
-PLAN_LABELS = ["plan-kexec-eval", "plan-store-validity", "plan-store-roots", "plan-store-roots", "idle-units",
-               "idle-units"]
+PLAN_LABELS = ["plan-host-steps-list", "plan-kexec-eval", "plan-store-validity", "plan-store-roots",
+               "plan-store-roots", "idle-units", "idle-units"]
 RUN_LABELS = PLAN_LABELS + [
     "idle-units", "idle-units", "0.6a", "0.8a", "0.8b", "1.1a", "1.1b", "1.1c", "1.2a", "1.2b", "1.3b", "1.3c", "1.3d",
     "1.4", "1.5a", "1.5b", "1.5c", "1.5d", "1.6a", "1.6b", "1.7a", "1.7b", "1.7c", "2.0", "2.1-6"]
+TEARDOWN_LABELS = [*["7.1-wait"] * 5, "7.1", *["7.1-show"] * 5, "7.3", "7.4", *["7.5-show"] * 5, "7.6",
+                   *["7.6-show"] * 2, "idle-units", "idle-units"]
+NOT_ARMED_LABELS = ["idle-units", "idle-units"]
 
 
 class HappyPath(Harness):
     def test_exact_call_sequence_with_arguments(self):
         self.assertEqual(self.drive(), driver.EXIT_PASS, self.err.getvalue())
         R, T, S = str(self.R), str(self.R / "provider-token"), self.source
+        b = str(self.bin)
         creds = ["--directory", R, "--credential-file", T]
         lease_tool, timer_tool = self.py("infra/cloud/rehearsal_lease.py"), self.py("infra/cloud/rehearsal_timer.py")
         apply_tool = self.py("infra/cloud/rehearsal_apply.py")
@@ -301,16 +349,21 @@ class HappyPath(Harness):
         expires = str(int(FIXED) + 14400)
         idle = [[SYSTEMCTL, "list-units", "--plain", "--no-legend", "terrace-cloud-*", "terrace-lease-sftp-*"],
                 [SYSTEMCTL, "--user", "list-units", "--plain", "--no-legend", "terrace-cloud-*", "terrace-lease-sftp-*"]]
+
+        def show(label, unit):
+            return (label, [SYSTEMCTL, "show", unit, "--property=ActiveState", "--value"])
+        writers = [f"terrace-cloud-{RUN}-{u}.service" for u in WRITERS]
         expected = [
-            ("plan-kexec-eval", ["/nix/bin/nix", "eval", "--raw", "--offline", "--impure", "--file",
+            ("plan-host-steps-list", self.py("infra/nixos/lease_host_steps.py") + ["list"]),
+            ("plan-kexec-eval", [b + "/nix", "eval", "--raw", "--offline", "--impure", "--file",
                                  str(S / "infra/nixos/kexec-installer.nix"), "archive.outPath"]),
-            ("plan-store-validity", ["/nix/bin/nix-store", "--check-validity", SYSTEM, DISKO, INSTALLER,
+            ("plan-store-validity", [b + "/nix-store", "--check-validity", SYSTEM, DISKO, INSTALLER,
                                      *(VARIANTS[n] for n in ("v1", "release", "v2", "v3", "v4", "v5"))]),
-            ("plan-store-roots", ["/nix/bin/nix-store", "--query", "--roots", os.path.realpath(self.R / "lease")]),
-            ("plan-store-roots", ["/nix/bin/nix-store", "--query", "--roots", os.path.realpath(self.R / "variants")]),
+            ("plan-store-roots", [b + "/nix-store", "--query", "--roots", os.path.realpath(self.R / "lease")]),
+            ("plan-store-roots", [b + "/nix-store", "--query", "--roots", os.path.realpath(self.R / "variants")]),
             ("idle-units", idle[0]), ("idle-units", idle[1]),
             ("idle-units", idle[0]), ("idle-units", idle[1]),
-            ("0.6a", ["/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "terrace-lease-bootstrap", "-f",
+            ("0.6a", [b + "/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "terrace-lease-bootstrap", "-f",
                       R + "/operator-ed25519"]),
             ("0.8a", availability),
             ("0.8b", lease_tool + ["prepare", "--directory", R + "/preflight", "--credential-file", T,
@@ -337,9 +390,9 @@ class HappyPath(Harness):
             ("1.6a", self.py("infra/nixos/lease_install_plan.py") + [
                 R, "original", "app", "--outputs", R + "/lease", "--host-stage", R + "/host-stage",
                 "--host-public", R + "/secrets/hosts/app/ssh_host_ed25519_key.pub"]),
-            ("1.6b", self.py("infra/nixos/rescue_install.py") + [R, "original", "app", "--install-approved-sha",
-                                                                 hashlib.sha256((self.R / "original-app-install.json")
-                                                                                .read_bytes()).hexdigest()]),
+            ("1.6b", self.py("infra/nixos/rescue_install.py") + [
+                R, "original", "app", "--install-approved-sha",
+                hashlib.sha256((self.R / "original-app-install.json").read_bytes()).hexdigest()]),
             ("1.7a", self.unit("original-app-apply", self.py("infra/cloud/rehearsal_provider_actions.py") + [
                 "boot-installed", "original", "app", *creds])),
             ("1.7b", self.py("infra/cloud/rehearsal_lease_driver.py") + ["wait-tcp", ADDRESS, "--seconds", "300"]),
@@ -347,43 +400,40 @@ class HappyPath(Harness):
             ("2.0", self.py("infra/nixos/lease_host_steps.py") + ["pin", R, "--address", ADDRESS]),
             ("2.1-6", self.py("infra/nixos/lease_host_steps.py") + [
                 "run", R, "--address", ADDRESS, "--evidence", R + "/host-evidence", "--variants", R + "/variants",
-                "--rclone", sys.executable, "--restic", sys.executable, "--sops", sys.executable,
-                "--terrace-secrets", sys.executable, "--nix", "/nix/bin/nix"]),
-            *(("7.1-wait", [SYSTEMCTL, "show", f"terrace-cloud-{RUN}-{u}.service", "--property=ActiveState", "--value"])
-              for u in ("foundation-preview", "foundation-apply", "original-preview", "original-apply",
-                        "original-app-apply")),
-            ("7.1", ["sudo", "-n", SYSTEMCTL, "stop", *(f"terrace-cloud-{RUN}-{u}.service" for u in (
-                "foundation-preview", "foundation-apply", "original-preview", "original-apply",
-                "original-app-apply"))]),
-            *(("7.1-show", [SYSTEMCTL, "show", f"terrace-cloud-{RUN}-{u}.service", "--property=ActiveState", "--value"])
-              for u in ("foundation-preview", "foundation-apply", "original-preview", "original-apply",
-                        "original-app-apply")),
+                "--rclone", b + "/rclone", "--restic", b + "/restic", "--sops", b + "/sops",
+                "--terrace-secrets", b + "/terrace-secrets", "--nix", b + "/nix"]),
+            *(show("7.1-wait", unit) for unit in writers),
+            ("7.1", [b + "/sudo", "-n", SYSTEMCTL, "stop", *writers]),
+            *(show("7.1-show", unit) for unit in writers),
             ("7.3", lease_tool + ["cleanup", *creds]),
             ("7.4", lease_tool + ["prepare", "--directory", R + "/audit-<NS>", "--credential-file", T, "--run",
                                   "<FRESH>", "--expires", str(int(FIXED) + 900)]),
-            ("7.5", timer_tool + ["disarm", *creds]),
-            *(("7.6-show", [SYSTEMCTL, "show", unit, "--property=ActiveState", "--value"]) for unit in (
-                f"terrace-cloud-{RUN}.timer", f"terrace-cloud-{RUN}.service",
-                *(f"terrace-cloud-{RUN}-{u}.service" for u in ("foundation-preview", "foundation-apply",
-                                                                "original-preview", "original-apply",
-                                                                "original-app-apply")))),
+            *(show("7.5-show", unit) for unit in writers),
+            ("7.6", timer_tool + ["disarm", *creds]),
+            show("7.6-show", f"terrace-cloud-{RUN}.timer"), show("7.6-show", f"terrace-cloud-{RUN}.service"),
             ("idle-units", idle[0]), ("idle-units", idle[1]),
         ]
         self.assertEqual([(label, normalize(argv)) for label, argv in self.tools.calls], expected)
 
+    def test_children_get_only_the_stated_environment(self):
+        self.drive()
+        expected = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": None, "USER": USER, "LOGNAME": USER,
+                    "LANG": "C.UTF-8", "TZ": "UTC"}
+        for env in self.tools.envs:
+            self.assertEqual(set(env), set(expected))
+            self.assertEqual({k: v for k, v in env.items() if k != "HOME"},
+                             {k: v for k, v in expected.items() if k != "HOME"})
+
     def test_pass_closes_the_lease_and_deletes_material(self):
         self.assertEqual(self.drive(), driver.EXIT_PASS)
         closing = json.loads((self.R / "lease-closed.json").read_text())
-        self.assertEqual((closing["exit"], closing["failedStep"], closing["teardown"]["providerVerified"],
-                          closing["teardown"]["timerDisarmed"]), (0, None, True, True))
-        for name in ("provider-token", "operator-ed25519", "deploy-key.sec", "spare-key.sec", "escrow.age",
-                     "host-operator-ed25519", "secrets", "sftp", "host-stage", "original-app-bootstrap-nonce",
-                     "foundation/passphrase.json", "original/passphrase.json", "run-ca.pem"):
+        self.assertEqual((closing["exit"], closing["failedStep"], closing["state"]["timer"], closing["problems"]),
+                         (0, None, "disarmed", []))
+        for name in ("provider-token", *SECRETS, "sftp", "host-steps"):
             self.assertFalse(os.path.lexists(self.R / name), name)
         self.assertFalse((self.leases / (RUN + ".open")).exists())
         self.assertTrue((self.R / "driver/SHA256SUMS").exists())
-        log = (self.R / "driver/steps.log").read_text()
-        self.assertIn("2.1-6 passed exit 0", log)
+        self.assertIn("2.1-6 passed exit 0", (self.R / "driver/steps.log").read_text())
         inputs = json.loads((self.R / "original-input.json").read_text())
         self.assertEqual({k: inputs[k] for k in ("roles", "appType", "location", "image", "sshKeyId", "firewallId")},
                          {"roles": ["app"], "appType": "cpx42", "location": "nbg1", "image": "debian-13",
@@ -394,31 +444,27 @@ class HappyPath(Harness):
 
     def test_no_retry_anywhere(self):
         self.drive()
-        counts = {label: self.labels().count(label) for label in set(self.labels())}
-        for label in RUN_LABELS[len(PLAN_LABELS) + 2:] + ["7.1", "7.3", "7.4", "7.5"]:
-            self.assertEqual(counts[label], 1, label)
         self.assertEqual(self.labels(), RUN_LABELS + TEARDOWN_LABELS)
+        for label in RUN_LABELS[len(PLAN_LABELS) + 2:] + ["7.1", "7.3", "7.4", "7.6"]:
+            self.assertEqual(self.labels().count(label), 1, label)
 
 
 class Secrets(Harness):
     def assert_no_planted(self):
-        texts = [json.dumps(self.tools.calls), self.out.getvalue(), self.err.getvalue()]
+        texts = [json.dumps(self.tools.calls), json.dumps(self.tools.envs), self.out.getvalue(), self.err.getvalue()]
         for path in self.R.rglob("*"):
-            if path.is_file() and not path.is_symlink() and path.parent != self.R / "secrets" \
-                    and not str(path).startswith(str(self.R / "sftp")) and path.name not in (
-                    "provider-token", "operator-ed25519", "host-operator-ed25519", "deploy-key.sec", "spare-key.sec",
-                    "escrow.age", "original-app-bootstrap-nonce", "ssh_host_ed25519_key", "passphrase.json",
-                    "sftp-host-key"):
+            if path.is_file() and not path.is_symlink() and "secrets" not in path.parts and "sftp" not in path.parts \
+                    and path.name not in ("provider-token", "operator-ed25519", "host-operator-ed25519",
+                                          "deploy-key.sec", "spare-key.sec", "escrow.age",
+                                          "original-app-bootstrap-nonce", "ssh_host_ed25519_key", "passphrase.json"):
                 texts.append(path.read_text(errors="replace"))
         joined = "\n".join(texts)
         for value in self.planted:
             self.assertNotIn(value, joined)
 
-    def test_no_secret_in_argv_logs_or_receipts_on_pass(self):
+    def test_no_secret_in_argv_env_logs_or_receipts_on_pass(self):
         self.drive()
         self.assert_no_planted()
-        # The token is passed by path only.
-        self.assertTrue(all(PLANTED["token"] not in " ".join(argv) for _, argv in self.tools.calls))
 
     def test_no_secret_on_failure_or_escalation(self):
         self.tools.fail["1.6b"] = 1
@@ -441,23 +487,23 @@ class FailureAtEveryStep(Harness):
 
     def test_each_step_failure_stops_and_tears_down(self):
         steps = driver.run_steps(self.config())
+        ids = [s.id for s in steps]
         for index, step in enumerate(steps):
             with self.subTest(step=step.id):
                 self.setUp()
                 code = self.run_failing(step)
                 labels = self.labels()[len(PLAN_LABELS):]
-                ids = [s.id for s in steps]
                 self.assertFalse(set(ids[index + 1:]) & set(labels), labels)
-                armed = index > ids.index("1.1a")
-                if armed:
-                    self.assertEqual(labels[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+                if index > ids.index("1.1a"):
+                    self.assert_teardown_complete()
                     self.assertEqual(code, driver.EXIT_ESCALATE if step.host else driver.EXIT_STEP_FAILED)
-                    self.assertTrue((self.R / "lease-closed.json").exists() or step.host)
                 else:
                     self.assertNotIn("7.3", labels)
-                    self.assertEqual(labels[-2:], ["idle-units", "idle-units"])
+                    self.assertEqual(labels[-2:], NOT_ARMED_LABELS)
                     self.assertEqual(code, driver.EXIT_STEP_FAILED)
-                for label in set(labels) - {"idle-units", "7.1-wait", "7.1-show", "7.6-show"}:
+                    for name in ("provider-token", *SECRETS):
+                        self.assertFalse(os.path.lexists(self.R / name), name)  # (iii) deleted before "clean"
+                for label in set(labels) - {"idle-units", "7.1-wait", "7.1-show", "7.5-show", "7.6-show"}:
                     self.assertEqual(labels.count(label), 1, label)
 
     def test_each_after_guard_failure_stops_and_tears_down(self):
@@ -478,23 +524,60 @@ class FailureAtEveryStep(Harness):
                     self.assertIn("7.3", self.labels())
                 self.assertEqual(code, driver.EXIT_STEP_FAILED)
 
+    def test_preflight_drift_from_the_stated_baseline_stops_before_arming(self):
+        self.preflight_baseline = dict(BASELINE, servers={})
+        self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
+        self.assertNotIn("1.1a", self.labels())
+        self.assertIn("drift", json.loads((self.R / "driver/receipts/0.8b.json").read_text())["error"])
+
+    def test_lease_baseline_must_equal_the_preflight(self):
+        # Two reads that disagree are for a person: the final audit compares them, so the timer stays armed.
+        self.lease_baseline = dict(BASELINE, ssh_keys={})
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertNotIn("1.1b", self.labels())
+        self.assertIn("7.3", self.labels())
+        self.assertNotIn("7.6", self.labels())
+
     def test_prepare_that_wrote_its_manifest_then_failed_is_torn_down(self):
         self.tools.fail["1.1a"] = 1
         self.tools.after_fail.add("1.1a")
         self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
-        self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+        self.assert_teardown_complete()
         self.assertNotIn("1.1b", self.labels())
 
     def test_host_steps_exit_codes_keep_their_meaning(self):
         for exit_code, expected in ((1, driver.EXIT_STEP_FAILED), (2, driver.EXIT_STEP_FAILED),
-                                    (3, driver.EXIT_ESCALATE), (4, driver.EXIT_STEP_FAILED)):
+                                    (3, driver.EXIT_ESCALATE), (4, driver.EXIT_STEP_FAILED),
+                                    (124, driver.EXIT_ESCALATE), (-9, driver.EXIT_ESCALATE)):
             with self.subTest(exit=exit_code):
                 self.setUp()
                 self.tools.fail["2.1-6"] = exit_code
                 self.assertEqual(self.drive(), expected)
                 receipt = json.loads((self.R / "driver/receipts/2.1-6.json").read_text())
-                self.assertEqual(receipt["hostExitMeaning"], driver.HOST_EXIT_MEANING[exit_code])
-                self.assertIn("7.5", self.labels())  # the provider side is still verified and disarmed
+                self.assertEqual(receipt["hostExitMeaning"],
+                                 driver.HOST_EXIT_MEANING.get(exit_code, "no status or killed: unverified"))
+                self.assertIn("7.6", self.labels())  # the provider side is still verified and disarmed
+
+    def test_host_steps_unverified_keeps_local_state_and_deletes_secrets(self):
+        self.tools.fail["2.1-6"] = 3
+        self.tools.after_fail.add("2.1-6")
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        for name in ("provider-token", *SECRETS):
+            self.assertFalse(os.path.lexists(self.R / name), name)
+        self.assertTrue((self.R / "sftp").is_dir())
+        self.assertTrue((self.R / "host-steps").is_dir())
+        self.assertIn("timer terrace-cloud-", self.err.getvalue())
+        self.assertIn("disarmed", self.err.getvalue())
+        self.assertIn("rehearsal_sftp.py status", self.err.getvalue())
+
+    def test_a_failed_sftp_stop_escalates_and_keeps_the_endpoint_directory(self):
+        self.sftp_left_running = True
+        self.tools.fail["7.2"] = 1
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertIn("7.2", self.labels())
+        self.assertTrue((self.R / "sftp").is_dir())
+        self.assertFalse((self.R / "provider-token").exists())
+        self.assertIn("SFTP endpoint is not verified stopped", self.err.getvalue())
 
     def test_a_crashing_child_is_a_failure(self):
         self.tools.fail["1.5b"] = -9
@@ -509,14 +592,14 @@ class FailureAtEveryStep(Harness):
             self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
         finally:
             driver.Driver.after_binding = original
-        self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+        self.assert_teardown_complete()
 
     def test_deadline_guard_stops_before_a_step_that_cannot_finish(self):
         cfg = self.config()
         digest = self.plan(cfg)
         self.tools.calls.clear()
         clock = {"now": FIXED}
-        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: clock["now"])
+        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: clock["now"], sleep=lambda _: None)
         original = self.tools.effect
 
         def late(label, argv):
@@ -536,12 +619,20 @@ class Interrupts(Harness):
         self.tools.signal_at[label] = sig
         return self.drive()
 
+    def test_signal_handler_never_raises(self):
+        d = driver.Driver(self.config(), self.tools, out=self.out, err=self.err)
+        for _ in range(3):
+            self.assertIsNone(d.on_signal(signal.SIGTERM, None))
+        self.assertTrue(d.interrupted)
+        self.assertEqual(d.signals, [signal.SIGTERM] * 3)
+
     def test_interrupt_before_anything_is_armed(self):
         self.assertEqual(self.interrupt("0.8a", signal.SIGINT), driver.EXIT_INTERRUPTED)
         self.assertNotIn("7.3", self.labels())
         self.assertNotIn("0.8b", self.labels())
         self.assertFalse((self.leases / (RUN + ".open")).exists())
         self.assertTrue((self.R / "lease-closed.json").exists())
+        self.assertFalse((self.R / "provider-token").exists())
 
     def test_interrupt_at_every_armed_phase_tears_down(self):
         for label, sig in (("1.1b", signal.SIGHUP), ("1.1c", signal.SIGTERM), ("1.2b", signal.SIGINT),
@@ -552,39 +643,113 @@ class Interrupts(Harness):
                 self.assertEqual(self.interrupt(label, sig), driver.EXIT_INTERRUPTED)
                 labels = self.labels()
                 self.assertEqual(labels[labels.index(label) + 1], "7.1-wait")
-                self.assertEqual(labels[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+                self.assert_teardown_complete()
                 self.assertTrue((self.R / "lease-closed.json").exists())
 
     def test_signal_during_teardown_is_ignored(self):
         self.tools.fail["1.5a"] = 1
         self.tools.signal_at["7.3"] = signal.SIGTERM
         self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
-        self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
-        self.assertIn("signal", self.err.getvalue())
+        self.assert_teardown_complete()
+        self.assertIn("teardown in progress", self.err.getvalue())
 
-    def test_a_second_signal_while_stopping_the_child_is_ignored(self):
-        self.tools.signal_at["1.6b"] = signal.SIGTERM
+    def test_writer_unit_finishes_before_it_is_stopped(self):
+        states = iter([b"active\n"] * 7 + [b"inactive\n"] * 100)
+        self.tools.overrides["7.1-wait"] = lambda argv: (0, next(states))
+        self.tools.signal_at["1.3d"] = signal.SIGTERM
+        self.assertEqual(self.drive(), driver.EXIT_INTERRUPTED)
+        labels = self.labels()
+        self.assertGreater(labels[:labels.index("7.1")].count("7.1-wait"), 5)
+
+    def test_a_writer_unit_that_never_ends_is_stopped_after_its_bound(self):
+        self.tools.overrides["7.1-wait"] = lambda argv: (0, b"active\n")
+        clock = {"now": FIXED}
+
+        def tick():
+            clock["now"] += 1
+            return clock["now"]
+        cfg = self.config()
+        digest = self.plan(cfg)
+        self.tools.calls.clear()
+        self.tools.fail["1.5a"] = 1
+        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=tick, sleep=lambda _: None)
+        self.assertEqual(d.run(digest), driver.EXIT_STEP_FAILED)
+        self.assertIn("7.1", self.labels())
+        self.assertIn("7.3", self.labels())
+
+
+class RealChildren(Harness):
+    """Steps handed to the REAL Runner, with bounds scaled down (the plan keeps the real ones)."""
+
+    def scaled(self):
+        return self.config(bound_scale=0.005)
+
+    def test_a_step_child_past_its_bound_is_stopped(self):
+        self.tools.real["1.5c"] = ["/bin/sh", "-c", "sleep 30"]
+        started = time.monotonic()
+        self.assertEqual(self.drive(self.scaled()), driver.EXIT_STEP_FAILED)
+        self.assertLess(time.monotonic() - started, 20)
+        receipt = json.loads((self.R / "driver/receipts/1.5c.json").read_text())
+        self.assertEqual((receipt["stoppedBy"], receipt["childGone"]), ("bound", True))
+        self.assert_teardown_complete()
+
+    def test_cleanup_past_its_bound_escalates(self):
+        self.tools.real["7.3"] = ["/bin/sh", "-c", "sleep 40"]
+        self.tools.fail["1.5a"] = 1
+        started = time.monotonic()
+        self.assertEqual(self.drive(self.scaled()), driver.EXIT_ESCALATE)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertNotIn("7.6", self.labels())
+
+    def test_host_steps_trapping_sigterm_report_through_two_signals(self):
+        # The host steps get SIGTERM, take a moment for their clean-up and report 3; a second signal changes nothing.
+        self.tools.real["2.1-6"] = ["/bin/sh", "-c", "trap 'sleep 0.5; exit 3' TERM; sleep 30 & wait"]
+        timer = threading.Timer(0.7, lambda: (os.kill(os.getpid(), signal.SIGTERM), time.sleep(0.2),
+                                              os.kill(os.getpid(), signal.SIGINT)))
         original = self.tools.run
 
-        def twice(argv, timeout, **kwargs):
-            if kwargs["label"] == "7.1":  # the second signal arrives in teardown
-                os.kill(os.getpid(), signal.SIGINT)
-                time.sleep(0.2)
+        def run(argv, timeout, **kwargs):
+            if kwargs["label"] == "2.1-6":
+                timer.start()
             return original(argv, timeout, **kwargs)
-        self.tools.run = twice
-        self.assertEqual(self.drive(), driver.EXIT_INTERRUPTED)
-        self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+        self.tools.run = run
+        cfg = self.config(bound_scale=1.0)
+        self.assertEqual(self.drive(cfg), driver.EXIT_ESCALATE)
+        self.assertEqual(self.driver.host_exit, 3)
+        self.assertEqual(self.driver.signals, [signal.SIGTERM, signal.SIGINT])
+        self.assert_teardown_complete()
+
+    def test_host_steps_that_ignore_sigterm_are_killed_and_escalate(self):
+        self.tools.real["2.1-6"] = ["/bin/sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"]
+        self.tools.signal_at["1.7c"] = signal.SIGTERM  # interrupted already: the host step never starts
+        self.assertEqual(self.drive(self.scaled()), driver.EXIT_INTERRUPTED)
+        self.setUp()
+        self.tools.real["2.1-6"] = ["/bin/sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"]
+        timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        original = self.tools.run
+
+        def run(argv, timeout, **kwargs):
+            if kwargs["label"] == "2.1-6":
+                timer.start()
+            return original(argv, timeout, **kwargs)
+        self.tools.run = run
+        self.assertEqual(self.drive(self.config(bound_scale=0.005)), driver.EXIT_ESCALATE)
+        self.assertEqual(self.driver.host_exit, -signal.SIGKILL)
 
 
 class TeardownFailure(Harness):
     def assert_left_armed(self):
         self.assertEqual(self.code, driver.EXIT_ESCALATE)
-        self.assertNotIn("7.5", self.labels())  # never disarmed
+        self.assertNotIn("7.6", self.labels())  # never disarmed
         self.assertTrue((self.R / "provider-token").exists())  # kept for recovery
+        self.assertTrue((self.R / "rehearsal_lease.py").exists() or "0.6b" not in self.labels())
+        for name in SECRETS:
+            self.assertFalse(os.path.lexists(self.R / name), name)  # not needed by recovery
         self.assertTrue((self.leases / (RUN + ".open")).exists())
         self.assertFalse((self.R / "lease-closed.json").exists())
-        self.assertIn("LEFT ARMED", self.err.getvalue())
+        self.assertIn("armed", self.err.getvalue())
         self.assertIn("resume-teardown", self.err.getvalue())
+        self.assertIn("Kept on purpose", self.err.getvalue())
 
     def test_cleanup_failure_leaves_the_timer_armed(self):
         self.tools.fail["1.4"] = 1
@@ -605,43 +770,127 @@ class TeardownFailure(Harness):
         self.drive()
         self.assert_left_armed()
         self.assertIn("7.4", self.labels())
+        self.assertNotIn("7.5-show", self.labels())  # stops at the inventory, before the audit
+        self.assertIn("independent inventory does not equal the baseline", self.err.getvalue())
 
-    def test_disarm_failure_escalates_and_deletes_nothing(self):
-        self.tools.fail["7.5"] = 1
+    def test_final_audit_failure_leaves_the_timer_armed(self):
+        self.absence_reads = 2
+        self.drive()
+        self.assert_left_armed()
+        self.assertFalse(json.loads(next((self.R / "driver").glob("final-audit.json")).read_text())["absence"])
+
+    def test_final_audit_reads_the_writer_units(self):
+        self.tools.overrides["7.5-show"] = lambda argv: (0, b"active\n")
+        self.drive()
+        self.assert_left_armed()
+
+    def test_disarm_failure_escalates_with_the_timer_state_unknown(self):
+        self.tools.fail["7.6"] = 1
         self.drive()
         self.assertEqual(self.code, driver.EXIT_ESCALATE)
         self.assertTrue((self.R / "provider-token").exists())
+        self.assertIn("unknown: disarm failed", self.err.getvalue())
 
-    def test_unit_still_active_escalates_before_cleanup(self):
-        self.tools.overrides["7.1-show"] = lambda argv: (0, b"active\n")
+    def test_timer_not_read_inactive_after_disarm_escalates(self):
+        self.tools.overrides["7.6-show"] = lambda argv: (1, b"")
         self.drive()
         self.assertEqual(self.code, driver.EXIT_ESCALATE)
-        self.assertNotIn("7.3", self.labels())
+        self.assertIn("could not be read inactive", self.err.getvalue())
 
-    def test_teardown_lets_a_running_writer_unit_finish_first(self):
-        states = iter([b"active\n"] * 7 + [b"inactive\n"] * 100)
-        self.tools.overrides["7.1-wait"] = lambda argv: (0, next(states))
-        self.tools.signal_at["1.3d"] = signal.SIGTERM
-        self.assertEqual(self.drive(), driver.EXIT_INTERRUPTED)
-        labels = self.labels()
-        first_stop = labels.index("7.1")
-        self.assertGreater(labels[:first_stop].count("7.1-wait"), 5)
+    def test_unit_read_failure_or_empty_output_is_unknown(self):
+        for answer in ((1, b"inactive\n"), (0, b""), (0, b"activating\n")):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.tools.overrides["7.1-show"] = lambda argv, answer=answer: answer
+                self.drive()
+                self.assertEqual(self.code, driver.EXIT_ESCALATE)
+                self.assertNotIn("7.3", self.labels())
 
-    def test_a_writer_unit_that_never_ends_is_stopped_after_its_bound(self):
-        self.tools.overrides["7.1-wait"] = lambda argv: (0, b"active\n")
-        clock = {"now": FIXED}
+    def test_receipt_write_failure_does_not_skip_cleanup(self):
+        original = lease.write_private
 
-        def tick():
-            clock["now"] += 1
-            return clock["now"]
-        cfg = self.config()
-        digest = self.plan(cfg)
-        self.tools.calls.clear()
-        self.tools.fail["1.5a"] = 1
-        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=tick, sleep=lambda _: None)
-        self.assertEqual(d.run(digest), driver.EXIT_STEP_FAILED)
-        self.assertIn("7.1", self.labels())
-        self.assertIn("7.3", self.labels())
+        def failing(path, value):
+            if "receipts" in str(path):
+                raise OSError(28, "No space left on device")
+            return original(path, value)
+        lease.write_private = failing
+        try:
+            self.tools.fail["1.5a"] = 1
+            self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
+        finally:
+            lease.write_private = original
+        self.assert_teardown_complete()
+
+    def test_closing_write_failure_still_escalates_with_recovery_text(self):
+        original = lease.write_private
+
+        def failing(path, value):
+            if Path(path).name.startswith(("closing", "lease-closed")):
+                raise OSError(28, "No space left on device")
+            return original(path, value)
+        lease.write_private = failing
+        try:
+            self.tools.fail["1.4"] = 1
+            self.tools.fail["7.3"] = 1
+            self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        finally:
+            lease.write_private = original
+        self.assertIn("ESCALATE", self.err.getvalue())
+
+    def test_abort_or_refresher_errors_do_not_skip_teardown(self):
+        for name in ("abort_current", "stop_refresher"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.tools.fail["1.5a"] = 1
+                target = self.tools if name == "abort_current" else driver.Driver
+                original = getattr(target, name)
+
+                def broken(*args, original=original, name=name):
+                    if name == "abort_current" or args[0].teardown_running:
+                        raise PermissionError(1, "Operation not permitted")
+                    return original(*args)
+                setattr(target, name, broken)
+                try:
+                    self.drive()
+                finally:
+                    setattr(target, name, original)
+                self.assertIn("7.3", self.labels())
+                self.assertIn("7.6", self.labels())
+
+    def test_deletion_continues_after_a_failure(self):
+        original = driver.remove_inside
+
+        def flaky(run, relative):
+            if relative == "deploy-key.sec":
+                raise driver.Failed("read-only")
+            return original(run, relative)
+        driver.remove_inside = flaky
+        try:
+            self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        finally:
+            driver.remove_inside = original
+        self.assertTrue((self.R / "deploy-key.sec").exists())
+        for name in ("provider-token", "spare-key.sec", "escrow.age", "secrets"):
+            self.assertFalse(os.path.lexists(self.R / name), name)
+        self.assertIn("deploy-key.sec", self.err.getvalue())
+
+    def test_main_maps_an_error_after_the_start_to_escalate(self):
+        args = ["run", "--run-directory", str(self.R), "--revision", REV, "--source-manifest-sha256", "0" * 64,
+                "--kexec-archive", "/x", "--kexec-archive-sha256", "0" * 64, "--ssh-cidr", "198.51.100.9/32",
+                "--unit-path", "/x", "--expect-baseline", "servers=1", "--ssh-keygen", "/x", "--nix", "/x",
+                "--nix-store", "/x", "--rclone", "/x", "--restic", "/x", "--sops", "/x", "--terrace-secrets", "/x",
+                "--approved-plan-sha", "0" * 64]
+        original = driver.Driver.run
+        driver.Driver.run = lambda self, sha: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(driver.main(args, runner=self.tools), driver.EXIT_INPUTS)
+            lease.write_private(self.R / "lease.json", {"schema": 1})
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(driver.main(args, runner=self.tools), driver.EXIT_ESCALATE)
+            self.assertIn("ESCALATE", err.getvalue())
+        finally:
+            driver.Driver.run = original
 
     def test_resume_teardown_after_escalation(self):
         self.tools.fail["1.4"] = 1
@@ -649,9 +898,9 @@ class TeardownFailure(Harness):
         self.drive()
         del self.tools.fail["7.3"]
         self.tools.calls.clear()
-        cfg = driver.Config(run_directory=self.R, source=self.source, python="/py/python3", user=USER)
-        code = driver.resume_teardown(cfg, self.tools, out=self.out, err=self.err)
-        self.assertEqual(code, driver.EXIT_PASS)
+        cfg = self.config()
+        code = driver.resume_teardown(cfg, self.tools, out=self.out, err=self.err, sleep=lambda _: None)
+        self.assertEqual(code, driver.EXIT_PASS, self.err.getvalue())
         self.assertEqual(self.labels(), TEARDOWN_LABELS)
         self.assertFalse((self.R / "provider-token").exists())
         self.assertTrue((self.R / "lease-closed.json").exists())
@@ -660,17 +909,29 @@ class TeardownFailure(Harness):
     def test_resume_delete_after_person_check(self):
         self.tools.fail["1.3d"] = 1
         self.tools.fail["7.3"] = 1
+        self.sftp_left_running = True
+        (self.R / "sftp/sftp-listener.json").write_text("{}")
         self.drive()
-        cfg = driver.Config(run_directory=self.R, source=self.source, python="/py/python3", user=USER)
+        cfg = self.config()
         self.tools.overrides["resume-load"] = lambda argv: (0, b"loaded\n")
         self.assertEqual(driver.resume_teardown(cfg, self.tools, delete_after_person_check=True, out=self.out,
                                                 err=self.err), driver.EXIT_ESCALATE)
         self.assertTrue((self.R / "provider-token").exists())
         self.tools.overrides["resume-load"] = lambda argv: (0, b"not-found\n")
+        self.audit_baseline = dict(BASELINE, servers={})
+        self.assertEqual(driver.resume_teardown(cfg, self.tools, delete_after_person_check=True, out=self.out,
+                                                err=self.err), driver.EXIT_ESCALATE)
+        self.assertTrue((self.R / "provider-token").exists())
+        self.audit_baseline = BASELINE
+        self.tools.calls.clear()
         self.assertEqual(driver.resume_teardown(cfg, self.tools, delete_after_person_check=True, out=self.out,
                                                 err=self.err), driver.EXIT_PASS)
+        self.assertIn("7.2", self.labels())
+        self.assertNotIn("7.6", self.labels())
         self.assertFalse((self.R / "provider-token").exists())
-        self.assertNotIn("7.5", self.labels())
+        self.assertFalse((self.R / "sftp").exists())
+        self.assertTrue(list(self.R.glob("lease-closed*.json")))
+        self.assertFalse((self.leases / (RUN + ".open")).exists())
 
 
 class Deletion(Harness):
@@ -731,15 +992,19 @@ class Refusals(Harness):
         self.assertEqual(len(span("2026-12-01T03:09:00", "2026-12-01T03:20:00")), 2)  # both spans
         self.assertEqual(span("2026-12-01T03:10:00", "2026-12-01T03:15:00"), [])  # the gap between them
 
-    def test_window_rechecked_at_arming(self):
-        self.drive(now=FIXED)  # passes at 08:00
+    def arm_at(self, text):
         self.setUp()
         cfg = self.config()
         digest = self.plan(cfg)
         self.tools.calls.clear()
-        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: self.at("2026-12-01 18:30:00"))
+        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: self.at(text), sleep=lambda _: None)
         d.start = lambda approved: driver.make_plan(cfg, self.tools, FIXED)  # approved earlier, started late
-        self.assertEqual(d.run(digest), driver.EXIT_STEP_FAILED)
+        return d.run(digest)
+
+    def test_window_rechecked_at_arming_including_the_timer_cleanup_tail(self):
+        # Lease plus the timer's own cleanup: 15300 s. 18:10:00 + 15300 s = 22:25:00 (touches the block: allowed).
+        self.assertEqual(self.arm_at("2026-12-01 18:10:00"), driver.EXIT_PASS)
+        self.assertEqual(self.arm_at("2026-12-01 18:10:01"), driver.EXIT_STEP_FAILED)
         self.assertNotIn("1.1a", self.labels())
         self.assertNotIn("7.3", self.labels())
 
@@ -780,33 +1045,57 @@ class Refusals(Harness):
         self.refused("not closed")
         (other / "lease-closed.json").write_text("{}")
         driver.make_plan(self.config(), self.tools, FIXED)
+        (self.leases / (RUN + ".open")).write_text("x")
+        self.refused("own open pointer")
+        (self.leases / (RUN + ".open")).unlink()
         lease.write_private(self.R / "lease.json", {})
         self.refused("already exists")
 
     def test_other_input_refusals(self):
-        self.refused("credential", self.config(credential_file=self.tmp / "token"))
+        outside = self.tmp / "token"
+        outside.write_text(PLANTED["token"])
+        outside.chmod(0o600)
+        self.refused("credential file must be a 0600 copy directly inside", self.config(credential_file=outside))
         (self.R / "provider-token").chmod(0o644)
         self.refused("credential")
         (self.R / "provider-token").chmod(0o600)
         self.refused("manifest", self.config(manifest_sha256="0" * 64))
         self.refused("ssh-cidr", self.config(ssh_cidr="0.0.0.0/0"))
         self.refused("free", self.config(min_free_bytes=1 << 62))
+        self.refused("absolute path", self.config(nix="nix"))
+        self.refused("child-path", self.config(child_path="relative/bin"))
         self.tools.overrides["idle-units"] = lambda argv: (0, b"terrace-cloud-x.timer loaded active waiting\n")
         self.refused("not idle")
         del self.tools.overrides["idle-units"]
         (self.source / "infra/nixos/lease_host_steps.py").unlink()
         self.refused("lease_host_steps.py", self.config(manifest_sha256=driver.tree_manifest(self.source)))
 
+    def test_refuses_root(self):
+        driver.running_as_root = lambda: True
+        self.refused("root")
+        self.assertEqual(driver.resume_teardown(self.config(), self.tools, out=self.out, err=self.err),
+                         driver.EXIT_INPUTS)
+
+    def test_unexpected_input_error_exits_2_with_nothing_started(self):
+        cfg = self.config()
+        digest = self.plan(cfg)
+        (self.R / "lease-inputs.json").write_text("{not json")
+        d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: FIXED)
+        self.assertEqual(d.run(digest), driver.EXIT_INPUTS)
+        self.assertFalse((self.leases / (RUN + ".open")).exists())
+        self.assertFalse((self.R / "driver").exists())
+
     def test_queue_check_is_reported_whether_or_not_supplied(self):
         plan = driver.make_plan(self.config(), self.tools, FIXED)
         queue = [c for c in plan["checks"] if c["check"] == "heavy queue"][0]
         self.assertEqual(queue["result"], "NOT MADE")
         self.assertIn("not made", driver.render_plan(plan, "0" * 64))
-        plan = driver.make_plan(self.config(queue_command="/bin/queue-idle"), self.tools, FIXED)
+        q = str(self.bin / "queue-idle")
+        plan = driver.make_plan(self.config(queue_command=q), self.tools, FIXED)
         self.assertEqual([c for c in plan["checks"] if c["check"] == "heavy queue"][0]["detail"],
-                         "supplied: /bin/queue-idle exit 0")
+                         f"supplied: {q} exit 0")
         self.tools.fail["idle-queue"] = 1
-        self.refused("heavy-queue check", self.config(queue_command="/bin/queue-idle"))
+        self.refused("heavy-queue check", self.config(queue_command=q))
 
     def test_run_refuses_an_unapproved_or_changed_plan(self):
         cfg = self.config()
@@ -818,6 +1107,45 @@ class Refusals(Harness):
         self.assertEqual(d.run(digest), driver.EXIT_INPUTS)
         self.assertFalse((self.leases / (RUN + ".open")).exists())
 
+    def changed_between_plan_and_run(self, change):
+        cfg = self.config()
+        digest = self.plan(cfg)
+        undo = change()
+        try:
+            d = driver.Driver(cfg, self.tools, out=self.out, err=self.err, now=lambda: FIXED)
+            return d.run(digest)
+        finally:
+            undo()
+
+    def test_plan_digest_binds_steps_teardown_tools_and_host_steps(self):
+        def steps():
+            original = driver.run_steps
+
+            def changed(cfg):
+                result = original(cfg)
+                result[0].bound += 1
+                return result
+            driver.run_steps = changed
+            return lambda: setattr(driver, "run_steps", original)
+
+        def teardown():
+            original = driver.TEARDOWN
+            driver.TEARDOWN = original[:-1]
+            return lambda: setattr(driver, "TEARDOWN", original)
+
+        def tool():
+            (self.bin / "restic").write_text("#!/bin/sh\nexit 1\n")
+            return lambda: None
+
+        def host_list():
+            self.tools.overrides["plan-host-steps-list"] = lambda argv: (0, HOST_LIST + b"7  something new\n")
+            return lambda: self.tools.overrides.pop("plan-host-steps-list")
+        for name, change in (("steps", steps), ("teardown", teardown), ("tool", tool), ("host steps", host_list)):
+            with self.subTest(name=name):
+                self.setUp()
+                self.assertEqual(self.changed_between_plan_and_run(change), driver.EXIT_INPUTS)
+                self.assertIn("changed since the plan", self.err.getvalue())
+
     def test_plan_lists_every_step_with_its_fields(self):
         plan = driver.make_plan(self.config(), self.tools, FIXED)
         self.assertEqual([s["id"] for s in plan["steps"]], [s.id for s in driver.run_steps(self.config())])
@@ -825,7 +1153,9 @@ class Refusals(Harness):
             self.assertTrue(all(step[key] for key in ("command", "guard", "expected", "evidence", "stop")), step)
         text = driver.render_plan(plan, "f" * 64)
         for needle in ("cap 5.0 USD", "expiry", "--approved-plan-sha " + "f" * 64, "systemd-run",
-                       "RuntimeMaxSec=230", "--server-type cpx42 --location nbg1"):
+                       "RuntimeMaxSec=230", "--server-type cpx42 --location nbg1", "servers=1, primary_ips=2, ssh_keys=1",
+                       SYSTEM, DISKO, INSTALLER, VARIANTS["v5"], "throwaway SFTP endpoint and reverse forward",
+                       "Runs as root", "Exit codes", "sha256"):
             self.assertIn(needle, text)
         self.assertNotIn(PLANTED["token"], text)
 
@@ -835,13 +1165,11 @@ class Units(Harness):
         cfg = self.config()
         for step in [s for s in driver.run_steps(cfg) if s.unit]:
             argv = driver.bounded_unit(cfg, step.unit, list(step.command))
-            tool, action, phase = Path(step.command[2]).name, step.command[3], step.command[4]
-            role = step.command[5] if tool == "rehearsal_provider_actions.py" else None
-            scope = f"{phase}-{role}" if role else action if tool == "rehearsal_provider_actions.py" else phase
+            tool = Path(step.command[4]).name
             if tool == "rehearsal_provider_actions.py":
-                scope, kind = f"{step.command[4]}-{step.command[5]}", "create"
+                scope, kind = f"{step.command[6]}-{step.command[7]}", "create"
             else:
-                kind = action
+                scope, kind = step.command[6], step.command[5]
             seen = {}
 
             class FakePath:
@@ -874,6 +1202,7 @@ class Refresher(Harness):
         self.assertEqual(self.drive(cfg), driver.EXIT_STEP_FAILED)
         receipt = json.loads((self.R / "driver/receipts/1.6b.json").read_text())
         self.assertEqual(receipt["status"], "failed")
+        self.assertIn("binding refresh failed", receipt["error"])
         self.assertNotIn("1.7a", self.labels())
         self.assertIn("7.3", self.labels())
 
@@ -894,30 +1223,60 @@ class Refresher(Harness):
         self.assertLess(max(refreshes), labels.index("1.7a"))
 
 
-class RealProcesses(unittest.TestCase):
-    def test_runner_bound_stops_the_child(self):
+class RealRunner(unittest.TestCase):
+    def test_bound_stops_the_child(self):
         started = time.monotonic()
-        code, output = driver.Runner().run(["sleep", "30"], 0.3, label="t", grace=1)
-        self.assertEqual(code, 124)
+        outcome = driver.Runner().run(["/bin/sh", "-c", "sleep 30"], 0.3, label="t", grace=1)
+        self.assertEqual((outcome.reason, outcome.gone), ("bound", True))
         self.assertLess(time.monotonic() - started, 10)
 
-    def test_runner_interrupt_stops_the_child_group(self):
-        runner = driver.Runner()
+    def test_interrupt_flag_stops_the_child_group(self):
         pid_file = Path(tempfile.mkdtemp()) / "pid"
-        previous = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(driver.Interrupted()))
-        signal.setitimer(signal.ITIMER_REAL, 0.5)
-        try:
-            with self.assertRaises(driver.Interrupted):
-                runner.run(["sh", "-c", f"sleep 30 & echo $! > {pid_file}; wait"], 20, label="t", grace=2)
-        finally:
-            signal.signal(signal.SIGALRM, previous)
-        child = int(pid_file.read_text())
+        flag = {"set": False}
+        threading.Timer(0.4, lambda: flag.update(set=True)).start()
+        outcome = driver.Runner().run(["/bin/sh", "-c", f"sleep 30 & echo $! > {pid_file}; wait"], 20, label="t",
+                                      grace=2, interrupted=lambda: flag["set"])
+        self.assertEqual((outcome.reason, outcome.gone), ("interrupted", True))
         time.sleep(0.2)
         with self.assertRaises(ProcessLookupError):
-            os.kill(child, 0)
+            os.kill(int(pid_file.read_text()), 0)
 
-    def test_runner_passes_exit_codes(self):
-        self.assertEqual(driver.Runner().run(["sh", "-c", "echo hi; exit 3"], 5, label="t"), (3, b"hi\n"))
+    def test_finished_child_with_a_grandchild_holding_the_pipe(self):
+        started = time.monotonic()
+        outcome = driver.Runner().run(["/bin/sh", "-c", "sleep 30 & echo done; exit 0"], 20, label="t", grace=1)
+        self.assertEqual((outcome.code, outcome.reason, outcome.gone), (0, None, True))
+        self.assertIn(b"done", outcome.output)
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_output_is_capped_while_reading(self):
+        outcome = driver.Runner().run(["/bin/sh", "-c", "head -c 3000000 /dev/zero"], 20, label="t")
+        self.assertEqual(outcome.code, 0)
+        self.assertLessEqual(len(outcome.output), driver.OUTPUT_LIMIT)
+
+    def test_exit_status_and_signal_deaths(self):
+        self.assertEqual(tuple(driver.Runner().run(["/bin/sh", "-c", "echo hi; exit 3"], 5, label="t")), (3, b"hi\n"))
+        self.assertEqual(driver.Runner().run(["/bin/sh", "-c", "kill -9 $$"], 5, label="t").code, -9)
+
+    def test_a_child_that_cannot_be_signalled_is_not_called_gone(self):
+        runner = driver.Runner()
+        original = os.killpg
+
+        def denied(pgid, sig):
+            if sig:
+                raise PermissionError(1, "Operation not permitted")
+            return original(pgid, sig)
+        os.killpg = denied
+        try:
+            outcome = runner.run(["/bin/sh", "-c", "sleep 2"], 0.3, label="t", grace=0.2)
+        finally:
+            os.killpg = original
+        self.assertFalse(outcome.gone)
+        self.assertTrue(runner.leftovers)
+        self.assertTrue(runner.settle(10))
+
+    def test_child_environment_is_exactly_what_is_passed(self):
+        outcome = driver.Runner().run(["/usr/bin/env"], 5, label="t", env={"PATH": "/usr/bin:/bin", "TZ": "UTC"})
+        self.assertEqual(sorted(outcome.output.decode().split()), ["PATH=/usr/bin:/bin", "TZ=UTC"])
 
     def test_wait_tcp(self):
         listener = socket.socket()
