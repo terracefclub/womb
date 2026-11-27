@@ -532,7 +532,13 @@ change with unit tests and mutants: (1) a switch unit stopped mid-switch made
 --wait` returned 0); the client now requires its finished record. (2) After a failed
 or timed-out migration the failed `terrace-cms-migrate.service` would have made the
 fix-forward activation `failed (exit 4)`: the migration unit is now recorded and reset
-before a switch like the CMS and website. Also, more generally (unit-tested; no VM
+before a switch like the CMS and website. (3) Found by the deploy proof's second run
+in the final evidence chain (2026-11-27), a defect on trunk since 2026-11-25: when the
+wait after a switch saw a start job still queued, it named it with `awk`, which is not
+among the command's runtime inputs and so not on the switch unit's PATH; the unit died
+(`awk: command not found`, exit 127) without its finished record. This was the
+queued-job window no VM run had caught before; the names are now joined in bash, and
+the unit tests run with an `awk` that fails. Also, more generally (unit-tested; no VM
 case): a unit already failed before the switch and not run again by it (same
 `InvocationID`) is named in `preexistingFailedUnits` and as a WARNING, not counted
 against the switch; one the switch ran again counts. And the automatic revert of the
