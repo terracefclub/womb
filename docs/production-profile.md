@@ -423,6 +423,11 @@ create` made. See [cloud rehearsal](cloud-rehearsal.md#production-lease-host-pre
   `python3 -B tests/platform/test_terrace_deploy.py -v`; mutation check (any
   machine, several minutes): `python3 -B tests/platform/deploy_mutants.py`. What it
   proves: [host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)
+- Update drill (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-update-drill-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE PREVIOUS_WEB_ARCHIVE PREVIOUS_CMS_ARCHIVE`,
+  the same five inputs as the deploy check: the relay's update and rollbacks, rollbacks
+  past failed and unfinished generations, a failed switch set back automatically, failed
+  and timed-out migrations and fixing forward
+  ([host updates, section 1.6](host-updates.md#16-the-update-drill-what-ran-and-what-it-changed-here)); run by hand, not in CI
 - Restore promotion drill (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-promotion-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`,
   the written [restore promotion](restore-promotion.md#5-the-promotion-drill)
   procedure run with its own commands on both roles; unit test (CI):

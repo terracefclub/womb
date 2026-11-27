@@ -60,6 +60,21 @@ that outcome as `success` too. The second failure was a wrong VM assertion (a
 systemd timestamp that changes on refused starts), replaced by a journal measure
 with a control.
 
+**Update of 2026-11-26 and 2026-11-27: owner decisions, and a second drill.** On
+2026-11-26 the owner decided: builds reach the hosts by the signed deploy path (U0,
+section 1.2), with an offline spare deploy key trusted from every host's first install;
+keep the website's migration gate (H7); and a failed switch that leaves the new
+generation as boot default is undone automatically (section 1.5, "A switch that
+fails"). A second VM proof, the update drill (`platform/production/update-drill-test.nix`,
+run with `platform/production-update-drill-check`, synthetic data), exercises what the
+deploy proof leaves out: the relay's update and rollbacks, a real rollback past a
+failed and an unfinished generation, `rollback --generation N`, a switch that fails at
+the boot loader, a migration that fails, two killed at their time limit (before and
+after their commit), fixing forward, and a build signed with the second deploy key.
+Its runs found two defects in the command, both fixed here, one gap in the website
+release, and several places where this document was wrong; section 1.6 lists them
+with what ran.
+
 Evidence levels, as in [restore promotion](restore-promotion.md) and
 [credential rotation](credential-rotation.md): **VM rehearsal (synthetic data)**,
 with the test file and what it asserts; **unit test**; **READ** (read from code,
@@ -233,8 +248,8 @@ comparison); **READ**; **NOT EXERCISED**. Nothing here ran on a real host.
 | The system manifest | `/etc/terrace/system.json`, so `<toplevel>/etc/terrace/system.json` in every production system: `schema`, `role`, `hostName`, `instance`, `wombRevision`, the app's `website.revision` and `website.migrations` (the release's migration list: `terrace.production.app.releaseMigrations`, by default the pin's list when the host runs the pinned revision, otherwise unknown), and `versions` of Keycloak, PostgreSQL and Headscale. `wombRevision` comes from the new `wombRevision` argument of `infra/nixos/production-config.nix` ([production profile](production-profile.md#building-a-host)) | RAN (eval) for both roles; RAN IN VM (read by `activate` and `status`) |
 | `platform/production/terrace-deploy.sh` (operator machine) | Refuses unless given a Nix **secret** key file, an SSH identity and a built production toplevel with a manifest; then `nix store sign --recursive` (needs a user the build machine's Nix daemon lets add signatures: root or a trusted user), `nix copy --to ssh-ng://operator@<host>` with strict host key checking, and prints the activation command. It activates nothing | RAN IN VM (the operator guest stands in for the build machine); unit test |
 | `terrace-production activate <toplevel> [--boot] [--cms-stays-down] [--accept-upstream-schema-change]` | Root only (`sudo` from `operator`). The checks below, then **inside the transient unit** `systemd-run --unit=terrace-switch --collect --service-type=exec --wait`: `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`, `<toplevel>/bin/switch-to-configuration switch` (or `boot` with `--boot`), and a record | RAN IN VM; unit test |
-| `terrace-production rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]` | Without `--generation`: the newest generation older than the current one whose last record is **neither a failure nor an unfinished attempt**. A generation's records are the `finished` lines whose `generationAfter` is its number and whose `to` is its system, and any `started` line for its system that no `finished` line follows (the unit was killed or the host lost power mid-switch: `unfinished (started <time>, never finished)`, skipped like a failure); a generation with none of these (the installation's generation 1, one made by hand, one whose records were lost) stays eligible, since nothing says it failed. So does one whose last record is `switched; down until the CMS migration`: that switch did what it should, its gate refusing a database not yet migrated, and rolling back to it brings that release back with its gate. Each generation passed over is named (`Skipping generation <n>: its last record is 'failed (exit <n>)' ...`, and in `status`); if none is left, or the log cannot be read, it refuses and asks for `--generation N`. With `--generation N`: that generation, with a WARNING if its last record is a failure or unfinished; every check of a rollback still runs. It must exist and be **older than the current generation**, which is the running system's (newest) generation, or the boot default's when the running system is in no generation; so with a pending boot default (after `activate --boot` or a switch that failed after registering), the pending generation and anything between counts as newer. A newer one is refused: going forward is `activate` with that generation's system path, which the refusal prints. Same checks as `activate` except the signatures (a generation is already root-trusted), same unit: `nix-env --switch-generation <n>`, then that generation's `switch-to-configuration`. When the boot default is **not** the running system (after `activate --boot`, or a switch that failed after registering its generation), a plain `rollback` instead makes the running system's generation the boot default again: `nix-env --switch-generation <that generation>` and the running system's `switch-to-configuration boot`, in the same unit, recorded as `cancel`; nothing running changes | RAN IN VM (both forms: the second as `activate --boot` cancelled before a reboot); RAN IN VM: after the gated switch that also broke a unit (recorded `failed (exit 4)`) and a new activation, `rollback --dry-run` named that generation as skipped and targeted the one before, and `status` named it; unit test (both forms, the failed-switch case, the skip, an unfinished attempt skipped and choosable with a warning, a record of another system under the same number not counting, a generation without records eligible, all older ones failed, an unreadable log, `--generation` with its refusals, a newer generation refused in the normal and the pending-boot-default state) |
-| The records and `status` | The unit appends two JSON lines to `/var/lib/terrace-production/deployments.log` (root, 0600): a `started` line before it changes anything (time, action, mode, from, to, generation before, and `failedBefore`: which of the CMS and website were already failed; the unit then clears their failed state so a start limit hit earlier cannot block a unit whose gate is open), and a `finished` line after (generation after, Womb and website revision, result `success`, `switched; down until the CMS migration: <units>` or `failed (exit <n>)`, `switchExit` (the switch's own exit code, `null` when it did not run), `failedUnits`, `unexpectedUnits`, `notStartedUnits`, `waitTimedOut`, `stillStarting` (step 7); the field `startingUnits` of records written before 2026-11-25 is gone, see step 7). The unit writes them, so they exist even when the SSH session dropped. `terrace-production status` adds the running system and its revisions, the profile's generation (the boot default) with a WARNING when it is not the running system, the previous generation and its revisions, whether the deploy path is on, and the last record, with a WARNING when the last activation started and never finished (its unit stopped, or the host rebooted mid-switch) | RAN IN VM (records and `status` lines); unit test (both WARNINGs, `failedBefore`) |
+| `terrace-production rollback [--generation N] [--boot] [--cms-stays-down] [--accept-upstream-schema-change] [--dry-run]` | Without `--generation`: the newest generation older than the current one whose last record is **neither a failure nor an unfinished attempt**. A generation's records are the `finished` lines whose `generationAfter` is its number and whose `to` is its system, and any `started` line for its system that no `finished` line follows (the unit was killed or the host lost power mid-switch: `unfinished (started <time>, never finished)`, skipped like a failure); a generation with none of these (the installation's generation 1, one made by hand, one whose records were lost) stays eligible, since nothing says it failed. So does one whose last record is `switched; down until the CMS migration`: that switch did what it should, its gate refusing a database not yet migrated, and rolling back to it brings that release back with its gate. Each generation passed over is named (`Skipping generation <n>: its last record is 'failed (exit <n>)' ...`, and in `status`); if none is left, or the log cannot be read, it refuses and asks for `--generation N`. With `--generation N`: that generation, with a WARNING if its last record is a failure or unfinished; every check of a rollback still runs. It must exist and be **older than the current generation**, which is the running system's (newest) generation, or the boot default's when the running system is in no generation; so with a pending boot default (after `activate --boot` or a switch that failed after registering), the pending generation and anything between counts as newer. A newer one is refused: going forward is `activate` with that generation's system path, which the refusal prints. Same checks as `activate` except the signatures (a generation is already root-trusted), same unit: `nix-env --switch-generation <n>`, then that generation's `switch-to-configuration`. When the boot default is **not** the running system (after `activate --boot`, or a switch that failed after registering its generation), a plain `rollback` instead makes the running system's generation the boot default again: `nix-env --switch-generation <that generation>` and the running system's `switch-to-configuration boot`, in the same unit, recorded as `cancel`; nothing running changes | RAN IN VM (both forms: the second as `activate --boot` cancelled before a reboot, and in the update drill after an unfinished attempt); RAN IN VM (update drill, section 1.6): a real plain `rollback` past a failed and an unfinished generation, `--generation N` to an older generation, its warnings on a failed and an unfinished one, and its refusal of a newer generation, also with a pending boot default; RAN IN VM (deploy proof): after the gated switch that also broke a unit, `rollback --dry-run` named that generation as skipped; unit test (both forms, the failed-switch case, the skip, an unfinished attempt skipped and choosable with a warning, a record of another system under the same number not counting, a generation without records eligible, all older ones failed, an unreadable log, `--generation` with its refusals, a newer generation refused in the normal and the pending-boot-default state) |
+| The records and `status` | The unit appends two JSON lines to `/var/lib/terrace-production/deployments.log` (root, 0600): a `started` line before it changes anything (time, action, mode, from, to, generation before, and `failedBefore`: which of the CMS and website were already failed; the unit then clears their failed state so a start limit hit earlier cannot block a unit whose gate is open), and a `finished` line after (generation after, Womb and website revision, result `success`, `switched; down until the CMS migration: <units>` or `failed (exit <n>)`, `switchExit` (the switch's own exit code, `null` when it did not run), `failedUnits`, `unexpectedUnits`, `notStartedUnits`, `waitTimedOut`, `stillStarting` (step 7), and since 2026-11-26 `preexistingFailedUnits` (units failed before the switch and left untouched by it: a warning, not a failure), `revert` (`null`, or `{from, to, result}` when the command set the boot default back after a failed switch, "A switch that fails" below) and `bootDefaultAfter`; the field `startingUnits` of records written before 2026-11-25 is gone, see step 7). `failedBefore` also names `terrace-cms-migrate.service` (app) since 2026-11-26: it is reset before the switch like the CMS and website. The unit writes them, so they exist even when the SSH session dropped. `terrace-production status` adds the running system and its revisions, the profile's generation (the boot default) with a WARNING when it is not the running system, the previous generation and its revisions, whether the deploy path is on, and the last record, with a WARNING when the last activation started and never finished (its unit stopped, or the host rebooted mid-switch) | RAN IN VM (records and `status` lines; in the update drill also the `revert` record, the migration unit in `failedBefore`, the `started` record of a stopped switch); unit test (every WARNING, `failedBefore`, `preexistingFailedUnits`, `revert`) |
 
 **What `activate` and `rollback` refuse, before anything changes.** Each refusal
 prints `terrace-production: nothing changed: ...` and exits 1; the unit tests check
@@ -387,31 +402,66 @@ Unit tests for each of these, with a mutant for each guard. VM (update drill, su
   not reboot; repair the boot loader cause first, and plan for console access at
   the provider before any reboot (H4).
 
-**What the deploy VM proof does not assert.** A real host, provider or network; the
-relay role's update (its closure is only refused on the app); a boot loader
-installed on a real disk (the test nodes only write the GRUB menu); a kernel change
+**A switch unit stopped or killed mid-switch** (`systemctl stop terrace-switch.service`,
+a kill, a power loss) writes no finished record, so the command sets nothing back:
+the unit that would do it is gone, a revert from the client would run outside the
+unit and its re-checks on a half-switched system (possibly against whoever stopped
+it), and after a power loss there is no client at all. The client exits 1 with `the
+terrace-switch unit ended without writing its finished record (stopped or killed
+mid-switch); the system may be half switched: read terrace-production status.
+Nothing was set back: to make the running system the boot default again, run
+terrace-production rollback`; `status` warns that the last activation never finished
+and, when the profile moved, that the boot default is not the running system. A plain
+`rollback` then cancels the pending generation; the next completed switch replaces
+what the stopped activation had already changed (in the drill, `/etc`). RAN IN VM
+(update drill); unit test. Before 2026-11-26 the client reported such a run as a
+success: systemd counts a unit stopped by SIGTERM as ended successfully, so
+`systemd-run --wait` returns 0 (found by the update drill).
+
+**A switch that fails only because `operator`'s user manager was stopping.** Every
+SSH login as `operator` (a copy, a command) starts `operator`'s systemd user manager,
+which stops about 10 seconds after the last session ends. A switch started while it is
+stopping fails its user activation (`Failed to start user unit sockets.target:
+Transaction ... is destructive`, `warning: user activation for operator failed`) and
+exits 4 with no failed unit: seen once in the update drill, before it waited for the
+user manager. The command records `failed (exit 4)` with empty unit lists (nothing
+explains exit 4, so it is not called a success). The new system did switch and runs,
+and it is the boot default, so the automatic revert does not run (the boot default is
+the running system). What the operator sees: `FAILED (exit 4)`, `rollback result:
+failed (exit 4)`, and those lines in `journalctl -u terrace-switch.service -o cat
+--no-pager`. What to do: read that journal; if it shows only the user activation
+failing and `systemctl --failed` lists nothing, the system is as intended, but its
+generation is recorded as failed, so a later plain `rollback` passes over it. Running
+`activate` again with the same path is refused (it is the running system). The case
+itself is READ from that one run's log (the drill now waits until the user manager has
+stopped before every switch, so it does not assert it); the advice is READ. Running
+`activate` over SSH avoids it: that session keeps the user manager running.
+
+**What the two VM proofs do not assert.** Neither runs on a real host, provider or
+network; a boot loader on a real disk (the test nodes only write the GRUB menu; the
+update drill's failing GRUB install is a VM disk that cannot take it); a kernel change
 and a reboot into a new generation (a test VM boots its first system directly;
-`--boot` runs only as far as the boot step, then is cancelled); a switch that
-restarts sshd; a Keycloak, Headscale or PostgreSQL version
-change; the inventory and realm steps (8, 9); a failed or timed-out migration; the
-old migration unit on the newer schema (H1); backups, retention and the backup
-window (steps 5, 6, 13); a failed switch's state (seen while the proof was built,
-when the VM could not take GRUB, but asserted only by unit tests); the bootstrap
-route and key rotation; real data sizes; the 300 s wait for the CMS and website
-reaching its limit (unit test only); a gated switch with the gated website that exits
-4 for the gated units alone (only exit 0 was seen); the window in which the CMS and
-website start jobs are still queued when the switch returns (waited for since review
-round 1; unit test only, the VM never caught it open); a closed gate with the units
-never started (unit test only); an unfinished `started` record (unit test only);
-`--generation` refusing a newer generation, also with a pending boot default (unit
-test only); `rollback --generation N`, a plain
-`rollback` that actually switches past a failed generation (the VM shows the choice
-with `--dry-run` only), the lock under two concurrent SSH sessions and the race of
-two first-ever runs on the lock file, and a symlinked signing key (unit tests only).
-One release pair (`680ad56` to `dd1aef7`)
-and small synthetic data. The test nodes enable `switch-to-configuration` (the test
-framework turns it off for its nodes; an installed host keeps NixOS's default, on)
-and write the GRUB menu without installing it (the VM disk cannot take GRUB).
+`--boot` runs only as far as the boot step, then is cancelled; after the automatic
+revert no reboot is made); a switch that restarts sshd; a Keycloak, Headscale or
+PostgreSQL version change; the inventory and realm steps (8, 9); the old migration
+unit on the newer schema (H1); backups, retention and the backup window (steps 5, 6,
+13; both proofs hold the backup timers with hand-placed markers); the bootstrap route
+and key rotation; real data sizes; the 300 s wait for the CMS and website reaching its
+limit (unit test only); a gated switch with the gated website that exits 4 for the
+gated units alone (only exit 0 was seen); the window in which the CMS and website start
+jobs are still queued when the switch returns (unit test only); a closed gate with the
+units never started (unit test only); a unit failed before a switch and left
+untouched by it, named as a warning (unit test only); a revert that itself fails, and
+a switch failing only because `operator`'s user manager was stopping (READ, below; the
+drill avoids it); the lock under two concurrent SSH sessions and the race of two
+first-ever runs on the lock file, and a symlinked signing key (unit tests only);
+Headscale clients through an update; a migration whose own failure leaves a change
+behind (the one release pair has one migration, which Payload runs in one
+transaction); a migration longer than the limit on real data. One release pair
+(`680ad56` to `dd1aef7`) and small synthetic data. The test nodes enable
+`switch-to-configuration` (the test framework turns it off for its nodes; an installed
+host keeps NixOS's default, on) and write the GRUB menu without installing it (the VM
+disk cannot take GRUB). What the update drill itself ran: section 1.6.
 
 **Integrity, not a privilege boundary.** `operator` has passwordless `sudo`, so root
 on the host can still import any closure (`nix-store --import`, as the VM proof does
@@ -449,6 +499,55 @@ key's custody is in [secrets](secrets.md#deploy-signing-key).
   trusts a new key.
 - *Leak*: copying still needs the `operator` login and activation still needs
   `sudo`, so a leaked key alone does not reach a host; rotate as above.
+
+### 1.6 The update drill: what ran, and what it changed here
+
+`platform/production/update-drill-test.nix` (VM, synthetic data, instance `rehearsal`):
+an operator guest that signs and copies, a production relay and a production app
+host. Both hosts carry the hold markers `adopt --restored` writes, placed by hand,
+because the drill has no backup repository and an hourly freshness check would fail
+(the app's sweep marker is removed in part A). Every switch waits until `operator`'s
+systemd user manager has stopped (see "A switch that fails" in 1.5). Run by hand on
+the build machine, not in CI. Results: below, "Runs".
+
+| Subtest | What it showed |
+| --- | --- |
+| Relay R1 and R2 | Signed copy accepted as `operator`; `activate --dry-run` over SSH with Headscale and nginx running exits 0 (`Checks passed ... (Womb <rev>, website none)`: no quiesce check on the relay); the activation over SSH records `success`, `switchExit` 0, empty unit lists, `websiteRevision` ""; Headscale restarted (its settings changed), nginx not; the Headscale key hashes and the user unchanged; HTTPS `/health` 200 from the operator guest; `status` names both generations, no WARNING |
+| Relay: no CMS gate | READ in `terrace-production.sh` and `base.nix`: for the relay `quiesce` and `cms_marker` are empty, so `check_cms` returns at once, the gate is never closed, the wait has only `terrace-production.target` and `terrace-production-boot` jobs, and a switch is judged only after exit 4 or a timed-out wait. RAN IN VM: a system that adds a failing unit is recorded `failed (exit 4)` naming only that unit, never "down until the CMS migration" |
+| Relay rollbacks | Plain `rollback` from the failed generation 3 runs generation 2, again to generation 1 (Headscale restarted with its previous settings); keys, user, health unchanged |
+| Unfinished attempt | `systemctl stop terrace-switch.service` while a 20 s activation probe runs: the log ends with a `started` record; the client exits 1 with `the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch) ...` (before the fix it reported success, below); the stopped activation had already replaced `/etc`; running: the old system, boot default: the attempt's generation; `status` warns of both; `rollback --generation <the pending one>` refused (not older than the running system's); plain `rollback` cancels it (mode `boot`), and leaves the attempt's `/etc` in place until the next completed switch |
+| Rollback past failed and unfinished generations | A failed (exit 4) generation 4 and the unfinished generation 3: a real plain `rollback` from generation 5 prints both `Skipping generation ...` lines and runs generation 2, recorded `rollback 5 -> 2`; `rollback --generation 4` and `--generation 3` (dry runs) warn with each last record and pass their checks |
+| `rollback --generation N` | `--generation 5` from generation 2 refused, naming `activate <its system>`; `--generation 1` runs generation 1, no warning |
+| Second deploy key | The app trusts two deploy keys; a build signed with the second only (its toplevel carries only that signature) is activated, `Signatures: <n> new path(s) verified against 2 trusted deploy key(s)` |
+| E: failed at the boot loader | A system that installs GRUB on the VM disk fails before it switches; the record has `revert {from 6, to 1, result success}`, `bootDefaultAfter` 1; the client says it set the boot default back; the running system is the boot default, generation 6 stays in the list; the first entry of `/boot/grub/grub.cfg` boots the running system; `status` has no WARNING. No reboot: a test VM boots the system the framework names, not the boot menu's default |
+| Next release, gated | Activation of the next release over SSH recorded `switched; down until the CMS migration`; the activation **started the sweep timer step 6 had stopped**, and tried to start the backup timers (their hold marker kept them off) |
+| A1: migration fails | A leftover enum type with the migration's name: `bin/migrate` fails (`Result=exit-code`, `ExecMainStatus=1`), **with no line in the unit's journal** (below); marker old, ledger old, no table added, data unchanged; CMS, website and sweep not running; `status` shows nothing of it; `rollback --dry-run` to the previous release passes every check; activating the running system again is refused |
+| A2: killed before its commit | A second session holds a lock the migration's `ALTER TABLE` needs; the unit is killed at its limit (`Result=timeout`; the failing build carries 60 s instead of 180 s, the drill's only change to it); **the database session outlives the killed unit**, still waiting for the lock, and ends by itself once the lock is released; nothing committed |
+| A3: killed after its commit (H9) | The CMS role's commit held on an absent synchronous standby; the unit killed at its limit after the migration committed locally; while the commit waits other sessions do not see it; afterwards the ledger lists the new migration and the marker the old revision; `rollback` (also `--dry-run`, `--cms-stays-down`, `--generation 1`) and `activate` of the previous release are refused with `(a failed or partial migration, H9) ... Not allowed by any flag` (control: A1's dry run, without the ledger row, passed) |
+| A4: fixing forward | The corrected build (same release, the module's 180 s limit, a new Womb revision) signed, copied, dry run exit 0, activated over SSH with no manual step: the failed migration unit is named in `failedBefore` and reset by the command, the record is `switched; down until the CMS migration`; the activation started the sweep timer again; the migration, held 75 s by a lock (longer than the failing build's limit), is not killed and succeeds once released; marker and ledger the new pin's (nothing left to apply after A3); the site serves; data unchanged; no failed unit |
+
+**What it changed in the tools.** Two defects found by the drill, fixed in this
+change with unit tests and mutants: (1) a switch unit stopped mid-switch made
+`activate` report success (systemd counts SIGTERM as a clean exit, so `systemd-run
+--wait` returned 0); the client now requires its finished record. (2) After a failed
+or timed-out migration the failed `terrace-cms-migrate.service` would have made the
+fix-forward activation `failed (exit 4)`: the migration unit is now recorded and reset
+before a switch like the CMS and website. Also, more generally (unit-tested; no VM
+case): a unit already failed before the switch and not run again by it (same
+`InvocationID`) is named in `preexistingFailedUnits` and as a WARNING, not counted
+against the switch; one the switch ran again counts. And the automatic revert of the
+boot default (owner decision of 2026-11-26).
+
+**What it changed in this document.** Step 6 to step 13: an activation or rollback
+starts again the timers step 6 stopped (section 2, step 7). Step 10: a failed
+migration writes nothing to the journal (website gap, fixed in the website at
+`57b4649`, not on hosts until the pin moves); what the command allows after each kind
+of failure; the orphaned database session after a timeout. Section 3: the relay's
+update is now run in a VM. Section 1.5: the stopped-switch report, the revert, units
+failed before a switch.
+
+**Runs.** See the pull request and the evidence list there for every run, failed runs
+included with their causes.
 
 ## 2. The app host procedure
 
@@ -813,7 +912,14 @@ website that is merely `activating` when the switch has returned is not counted:
 `switch-to-configuration` waits for the jobs it queued, so such a unit was started by
 something else, such as a timer. Anything else, an inventory addition's
 `sops-install-secrets` included, is recorded `failed (exit 4)` with every
-unexpected unit named: read the list, do not retry blindly. RAN IN VM: every gated
+unexpected unit named: read the list, do not retry blindly. A unit that was already
+failed before the switch and that the switch did not run again (the same systemd
+invocation before and after) is not counted against it since 2026-11-26: it is listed
+in `preexistingFailedUnits` and the client prints `WARNING: already failed before this
+switch and left untouched by it, so not counted against it: <units>`; with the gate
+open, an exit 4 explained only by such units is recorded `success`. One the switch
+started again and that failed again counts as broken, as does a unit that keeps
+restarting (each restart is a new invocation). Unit test only. RAN IN VM: every gated
 switch was recorded as switched with exactly the CMS and website failed and nothing
 unexpected, and a gated switch whose system also carried a unit that fails and
 restarts was recorded `failed (exit 4)` naming exactly that unit, which the real
@@ -823,11 +929,28 @@ retrying during the wait, and one still starting after it (named as a timed-out 
 when the switch returns (waited for), a gate closed with the units never started
 (failed, `THE SITE IS DOWN`), a job listing that fails, and a gated unit running
 with the gate closed. The queued-job window itself was not made to occur in a VM.
-Nothing needs stopping
-now: both units stay failed until step 11. Any later `activate` or `rollback` that
-changes the release again refuses while the CMS or the website is still retrying
-(a start by hand, a reboot or a push can start them), and names `systemctl stop
-terrace-cms.service terrace-web.service`.
+The CMS and website need no stopping now: both stay failed until step 11. Any later
+`activate` or `rollback` that changes the release again refuses while the CMS or the
+website is still retrying (a start by hand, a reboot or a push can start them), and
+names `systemctl stop terrace-cms.service terrace-web.service`.
+
+**But the timers step 6 stopped are running again.** `switch-to-configuration` starts
+every active target again (READ: nixpkgs `switch-to-configuration-ng`, "Cause all
+active target units to be restarted"), so `terrace-production.target` starts what it
+wants, the backup, check and sweep timers included. RAN IN VM (update drill): the
+activation of the next release, and again that of the corrected build, started the
+sweep timer step 6 had stopped, and tried to start the backup timers (only the hold
+markers that drill places kept them off). This holds for every `activate`, `rollback`
+and switch by hand. So right after step 7, and after every later activation or
+rollback before step 13, stop them again (step 6's first line):
+
+```sh
+systemctl stop terrace-backup.timer terrace-backup-check.timer terrace-cms-sweep.timer
+```
+
+On a host adopted with `--restored` whose timers are still held, the held ones stay
+off by their start condition (RAN IN VM, both proofs). Before 2026-11-27 this
+document said they stayed stopped; it was wrong.
 
 Failed: anything else in `systemctl --failed` (Keycloak, PostgreSQL, nginx, sshd,
 an unexpected `sops-install-secrets`). Without a Keycloak or Headscale version
@@ -1005,7 +1128,8 @@ of a failed migration is therefore not visible on the host. Then:
 
 - The marker still holds the **old** revision. On the new generation the gate stays
   closed (old marker, new pin), so the CMS, the website, the sweep and the tools
-  refuse; keep it so. Keep the sweep and backup timers stopped. **A reboot undoes
+  refuse; keep it so. Keep the sweep and backup timers stopped, and stop them again
+after every activation or rollback (each starts them, step 7). **A reboot undoes
   part of this**: at boot the adopted host starts `terrace-production.target`,
   which arms the backup, check, freshness and sweep timers and starts the writers
   (the CMS and website then fail their gate again) (`base.nix`; [restore promotion](restore-promotion.md) step 2 says the same
@@ -1015,14 +1139,37 @@ of a failed migration is therefore not visible on the host. Then:
   and stop the timers again (step 6's first line). The boot default
   must be the new generation (`nix-env --set` and `switch`, step 7), never an old
   one left by a `test` activation.
-- **Do not roll back the generation and start the old CMS.** The old generation's
-  gate expects the old revision, which is exactly what the marker holds, so the old
-  CMS **would start** on a database that may be partly migrated. Do not run "restart
-  after quiesce" either.
-- Read the ledger to see which migrations were recorded. Whether Payload runs each
-  migration in its own transaction, whether a killed run leaves a migration half
-  applied, and whether a second `start` resumes cleanly are **not determined from the
-  repository**. Treat the database as changed.
+- **Do not roll back the generation and start the old CMS** before the owner has
+  decided. The old generation's gate expects the old revision, which is exactly what
+  the marker holds, so the old CMS **would start** on whatever the database now is.
+  Do not run "restart after quiesce" either.
+- **What the command enforces, and what it leaves to you** (RAN IN VM, update drill
+  A1 to A3, one release pair whose new release adds one migration): when the ledger
+  holds a migration the previous release lacks while the marker is still the old
+  revision (H9: the migration committed, then the run was killed before writing the
+  marker), every way back to the previous release (`rollback`, with or without
+  `--cms-stays-down`, `--generation N`, `activate` of its system) is refused with no
+  flag. When the ledger shows nothing new (a migration that failed, or was killed
+  before its commit), a plain `rollback` passes every check: the command cannot see
+  a change, so the decision between fixing forward and restoring is yours (the
+  owner's) alone, not the tool's.
+- **Wait for the migration's database session to end, then read the ledger.** After a
+  kill at the time limit the migration's PostgreSQL session can outlive the unit: in
+  the drill it still waited for a lock after the unit was killed and ended by itself
+  only when the lock was released; and a session killed while its commit waited
+  (A3) made its migration visible only once the commit completed. Check that `runuser
+  -u postgres -- psql -XAt -d postgres -c "select count(*) from pg_stat_activity
+  where usename = 'terrace_cms'"` prints `0` (the CMS, website and sweep are down, so
+  any session is the migration's), then read the ledger. If a session stays, find
+  what it waits for (`wait_event_type`, `wait_event` in the same view) before
+  anything else; do not start another migration under it.
+- Seen in the drill for this release pair: each migration commits in its own
+  transaction (Payload, in the pinned bundle), so a failure or a kill before the
+  commit left the ledger and the schema unchanged, and one after the commit left the
+  migration fully applied; a second `start` (the corrected build's) found nothing
+  left to apply and wrote the marker. A release whose migrations do something outside
+  their transaction is not covered. Treat the database as changed until the ledger and
+  the session check say otherwise.
 - Owner decision, before anything else: **fix forward** (a corrected pin, or a
   retry when the cause is known and outside the database, such as a guard), or
   **restore** the step 6 snapshot onto a replacement (U8, section 4.3). A blind
@@ -1031,7 +1178,8 @@ of a failed migration is therefore not visible on the host. Then:
   the corrected closure (steps 3 and 4), stop the CMS and website if either is
   still retrying (`systemctl stop terrace-cms.service terrace-web.service`;
   `activate` refuses a release change until they are), then go straight to
-  activation (step 7),
+  activation (step 7; the failed migration unit needs no reset by hand: the command
+  records it in `failedBefore` and resets it; then stop the timers again, step 7),
   secrets (step 8) if needed, the realm (step 9) and the migration (step 10). Do
   **not** run step 5's checks as a gate (its marker check fails by design in this
   state) and do **not** run step 6 again the same day: a second snapshot today
@@ -1055,8 +1203,12 @@ list, the only migration applied is the one the new pin adds
 (`20261119_165021_roster_journal`), a second run applies nothing, the tables written
 before are unchanged row for row, the media files are unchanged, and the CMS serves
 again. One release pair, small synthetic data. **A failing migration and the time
-limit: not exercised anywhere**, in this repository or in the website's release CI,
-which migrates an empty database (website `tools/release/README.md` at `dd1aef7`).
+limit: RAN IN VM** (update drill A1 to A4, section 1.6): a migration that fails on a
+conflicting object, one killed at its limit before its commit and one after it, and
+fixing forward with a corrected build, on the same release pair; the drill lowers the
+failing build's limit to 60 s (the corrected build carries the module's 180 s). Not
+exercised: real data, a release with several new migrations. The website's release
+CI migrates an empty database (website `tools/release/README.md` at `dd1aef7`).
 
 ### Part E. Start, check, finish
 
@@ -1197,8 +1349,14 @@ terrace-backup-check.timer`, as step 13.
 Evidence: the production relay role is booted, pushed, adopted, serves Headscale and
 HTTPS and backs up, VM rehearsal (synthetic data), `platform/production/test.nix`
 "production relay role" subtest; and the live specialisation switch of step 7's
-evidence ran on the relay. Updating the relay to a new revision, Headscale version
-changes, client reconnection after an update: not exercised anywhere.
+evidence ran on the relay. **The relay's update through the deploy path: RAN IN VM**
+(update drill, section 1.6): R1's record and key hashes, a signed copy, `activate
+--dry-run` and `activate` over SSH with Headscale and nginx running (no quiesce on the
+relay: the dry run is a clean pass), the record and `status`, Headscale restarted with
+its keys and user unchanged, HTTPS `/health` 200, a broken switch recorded
+`failed (exit 4)`, and two real rollbacks (section 4.1). R1's backup and R5's re-arm
+are not in it (no repository; the timers are held there), nor are Headscale version
+changes or clients reconnecting.
 
 ## 4. Going back
 
@@ -1282,14 +1440,18 @@ back:
 Evidence: RAN IN VM (`deploy-test.nix`, "case A"): after activating the next release
 and before its migration, `terrace-production rollback` ran generation 1 again;
 "restart after quiesce" brought the previous CMS and website back, serving the
-populated data, with the old marker and ledger unchanged. Items 3 and the relay:
-not exercised anywhere.
+populated data, with the old marker and ledger unchanged. The relay's rollbacks: RAN
+IN VM (update drill; timers held there, so item 2's re-arm is not shown). Item 3: not
+exercised anywhere.
 
 **This case does not cover a step 10 that started and failed**: the marker then
 still holds the old revision, and item 2 would start the old CMS on a database that
 may be partly migrated. That is case B. `terrace-production rollback` refuses it
-whenever the ledger records a migration the old release does not list (unit test;
-a failed migration is not exercised in a VM).
+whenever the ledger records a migration the old release does not list (RAN IN VM,
+update drill A3, a migration killed after its commit). After a migration that failed
+or was killed before its commit the ledger shows nothing new and the command allows
+the rollback (RAN IN VM, A1): that it is case B is the operator's judgement, from
+step 10's checks, not the tool's.
 
 ### 4.3 Case B: a migration started, or an upstream schema changed
 
@@ -1430,8 +1592,17 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
   size the hardware module sets. Collecting garbage, by hand, removes rollback
   targets. Neither effect is measured.
 - **H9. A failed or killed migration leaves the old marker.** The old generation's
-  gate then opens for a possibly partly migrated database (step 10, case A's
-  exclusion). The 180-second start limit can kill a long migration on real data.
+  gate then opens for whatever the database is (step 10, case A's exclusion). The
+  180-second start limit can kill a long migration on real data. RAN IN VM (update
+  drill): killed after its commit, the ledger holds the migration and the command
+  refuses every way back with no flag; failed or killed before its commit, nothing
+  changed in the ledger or schema and the command allows a rollback (the decision is
+  the owner's).
+- **H10. An activation re-arms the timers step 6 stopped** (step 7): RAN IN VM for the
+  sweep timer; stop them again after each activation or rollback.
+- **H11. A failed migration is silent** in the pinned release (step 10): only the
+  unit's result and exit status show it. Fixed in the website at `57b4649`; not on
+  hosts until Womb's pin moves.
 
 ## 6. Traceability: evidence per step
 
@@ -1445,17 +1616,17 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
 | 3. Build | `infra/nixos/production-config.nix`; every production VM check builds the same roles | Evaluation invariants, archive hashes | VM rehearsal (synthetic data) for a fresh host; a build for a real private module: not exercised anywhere |
 | 4. Copy the closure | `platform/production/terrace-deploy.sh` (opt-in deploy path); `copy_store` in `infra/nixos/rescue_install.py` (root, Rescue system, install only) | Signed copy as `operator` accepted; unsigned and foreign-signed copies refused by the host's Nix daemon | RAN IN VM (`deploy-test.nix`, app role, operator guest as build machine). The Rescue copy is not an update path. A real host and the relay: not exercised anywhere |
 | 5. Record state | `terrace-production status` in `base.nix`; `test.nix` asserts only the "adoption as new not finished" string | That string | The `adopted <time>` and `active` outputs: READ. The window checks: not exercised anywhere |
-| 6. Quiesce, back up | "back up, destroy the host" subtest, `test.nix` | Backup succeeds, snapshot listed | VM rehearsal (synthetic data); that subtest also stops Keycloak and nginx. Keeping Keycloak up, stopping and re-arming the backup timers, retention of the pre-update snapshot: not exercised anywhere |
-| 7. Activate | `terrace-production activate` (`deploy-test.nix`); `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | The refusals of section 1.5 with controls; the new generation runs, its record and `status`; the switch completes after the SSH client is killed | RAN IN VM for the app role, `switch` mode, a new release; the relay's same-build `test` switch as before. `boot`, a reboot into a new generation, the relay's update: not exercised anywhere |
+| 6. Quiesce, back up | "back up, destroy the host" subtest, `test.nix` | Backup succeeds, snapshot listed | VM rehearsal (synthetic data); that subtest also stops Keycloak and nginx. An activation starting the stopped sweep timer again: RAN IN VM (update drill). Keeping Keycloak up, the backup timers themselves (held in both drills), retention of the pre-update snapshot: not exercised anywhere |
+| 7. Activate | `terrace-production activate` (`deploy-test.nix`); `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | The refusals of section 1.5 with controls; the new generation runs, its record and `status`; the switch completes after the SSH client is killed | RAN IN VM for the app role, `switch` mode, a new release; in the update drill also the relay's update, a switch stopped mid-way, a switch failed at the boot loader with the boot default set back, a build signed by the second deploy key; the relay's same-build `test` switch as before. `boot` with a reboot into a new generation: not exercised anywhere |
 | 7. Gate closes on a re-pin | `requireMigration`; the tool and website refusals in `website-test.nix`; the re-pin in `deploy-test.nix` | `CMS migration gate is closed` from the tool and the website; on a real re-pin the CMS's and website's gate messages and `start-limit-hit`, the switch (exit 0 or 4) recorded as `switched; down until the CMS migration`, neither bundle started | VM rehearsal (synthetic data): the tool and the website with the marker moved away or wrong (website module), and the CMS and website on a re-pin of the production app role. The sweep refusal: READ |
 | 8. Secrets after activation | `cmd_install`, `cmd_verify`; "rotate the intake secret" in `test.nix` | Push, verify, CMS and website restarted | VM rehearsal (synthetic data) for a push to an adopted host; an inventory change, a push with the CMS stopped: not exercised anywhere |
 | 9. Realm | "realm reconciliation" in `identity-admin-test.nix` | One planned change applied; users and credentials unchanged; converged; back to pinned keeps roles, clients, mappers, scopes | VM rehearsal (synthetic data); re-pin simulated by rewriting the tool's configuration |
-| 10. Migrate | "explicit migration gate" in `website-test.nix`; replacement subtest in `test.nix`; upgrade in `deploy-test.nix` | Pinned ledger; idempotent; refusals stop nothing; accepted migration stops the apps; upgrade adds exactly the new pin's migration, data unchanged | VM rehearsal (synthetic data) on an empty database, on restored data of the same release, and an upgrade `680ad56` to `dd1aef7` on populated synthetic data. A failed or timed-out migration: not exercised anywhere |
+| 10. Migrate | "explicit migration gate" in `website-test.nix`; replacement subtest in `test.nix`; upgrade in `deploy-test.nix` | Pinned ledger; idempotent; refusals stop nothing; accepted migration stops the apps; upgrade adds exactly the new pin's migration, data unchanged | VM rehearsal (synthetic data) on an empty database, on restored data of the same release, and an upgrade `680ad56` to `dd1aef7` on populated synthetic data. A failed migration, two killed at the limit (before and after the commit) and fixing forward: RAN IN VM (update drill, same release pair) |
 | 11. Start | `website-test.nix` (`reset-failed`, start after migrations); persistent sweep timer catch-up | Units active; missed sweep runs at once | VM rehearsal (synthetic data), website module |
 | 12. Checks | `terrace-tls check` (`tls-test.nix`), `verify` (`test.nix`), `realm plan` (`identity-admin-test.nix`) | Each check's own output | VM rehearsal (synthetic data), each separately; together after an update: not exercised anywhere |
 | 13. Re-arm timers | none | none | Not exercised anywhere |
-| R1-R5 Relay | "production relay role" subtest in `test.nix`; the relay switch in `tls-test.nix` | Adoption, HTTPS, backup; live switch | VM rehearsal (synthetic data) for boot and a same-build switch; an update: not exercised anywhere |
-| 4.1-4.3 Rollback | `terrace-production rollback` (`deploy-test.nix`) | Case A: previous site back, data and ledger unchanged. Case B: refused without `--cms-stays-down`; with it, the previous CMS fails its gate; what reverts and what does not (4.1) | RAN IN VM, app role. Restore onto a replacement (4.3, item 2), the relay, a rollback after a Keycloak or Headscale change: not exercised anywhere |
+| R1-R5 Relay | "production relay role" subtest in `test.nix`; the relay switch in `tls-test.nix` | Adoption, HTTPS, backup; live switch | VM rehearsal (synthetic data) for boot and a same-build switch; the update, a broken switch and two rollbacks: RAN IN VM (update drill); R1's backup, R5, Headscale version changes and clients: not exercised anywhere |
+| 4.1-4.3 Rollback | `terrace-production rollback` (`deploy-test.nix`) | Case A: previous site back, data and ledger unchanged. Case B: refused without `--cms-stays-down`; with it, the previous CMS fails its gate; what reverts and what does not (4.1) | RAN IN VM, app role; the update drill adds real rollbacks past failed and unfinished generations, `--generation N`, the refusals after a migration killed after its commit (H9), and the relay's rollbacks. Restore onto a replacement (4.3, item 2), a rollback after a Keycloak or Headscale change: not exercised anywhere |
 | 4.4 Realm | the realm back-to-pinned block | Realm: kept items, exact-list removals | VM rehearsal (synthetic data) |
 | 5. Reboot into a new generation | reboot subtests in `test.nix`, `tls-test.nix` (same generation) | Writers start alone; secrets return; certificate kept | VM rehearsal (synthetic data) for the same generation only |
 
@@ -1479,6 +1650,11 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
   a Keycloak upgrade: not determined from the repository.
 
 ## 8. Drills to add
+
+Status 2026-11-27: the update drill (`platform/production/update-drill-test.nix`,
+section 1.6) covers drill 7 (a failed migration and two killed at a lowered limit,
+with the ledger, the marker, what a second start does and that the CMS units stay
+stopped) and drill 12 without Headscale peers (key hashes unchanged; no clients).
 
 Status 2026-11-24: the deploy VM rehearsal (`platform/production/deploy-test.nix`,
 section 1.5) covers drill 2 (both refusals), drill 3 (one release pair, small

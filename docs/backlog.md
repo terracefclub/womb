@@ -598,8 +598,17 @@ marked so.
   a failed attempt (so no generation's gate opens), and whether 180 s is right for
   real data (measured only on empty or small synthetic databases). **Narrowed
   2026-11-24**: `terrace-production rollback` refuses, with no flag, when the ledger
-  holds a migration the target lacks while the marker holds the target's revision
-  (unit test); a migration killed before it recorded anything is not detected.
+  holds a migration the target lacks while the marker holds the target's revision.
+  **Ran in a VM 2026-11-27** (update drill, one release pair, synthetic data): a
+  migration that failed on a conflicting object and one killed at its limit before
+  its commit left the ledger and schema unchanged (Payload commits each migration in
+  its own transaction), and the tool then allows a plain `rollback` (nothing in the
+  database shows a change; the fix-forward or restore decision stays the owner's); one
+  killed after its commit (H9, reached by holding the commit on an absent synchronous
+  standby) left the migration in the ledger and the old marker, and every way back to
+  the old release was refused with no flag. Still open: a migration that leaves a
+  half-applied change inside one transaction is impossible by this mechanism, but a
+  release with a non-transactional step is not covered; the 180 s limit on real data.
 - Gap in the website release, found by the update drill (2026-11-27), not fixed in
   Womb: a CMS migration that fails writes nothing to `terrace-cms-migrate.service`'s
   journal. In the pinned bundle Payload's migration runner logs through the Payload
@@ -607,9 +616,10 @@ marked so.
   (`node_modules/@payloadcms/drizzle/dist/migrate.js`); website
   `cms/tools/release-migrate.ts` (`dd1aef7`) sets that logger to `silent`, so its own
   `CMS release migration failed; ...` line never runs. The operator sees only the
-  unit's `Result=exit-code`, `ExecMainStatus=1`. Fix in tfc-website (keep a redacted
-  error line), then re-pin; the update drill asserts today's behaviour and would show
-  the change.
+  unit's `Result=exit-code`, `ExecMainStatus=1`. Fixed in the website at `57b4649`
+  (tfc-website #26: one redacted stderr line `CMS release migration <name> failed
+  (<ErrorClass> <SQLSTATE>): <reason>.`); it reaches hosts when Womb's pin moves past
+  it, which then flips the update drill's A1 assertion (no line today).
 - Not determined, needs a test: what sops-nix does at activation when the new
   manifest declares a name the delivered ciphertext lacks (expected failure of
   `sops-install-secrets`; whether the previous secrets stay), and whether a push's
@@ -618,14 +628,28 @@ marked so.
 - Drill: the 16 items in the document's "Drills to add". **Narrowed 2026-11-24**:
   the deploy VM rehearsal covers drills 2, 3 (one release pair, small synthetic
   data), 4 (without the sweep and tool refusals), 5, 6 (without H1) and 15, and drill
-  1 for the app role without backup, realm and secrets steps. Open: the rest.
+  1 for the app role without backup, realm and secrets steps. **Narrowed 2026-11-27**:
+  the update drill covers drill 7 (a failed and a timed-out migration, with the limit
+  lowered to 60 s in the failing build) and drill 12 without peers. Open: the rest.
 - Drill: a reboot into a new generation and `activate --boot` (kernel change). A
   NixOS test VM boots its first system directly, not through the boot loader, so
   the deploy proof cannot show it; it needs a VM with `useBootLoader` or a lease.
   The kernel guard is unit-tested only.
-- Drill: the relay's update through the deploy path, with Headscale peers
-  reconnecting (the deploy proof only builds the relay's closure to show `activate`
-  refuses it on the app).
+- Drill: the relay's update through the deploy path. **Ran in a VM 2026-11-27**
+  (update drill): signed copy, dry run, activation over SSH, record and `status`,
+  Headscale restarted with its keys and users unchanged, HTTPS health, a broken-unit
+  switch recorded `failed (exit 4)`, two real rollbacks. Open: Headscale peers
+  reconnecting (no clients in that drill), a Headscale version change.
+- Docs/procedure, found by the update drill (2026-11-27): every `activate` and
+  `rollback` starts `terrace-production.target` again (nixpkgs' switch restarts every
+  active target), which starts the timers step 6 stopped. The document now says to
+  stop them again after each; whether the command should keep stopped timers stopped
+  is a design question, not settled.
+- Upstream behaviour met by the update drill (2026-11-27): a switch started while
+  `operator`'s systemd user manager is stopping (about 10 s after the last SSH
+  session) fails its user activation and exits 4 with no failed unit; the command
+  records `failed (exit 4)`. Not reproduced on purpose; the drill waits for the user
+  manager to stop before its switches.
 - Drill: the bootstrap route for a host installed without a deploy key (export,
   `sudo nix-store --import`, the raw step 7 commands), and key rotation with two
   trusted keys ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
