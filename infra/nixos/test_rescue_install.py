@@ -830,6 +830,34 @@ umount() { test "$2" = "$scratch"; printf '%s\\n' "$2"; }
             self.assertEqual(caught.exception.label, "authority")
             authority.assert_not_called()
 
+    def test_single_host_cohort_refuses_the_relay_and_accepts_the_app(self):
+        nonce_sha = "d" * 64
+        cfg = {"run": RUN, "phase": "original", "image": "debian-13", "roles": ["app"],
+               "bootstrapProofs": {"app": {"nonceSha256": nonce_sha}}}
+        write_reviewed_input(self.directory, cfg, roles=["app"])
+        with self.assertRaisesRegex(rescue.Rejected, "outside the reviewed single-host cohort"):
+            rescue.reviewed_bootstrap(self.directory, "original", "relay")
+        self.assertEqual(rescue.reviewed_bootstrap(self.directory, "original", "app"), (RUN, nonce_sha))
+        reached = rescue.Rejected("authority reached")
+        with patch.object(rescue, "authority", side_effect=reached) as authority:
+            for call in (lambda role: rescue.install(self.directory, "original", role, "unused", None),
+                         lambda role: rescue.inspect(self.directory, "original", role, "/dev/sda")):
+                with self.assertRaises(rescue.Rejected) as caught:
+                    call("relay")
+                self.assertIsNot(caught.exception, reached)
+                authority.assert_not_called()
+                # Positive control: the app passes the reviewed scope and reaches the host authority.
+                with self.assertRaises(rescue.Rejected) as caught:
+                    call("app")
+                self.assertTrue(caught.exception is reached or caught.exception.__context__ is reached)
+                self.assertEqual(authority.call_args.args[:3], (self.directory, "original", "app"))
+                authority.reset_mock()
+        # The pair still accepts both roles.
+        write_reviewed_input(self.directory, {**{k: v for k, v in cfg.items() if k != "roles"},
+                                              "bootstrapProofs": {"app": {"nonceSha256": nonce_sha},
+                                                                  "relay": {"nonceSha256": "e" * 64}}})
+        self.assertEqual(rescue.reviewed_bootstrap(self.directory, "original", "relay"), (RUN, "e" * 64))
+
     def run_install(self, *, step_failure=None, recheck_binding=None):
         binding = {"run": RUN, "phase": "original", "role": "relay", "serverId": 22, "ipv4": "1.1.1.22",
                    "expires": 9000}

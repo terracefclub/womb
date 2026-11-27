@@ -480,8 +480,12 @@ def operate(action, directory, manifest, token, phase, credential, approval, app
     review_data = lease.read_private(review_path, 65536)
     report = parse_json(review_data)
     plan_data = lease.read_private(plan, PULUMI_OUTPUT_LIMIT)
+    # A review written before the single-host shape records no roles. It can
+    # only have authorized an input without `roles`, as reviewed_phase_input holds.
+    if "roles" not in report and single_app:
+        raise lease.Rejected("review without recorded roles cannot authorize a single-host cohort")
     if (approval != hashlib.sha256(review_data).hexdigest() or report["sourceSha256"] != source
-            or report["probeOnly"] is not probe_only or report["roles"] != roles
+            or report["probeOnly"] is not probe_only or report.get("roles", roles) != roles
             or report["inputSha256"] != hashlib.sha256(config_data).hexdigest()
             or report["stackConfigSha256"] != optional_sha(stack_config)
             or report["planSha256"] != hashlib.sha256(plan_data).hexdigest()):

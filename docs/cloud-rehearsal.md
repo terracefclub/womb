@@ -154,12 +154,17 @@ across every inventory kind.
 
 The single-host shape is for proving one installable app host on provider
 hardware, for example the production profile, without the relay. Its preview
-and plan must create exactly the app server and its IPv4. The review records
-`roles` and apply refuses a review whose roles differ from the input. Provider
-actions (Rescue, console, installed boot) and the binding accept only the app.
-`retire-original` and a `replacement` phase are refused, so the lease ends with
-`cleanup`. The service proof in `infra/nixos/rehearsal_services.py` needs the
-pair and does not apply. `relayType` stays in the input, as `appType` does for
+and plan must create exactly the app server and its IPv4. Every review file
+now records `roles`, for every shape and phase, and apply refuses a review
+whose roles differ from the input; a review from before this field authorizes
+only an input without `roles`. Provider actions (Rescue, console, installed
+boot), the binding and the disk pin, inspect and install in
+`infra/nixos/rescue_install.py` accept only the app. `retire-original` and a
+`replacement` phase are refused, so the lease ends with `cleanup`. For every
+shape, `retire-original` now also reads the original's reviewed input, review
+and dispatch files, and fails closed before deleting anything if one is missing
+or altered. The service proof in `infra/nixos/rehearsal_services.py` needs the
+pair and refuses a single-host cohort. `relayType` stays in the input, as `appType` does for
 the probe, and is unused. This shape is tested offline only (unit and Pulumi
 mock tests); it has not been used at a provider.
 

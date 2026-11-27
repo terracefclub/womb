@@ -37,6 +37,26 @@ class ServiceProofTests(unittest.TestCase):
         with self.assertRaises(services.Rejected):
             services.check_original_absence(run, original, replacement, absence, {**backup, "verified": False})
 
+    def test_service_phase_refuses_a_single_host_cohort_before_any_ssh(self):
+        run = "a" * 32
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            rescue.write_private(directory / "lease.json", {
+                "schema": 1, "run": run, "expires": int(time.time()) + 3600, "baseline": {"servers": {}}})
+            created = directory / "original-created.json"
+            rescue.write_private(created, {"servers": [4], "primary_ips": [5], "firewalls": [], "ssh_keys": []})
+            with patch.object(rescue, "checked_process", side_effect=AssertionError("no SSH")), \
+                 patch.object(services, "listener", side_effect=AssertionError("no listener")) as listener:
+                with self.assertRaisesRegex(services.Rejected, "single-host cohort is refused"):
+                    services.run_phase(directory, "original", rescue)
+                listener.assert_not_called()
+                # Positive control: the pair passes this check and reaches the listener.
+                created.unlink()
+                rescue.write_private(created, {"servers": [4, 6], "primary_ips": [5, 7],
+                                               "firewalls": [], "ssh_keys": []})
+                with self.assertRaisesRegex(AssertionError, "no listener"):
+                    services.run_phase(directory, "original", rescue)
+
     def test_offhost_snapshot_inventory_is_exact(self):
         snapshots = [{"hostname": "relay", "id": "c" * 64}, {"hostname": "gateway", "id": "d" * 64}]
         result = services.check_snapshots(snapshots)

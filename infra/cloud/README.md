@@ -113,7 +113,9 @@ in three reads, with the baseline resources and associations preserved.
 
 `rehearsal_lease.py prepare` is read-only. `retire-original` requires a
 verified off-host backup receipt and fails if the replacement cohort already
-exists. `cleanup` closes the lease to future creates before removing its
+exists. It also reads the original's reviewed input, review and dispatch
+files, and fails closed before deleting anything if one is missing or
+altered or the reviewed cohort is not the app and relay pair. `cleanup` closes the lease to future creates before removing its
 resources. A launcher must hold the same lease lock across each create and
 arm independent, time-bounded cleanup before making the first write. The
 lease helper alone does not start a timer or provision resources. It never
@@ -164,8 +166,9 @@ replacement. Clean up and verify the project baseline as with a full lease.
 
 For one installable app host, add `"roles": ["app"]` to the reviewed
 `original` input instead. The creator, preview and saved plan require exactly
-the app server and its IPv4; the review records the roles and apply refuses a
-review whose roles differ from the input. Binding, Rescue, console and the
+the app server and its IPv4. Every review file now records `roles` (`[]` for
+the foundation); apply refuses a review whose roles differ from the input, and
+a review from before this field authorizes only an input without `roles`. Binding, Rescue, console and the
 installed boot accept only the app. `retire-original` and the `replacement`
 phase are refused; end the lease with `cleanup`. `"roles"` cannot be combined
 with `"probeOnly"`. This shape has offline tests only and has not run at a

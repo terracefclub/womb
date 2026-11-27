@@ -30,16 +30,24 @@ SINGLE = {"run": RUN, "phase": "original", "roles": ["app"], "sshKeyId": 9, "fir
           "image": "debian-13", "location": "nbg1", "appType": "cpx42", "relayType": "cpx22"}
 
 
-def create_single_host(data):
-    name = PREFIX + "-original-app"
+HOSTS = {"app": (4, 5, "cpx42"), "relay": (6, 7, "cpx22")}
+
+
+def create_host(data, role):
+    server_id, ip_id, server_type = HOSTS[role]
+    name = PREFIX + "-original-" + role
     data["servers"].append(resource(
-        4, name, volumes=[], private_net=[], load_balancers=[], server_type={"name": "cpx42"},
+        server_id, name, volumes=[], private_net=[], load_balancers=[], server_type={"name": server_type},
         image={"name": "debian-13"}, location={"name": "nbg1"}, rescue_enabled=False, backup_window=None,
         protection={"delete": False, "rebuild": False}, status="running",
-        public_net={"ipv4": {"id": 5, "ip": "93.184.215.14"}, "ipv6": None,
+        public_net={"ipv4": {"id": ip_id, "ip": "93.184.215.14"}, "ipv6": None,
                     "firewalls": [{"id": 8, "status": "applied"}], "floating_ips": []}))
-    data["primary_ips"].append(resource(5, name + "-ip", assignee_id=4, assignee_type="server", auto_delete=False,
-                                        protection={"delete": False}, ip="93.184.215.14"))
+    data["primary_ips"].append(resource(ip_id, name + "-ip", assignee_id=server_id, assignee_type="server",
+                                        auto_delete=False, protection={"delete": False}, ip="93.184.215.14"))
+
+
+def create_single_host(data):
+    create_host(data, "app")
 
 
 def digest(phase, *, probe_only=False, single_app=False):
@@ -503,6 +511,66 @@ class SingleHostApplyTest(unittest.TestCase):
                 self.assertEqual(sum(args[0] == "up" for args in calls), 1)
             self.assertEqual([row["id"] for row in api.data["servers"]], [1, 4])
             self.assertEqual(api.deleted, [])
+
+    def test_every_review_records_roles_and_old_reviews_never_authorize_single_host(self):
+        """Pair, probe and single host: the preview records the shape's roles. A review
+        in the layout from before this shape (no roles key) still authorizes the pair
+        and the probe as before, and is refused for the single host."""
+        shapes = (({}, {}, ["app", "relay"]), ({"probeOnly": True}, {"probe_only": True}, ["relay"]),
+                  ({"roles": ["app"]}, {"single_app": True}, ["app"]))
+        for extra, shape, roles in shapes:
+            for legacy in (False, True):
+                with self.subTest(roles=roles, legacy=legacy), tempfile.TemporaryDirectory() as name:
+                    root = Path(name)
+                    config = {key: value for key, value in SINGLE.items() if key != "roles"}
+                    lease.write_private(root / "original-input.json", {**config, **extra})
+                    lease.write_private(root / "foundation-input.json", FOUNDATION)
+                    lease.write_private(root / "foundation-created.json",
+                                        {"servers": [], "primary_ips": [], "firewalls": [8], "ssh_keys": [9]})
+                    (root / "project/rehearsal-create").mkdir(parents=True)
+                    lease.write_private(root / "project/package.json", {"dependencies": {"@pulumi/hcloud": "1.42.0"}})
+                    data = inventory()
+                    manifest = {"run": RUN, "baseline": lease.baseline_from(data)}
+                    create_foundation(data)
+                    api = FakeApi(data)
+                    created = {"servers": [HOSTS[r][0] for r in roles], "primary_ips": [HOSTS[r][1] for r in roles],
+                               "firewalls": [], "ssh_keys": []}
+
+                    def pulumi(_project, _env, args, **_options):
+                        if args[0] == "preview":
+                            lease.write_private(Path(args[-1]), saved_plan("original", **shape))
+                            return digest("original", **shape)
+                        if args[0] == "up":
+                            for role in roles:
+                                create_host(api.data, role)
+                        if args[:2] == ["stack", "output"]:
+                            return created
+
+                    source = "1" * 64
+                    with (patch.object(apply.lease, "Api", return_value=api),
+                          patch.object(apply, "source_sha", return_value=source), patch.object(apply, "pulumi", pulumi),
+                          patch.object(apply, "require_run_unit"), patch.object(apply.timer, "check_ready"),
+                          patch("builtins.print")):
+                        args = (root, manifest, b"synthetic", "original", root / "credential")
+                        apply.operate("preview", *args, None, source)
+                        review_path = root / "original/review.json"
+                        review = apply.read_json(review_path)
+                        self.assertEqual(review["roles"], roles)
+                        self.assertIs(review["probeOnly"], "probeOnly" in extra)
+                        if legacy:
+                            del review["roles"]
+                            review_path.unlink()
+                            lease.write_private(review_path, review)
+                        approval = hashlib.sha256(review_path.read_bytes()).hexdigest()
+                        if legacy and "roles" in extra:
+                            with self.assertRaisesRegex(lease.Rejected, "without recorded roles"):
+                                apply.operate("create", *args, approval, source)
+                            self.assertFalse((root / "original-dispatched.json").exists())
+                            self.assertEqual(len(api.data["servers"]), 1)
+                            continue
+                        apply.operate("create", *args, approval, source)
+                        self.assertEqual(apply.read_json(root / "original-created.json"), created)
+                        self.assertEqual(lease.reviewed_roles(root, "original"), tuple(roles))
 
 
 if __name__ == "__main__":
