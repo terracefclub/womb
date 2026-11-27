@@ -344,17 +344,30 @@ the record says `1` to `2`.
 **A switch that fails.** `activate` registers the generation before it switches,
 exactly as `nixos-rebuild` does, and `switch-to-configuration` installs the boot
 loader before it changes the running system. So a switch that fails, for example
-at the boot loader step, leaves the system profile (the boot default) on the new
-generation while the old system keeps running. The command prints `FAILED`, the
-record says `failed (exit <n>)`, and `status` prints `WARNING: the boot default,
-generation <n> (...), is not the running system: a reboot boots generation <n>.`
-(unit test; a failed switch was seen in the VM while the proof was being built,
-when its test VM could not take GRUB, but no VM assertion checks it). In that state
-**a reboot boots the new, never-activated generation**. The command does not revert
-the profile on its own (the operator decides, after reading `journalctl -u
-terrace-switch.service -o cat --no-pager`); whether it should is an open question in
-the [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24). The
-ways out:
+at the boot loader step, would leave the system profile (the boot default) on the new
+generation while the old system keeps running: **a reboot would boot a system that
+never ran.** Since 2026-11-26 (the owner decided that day that this must be undone
+automatically) the command undoes it itself: when an `activate` or `rollback` in
+`switch` mode ends as a failure and the boot default is not the running system, the
+same `terrace-switch` unit, under the same lock, runs once `nix-env -p
+/nix/var/nix/profiles/system --switch-generation <the running system's generation>`
+and the running system's `switch-to-configuration boot`. The finished record keeps
+`generationAfter` (the attempted generation, so that generation stays in the list,
+recorded as failed, and a plain `rollback` keeps passing over it) and adds `revert`
+(`{from, to, result}`) and `bootDefaultAfter`. The client prints `the switch failed
+before the new system ran, so the boot default was set back to generation <n>, the
+running system; generation <m> stays in the list, recorded as failed (rollback passes
+over it).`, then `FAILED`, exit 1. It never runs after a success or a `switched; down
+until the CMS migration`; never with `--boot` (there the pending default is what was
+asked for, also when the boot step fails); never for `cancel`. A switch that exits 4
+has already switched (the new system runs and is the boot default), so nothing is set
+back. If the revert itself fails, there is no second attempt: the record says
+`failed (exit <n>)` in `revert.result`, the client warns (`the boot default is still
+generation <m>, which a reboot would boot`, or, when only the boot loader step failed,
+`the profile names the running system again, but its boot loader step failed, so the
+boot menu may still default to generation <m>`), exits 1, and `status` keeps warning.
+Unit tests for each of these, with a mutant for each guard. VM (update drill, subtest
+"E"): see section 1.6. The ways out when the automatic step did not work:
 
 - the cause is fixed: repeat `activate` with the same toplevel (the profile already
   points to it, so Nix reuses that generation);

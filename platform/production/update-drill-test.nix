@@ -251,10 +251,18 @@ in {
     def ssh(host):
         return f"ssh -i /root/.ssh/operator -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/{host}_known_hosts operator@{host} "
 
+    def user_manager_gone(machine):
+        # Every SSH login as operator (the copy, an activation over SSH) starts operator's systemd user manager, which
+        # stops about 10 s after the last session. A switch that runs while it is stopping fails its user activation
+        # ("warning: user activation for operator failed") and exits 4 with no failed unit: seen in the fourth run of this
+        # drill, recorded `failed (exit 4)` (the tool is right not to explain it away). So a switch waits for that state.
+        machine.wait_until_succeeds("test \"$(systemctl show user@$(id -u operator).service -p ActiveState --value)\" = inactive", timeout=120)
+
     def deploy(host, path, key="deploy"):
         out = op(f"terrace-deploy --key /root/signing/{key}.sec --address {host} --identity /root/.ssh/operator --known-hosts /root/{host}_known_hosts {path}")
         ok(f"Signed the closure of {path}" in out and f"Copied to operator@{host}." in out and out.strip().endswith(f"ssh -t operator@{host} sudo terrace-production activate {path}"),
            f"{host}: {path} signed and copied as operator, the activation command printed")
+        user_manager_gone(relay if host == "relay" else app)
 
     def op(command, **kwargs):
         return operator.succeed(ENV + command, **kwargs)
@@ -453,6 +461,7 @@ in {
         relay.succeed("systemctl stop terrace-drill-broken.service; systemctl reset-failed terrace-drill-broken.service")
 
     with subtest("relay: rollback past the failed attempt to the update, then to the first system"):
+        user_manager_gone(relay)
         out = relay.succeed("terrace-production rollback")
         ok(f"Running generation 2: {RELAY_NEXT}." in out and running(relay) == RELAY_NEXT, f"relay: rollback from the failed generation 3 ran generation 2: {out.strip()[-300:]!r}")
         finished(records(relay)[-1], "rollback", "3", "2", RELAY_NEXT, "success")
