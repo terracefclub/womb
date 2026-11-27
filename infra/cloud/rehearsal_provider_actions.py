@@ -65,6 +65,8 @@ def operate(mode, directory, manifest, credential, token, phase, role):
     probe_only = "probeOnly" in config
     if probe_only and (role != "relay" or mode == "boot-installed"):
         raise lease.Rejected("console probe action scope rejected")
+    if role not in lease.cohort_roles(config, phase):
+        raise lease.Rejected("role is outside the reviewed cohort")
     if "bootstrapProofs" in config and mode in ("rescue", "console"):
         raise lease.Rejected("known-host bootstrap does not use provider Rescue")
     host = api.get("servers", sid)

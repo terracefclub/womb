@@ -25,7 +25,9 @@ def inventory():
     return result
 
 
-def write_reviewed_input(root, config):
+def write_reviewed_input(root, config, roles=None):
+    """Write a reviewed, dispatched phase input. Without roles the review has the
+    pre-single-host layout, which has no roles key."""
     phase = config["phase"]
     path = root / f"{phase}-input.json"
     review = root / phase / "review.json"
@@ -35,6 +37,7 @@ def write_reviewed_input(root, config):
         file.unlink(missing_ok=True)
     lease.write_private(path, config)
     lease.write_private(review, {"probeOnly": config.get("probeOnly", False),
+                                 **({} if roles is None else {"roles": roles}),
                                  "inputSha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     lease.write_private(dispatch, {"run": config["run"], "reviewSha256": hashlib.sha256(review.read_bytes()).hexdigest()})
     return path
@@ -175,6 +178,122 @@ class RehearsalLeaseTest(unittest.TestCase):
             os.chmod(path, 0o644)
             with self.assertRaises(lease.Rejected):
                 lease.read_private(path, 1024)
+
+
+class SingleHostCohortTest(unittest.TestCase):
+    """The original-only `"roles": ["app"]` cohort: one installable app host."""
+
+    CONFIG = {"run": RUN, "phase": "original", "roles": ["app"]}
+
+    def setUp(self):
+        self.data = inventory()
+        # One pre-existing row of every other kind, so absence must preserve each.
+        for rid, kind in enumerate(lease.INVENTORY[len(lease.DELETION_ORDER):], start=100):
+            self.data[kind] = [resource(rid, "existing-" + kind, False)]
+        self.manifest = {"run": RUN, "baseline": lease.baseline_from(self.data)}
+        populate(self.data, "original", 4, 5)
+        self.data["firewalls"] = [resource(8, PREFIX + "-firewall", applied_to=[])]
+        self.data["ssh_keys"].append(resource(9, PREFIX + "-key"))
+        self.api = FakeApi(self.data)
+
+    def clean(self, phase="final", known=None):
+        return lease.clean(self.api, self.manifest, phase, known or {}, deadline=time.monotonic() + 2, delay=0)
+
+    def test_shape_is_exact_and_original_only(self):
+        self.assertEqual(lease.cohort_roles(self.CONFIG, "original"), ("app",))
+        self.assertEqual(lease.cohort_roles({"run": RUN, "phase": "original"}, "original"), ("app", "relay"))
+        self.assertEqual(lease.cohort_roles({"probeOnly": True}, "original"), ("relay",))
+        for roles in (["relay"], ["app", "relay"], ["app", "app"], [], "app", ("app",), None, [["app"]]):
+            with self.assertRaises(lease.Rejected):
+                lease.cohort_roles({**self.CONFIG, "roles": roles}, "original")
+        for phase in ("replacement", "foundation", "final"):
+            with self.assertRaises(lease.Rejected):
+                lease.cohort_roles(self.CONFIG, phase)
+        with self.assertRaises(lease.Rejected):
+            lease.cohort_roles({**self.CONFIG, "probeOnly": True}, "original")
+
+    def test_review_binds_the_roles(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            write_reviewed_input(root, self.CONFIG, roles=["app"])
+            self.assertEqual(lease.reviewed_roles(root, "original"), ("app",))
+            for roles in (None, ["app", "relay"], ["relay"], []):
+                write_reviewed_input(root, self.CONFIG, roles=roles)
+                with self.assertRaisesRegex(lease.Rejected, "no longer matches"):
+                    lease.reviewed_phase_input(root, "original")
+            write_reviewed_input(root, {"run": RUN, "phase": "original"}, roles=["app"])
+            with self.assertRaisesRegex(lease.Rejected, "no longer matches"):
+                lease.reviewed_phase_input(root, "original")
+            # The two existing shapes still read without a recorded roles key.
+            write_reviewed_input(root, {"run": RUN, "phase": "original"})
+            self.assertEqual(lease.reviewed_roles(root, "original"), ("app", "relay"))
+            write_reviewed_input(root, {"run": RUN, "phase": "original", "probeOnly": True})
+            self.assertEqual(lease.reviewed_roles(root, "original"), ("relay",))
+
+    def test_cleanup_deletes_only_the_named_and_labelled_run_resources(self):
+        receipt = self.clean(known={"servers": [4], "primary_ips": [5]})
+        self.assertEqual(self.api.deleted, [("servers", 4), ("primary_ips", 5), ("firewalls", 8), ("ssh_keys", 9)])
+        self.assertEqual(receipt["verifiedAbsent"], {"servers": [4], "primary_ips": [5],
+                                                     "firewalls": [8], "ssh_keys": [9]})
+        self.assertEqual((receipt["absenceReads"], receipt["baselinePreserved"]), (3, True))
+        self.assertEqual(lease.baseline_from(self.data), self.manifest["baseline"])
+
+    def test_ownership_needs_name_and_label_and_never_a_baseline_id(self):
+        for change in ({"labels": {}}, {"name": PREFIX + "-original-other"},
+                       {"labels": {lease.LABEL: "b" * 32}}):
+            data = copy.deepcopy(self.data)
+            data["servers"][1].update(change)
+            owned, collisions = lease.select_owned(RUN, self.manifest["baseline"], data, "final")
+            self.assertTrue(collisions)
+            self.assertNotIn(4, [row["id"] for row in owned["servers"]])
+            api = FakeApi(data)
+            with self.assertRaises(lease.Rejected):
+                lease.clean(api, self.manifest, "final", {"servers": [4]}, deadline=time.monotonic() + 2, delay=0)
+            self.assertNotIn(("servers", 4), api.deleted)
+        # Baseline rows given the run's exact name and label stay out of scope.
+        for kind, name in (("servers", PREFIX + "-original-app"), ("primary_ips", PREFIX + "-original-app-ip"),
+                           ("ssh_keys", PREFIX + "-key")):
+            data = copy.deepcopy(self.data)
+            data[kind][0].update(name=name, labels={lease.LABEL: RUN})
+            _, collisions = lease.select_owned(RUN, self.manifest["baseline"], data, "final")
+            self.assertTrue(collisions)
+            api = FakeApi(data)
+            with self.assertRaises(lease.Rejected):
+                lease.clean(api, self.manifest, "final", {}, deadline=time.monotonic() + 2, delay=0)
+            self.assertNotIn((kind, data[kind][0]["id"]), api.deleted)
+            self.assertFalse(any(rid in (1, 2, 3) for _, rid in api.deleted))
+
+    def test_absence_compares_every_inventory_kind_with_the_baseline(self):
+        for kind in lease.INVENTORY:
+            for extra in (resource(200, "unrecognized", False, assignee_id=None),
+                          resource(200, PREFIX + "-" + kind, assignee_id=None)):
+                data = copy.deepcopy(self.data)
+                data[kind].append(extra)
+                api = FakeApi(data)
+                with self.assertRaises(lease.Rejected, msg=kind):
+                    lease.clean(api, self.manifest, "final", {}, deadline=time.monotonic() + 2, delay=0)
+                self.assertNotIn((kind, 200), api.deleted)
+
+    def test_retire_original_refuses_the_single_host_cohort(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            lease.write_private(root / "original-created.json", {"servers": [4], "primary_ips": [5]})
+            lease.write_private(root / "backup-verified.json", {"run": RUN, "verified": True, "servers": [4]})
+            write_reviewed_input(root, self.CONFIG, roles=["app"])
+            with self.assertRaisesRegex(lease.Rejected, "requires the reviewed two-role cohort"):
+                lease.require_retirement_scope(root, self.manifest)
+            write_reviewed_input(root, {"run": RUN, "phase": "original", "probeOnly": True})
+            with self.assertRaisesRegex(lease.Rejected, "requires the reviewed two-role cohort"):
+                lease.require_retirement_scope(root, self.manifest)
+            # The two-role cohort keeps its existing backup-receipt rule.
+            write_reviewed_input(root, {"run": RUN, "phase": "original"})
+            with self.assertRaisesRegex(lease.Rejected, "off-host backup receipt"):
+                lease.require_retirement_scope(root, self.manifest)
+            for path in ("original-created.json", "backup-verified.json"):
+                (root / path).unlink()
+            lease.write_private(root / "original-created.json", {"servers": [4, 6], "primary_ips": [5, 7]})
+            lease.write_private(root / "backup-verified.json", {"run": RUN, "verified": True, "servers": [6, 4]})
+            lease.require_retirement_scope(root, self.manifest)
 
 
 if __name__ == "__main__":

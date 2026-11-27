@@ -763,6 +763,8 @@ def run_phase(directory, phase, rescue):
             and manifest["expires"] > time.time() + 300
             and not os.path.lexists(directory / "closed.json"), "service lease is closed or expired")
     created, _ = rescue.read_json(directory / f"{phase}-created.json")
+    require(not (isinstance(created.get("servers"), list) and len(created["servers"]) == 1),
+            "the service proof needs the app and relay pair; a single-host cohort is refused")
     ids = owned_ids(created, "servers")
     require(all(str(server_id) not in manifest["baseline"]["servers"] for server_id in ids),
             "service cohort includes a baseline server")

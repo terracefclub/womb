@@ -285,7 +285,7 @@ On 2026-11-09 the OVMF fixture of `20010fb` observed
 `not-ram@0 no-banner@6 ready@18`. QEMU's user network accepts TCP while the
 guest is down. The RAM system saw EFI and started its initrd at 4.9 s, its
 switched root at 8.9 s and `sshd` at 12.7 s after kernel start.
-The probe-only cohort ends here. A full cohort next checks the RAM installer
+The probe-only cohort ends here. A full or single-host cohort next checks the RAM installer
 as an install target, then records its whole-disk probe:
 
 ```sh

@@ -31,7 +31,12 @@ type CohortBase = {
   appType: string;
   relayType: string;
   probeOnly?: true;
+  roles?: SingleHostRoles;
 };
+
+// The only alternative role list: one installable app host, original phase only.
+type SingleHostRoles = ["app"];
+type CohortShape = { probeOnly?: true; roles?: SingleHostRoles };
 
 type Cohort = CohortBase & (BootstrapInput | { bootstrapProofs?: never; bootstrapOperatorPublicKey?: never });
 
@@ -41,8 +46,11 @@ const MAX_INPUT = 4096;
 const NONCE_FILE = /^[a-f0-9]{64}\n$/;
 const ED25519_PREFIX = Buffer.from("0000000b7373682d6564323535313900000020", "hex");
 
-export function cohortRoles(probeOnly?: true): readonly HostRole[] {
-  return probeOnly ? ["relay"] : ["app", "relay"];
+export function cohortRoles(shape: CohortShape): readonly HostRole[] {
+  if (shape.probeOnly && shape.roles) throw new Error("invalid cohort shape");
+  if (shape.probeOnly) return ["relay"];
+  if (shape.roles) return ["app"];
+  return ["app", "relay"];
 }
 
 function exactKeys(record: Record<string, unknown>, expected: string[]): void {
@@ -130,6 +138,14 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     if (stack !== "original" || record.probeOnly !== true) throw new Error("invalid console probe mode");
     expected.push("probeOnly");
   }
+  const singleHost = Object.prototype.hasOwnProperty.call(record, "roles");
+  if (singleHost) {
+    const roles = record.roles;
+    if (stack !== "original" || probeOnly || !Array.isArray(roles) || roles.length !== 1 || roles[0] !== "app") {
+      throw new Error("invalid single-host cohort roles");
+    }
+    expected.push("roles");
+  }
   const bootstrap = Object.prototype.hasOwnProperty.call(record, "bootstrapProofs")
     || Object.prototype.hasOwnProperty.call(record, "bootstrapOperatorPublicKey");
   if (bootstrap) expected.push("bootstrapProofs", "bootstrapOperatorPublicKey");
@@ -149,9 +165,10 @@ export function parseInput(value: unknown, stack: string): RehearsalInput {
     sshKeyId: inputId(record.sshKeyId),
     firewallId: inputId(record.firewallId),
     ...(probeOnly ? { probeOnly: true as const } : {}),
+    ...(singleHost ? { roles: ["app"] as SingleHostRoles } : {}),
   };
   // Pulumi type-checks this program before it runs; keep each branch exact.
-  return bootstrap ? { ...cohort, ...parseBootstrap(record, cohortRoles(probeOnly ? true : undefined)) } : cohort;
+  return bootstrap ? { ...cohort, ...parseBootstrap(record, cohortRoles(cohort)) } : cohort;
 }
 
 function readPrivateFile(path: string, limit: number): Buffer {
@@ -198,7 +215,7 @@ export function readBootstrapUserData(path: string | undefined, input: Cohort): 
     throw new Error("invalid private bootstrap directory");
   }
   const result: Partial<Record<HostRole, string>> = {};
-  for (const role of cohortRoles(input.probeOnly)) {
+  for (const role of cohortRoles(input)) {
     const proof = input.bootstrapProofs[role];
     const bytes = readPrivateFile(join(directory, input.phase + "-" + role + "-bootstrap-nonce"), 65);
     if (!proof || createHash("sha256").update(bytes).digest("hex") !== proof.nonceSha256) {

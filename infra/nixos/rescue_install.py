@@ -385,10 +385,16 @@ def parse_probe(data, device):
 
 
 def reviewed_bootstrap(directory, phase, role):
-    """Return the reviewed run and proof-nonce digest for a known-host bootstrap."""
-    from rehearsal_lease import reviewed_phase_input
+    """Return the reviewed run and proof-nonce digest for a known-host bootstrap.
+
+    Every pin, inspect and install path reads the reviewed input here, so this
+    also refuses a role outside the reviewed cohort (the relay of a single-host one).
+    """
+    from rehearsal_lease import cohort_roles, reviewed_phase_input
 
     config, _ = reviewed_phase_input(directory, phase)
+    require(role in cohort_roles(config, phase), "role is outside the reviewed single-host cohort"
+            if "roles" in config else "role is outside the reviewed cohort")
     require("bootstrapHostKeys" not in config, "host private keys must not pass through user data")
     if "bootstrapProofs" not in config:
         return None

@@ -136,6 +136,38 @@ uses stub releases and evaluates role wiring. Actual provider installation,
 private transport, application bootstrap, fresh recovery and resource
 absence require the leased run (see the lease 5 result below).
 
+## Cohort shapes
+
+The reviewed `original` or `replacement` input of `infra/cloud/rehearsal-create`
+selects one of three shapes. Every shape keeps the same isolation: names
+`terrace-r-<run>-<phase>-<role>` (and `-ip`), the label `terrace-rehearsal=<run>`,
+only the run's own SSH key and firewall, one IPv4 Primary IP per server and no
+IPv6, a create-only preview and saved plan, and cleanup that selects by name
+and label, excludes every baseline ID and compares absence with the baseline
+across every inventory kind.
+
+| Shape | Input | Hosts | Install | Retire and replacement | Provider use |
+|---|---|---|---|---|---|
+| Pair | no shape key | app and relay | both roles | yes | leases 1 to 5 |
+| Console probe | `"probeOnly": true` (original only) | relay | refused | refused | relay probes |
+| Single host | `"roles": ["app"]` (original only) | app | app only | refused | none yet |
+
+The single-host shape is for proving one installable app host on provider
+hardware, for example the production profile, without the relay. Its preview
+and plan must create exactly the app server and its IPv4. Every review file
+now records `roles`, for every shape and phase, and apply refuses a review
+whose roles differ from the input; a review from before this field authorizes
+only an input without `roles`. Provider actions (Rescue, console, installed
+boot), the binding and the disk pin, inspect and install in
+`infra/nixos/rescue_install.py` accept only the app. `retire-original` and a
+`replacement` phase are refused, so the lease ends with `cleanup`. For every
+shape, `retire-original` now also reads the original's reviewed input, review
+and dispatch files, and fails closed before deleting anything if one is missing
+or altered. The service proof in `infra/nixos/rehearsal_services.py` needs the
+pair and refuses a single-host cohort. `relayType` stays in the input, as `appType` does for
+the probe, and is unused. This shape is tested offline only (unit and Pulumi
+mock tests); it has not been used at a provider.
+
 ## Lease 5 result (2026-11-20)
 
 Known-full lease 5 (run `efc9794a`, staged at Womb trunk `bb0d526`, armed 16:12:52
