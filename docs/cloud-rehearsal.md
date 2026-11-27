@@ -216,4 +216,96 @@ Scope: synthetic data on private, temporary hosts. No real members, public DNS,
 public certificate authority, mail, payments or public service exposure (the hosts had public addresses with operator SSH ingress only). One run, on one
 day, on one choice of server types. Not proven by this lease: anything in production
 profile mode (`terrace.production`), ACME, the Keycloak administration tool, real
-data migration, cutover, alerting. Lease 6 has not been requested.
+data migration, cutover, alerting.
+
+## Throwaway SFTP repository for the production lease host
+
+The production backup module accepts only an `sftp:` restic repository with a pinned known-hosts entry, so a lease
+that runs the production profile needs an SFTP repository the leased host can reach. `infra/cloud/rehearsal_sftp.py`
+provides one on the build machine for the length of the lease; `infra/cloud/rehearsal_sftp_probe.sh` proves its
+confinement. Lease 6 was approved once on 2026-11-26 and has not run; nothing here has touched a provider.
+
+**Design.** The client key will sit on a rented machine on the public internet, so the endpoint must confine a
+holder of that key by construction, without root. A user-level `sshd` with `ForceCommand internal-sftp` cannot: there
+is no chroot, so the account's whole home would be readable. The endpoint is instead `rclone serve sftp` from the
+repository's pinned nixpkgs (`github:NixOS/nixpkgs/31ecbaca1bdefa45dffc409f0250bd8039ea0010#rclone`, 1.75.2;
+`restic` and `openssh` come from the same pin). It is a userspace SFTP server with exactly one filesystem root: it
+has no shell or command execution, accepts only session channels with the `sftp` subsystem, rejects port forwarding,
+resolves every path (`..`, absolute) inside the served root, does not follow symlinks, does not create symlinks or
+hard links and cannot rename out of the root. It authenticates with the single key in the authorized-keys file (it
+advertises a password method but has no user or password configured, so every password is refused; the user name is
+ignored, so any name reaches the same root) and offers one ed25519 host key. It is started as a transient
+`systemd --user` unit with a hard `RuntimeMaxSec`, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=tmpfs`,
+`MemoryMax`, `TasksMax`, `LimitNOFILE`, AF_INET/AF_UNIX only, and a mount namespace in which the served root is an
+empty read-only directory holding only the repository (`app`, writable) while the run directory shows only the host
+key and keys (read-only) and the log. The server's own rooting and the namespace are independent layers, and the
+probe runs against both (the second with the namespace off). `start` also verifies the namespace after the server
+is up, through `/proc/<pid>/root`: the served root must hold exactly `app` and the run directory view exactly the
+host key, the authorized keys and the log directory; if not, or if it cannot be checked, it stops the unit and
+fails.
+
+**Size limit.** Nothing without root can set a disk quota, so a companion unit (`<server unit>-watch`) measures the
+repository plus the server log every 2 seconds and stops the server when the total exceeds `--limit-mib` (default
+2048) or when the number of files and directories exceeds `--max-entries` (default 200000). Every file and directory
+counts at least 4096 bytes, so empty files and directories use up the limit too (they cost real storage). The two
+units are bound to each other: the watcher has the same runtime limit, ends when the server ends, and the server has
+`BindsTo=` the watcher, so neither outlives the other. The server's log is at error level and rotates at 5 MiB
+keeping two old files. A tripped limit is recorded in `sftp-limit-tripped.json`; `status` shows the repository and
+log sizes, the counted bytes and entries, the limits and whether one tripped, and the receipt records both limits.
+The limit is checked between measurements, so a client can overshoot it by about what it can write in 2 seconds; it
+is a bound on exposure, not an exact quota. Measured on loopback, a client wrote 64 MiB in 0.7 s against a 16 MiB
+limit (about 48 MiB over) before the server stopped; a real reverse forward over the internet is much slower, but
+choose `--limit-mib` with that margin. Put the run directory on scratch storage with ample free space that is not
+snapshotted (a deleted file's space stays allocated while snapshots hold it); the limit protects the disk, it does
+not make snapshotted storage a good place for it.
+
+**Commands** (run from a checkout on the build machine; `RCLONE`, `KEYGEN` are the pinned store paths):
+
+```sh
+python3 -B infra/cloud/rehearsal_sftp.py prepare --directory RUN --ssh-keygen KEYGEN --client-public-key CLIENT.pub
+python3 -B infra/cloud/rehearsal_sftp.py start   --directory RUN --rclone RCLONE [--seconds 7200] [--limit-mib 2048] [--max-entries 200000] [--port N]
+python3 -B infra/cloud/rehearsal_sftp.py forward --directory RUN [--host-port N]
+python3 -B infra/cloud/rehearsal_sftp.py status  --directory RUN
+python3 -B infra/cloud/rehearsal_sftp.py stop    --directory RUN
+bash infra/cloud/rehearsal_sftp_probe.sh RUN CLIENT_PRIVATE_KEY EVIDENCE_DIR OPENSSH_BIN_DIR RESTIC
+```
+
+`RUN` is a caller-supplied 0700 directory. `prepare` creates a fresh ed25519 host key, an authorized-keys file with
+exactly the one supplied public key, and an empty `app` directory, and refuses any existing file. `start` prints
+the receipt as JSON (units, pid, port, host key, `knownHosts` as `[127.0.0.1]:<port> ssh-ed25519 ...`, repository
+`sftp:terrace@127.0.0.1:app`, expiry, size limit) and saves it in `RUN`. The default runtime is 2 hours (maximum 4
+hours, the lease expiry): the endpoint is needed from the first backup to teardown of a lease planned at about 90
+minutes, and the client key is only as safe as the time it is live. `forward` prints the option for the operator's own ssh to the
+host, for example `-R 127.0.0.1:<port>:127.0.0.1:<port>`: it binds on the host's loopback only and ends at the
+endpoint's loopback port; the helper never opens it. Run the probe against the started endpoint before the real
+backup. `stop` stops both units and verifies that they are inactive, no process remains and the listener refuses
+connections; if it is forgotten the runtime limit ends the units. If `start` is killed between starting the units
+and writing the receipt, stop `terrace-lease-sftp-*` by exact unit name with `systemctl --user stop`.
+
+**After `stop`, delete `RUN`** (it holds the private host key, the repository data and the log) **and the client
+private key**, by exact path, and verify both are gone (`test ! -e RUN`, `test ! -e CLIENT_PRIVATE_KEY`). Nothing is
+written outside `RUN`, no sudo is used, and private key material is never printed. Unit tests:
+`python3 -B infra/cloud/test_rehearsal_sftp.py -v` (also in the GitLab/GitHub `check-supervision` job).
+`infra/cloud/rehearsal_sftp_nonamespace_check.py` removes the namespace from a prepared run directory and passes only
+if `start` refuses.
+
+**Known limits.** The unit takes a loopback port on the build machine while it runs. The helper needs a systemd
+user manager and a `/var/empty` directory on the build machine. The user name is ignored, and `chmod`/`chown`
+requests are accepted and ignored.
+
+**What ran** (on the Linux build machine, throwaway client key, no provider): restic `init`, `backup`, `snapshots`,
+`check` and `restore` through the endpoint with the production invocation shape (`sftp.args` with `IdentitiesOnly`,
+`BatchMode`, `StrictHostKeyChecking=yes` and a pinned known-hosts file), restore checksums equal; refused: shell,
+exec, `-L`, `-R`, agent/X11, other subsystems, reads outside the repository by absolute path, `..`, the endpoint's own
+key files and a symlink planted inside the repository, client-created symlinks, hard links, renames out of the root,
+writes outside, an unlisted second key, password authentication and a non-ed25519 host key; the namespace check
+passed on a real start and `start` refused with the namespace removed; a write past a small size limit stopped both
+units within seconds, and so did 6000 empty files against a small limit and an entry cap; `stop` left no listener, process or unit; a 300 s runtime limit ended the unit by itself.
+Evidence is kept on the build machine, not in the repository.
+
+**What was only read or evaluated:** the production profile's sshd settings were read in `platform/production/base.nix`
+and evaluated on the build machine for the lease host of the unmerged lease-host change (the V0 system, repository
+`sftp:terrace@127.0.0.1:app`, port 22433, no failed assertion out of 1624): sshd sets no `AllowTcpForwarding`,
+`PermitListen` or `Match`, and `GatewayPorts` is `no`, so the OpenSSH defaults apply (forwarding on, remote forwards
+bound to the host's loopback). That evaluation is not the full production evaluation check. Nothing was exercised on
+a booted host.
