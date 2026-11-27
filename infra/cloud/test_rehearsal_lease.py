@@ -1,6 +1,10 @@
+import contextlib
 import copy
 import hashlib
+import io
+import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -294,6 +298,132 @@ class SingleHostCohortTest(unittest.TestCase):
             lease.write_private(root / "original-created.json", {"servers": [4, 6], "primary_ips": [5, 7]})
             lease.write_private(root / "backup-verified.json", {"run": RUN, "verified": True, "servers": [6, 4]})
             lease.require_retirement_scope(root, self.manifest)
+
+
+def page(endpoint, rows, number, last):
+    return {endpoint: rows, "meta": {"pagination": {"page": number, "next_page": None if last else number + 1}}}
+
+
+def datacenter(name, location, available):
+    return {"id": len(name), "name": name, "location": {"name": location},
+            "server_types": {"supported": [1, 2, 3], "available": available, "available_for_migration": []}}
+
+
+class RecordingOpener:
+    """Stands in for urllib: answers GET listings from fixed pages and records every request's method and route."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.requests = []
+
+    def open(self, request, timeout):
+        route = request.full_url.removeprefix("https://api.hetzner.cloud/v1/")
+        self.requests.append((request.get_method(), route, request.data))
+        endpoint, _, query = route.partition("?")
+        number = int(dict(part.split("=") for part in query.split("&"))["page"])
+        body = json.dumps(self.pages[endpoint][number - 1]).encode()
+        return io.BytesIO(body)
+
+
+class AvailabilityTest(unittest.TestCase):
+    TYPES = [page("server_types", [{"id": 47, "name": "cpx42"}], 1, True)]
+
+    def api(self, datacenters, types=None):
+        api = lease.Api("t" * 32)
+        api.opener = RecordingOpener({"server_types": types or self.TYPES, "datacenters": datacenters})
+        return api
+
+    def test_available_in_the_location(self):
+        api = self.api([page("datacenters", [datacenter("fsn1-dc14", "fsn1", [47]),
+                                             datacenter("nbg1-dc3", "nbg1", [12, 47])], 1, True)])
+        found = lease.availability(api, "cpx42", "nbg1")
+        self.assertEqual(found, {"serverType": "cpx42", "location": "nbg1", "serverTypeId": 47,
+                                 "availableIn": ["nbg1-dc3"]})
+
+    def test_unavailable_or_only_supported(self):
+        api = self.api([page("datacenters", [datacenter("nbg1-dc3", "nbg1", [12])], 1, True)])
+        with self.assertRaisesRegex(lease.Rejected, "unavailable in location"):
+            lease.availability(api, "cpx42", "nbg1")
+
+    def test_available_only_in_another_location(self):
+        api = self.api([page("datacenters", [datacenter("fsn1-dc14", "fsn1", [47]),
+                                             datacenter("nbg1-dc3", "nbg1", [])], 1, True)])
+        with self.assertRaisesRegex(lease.Rejected, "unavailable in location"):
+            lease.availability(api, "cpx42", "nbg1")
+        api = self.api([page("datacenters", [datacenter("fsn1-dc14", "fsn1", [47])], 1, True)])
+        with self.assertRaisesRegex(lease.Rejected, "no datacenter"):
+            lease.availability(api, "cpx42", "nbg1")
+
+    def test_unknown_or_ambiguous_type(self):
+        dcs = [page("datacenters", [datacenter("nbg1-dc3", "nbg1", [47])], 1, True)]
+        for rows in ([], [{"id": 47, "name": "cpx42"}, {"id": 48, "name": "cpx42"}], [{"id": 9, "name": "cpx22"}]):
+            with self.subTest(rows=rows), self.assertRaisesRegex(lease.Rejected, "unknown"):
+                lease.availability(self.api(dcs, [page("server_types", rows, 1, True)]), "cpx42", "nbg1")
+
+    def test_malformed_responses_refused(self):
+        bad = (
+            [page("datacenters", [{"name": "nbg1-dc3", "location": {"name": "nbg1"}}], 1, True)],
+            [page("datacenters", [datacenter("nbg1-dc3", "nbg1", ["47"])], 1, True)],
+            [page("datacenters", [datacenter("nbg1-dc3", "nbg1", None)], 1, True)],
+            [{"datacenters": {}, "meta": {"pagination": {"next_page": None}}}],
+            [{"datacenters": []}],
+            [page("datacenters", [], 1, False) | {"meta": {"pagination": {"next_page": 7}}}],
+        )
+        for pages in bad:
+            with self.subTest(pages=pages), self.assertRaises((lease.Rejected, KeyError, TypeError)):
+                lease.availability(self.api(pages), "cpx42", "nbg1")
+        with self.assertRaises(lease.Rejected):
+            lease.availability(self.api([]), "cpx42; x", "nbg1")
+        with self.assertRaises((lease.Rejected, KeyError, TypeError)):
+            lease.availability(self.api([], [page("server_types", [{"id": 0, "name": "cpx42"}], 1, True)]),
+                               "cpx42", "nbg1")
+
+    def test_pagination_is_followed(self):
+        api = self.api([page("datacenters", [datacenter("fsn1-dc14", "fsn1", [47])], 1, False),
+                        page("datacenters", [datacenter("hel1-dc2", "hel1", [47])], 2, False),
+                        page("datacenters", [datacenter("nbg1-dc3", "nbg1", [47])], 3, True)])
+        self.assertEqual(lease.availability(api, "cpx42", "nbg1")["availableIn"], ["nbg1-dc3"])
+        routes = [route for _, route, _ in api.opener.requests]
+        self.assertEqual([route for route in routes if route.startswith("datacenters")],
+                         [f"datacenters?per_page=50&page={n}" for n in (1, 2, 3)])
+        self.assertEqual(routes[0], "server_types?name=cpx42&per_page=50&page=1")
+
+    def test_issues_get_requests_only(self):
+        api = self.api([page("datacenters", [datacenter("nbg1-dc3", "nbg1", [47])], 1, True)])
+        lease.availability(api, "cpx42", "nbg1")
+        api2 = self.api([page("datacenters", [datacenter("nbg1-dc3", "nbg1", [])], 1, True)])
+        with self.assertRaises(lease.Rejected):
+            lease.availability(api2, "cpx42", "nbg1")
+        requests = api.opener.requests + api2.opener.requests
+        self.assertTrue(requests)
+        self.assertEqual({(method, data) for method, _, data in requests}, {("GET", None)})
+
+    def test_main_availability_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / "run"
+            root.mkdir(mode=0o700)
+            token = Path(name) / "token"
+            token.write_text("t" * 32)
+            token.chmod(0o600)
+            calls = []
+            original = lease.availability
+            lease.availability = lambda api, kind, where: calls.append((kind, where)) or {
+                "serverType": kind, "location": where, "serverTypeId": 1, "availableIn": ["nbg1-dc3"]}
+            argv = sys.argv
+            sys.argv = ["rehearsal_lease.py", "availability", "--directory", str(root), "--credential-file",
+                        str(token), "--server-type", "cpx42", "--location", "nbg1"]
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(lease.main(), 0)
+                lease.availability = lambda *_: (_ for _ in ()).throw(lease.Rejected("server type unavailable in location"))
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(lease.main(), 1)
+                self.assertIn("unavailable in location", err.getvalue())
+            finally:
+                lease.availability = original
+                sys.argv = argv
+            self.assertEqual(calls, [("cpx42", "nbg1")])
+            self.assertEqual(list(root.iterdir()), [], "availability wrote into the run directory")
 
 
 if __name__ == "__main__":

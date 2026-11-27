@@ -111,7 +111,10 @@ excludes all baseline IDs and checks attached IPs and firewalls before
 deleting any run server. It waits for provider actions and verifies absence
 in three reads, with the baseline resources and associations preserved.
 
-`rehearsal_lease.py prepare` is read-only. `retire-original` requires a
+`rehearsal_lease.py prepare` is read-only. So is `availability` (two GET listings of server types and
+datacenters; no lock, no manifest, nothing written), which the
+[production lease driver](../../docs/cloud-rehearsal.md#production-lease-driver-lease-6) runs before arming and
+before the cohort preview; passing it does not guarantee that a later create succeeds. `retire-original` requires a
 verified off-host backup receipt and fails if the replacement cohort already
 exists. It also reads the original's reviewed input, review and dispatch
 files, and fails closed before deleting anything if one is missing or
