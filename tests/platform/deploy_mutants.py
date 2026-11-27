@@ -86,6 +86,7 @@ MUTANTS = [
     ("never in boot mode", PRODUCTION, 'if [[ $mode == switch && $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then', 'if [[ $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then'),
     ("the revert's boot step counts", PRODUCTION, '"$now/bin/switch-to-configuration" boot >>"$switch_log" 2>&1 || revert_rc=$?', '"$now/bin/switch-to-configuration" boot >>"$switch_log" 2>&1 || true'),
     ("status warns after a revert that failed", PRODUCTION, """if [[ $(jq -r '(.revert.result // "success")' <<<"$last" 2>/dev/null) != success ]]; then""", "if false; then"),
+    ("queued jobs are named without awk (not a runtime input)", PRODUCTION, 'still_moving+=("jobs:$(IFS=,; echo "${queued[*]}")")', 'still_moving+=("jobs:$(awk \'{printf "%s%s", sep, $2; sep=","}\' <<<"$jobs")")'),
     ("only this run's records are printed", PRODUCTION, 'last=$(tail -n +"$((lines + 1))" "$records")', 'last=$(cat "$records")'),
     ("result recorded", PRODUCTION, "bootDefaultAfter: $boot_after}'", "bootDefaultAfter: $boot_after} | empty'"),
     ("started record", PRODUCTION, "'{phase: \"started\"", "'empty | {phase: \"started\""),

@@ -105,6 +105,8 @@ class Harness(unittest.TestCase):
             "terrace-secrets": '[[ $1 == verify ]] && echo "terrace-secrets verify: PASS"\n',
             # No waiting; a test can make time pass by changing unit states at each sleep ($FAKE_DIR/on-sleep).
             "sleep": 'if [[ -e $FAKE_DIR/on-sleep ]]; then . "$FAKE_DIR/on-sleep"; fi\nexit 0\n',
+            # Not among the host tool's runtime inputs (base.nix): inside the terrace-switch unit it is not on PATH.
+            "awk": 'echo "awk: not a runtime input of terrace-production" >&2\nexit 127\n',
             # cut is used by the stub only.
             "cut": f'exec {shutil.which("cut") or "/usr/bin/cut"} "$@"\n',
         }

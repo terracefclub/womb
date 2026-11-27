@@ -269,7 +269,7 @@ untouched() {
 # the record must say how they ended, not where they were. Sets settle_timed_out and still_moving.
 settle_seconds=300
 settle() {
-  local unit waited=0 jobs
+  local unit waited=0 jobs job queued
   while :; do
     still_moving=()
     for unit in "${quiesced[@]}"; do
@@ -279,7 +279,12 @@ settle() {
     if ! jobs=$(systemctl list-jobs --no-legend "${quiesced[@]}" terrace-production.target terrace-production-boot.service 2>/dev/null); then
       still_moving+=("jobs:unlistable")
     elif [[ -n $jobs ]]; then
-      still_moving+=("jobs:$(awk '{printf "%s%s", sep, $2; sep=","}' <<<"$jobs")")
+      # The unit column, joined with commas. Bash only: this runs inside the terrace-switch unit, whose PATH holds only the
+      # tool's runtime inputs (awk, used here until 2026-11-27, is not one: the deploy proof hit "awk: command not found"
+      # once, in a run that caught a start job still queued).
+      queued=()
+      while read -r _ job _; do queued+=("$job"); done <<<"$jobs"
+      still_moving+=("jobs:$(IFS=,; echo "${queued[*]}")")
     fi
     if (( ! ${#still_moving[@]} )); then settle_timed_out=0; return 0; fi
     if (( waited >= settle_seconds )); then settle_timed_out=1; return 0; fi
