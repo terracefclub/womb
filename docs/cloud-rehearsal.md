@@ -217,3 +217,61 @@ public certificate authority, mail, payments or public service exposure (the hos
 day, on one choice of server types. Not proven by this lease: anything in production
 profile mode (`terrace.production`), ACME, the Keycloak administration tool, real
 data migration, cutover, alerting. Lease 6 has not been requested.
+
+## Throwaway SFTP repository for the production lease host
+
+The production backup module accepts only an `sftp:` restic repository with a pinned known-hosts entry, so a lease
+that runs the production profile needs an SFTP repository the leased host can reach. `infra/cloud/rehearsal_sftp.py`
+provides one on the build machine for the length of the lease; `infra/cloud/rehearsal_sftp_probe.sh` proves its
+confinement. Lease 6 was approved once on 2026-11-26 and has not run; nothing here has touched a provider.
+
+**Design.** The client key will sit on a rented machine on the public internet, so the endpoint must confine a
+holder of that key by construction, without root. A user-level `sshd` with `ForceCommand internal-sftp` cannot: there
+is no chroot, so the account's whole home would be readable. The endpoint is instead `rclone serve sftp` from the
+repository's pinned nixpkgs (`github:NixOS/nixpkgs/31ecbaca1bdefa45dffc409f0250bd8039ea0010#rclone`, 1.75.2;
+`restic` and `openssh` come from the same pin). It is a userspace SFTP server with exactly one filesystem root: it
+has no shell or command execution, accepts only session channels with the `sftp` subsystem, rejects port forwarding,
+resolves every path (`..`, absolute) inside the served root, does not follow symlinks and does not create them. It
+authenticates with the single key in the authorized-keys file (it advertises a password method but has no user or
+password configured, so every password is refused) and offers one ed25519 host key. It is started as a transient
+`systemd --user` unit with a hard `RuntimeMaxSec`, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=tmpfs`,
+`MemoryMax`, `TasksMax`, AF_INET/AF_UNIX only, and a mount namespace in which the served root is an empty read-only
+directory holding only the repository (`app`, writable) while the run directory shows only the host key and keys
+(read-only) and the log. The server's own rooting and the namespace are independent layers; the probe was run with
+and without the namespace.
+
+**Commands** (run from a checkout on the build machine; `RCLONE`, `KEYGEN` are the pinned store paths):
+
+```sh
+python3 -B infra/cloud/rehearsal_sftp.py prepare --directory RUN --ssh-keygen KEYGEN --client-public-key CLIENT.pub
+python3 -B infra/cloud/rehearsal_sftp.py start   --directory RUN --rclone RCLONE --seconds 14400 [--port N]
+python3 -B infra/cloud/rehearsal_sftp.py forward --directory RUN [--host-port N]
+python3 -B infra/cloud/rehearsal_sftp.py status  --directory RUN
+python3 -B infra/cloud/rehearsal_sftp.py stop    --directory RUN
+```
+
+`RUN` is a caller-supplied 0700 directory. `prepare` creates a fresh ed25519 host key, an authorized-keys file with
+exactly the one supplied public key, and an empty `app` directory, and refuses any existing file. `start` prints
+the receipt as JSON (unit, pid, port, host key, `knownHosts` as `[127.0.0.1]:<port> ssh-ed25519 ...`, repository
+`sftp:terrace@127.0.0.1:app`, expiry) and saves it in `RUN`. `forward` prints the option for the operator's own ssh to the host, for
+example `-R 127.0.0.1:<port>:127.0.0.1:<port>`: it binds on the host's loopback only and ends at the endpoint's
+loopback port; the helper never opens it. `stop` stops the unit and verifies that the unit is inactive, no process
+remains and the listener refuses connections. Run `stop` at lease teardown; if it is forgotten the runtime limit
+ends the unit. Nothing is written outside `RUN`, no sudo is used, and private key material is never printed.
+Unit tests: `python3 -B infra/cloud/test_rehearsal_sftp.py -v` (also in the GitLab/GitHub `check-supervision` job).
+
+**Known limits.** The client can fill the repository directory (no quota without root; `status` reports its size).
+The unit takes the machine's loopback port while it runs. The helper needs a systemd user manager.
+
+**What ran** (on the Linux build machine, 2026-11-27, throwaway client key, no provider): restic `init`, `backup`,
+`snapshots`, `check` and `restore` through the endpoint with the production invocation shape (`sftp.args` with
+`IdentitiesOnly`, `BatchMode`, `StrictHostKeyChecking=yes` and a pinned known-hosts file), restore checksums equal;
+refused: shell, exec, `-L`, `-R`, agent/X11, reads outside the repository by absolute path, `..` and a symlink
+planted inside the repository, client-created symlinks, writes outside, an unlisted second key, password
+authentication and a non-ed25519 host key; `stop` left no listener, process or unit; a 300 s runtime limit ended the
+unit by itself. Evidence is kept on the build machine, not in the repository.
+
+**What was only read:** that the production profile's sshd permits the reverse forward (it sets no
+`AllowTcpForwarding`, `PermitListen`, `GatewayPorts` or `Match`, so the OpenSSH defaults apply: forwarding on,
+remote forwards bound to loopback); and that the lease host's evaluation accepts a loopback repository address.
+Neither has been exercised on a booted host.

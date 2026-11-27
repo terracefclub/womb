@@ -31,6 +31,7 @@ check-supervision:
     - python infra/cloud/test_rehearsal_apply.py -v
     - python infra/cloud/test_rehearsal_provider_actions.py -v
     - python infra/cloud/test_rehearsal_escrow.py -v
+    - python infra/cloud/test_rehearsal_sftp.py -v
     - python platform/production/test_terrace_secrets.py -v
     - python platform/production/test_terrace_identity_admin.py -v
     - python tests/platform/test_tls_check.py -v
