@@ -254,12 +254,22 @@ check_cms() {
 record() { jq -cn "$@" >>"$records"; chmod 0600 "$records"; }
 words() { printf '%s\n' "$@" | jq -R . | jq -cs 'map(select(. != ""))'; }
 in_list() { local item=$1; shift; [[ " $* " == *" $item "* ]]; }
+# Whether unit $1 was already failed before the switch (before_failed, set in apply) and has the same invocation now.
+untouched() {
+  local entry
+  for entry in "${before_failed[@]}"; do
+    if [[ ${entry%:*} == "$1" ]]; then [[ ${entry##*:} == "$(systemctl show "$1" -p InvocationID --value)" ]]; return; fi
+  done
+  return 1
+}
 # Until none of the CMS and website units is starting, stopping or reloading AND no start job is queued or running for
 # them, for terrace-production.target or for terrace-production-boot (which starts that target with --no-block, so its
 # jobs are not the switch's own and can still be queued when the switch returns), for at most settle_seconds. After a
 # gated switch the units fail their gate at once and restart (Restart=on-failure, 10 s apart) until their start limit:
 # the record must say how they ended, not where they were. Sets settle_timed_out and still_moving.
 settle_seconds=300
+# How long the client keeps waiting for systemd-run --wait after the switch unit has ended (deploy()).
+switch_gone_seconds=10
 settle() {
   local unit waited=0 jobs
   while :; do
@@ -301,19 +311,32 @@ apply() {
   local action=$1 mode=$2 target=$3 generation=$4 expected_from=$5 expected_gen=$6
   local from before after rc=0 result marker="" unit name active sub line expected=1
   local failed=() unexpected=() prefailed=() reported=() quiesced=() names=() text="" switch_exit=null not_started=() down=() gate_closed=0 state
+  local reset_units=() before_failed=() preexisting=() revert=null revert_from revert_to revert_rc revert_result now
   from=$(readlink -f "$current_system"); before=$(gen_of)
   [[ $from == "$expected_from" && $before == "$expected_gen" ]] || deny "the running system or the profile changed after the checks (checked: $expected_from, generation $expected_gen; now: $from, generation $before); run the command again"
   check_idle terrace-switch
   if [[ $action == cancel ]]; then check_system "$target" running-ok; else check_system "$target"; fi
   for unit in "${quiesce[@]}"; do quiesced+=("$unit.service"); done
-  # Recorded, then cleared: a start limit hit by an earlier gate refusal must not keep a unit from starting where its gate is open.
-  for unit in "${quiesced[@]}"; do if systemctl is-failed --quiet "$unit"; then prefailed+=("$unit"); fi; done
+  # Recorded, then cleared: a start limit hit by an earlier gate refusal must not keep a unit from starting where its gate is
+  # open. The migration unit too (app): a failed or timed-out migration leaves it failed, and the activation of a corrected
+  # build (fixing forward, docs/host-updates.md step 10) must not be judged by that earlier failure.
+  reset_units=("${quiesced[@]}")
+  if [[ -n $cms_marker ]]; then reset_units+=(terrace-cms-migrate.service); fi
+  for unit in "${reset_units[@]}"; do if systemctl is-failed --quiet "$unit"; then prefailed+=("$unit"); fi; done
   install -d -m 0700 "$state_dir"
   # shellcheck disable=SC2016 # jq variables, not shell
   record --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" --arg before "$before" \
     --argjson prefailed "$(words "${prefailed[@]}")" \
     '{phase: "started", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, failedBefore: $prefailed}'
-  if (( ${#quiesced[@]} )); then systemctl reset-failed "${quiesced[@]}" 2>/dev/null || true; fi
+  if (( ${#reset_units[@]} )); then systemctl reset-failed "${reset_units[@]}" 2>/dev/null || true; fi
+  # Every other unit already failed (or restarting after a failure) before the switch, with its invocation. One still
+  # failed afterwards with the SAME invocation was neither started nor stopped by the switch: it is named as a warning
+  # (preexistingFailedUnits), not as a unit the switch broke. One that ran again during the switch (a new invocation)
+  # and failed counts as broken, so does a unit that keeps restarting (each restart is a new invocation).
+  while read -r name _ active sub _; do
+    [[ $active == failed || $sub == auto-restart ]] || continue
+    before_failed+=("$name:$(systemctl show "$name" -p InvocationID --value)")
+  done < <(systemctl list-units --all --plain --no-legend --full)
   case $action in
     activate) nix-env -p "$profile" --set "$target" || rc=$? ;;
     *) nix-env -p "$profile" --switch-generation "$generation" || rc=$? ;;
@@ -348,13 +371,14 @@ apply() {
         # Still starting after the wait: not the gate's prompt refusal, so not explained by it.
         if [[ $active == failed ]]; then failed+=("$name"); else unexpected+=("$name"); fi
       elif [[ $active == failed || $sub == auto-restart ]]; then
-        unexpected+=("$name")
+        if untouched "$name"; then in_list "$name" "${preexisting[@]}" || preexisting+=("$name"); else unexpected+=("$name"); fi
       fi
     done < <(systemctl list-units --all --plain --no-legend --full)
     for name in "${reported[@]}"; do
       name=${name// /}
       [[ -n $name ]] || continue
-      in_list "$name" "${quiesced[@]}" "${unexpected[@]}" || unexpected+=("$name")
+      in_list "$name" "${quiesced[@]}" "${unexpected[@]}" "${preexisting[@]}" && continue
+      if untouched "$name"; then preexisting+=("$name"); else unexpected+=("$name"); fi
     done
     # With the gate closed every gated unit must have been refused by it: running is not possible without a bypass, and
     # inactive means nothing started it (or its start never ran), which must not pass as a clean switch.
@@ -368,9 +392,17 @@ apply() {
         fi
       done
     fi
-    (( gate_closed && ${#down[@]} == ${#quiesced[@]} && ${#unexpected[@]} == 0 && ${#not_started[@]} == 0 && ! settle_timed_out )) || expected=0
+    if (( gate_closed )); then
+      (( ${#down[@]} == ${#quiesced[@]} && ${#unexpected[@]} == 0 && ${#not_started[@]} == 0 && ! settle_timed_out )) || expected=0
+    else
+      # The gate open: judged because of exit 4 (or a gated unit's state), it is a good switch only when what failed had
+      # all failed before it, untouched, and nothing else failed or is still starting.
+      (( ${#failed[@]} == 0 && ${#unexpected[@]} == 0 && ${#preexisting[@]} > 0 && ! settle_timed_out )) || expected=0
+    fi
   fi
-  if (( classify && expected )); then result="switched; down until the CMS migration: ${down[*]}"; rc=0
+  if (( classify && expected )); then
+    if (( gate_closed )); then result="switched; down until the CMS migration: ${down[*]}"; else result=success; fi
+    rc=0
   elif [[ $rc == 0 || $rc == 4 ]] && (( classify )); then
     # Exit 4 names its units in the record's lists; exit 0 says here which units failed. Units not started and a wait
     # that timed out are always named in the result, which the client prints.
@@ -382,16 +414,34 @@ apply() {
     if [[ $rc == 0 ]]; then rc=1; fi
   elif [[ $rc == 0 ]]; then result=success
   else result="failed (exit $rc)"; fi
+  # A switch that failed after its generation was registered, without switching (the boot loader step comes first): the
+  # boot default would be a system that never ran. Make the running system the boot default again, once, in this unit;
+  # the failed generation stays in the profile, recorded as failed, so rollback keeps passing over it. Never after a
+  # success or "switched; down until the CMS migration", never in boot mode (there the pending default is intended).
+  now=$(readlink -f "$current_system")
+  if [[ $mode == switch && $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then
+    revert_from=$(gen_of) revert_to=$(gen_for "$now") revert_rc=0
+    if [[ -z $revert_to ]]; then
+      revert_result="not possible: the running system is in no generation of $profile"
+    else
+      nix-env -p "$profile" --switch-generation "$revert_to" || revert_rc=$?
+      if [[ $revert_rc == 0 ]]; then "$now/bin/switch-to-configuration" boot >>"$switch_log" 2>&1 || revert_rc=$?; fi
+      if [[ $revert_rc == 0 ]]; then revert_result=success; else revert_result="failed (exit $revert_rc)"; fi
+    fi
+    # shellcheck disable=SC2016 # jq variables, not shell
+    revert=$(jq -cn --arg from "$revert_from" --arg to "$revert_to" --arg result "$revert_result" '{from: $from, to: $to, result: $result}')
+  fi
   # shellcheck disable=SC2016 # jq variables, not shell
   record --arg time "$(date -u +%FT%TZ)" --arg action "$action" --arg mode "$mode" --arg from "$from" --arg to "$target" \
     --arg before "$before" --arg after "$after" --arg womb "$(field "$target" .wombRevision)" --arg website "$(field "$target" .website.revision)" --arg result "$result" --argjson switch_exit "$switch_exit" \
     --argjson failed "$(words "${failed[@]}")" --argjson unexpected "$(words "${unexpected[@]}")" --argjson not_started "$(words "${not_started[@]}")" \
     --argjson timed_out "$( (( settle_timed_out )) && echo true || echo false)" --argjson still "$(words "${still_moving[@]}")" \
-    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, switchExit: $switch_exit, failedUnits: $failed, unexpectedUnits: $unexpected, notStartedUnits: $not_started, waitTimedOut: $timed_out, stillStarting: $still}'
+    --argjson preexisting "$(words "${preexisting[@]}")" --argjson revert "$revert" --arg boot_after "$(gen_of)" \
+    '{phase: "finished", time: $time, action: $action, mode: $mode, from: $from, to: $to, generationBefore: $before, generationAfter: $after, wombRevision: $womb, websiteRevision: $website, result: $result, switchExit: $switch_exit, failedUnits: $failed, unexpectedUnits: $unexpected, notStartedUnits: $not_started, waitTimedOut: $timed_out, stillStarting: $still, preexistingFailedUnits: $preexisting, revert: $revert, bootDefaultAfter: $boot_after}'
   exit "$rc"
 }
 deploy() {
-  local action=$1 target="" generation="" chosen="" rc=0 running lines last result item old_umask current
+  local action=$1 target="" generation="" chosen="" rc=0 running lines last result item old_umask current waiter run_pid line seen=0 gone=0 abandoned=0 revert
   shift
   mode=switch cms_stays_down=0 accept_upstream=0 dry_run=0 not_quiesced=()
   while (( $# )); do
@@ -472,17 +522,49 @@ deploy() {
   fi
   lines=0
   if [[ -e $records ]]; then lines=$(wc -l <"$records"); fi
-  systemd-run --unit=terrace-switch --collect --service-type=exec --wait --quiet -p "Description=terrace-production $action" -- "$self" __apply "$action" "$mode" "$target" "$generation" "$running" "$(gen_of)" || rc=$?
+  # systemd-run --wait, watched: in the update drill it once did not return after its unit had been stopped (a client that
+  # never returns also keeps the lock). If the unit has ended and systemd-run still waits switch_gone_seconds later, stop
+  # waiting for it; the records below decide.
+  exec {waiter}< <(systemd-run --unit=terrace-switch --collect --service-type=exec --wait --quiet -p "Description=terrace-production $action" -- "$self" __apply "$action" "$mode" "$target" "$generation" "$running" "$(gen_of)" >&2 &
+    echo "pid $!"; wait "$!" && echo 'rc 0' || echo "rc $?")
+  read -r _ run_pid <&"$waiter"
+  while :; do
+    if read -r -t 1 -u "$waiter" line; then rc=${line#rc }; break
+    elif (( $? <= 128 )); then rc=1; break; fi
+    case $(systemctl show terrace-switch.service -p ActiveState --value 2>/dev/null) in
+      active | activating | deactivating | reloading) seen=1 gone=0 ;;
+      *) if (( seen )); then gone=$((gone + 1)); fi ;;
+    esac
+    if (( gone >= switch_gone_seconds )); then abandoned=1; kill "$run_pid" 2>/dev/null || true; break; fi
+  done
+  exec {waiter}<&-
   # Only the records this run wrote.
   last=""
   if [[ -e $records ]]; then last=$(tail -n +"$((lines + 1))" "$records"); fi
   if [[ -n $last ]]; then printf '%s\n' "$last"; last=$(tail -n 1 <<<"$last"); fi
+  if (( abandoned )); then
+    echo "terrace-production: the terrace-switch unit has ended, but systemd-run --wait had not returned ${switch_gone_seconds} s later; stopped waiting for it, the records decide" >&2
+    rc=1
+    result=$(jq -r 'select(.phase == "finished") | .result' <<<"${last:-null}" 2>/dev/null || true)
+    if [[ $result == success || $result == switched* ]]; then rc=0; fi
+  fi
   # The unit's exit status alone does not show that the switch ended: a unit stopped mid-switch (`systemctl stop`)
   # ends "successfully" for systemd (SIGTERM is a clean exit), so systemd-run --wait returns 0. Only this run's
   # finished record does (seen in the update drill, platform/production/update-drill-test.nix).
   if [[ $rc == 0 && $(jq -r '.phase // ""' <<<"${last:-null}" 2>/dev/null) != finished ]]; then
-    echo "terrace-production: the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch); the system may be half switched: read terrace-production status" >&2
+    echo "terrace-production: the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch); the system may be half switched: read terrace-production status. Nothing was set back: to make the running system the boot default again, run terrace-production rollback" >&2
     rc=1
+  fi
+  revert=$(jq -c '.revert // empty' <<<"${last:-null}" 2>/dev/null || true)
+  if [[ -n $revert && $(jq -r .result <<<"$revert") == success ]]; then
+    echo "terrace-production: the switch failed before the new system ran, so the boot default was set back to generation $(jq -r .to <<<"$revert"), the running system; generation $(jq -r .from <<<"$revert") stays in the list, recorded as failed (rollback passes over it)." >&2
+  elif [[ -n $revert && $(gen_of) == "$(jq -r .to <<<"$revert")" ]]; then
+    echo "terrace-production: WARNING: setting the boot default back to the running system did not work ($(jq -r .result <<<"$revert")): the profile names the running system again, but its boot loader step failed, so the boot menu may still default to generation $(jq -r .from <<<"$revert"). Do not reboot: fix the cause, then run terrace-production rollback --dry-run and read docs/host-updates.md section 1.5." >&2
+  elif [[ -n $revert ]]; then
+    echo "terrace-production: WARNING: setting the boot default back to the running system did not work ($(jq -r .result <<<"$revert")): the boot default is still generation $(gen_of), which a reboot would boot. Do not reboot: fix the cause, then run terrace-production rollback, which makes the running system the boot default again (docs/host-updates.md section 1.5)." >&2
+  fi
+  if [[ -n $last && $(jq -r '(.preexistingFailedUnits // []) | length' <<<"$last" 2>/dev/null) != 0 ]]; then
+    echo "WARNING: already failed before this switch and left untouched by it, so not counted against it: $(jq -r '.preexistingFailedUnits | join(" ")' <<<"$last"). Look at them: systemctl --failed" >&2
   fi
   if [[ $rc != 0 ]]; then
     if [[ -n $last ]]; then echo "terrace-production: $action result: $(jq -r '.result // "none"' <<<"$last" 2>/dev/null)" >&2; fi
@@ -517,6 +599,9 @@ deploy_status() {
   if [[ -s $records ]]; then
     last=$(tail -n 1 "$records")
     echo "last activation: $last"
+    if [[ $(jq -r '(.revert.result // "success")' <<<"$last" 2>/dev/null) != success ]]; then
+      echo "WARNING: the last switch failed and setting the boot default back to the running system did not work ($(jq -r .revert.result <<<"$last")); the boot menu may still default to generation $(jq -r .revert.from <<<"$last"): do not reboot before it is fixed (docs/host-updates.md section 1.5)"
+    fi
     if [[ $(jq -r '.phase // ""' <<<"$last") == started ]]; then
       echo "WARNING: the last activation started at $(jq -r .time <<<"$last") and never finished (its unit was stopped or the host rebooted mid-switch); check the running system and the boot default above"
     fi

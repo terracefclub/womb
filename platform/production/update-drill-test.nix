@@ -1,8 +1,9 @@
 # VM drills of the host-update steps the deploy proof (deploy-test.nix) leaves out (docs/host-updates.md): the
 # relay's update through the deploy path; a real rollback past a failed and an unfinished generation and
-# `rollback --generation N`; and, on the app role, a migration that fails, one killed at its time limit before its
-# commit and one killed after it (H9), each with what `status`, `activate` and `rollback` then allow, and the way
-# out by fixing forward with a corrected build. Synthetic `.invalid` names; every key is made at build time by this
+# `rollback --generation N`; a switch that fails before the new system runs, with the boot default set back
+# automatically; and, on the app role, a migration that fails, one killed at its time limit before its commit and
+# one killed after it (H9), each with what `status`, `activate` and `rollback` then allow, and the way out by fixing
+# forward with a corrected build. Synthetic `.invalid` names; every key is made at build time by this
 # file and never committed. What the drill changes to make a failure happen is said where it happens.
 {
   pkgs,
@@ -103,7 +104,7 @@ in {
         diskSize = 4096;
         # Registered in this guest's store, so it can sign and copy them like a builder its own outputs.
         additionalPaths = with nodes.app.system.build;
-          [nodes.app.system.build.toplevel drillGood drillProbe drillBroken drillGood2 drillNext drillFixed]
+          [nodes.app.system.build.toplevel drillGood drillProbe drillBroken drillGood2 drillGrubFail drillNext drillFixed]
           ++ (with nodes.relay.system.build; [nodes.relay.system.build.toplevel drillRelayNext drillRelayBroken]);
       };
       environment.systemPackages = [tool deploy pkgs.sops pkgs.age pkgs.ssh-to-age pkgs.openssl pkgs.bun pkgs.jq pkgs.curl];
@@ -152,6 +153,9 @@ in {
         drillGood = variant [(variantFile "good")];
         drillGood2 = variant [(variantFile "good2")];
         drillBroken = variant [brokenUnit];
+        # A switch that fails before it changes the running system: GRUB installed on the VM disk, which cannot take it
+        # (the failure the deploy proof met while it was built; priority 4 beats the node's own "nodev" at 5).
+        drillGrubFail = variant [{boot.loader.grub.device = lib.mkOverride 4 "/dev/disk/by-id/virtio-root";}];
         # Holds its activation for 20 seconds, so the drill can stop the switch unit in the middle of it.
         drillProbe = variant [
           (variantFile "probe")
@@ -209,7 +213,7 @@ in {
   testScript = {nodes, ...}: let
     base = nodes.app.system.build.toplevel;
     relayBase = nodes.relay.system.build.toplevel;
-    inherit (nodes.app.system.build) drillGood drillGood2 drillBroken drillProbe drillNext drillFixed;
+    inherit (nodes.app.system.build) drillGood drillGood2 drillBroken drillProbe drillGrubFail drillNext drillFixed;
     inherit (nodes.relay.system.build) drillRelayNext drillRelayBroken;
   in ''
     import json, shlex, time
@@ -229,7 +233,7 @@ in {
     HOLD = "/var/lib/terrace-production/timers-held"
     SERVICE_HOLD = "/var/lib/terrace-production/service-timers-held"
     BASE, GOOD, GOOD2, BROKEN, PROBE = "${base}", "${drillGood}", "${drillGood2}", "${drillBroken}", "${drillProbe}"
-    NEXT, FIXED = "${drillNext}", "${drillFixed}"
+    NEXT, FIXED, GRUBFAIL = "${drillNext}", "${drillFixed}", "${drillGrubFail}"
     RELAY_BASE, RELAY_NEXT, RELAY_BROKEN = "${relayBase}", "${drillRelayNext}", "${drillRelayBroken}"
     OLD_REV, NEXT_REV, FIXED_REV = "${revisions.old}", "${revisions.next}", "${revisions.fixed}"
     OLD_PIN, NEW_PIN = "${previous.revision}", "${release.revision}"
@@ -494,14 +498,24 @@ in {
         app.wait_until_succeeds("test -e /run/terrace-drill-probe-started && systemctl is-active --quiet terrace-switch.service", timeout=300)
         # As a killed unit or a host losing power mid-switch would leave it: the switch never finishes.
         app.succeed("systemctl stop terrace-switch.service")
-        app.wait_until_succeeds("test -e /tmp/probe.rc", timeout=120)
+        # Diagnostics if the client does not return (the second run of this drill saw it hang here): its processes, its output.
+        try:
+            app.wait_until_succeeds("test -e /tmp/probe.rc", timeout=120)
+        except Exception:
+            print("UPDATE-DRILL-DIAGNOSTICS " + json.dumps({"ps": app.execute("ps -eo pid,ppid,etimes,args | grep -E '[t]errace-production|[s]ystemd-run|[s]witch-to-conf'")[1],
+                  "log": app.execute("cat /tmp/probe.log")[1], "unit": app.execute("systemctl status --no-pager terrace-switch.service 2>&1")[1],
+                  "lock": app.execute("flock -n /var/lib/terrace-production/deploy.lock true && echo free || echo held")[1]}))
+            raise
         rc, out = int(app.succeed("cat /tmp/probe.rc").strip()), app.succeed("cat /tmp/probe.log")
         last = records(app)[-1]
         # systemd counts the stopped unit as a clean exit (systemd-run --wait returns 0); the client reads the missing
         # finished record instead (the first run of this drill found the client reporting success here).
+        # Either way (systemd-run returned 0, or did not return and the client stopped waiting), the records decide.
         ok(rc == 1 and "the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch)" in out and "activate FAILED (exit 1)" in out
            and "Running generation" not in out and (last["phase"], last["action"], last["to"], last["generationBefore"]) == ("started", "activate", PROBE, "2"),
-           f"the client reported FAILED (exit {rc}), and the log ends with the attempt's started record, no finished one: {last}; {out.strip()[-400:]!r}")
+           f"the client reported FAILED (exit {rc}), and the log ends with the attempt's started record, no finished one (watchdog: {'had not returned' in out}): {last}; {out.strip()[-600:]!r}")
+        ok("Nothing was set back: to make the running system the boot default again, run terrace-production rollback" in out, "the client says it set nothing back (no automatic revert without the unit) and names the way back")
+        ok(app.execute("flock -n /var/lib/terrace-production/deploy.lock true")[0] == 0, "the client released the lock")
         ok(app.execute("test -e /run/terrace-drill-probe-done")[0] != 0, "the activation never completed")
         ok(running(app) == GOOD and generation(app) == "3" and boot_default(app) == PROBE, "running: generation 2's system; the boot default: the attempt's generation 3")
         # The activation had replaced /etc before it was stopped (NixOS runs its etc step before this probe).
@@ -554,6 +568,24 @@ in {
         cms_serves("after --generation 1")
         ok(data() == before_upgrade and ledger() == OLD_MIGRATIONS and marker() == OLD_PIN, "same-release switches changed no data, ledger or marker")
 
+    # ---- E. A switch that fails before the new system runs is reverted automatically ----
+    with subtest("E: a switch that fails at the boot loader: the boot default is the running system again, with no operator action"):
+        deploy("app", GRUBFAIL)
+        rc, out = app.execute("terrace-production activate " + GRUBFAIL + " 2>&1")
+        record = records(app)[-1]
+        ok(rc == 1 and "activate FAILED (exit " in out and record["result"].startswith("failed (exit ") and record["switchExit"] not in [0, 4, None]
+           and record["generationAfter"] == "6" and record["revert"] == {"from": "6", "to": "1", "result": "success"} and record["bootDefaultAfter"] == "1",
+           f"E: the failed switch is recorded with the revert of the boot default from generation 6 to 1: {record}")
+        ok("will not proceed with blocklists" in app.succeed("cat /var/lib/terrace-production/last-switch.log"), "E: the switch failed installing GRUB on the VM disk, before it changed the running system")
+        ok("the boot default was set back to generation 1, the running system; generation 6 stays in the list, recorded as failed" in out, f"E: the client says what it did: {out.strip()[-500:]!r}")
+        ok(running(app) == BASE and boot_default(app) == BASE and generation(app) == "1" and app.execute("test -L /nix/var/nix/profiles/system-6-link")[0] == 0,
+           "E: the running system is the boot default; the failed generation 6 stays in the list")
+        ok(app.succeed("grep -m 1 -o 'init=[^ ]*' /boot/grub/grub.cfg").strip() == f"init={BASE}/init", "E: the boot menu's first entry boots the running system")
+        status = app.succeed("terrace-production status")
+        ok("WARNING" not in status, f"E: status has nothing to warn about: {status}")
+        cms_serves("E: after the reverted switch")
+        # A reboot is left out: a test VM boots the system the test framework names, not the boot menu's default.
+
     # ---- A. Failed and timed-out migrations, and fixing forward ----
     with subtest("app: quiesce and activate the next release (gated); the switch starts the timers step 6 stopped"):
         # Step 6's first two lines, with the sweep timer's hold marker removed: the backup timers stay held (no repository).
@@ -564,7 +596,7 @@ in {
         tried = {unit: int(state(app, unit, "ConditionTimestampMonotonic")) for unit in BACKUP_TIMERS}
         deploy("app", NEXT)
         out = operator.succeed(ssh("app") + "sudo terrace-production activate " + NEXT)
-        ok("THE SITE IS DOWN until the CMS migration" in out and running(app) == NEXT and generation(app) == "6", f"the next release runs as generation 6, down until its migration: {out.strip()[-300:]!r}")
+        ok("THE SITE IS DOWN until the CMS migration" in out and running(app) == NEXT and generation(app) == "7", f"the next release runs as generation 7, down until its migration: {out.strip()[-300:]!r}")
         gated_record(records(app)[-1], "activation of the next release")
         # switch-to-configuration starts every active target again (nixpkgs switch-to-configuration-ng), so
         # terrace-production.target starts what it wants: the stopped sweep timer runs again, and the held backup timers
@@ -645,26 +677,20 @@ in {
             refused(app, command, H9, f"A3: {command}")
         refused(app, "terrace-production activate " + NEXT, "is already the running system", "A3: activating the running system again")
 
-    with subtest("A4: fixing forward: the failed migration unit fails the corrected build's activation until it is reset"):
+    with subtest("A4: fixing forward: the corrected build signed, copied, activated, with the failed migration unit reset by the command"):
         deploy("app", FIXED)
         out = dry_run(app, "terrace-production activate " + FIXED, "A4: the corrected build passes every check")
         ok(f"Checks passed; activate {FIXED} (Womb {FIXED_REV}, website {NEW_PIN})" in out, "A4: the dry run names the corrected build")
         ok(state(app, "terrace-cms-migrate.service", "ActiveState") == "failed", "A4: the migration unit is still failed from A3")
-        rc, out = operator.execute(ssh("app") + "sudo terrace-production activate " + FIXED + " 2>&1")
-        record = records(app)[-1]
-        finished(record, "activate", "6", "7", FIXED, "failed (exit 4)")
-        ok(rc != 0 and "activate FAILED (exit 4)" in out and record["unexpectedUnits"] == ["terrace-cms-migrate.service"] and record["failedUnits"] == GATED,
-           f"A4: with the failed migration unit left in place, the activation is recorded failed, naming it (exit {rc}): {record}")
-        ok(running(app) == FIXED, "A4: the corrected build runs nevertheless (the switch itself completed)")
-        # The way out: clear the migration unit's failed state, go back to the generation before, activate again.
-        app.succeed("systemctl reset-failed terrace-cms-migrate.service")
-        out = app.succeed("terrace-production rollback")
-        ok(f"Running generation 6: {NEXT}." in out, f"A4: rollback from the failed generation 7 ran generation 6: {out.strip()[-300:]!r}")
-        gated_record(records(app)[-1], "A4: rollback to generation 6")
+        # Activated as documented, with no reset by hand: the command records the failed migration unit and resets it,
+        # as it does the CMS and website, so the earlier failure does not count against this switch.
         out = operator.succeed(ssh("app") + "sudo terrace-production activate " + FIXED)
-        ok(running(app) == FIXED and generation(app) == "7" and "THE SITE IS DOWN until the CMS migration" in out, f"A4: the corrected build runs as generation 7 again: {out.strip()[-300:]!r}")
-        finished(records(app)[-1], "activate", "6", "7", FIXED, "switched; down until the CMS migration: " + " ".join(GATED))
-        gated_record(records(app)[-1], "A4: activation of the corrected build")
+        ok(running(app) == FIXED and generation(app) == "8" and "THE SITE IS DOWN until the CMS migration" in out, f"A4: the corrected build runs as generation 8: {out.strip()[-300:]!r}")
+        started, record = records(app)[-2:]
+        ok(started["phase"] == "started" and "terrace-cms-migrate.service" in started["failedBefore"], f"A4: the started record names the failed migration unit in failedBefore: {started}")
+        finished(record, "activate", "7", "8", FIXED, "switched; down until the CMS migration: " + " ".join(GATED))
+        gated_record(record, "A4: activation of the corrected build")
+        ok(record["preexistingFailedUnits"] == [] and state(app, "terrace-cms-migrate.service", "ActiveState") == "inactive", "A4: the migration unit was reset, nothing left failed from before")
 
     with subtest("A4: fixing forward: the corrected build's migration outlasts the failing build's limit"):
         app.wait_until_succeeds("systemctl is-active --quiet terrace-cms-sweep.timer", timeout=60)

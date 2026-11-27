@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = ROOT / "platform/production/terrace-production.sh"
 DEPLOY = ROOT / "platform/production/terrace-deploy.sh"
 OTHER_UNIT = """      elif [[ $active == failed || $sub == auto-restart ]]; then
-        unexpected+=("$name")"""
+        if untouched "$name"; then in_list "$name" "${preexisting[@]}" || preexisting+=("$name"); else unexpected+=("$name"); fi"""
 # (name, script, exact text, replacement)
 MUTANTS = [
     ("root only", PRODUCTION, "[[ $(id -u) == 0 ]] ||", "true ||"),
@@ -78,16 +78,25 @@ MUTANTS = [
     ("dry run changes nothing", PRODUCTION, "  if (( dry_run )); then\n    echo 'Dry run: nothing changed.'", "  if false; then\n    echo 'Dry run: nothing changed.'"),
     ("switch runs in the terrace-switch unit", PRODUCTION, "systemd-run --unit=terrace-switch --collect", "systemd-run --unit=other --collect"),
     ("a unit stopped mid-switch is not a success", PRODUCTION, "if [[ $rc == 0 && $(jq -r '.phase // \"\"' <<<\"${last:-null}\" 2>/dev/null) != finished ]]; then", "if false; then"),
+    ("the migration unit is reset before a switch", PRODUCTION, "if [[ -n $cms_marker ]]; then reset_units+=(terrace-cms-migrate.service); fi", ":"),
+    ("a unit failed before is a warning only if the switch left it alone", PRODUCTION, '[[ ${entry##*:} == "$(systemctl show "$1" -p InvocationID --value)" ]]; return;', "return 0;"),
+    ("a unit failed before is not counted against the switch", PRODUCTION, 'if untouched "$name"; then in_list "$name" "${preexisting[@]}" || preexisting+=("$name"); else unexpected+=("$name"); fi', 'unexpected+=("$name")'),
+    ("exit 4 with the gate open needs a failure from before to explain it", PRODUCTION, "${#preexisting[@]} > 0 && ! settle_timed_out", "${#preexisting[@]} >= 0 && ! settle_timed_out"),
+    ("a failed switch sets the boot default back", PRODUCTION, 'if [[ $mode == switch && $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then', "if false; then"),
+    ("never in boot mode", PRODUCTION, 'if [[ $mode == switch && $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then', 'if [[ $result != success && $result != switched* && $(readlink -f "$profile") != "$now" ]]; then'),
+    ("the revert's boot step counts", PRODUCTION, '"$now/bin/switch-to-configuration" boot >>"$switch_log" 2>&1 || revert_rc=$?', '"$now/bin/switch-to-configuration" boot >>"$switch_log" 2>&1 || true'),
+    ("status warns after a revert that failed", PRODUCTION, """if [[ $(jq -r '(.revert.result // "success")' <<<"$last" 2>/dev/null) != success ]]; then""", "if false; then"),
+    ("the client stops waiting for a wait that does not return", PRODUCTION, "if (( gone >= switch_gone_seconds )); then abandoned=1;", "if false; then abandoned=1;"),
     ("only this run's records are printed", PRODUCTION, 'last=$(tail -n +"$((lines + 1))" "$records")', 'last=$(cat "$records")'),
-    ("result recorded", PRODUCTION, "stillStarting: $still}'", "stillStarting: $still} | empty'"),
+    ("result recorded", PRODUCTION, "bootDefaultAfter: $boot_after}'", "bootDefaultAfter: $boot_after} | empty'"),
     ("started record", PRODUCTION, "'{phase: \"started\"", "'empty | {phase: \"started\""),
     ("status names an unfinished activation", PRODUCTION, '<<<"$last") == started ]]', '<<<"$last") == never ]]'),
     ("pre-existing failures recorded", PRODUCTION, 'then prefailed+=("$unit"); fi', "then :; fi"),
     ("a gated switch needs the gate closed for the target", PRODUCTION, '$marker != "$(field "$target" .website.revision)" ]]; then gate_closed=1', "true ]]; then gate_closed=1"),
-    ("any other failed unit fails a gated switch", PRODUCTION, OTHER_UNIT, OTHER_UNIT.replace('unexpected+=("$name")', ":")),
+    ("any other failed unit fails a gated switch", PRODUCTION, OTHER_UNIT, OTHER_UNIT.replace('else unexpected+=("$name"); fi', "else :; fi")),
     ("a unit in auto-restart fails a gated switch", PRODUCTION, "elif [[ $active == failed || $sub == auto-restart ]]; then", "elif [[ $active == failed ]]; then"),
-    ("non-service units count", PRODUCTION, "systemctl list-units --all --plain --no-legend --full)", "systemctl list-units --all --plain --no-legend --full | grep '[.]service ')"),
-    ("the switch's own failed list counts", PRODUCTION, '|| unexpected+=("$name")', "|| true"),
+    ("non-service units count", PRODUCTION, "systemctl list-units --all --plain --no-legend --full)\n    for name in", "systemctl list-units --all --plain --no-legend --full | grep '[.]service ')\n    for name in"),
+    ("the switch's own failed list counts", PRODUCTION, 'if untouched "$name"; then preexisting+=("$name"); else unexpected+=("$name"); fi', 'if untouched "$name"; then preexisting+=("$name"); else :; fi'),
     ("helper: secret key only", DEPLOY, "grep -Eq '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{86}==$' \"$key\" ||", "true ||"),
     ("helper: a symlinked key is judged by its target", DEPLOY, 'mode=$(stat -L -c %a "$key" 2>/dev/null || stat -L -f %Lp "$key")', 'mode=$(stat -c %a "$key" 2>/dev/null || stat -f %Lp "$key")'),
     ("helper: key not readable by others", DEPLOY, "(( (8#$mode & 8#077) == 0 )) ||", "true ||"),
