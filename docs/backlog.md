@@ -600,6 +600,16 @@ marked so.
   2026-11-24**: `terrace-production rollback` refuses, with no flag, when the ledger
   holds a migration the target lacks while the marker holds the target's revision
   (unit test); a migration killed before it recorded anything is not detected.
+- Gap in the website release, found by the update drill (2026-11-27), not fixed in
+  Womb: a CMS migration that fails writes nothing to `terrace-cms-migrate.service`'s
+  journal. In the pinned bundle Payload's migration runner logs through the Payload
+  logger and calls `process.exit(1)` itself
+  (`node_modules/@payloadcms/drizzle/dist/migrate.js`); website
+  `cms/tools/release-migrate.ts` (`dd1aef7`) sets that logger to `silent`, so its own
+  `CMS release migration failed; ...` line never runs. The operator sees only the
+  unit's `Result=exit-code`, `ExecMainStatus=1`. Fix in tfc-website (keep a redacted
+  error line), then re-pin; the update drill asserts today's behaviour and would show
+  the change.
 - Not determined, needs a test: what sops-nix does at activation when the new
   manifest declares a name the delivered ciphertext lacks (expected failure of
   `sops-install-secrets`; whether the previous secrets stay), and whether a push's

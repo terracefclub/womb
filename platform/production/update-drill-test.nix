@@ -636,20 +636,19 @@ in {
         # release's own migration fails on its first statement.
         sql("create type public.enum_roster_runs_status as enum ('drill-leftover')")
         mark = app.succeed("date +%s").strip()
-        migrate_rc, invocation = migrate_invocation("A1", block=True)
+        migrate_rc, _ = migrate_invocation("A1", block=True)
         ok(migrate_rc != 0 and state(app, "terrace-cms-migrate.service", "Result") == "exit-code", f"A1: the migration failed (exit {migrate_rc}, Result exit-code)")
-        # This run's lines: the unit in its journal namespace since just before this start (the fifth run of the drill
-        # found no line under _SYSTEMD_INVOCATION_ID in the namespace journal; the dump below says what the entries carry).
-        lines = "journalctl --namespace=terrace-apps -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager"
-        try:
-            app.wait_until_succeeds("journalctl --namespace=terrace-apps --sync >/dev/null 2>&1 || true; " + lines
-                                    + " | grep -qF 'CMS release migration failed; inspect the protected runtime configuration and database state.'", timeout=60)
-        except Exception:
-            print("UPDATE-DRILL-DIAGNOSTICS " + json.dumps({"invocation": invocation, "sync": app.execute("journalctl --namespace=terrace-apps --sync 2>&1; echo exit $?")[1],
-                  "lines": app.execute(lines + " 2>&1")[1], "entries": app.execute("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service -n 3 -o json --no-pager 2>&1")[1],
-                  "system": app.execute("journalctl -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager 2>&1")[1]}))
-            raise
-        ok(app.succeed(lines).count("CMS release migration failed") == 1, "A1: this run's journal says 'CMS release migration failed' once (the cause is hidden by the tool)")
+        # What the operator sees of this failure. The pinned bundle's Payload exits on a failed migration itself
+        # (node_modules/@payloadcms/drizzle/dist/migrate.js: payload.logger.error, then process.exit(1)), and
+        # release-migrate.ts silences that logger, so its own "CMS release migration failed" line never runs: the run
+        # writes NOTHING to the unit's journal (found by this drill; a gap in the website release, not fixed here).
+        ok(state(app, "terrace-cms-migrate.service", "ExecMainStatus") == "1", "A1: the migration's main process exited with status 1")
+        app.succeed("journalctl --namespace=terrace-apps --sync && journalctl --sync")
+        lines = app.succeed("journalctl --namespace=terrace-apps -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager").strip()
+        ok(lines == "", f"A1 (gap): this failed run wrote no line to the unit's journal in the terrace-apps namespace: {lines!r}")
+        system = app.succeed("journalctl -u terrace-cms-migrate.service --since @" + mark + " -o cat --no-pager")
+        ok("terrace-cms-migrate.service: Main process exited, code=exited, status=1/FAILURE" in system and "Failed with result 'exit-code'" in system,
+           f"A1: the system journal shows only systemd's own lines for it: {system.strip()[-400:]!r}")
         ok(marker() == OLD_PIN and ledger() == OLD_MIGRATIONS, "A1: the marker holds the old revision and the ledger lists no new migration")
         ok(tables() == tables_before and sql("select to_regclass('public.roster_runs') is null") == "t" and data() == before_upgrade, "A1: no table added, every table and media file unchanged (the migration's transaction rolled back)")
         site_down("A1")

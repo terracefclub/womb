@@ -987,9 +987,21 @@ Failed, by a guard or an operator tool (the journal says so before any stop:
 --no-pager`): nothing changed; [website host](website-host.md#operator-tools-terrace-cms-tool)
 has the recovery, then run step 10 again.
 
-**Failed inside `bin/migrate`, or killed by the time limit.** The journal shows `CMS
-release migration failed; ...` (the tool hides the cause, `release-migrate.ts`) or a
-timeout. Then:
+**Failed inside `bin/migrate`, or killed by the time limit.** How you see it: `systemctl
+start terrace-cms-migrate.service` fails; `systemctl show terrace-cms-migrate.service -p
+Result -p ExecMainStatus` says `Result=exit-code` and `ExecMainStatus=1` for a failure,
+`Result=timeout` for the time limit. **Do not expect a message in the unit's journal**:
+when a migration itself fails, the pinned release writes nothing there (RAN IN VM,
+update drill A1, 2026-11-27: no line in `journalctl --namespace=terrace-apps -u
+terrace-cms-migrate.service` for the failed run, only systemd's own lines in the
+system journal). The reason, read in the pinned CMS bundle: Payload's migration
+runner logs the error through the Payload logger and calls `process.exit(1)` itself
+(`node_modules/@payloadcms/drizzle/dist/migrate.js`), and `release-migrate.ts` (website
+`dd1aef7`) silences that logger, so its own `CMS release migration failed; ...` line
+is never reached. That line appears only for failures outside a migration (for
+example at start-up). A gap in the website release, recorded in the
+[backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24); the cause
+of a failed migration is therefore not visible on the host. Then:
 
 - The marker still holds the **old** revision. On the new generation the gate stays
   closed (old marker, new pin), so the CMS, the website, the sweep and the tools
