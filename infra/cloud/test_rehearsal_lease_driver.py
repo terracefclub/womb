@@ -1602,6 +1602,57 @@ class DirectoryIdentity(unittest.TestCase):
                          {"real": os.path.realpath(second / "bin")})
 
 
+class LiveChild:
+    """A child that never ends: poll() stays None whatever is sent."""
+    pid = 4343
+    returncode = None
+
+    def poll(self):
+        return None
+
+
+class ChildThatSurvives(unittest.TestCase):
+    def test_a_child_alive_after_sigterm_and_sigkill_is_not_gone(self):
+        group = ScriptedGroup(lambda now, sent: None)
+        self.assertFalse(group.runner().stop(LiveChild(), 30))
+        self.assertEqual(group.sent, [(0.0, signal.SIGTERM), (30.0, signal.SIGKILL)])
+        self.assertAlmostEqual(group.now, 40.0, delta=0.2)
+
+    def test_through_run_the_surviving_child_is_a_leftover(self):
+        started = time.monotonic()
+
+        def killpg(pgid, sig):
+            if sig == signal.SIGKILL:
+                return  # the kill never lands, as for a child in uninterruptible sleep
+            os.killpg(pgid, sig)
+        runner = driver.Runner(killpg=killpg, monotonic=lambda: (time.monotonic() - started) * 50)
+        ready = Path(tempfile.mkdtemp()) / "ready"
+        outcome = runner.run(["/bin/sh", "-c", f"trap '' TERM; touch {ready}; sleep 30"], 30, label="t", grace=5,
+                             interrupted=lambda: ready.exists())
+        try:
+            self.assertFalse(outcome.gone)
+            self.assertEqual(len(runner.leftovers), 1)
+            self.assertIsNone(runner.leftovers[0].poll())
+        finally:
+            for process in runner.leftovers:  # the test's own clean-up: really kill it now
+                os.killpg(process.pid, signal.SIGKILL)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(runner.settle(10))
+
+
+class StorePrefix(unittest.TestCase):
+    def test_a_sibling_that_only_starts_with_the_store_path_is_not_store(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        store, sibling = tmp / "store", tmp / "store-evil"
+        for directory in (store, sibling):
+            directory.mkdir()
+        (sibling / "tool").write_text("#!/bin/sh\n")
+        (sibling / "tool").chmod(0o755)
+        self.assertIn("entries", driver.directory_identity(str(sibling), str(store)))
+        self.assertIn("sha256", driver.resolve_tool(str(sibling / "tool"), str(store)))
+
+
 class RealRunner(unittest.TestCase):
     def test_bound_stops_the_child(self):
         started = time.monotonic()

@@ -452,7 +452,7 @@ class Runner:
     def stop(self, process, grace, drain=None):
         """Stop the child and every member of its group. True only when the whole group is verified gone."""
         pgid = process.pid
-        drain = drain or (lambda: time.sleep(0.05))
+        drain = drain or (lambda: self.sleep(0.05))
         if process.poll() is None:
             for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10)):
                 try:

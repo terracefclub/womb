@@ -199,6 +199,13 @@ MUTANTS = (
      "                code = None\n            self.refreshes", "                code = 0\n            self.refreshes"),
     ("main net prints no recovery text when the full one fails", DRIVER,
      "                    text = minimal_recovery_text(cfg)", "                    text = \"\""),
+    ("a child alive after SIGTERM and SIGKILL reported gone", DRIVER,
+     "            if process.poll() is None:\n                return False\n        # The child is gone;",
+     "            if process.poll() is None:\n                return True\n        # The child is gone;"),
+    ("store prefix check without the trailing slash (directories)", DRIVER,
+     "    if real.startswith(os.path.realpath(store_dir) + \"/\"):", "    if real.startswith(os.path.realpath(store_dir)):"),
+    ("store prefix check without the trailing slash (tools)", DRIVER,
+     "    store = os.path.realpath(store_dir) + \"/\"", "    store = os.path.realpath(store_dir)"),
 )
 TESTS = ("infra/cloud/test_rehearsal_lease_driver.py", "infra/cloud/test_rehearsal_lease.py")
 
