@@ -478,8 +478,12 @@ user from the process's own uid, and the rest are fixed. The driver itself refus
 `ssh`, `ssh-keygen`, `nix`, `bash` and `curl` for the tools), `HOME`, `USER`, `LOGNAME`, `LANG=C.UTF-8` and `TZ=UTC`,
 nothing inherited. Python tools run with `-E -s -B` (not `-I`: it implies `-P`, which drops a tool's own directory
 from `sys.path` and breaks every sibling import). Every executable is given by absolute path and resolved once at
-plan time to its real path, with its sha256 when it is outside the Nix store; those, the child environment and the
-host steps' own step list are part of the approved digest, and `run` refuses if any differs.
+plan time to its real path, with its sha256 when it is outside the Nix store. Every directory in `--child-path` and
+`--unit-path` is resolved too: a store path by its real path (a system profile directory such as
+`/run/current-system/sw/bin` resolves into the store, so a profile switch changes it), any other directory by a
+digest of its entries (each name's target, size and modification time). Those, the child environment and the host
+steps' own step list are part of the approved digest, and `run` refuses if any differs. Use only root-owned
+directories in `--child-path`: the timer tool calls `sudo` by name. Every child runs in the run directory.
 
 ### Before the plan
 
@@ -546,9 +550,11 @@ creates the `<run>.open` pointer beside the run directory and executes the steps
 the first non-zero exit or failed guard, with no retry, and goes to teardown (G1). Before each step after 1.1a it
 requires the step's bound plus 1500 s before expiry. It refreshes the provider binding every 40 s while pin,
 dispatch, verify, inspect, plan and install run (a failed refresh stops the running step), and stops the refresher
-before any step that takes the lease lock. SIGINT, SIGTERM and SIGHUP only set a flag: the running child is then
+before any step that takes the lease lock. SIGINT, SIGTERM and SIGHUP only set a flag and record the signal (the
+handler writes nothing); the main flow reports them at the end. The running child is then
 stopped (SIGTERM to its process group, a grace period, SIGKILL; the host steps get 240 s for their own clean-up) and
-its real exit status is kept; further signals are ignored. A child that exits while a descendant still holds its
+its real exit status is kept, its output is still read while it shuts down (a child that prints a lot on SIGTERM is
+not mistaken for a hung one); further signals are ignored. A child that exits while a descendant still holds its
 output pipe is reported with its own status and the descendants in its group are stopped.
 
 Exit codes: 0 pass; 1 a step failed and every clean-up was verified; 2 inputs refused before anything was armed;
@@ -564,7 +570,7 @@ arming dispatched; every sub-step is guarded on its own and receipts are best ef
 
 1. wait up to 240 s for a running writer unit to finish, then `systemctl stop` the five units by exact name and read
    each as literally `inactive` or `failed` (a failed read or anything else is unknown, and unknown is never
-   inactive); wait for any child the driver could not verify gone;
+   inactive); wait for any child the driver could not verify gone (if one stays, the run exits 3);
 2. stop the SFTP endpoint if its receipt shows it still started;
 3. `rehearsal_lease.py cleanup` (three absence reads);
 4. an independent read-only inventory (`rehearsal_lease.py prepare` in a fresh `RUN/audit-*` directory under a new
@@ -606,11 +612,12 @@ absence has been confirmed twice.
 | 1.7a boot, 1.7b TCP wait, 1.7c, 2.0 | Wait for the boot unit, then cleanup | verified-clean | As above |
 | 2.1 to 6 host steps | SIGTERM to the host steps and up to 240 s for their clean-up; their real exit status is kept through further signals; the driver stops the SFTP endpoint itself if its receipt is still open; then cleanup | exit 4 or 1 when the host steps report 0, 1, 2 or 4 | Host steps report 3, die by signal or are SIGKILLed after the grace: exit 3 after the provider side is verified and disarmed; token and secrets deleted, `sftp/` and `host-steps/` kept |
 | Any signal while stopping a child or during teardown | Recorded and ignored | as above | — |
-| A receipt, transcript or closing write fails (disk full) | Ignored for behaviour; teardown continues to cleanup; recovery text printed before the closing writes | from the state | — |
+| A receipt, transcript or closing write fails (disk full) | Ignored for behaviour; teardown continues to cleanup; recovery text printed before the closing writes (a fixed minimal text if the full one cannot be built) | from the state | — |
+| A teardown child cannot be started, raises, or is not verified gone | Read as a failure, never as success: no disarm after a failed cleanup, inventory or disarm child | exit 3 | `resume-teardown` |
 | An unexpected error in the driver after the start | The single teardown entry still runs; `main` maps an error that escapes to exit 3 with the recovery text | exit 3 unless verified | — |
 | Driver killed hard (SIGKILL, lost machine) after 1.1b | Nothing runs; the transient timer fires at expiry and runs cleanup. A reboot of the build machine loses the transient timer | timer-clean, unverified by the driver | The `<run>.open` pointer stays, so no new plan passes; a person runs `resume-teardown` |
-| Teardown: a writer unit not read inactive, cleanup fails, inventory differs, final audit fails | No disarm; token and recovery files kept; secrets deleted; recovery commands printed | **exit 3, timer armed** | `resume-teardown` |
-| Teardown: disarm fails, or the timer is not read inactive after it | Token and recovery files kept | exit 3, timer state stated as unknown | Check the timer by hand, then `resume-teardown` |
+| Teardown: a writer unit not read inactive, cleanup fails, inventory differs, final audit fails | No disarm; token and recovery files kept; secrets deleted; recovery commands printed | **exit 3**; the timer is read and stated as found: ARMED, NOT armed (for example a baseline mismatch at 1.1a, before arming) or UNKNOWN | `resume-teardown` |
+| Teardown: disarm fails, or the timer is not read inactive after it | Token and recovery files kept | exit 3, the timer stated as read | Check the timer by hand, then `resume-teardown` |
 
 ### Recovery for a lost runner
 
@@ -618,6 +625,7 @@ absence has been confirmed twice.
 python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py resume-teardown --run-directory RUN --source STAGE
 ```
 
+An unexpected error in `resume-teardown` once a lease exists exits 3, never 2.
 This is the documented recovery sequence (controller cleanup, the final audit, then disarm) with the independent
 inventory and the final audit before disarm, the deletion policy above and the closing receipt. It exits 0 when
 everything verified, 3 otherwise (the commands are printed). After an unresolved dispatch, see the table row above.
@@ -643,3 +651,13 @@ in no argument, environment, log or receipt, and that files outside the run dire
 survive deletion; and check the bounded units against what `rehearsal_apply.require_run_unit` requires. Not
 verified: anything at a provider or a host, the real tools under the driver, `sudo` and `systemd-run` on the build
 machine, and the timings.
+
+**A possible false escalation that cannot be tested offline.** The driver calls a child "gone" only when its whole
+process group is verified gone, by signalling the group. A bounded writer step runs `sudo`, which may keep running
+as root; if the operator account is not allowed to signal that process group, the driver cannot verify it and
+reports "the child or its process group could not be verified gone" (or "a child the driver started (for example a
+sudo client) is not verified gone"), so a run whose every other check passed exits 3. This is the safe side and is
+accepted. What the operator does: read the closing summary (`problems` names the step); check
+`ps -o pid,pgid,user,args -g <pgid>` shows nothing and `systemctl show terrace-cloud-<run>-*` reads inactive; if the
+provider side is reported verified and the timer disarmed, nothing remains at the provider, and only the local check
+is left; then remove the `<run>.open` pointer by hand.

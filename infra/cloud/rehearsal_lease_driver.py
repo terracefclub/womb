@@ -240,6 +240,23 @@ def resolve_tool(path, store_dir):
     return {"path": str(path), "real": real, "sha256": sha256_file(real)}
 
 
+def directory_identity(path, store_dir):
+    """What a PATH directory resolves to: a store path is immutable; elsewhere, every entry's target, size and
+    modification time, so a binary swapped behind the directory between plan and run changes the plan digest."""
+    real = os.path.realpath(path)
+    if real.startswith(os.path.realpath(store_dir) + "/"):
+        return {"real": real}
+    entries = []
+    for name in sorted(os.listdir(real)):
+        target = os.path.realpath(os.path.join(real, name))
+        try:
+            info = os.stat(target)
+            entries.append(f"{name} {target} {info.st_size} {info.st_mtime_ns}")
+        except OSError:
+            entries.append(f"{name} {target} missing")
+    return {"real": real, "entries": hashlib.sha256("\n".join(entries).encode()).hexdigest()}
+
+
 # ---- Configuration ---------------------------------------------------------------------------------------------------
 
 @dataclass
@@ -373,7 +390,19 @@ class Runner:
                 if time.monotonic() >= deadline:
                     reason = "bound"
                     break
-            gone = self.stop(process, grace)
+            state = {"open": open_pipe, "size": size}
+
+            def drain():
+                # Keep reading while the child shuts down: a child that writes more than the pipe holds on SIGTERM
+                # would otherwise block and be SIGKILLed, and its clean shutdown would look unverified.
+                if state["open"]:
+                    ready, _, _ = select.select([descriptor], [], [], 0.05)
+                    if ready:
+                        state["open"], state["size"] = self.read(descriptor, chunks, state["size"])
+                else:
+                    time.sleep(0.05)
+            gone = self.stop(process, grace, drain)
+            open_pipe, size = state["open"], state["size"]
             if open_pipe:
                 for _ in range(64):  # what is already in the pipe; a descendant elsewhere may still hold it
                     ready, _, _ = select.select([descriptor], [], [], 0)
@@ -417,9 +446,10 @@ class Runner:
         except OSError:
             return None
 
-    def stop(self, process, grace):
+    def stop(self, process, grace, drain=None):
         """Stop the child and every member of its group. True only when the whole group is verified gone."""
         pgid = process.pid
+        drain = drain or (lambda: time.sleep(0.05))
         if process.poll() is None:
             for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10)):
                 try:
@@ -428,28 +458,33 @@ class Runner:
                     break
                 except OSError:
                     return False  # cannot signal it: cannot verify
-                try:
-                    process.wait(timeout=wait)
+                end = time.monotonic() + wait
+                while process.poll() is None and time.monotonic() < end:
+                    drain()
+                if process.poll() is not None:
                     break
-                except subprocess.TimeoutExpired:
-                    continue
             if process.poll() is None:
                 return False
-        # The child is gone; descendants left in its group (the pipe holders) are stopped too.
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            alive = self.group_alive(pgid)
-            if alive is None:
-                return False
-            if not alive:
-                return True
-            try:
-                os.killpg(pgid, sig)
-            except ProcessLookupError:
-                return True
-            except OSError:
-                return False
-            time.sleep(0.5)
-        return self.group_alive(pgid) is False
+        # The child is gone; descendants left in its group (the pipe holders) are stopped too. A killed descendant
+        # stays a group member until its new parent reaps it, so each signal is followed by a bounded wait.
+        # A group that cannot be signalled (a member we may not signal, or on some kernels a zombie awaiting its
+        # reaper) is "unknown": keep polling within the same bound; only a group verified empty counts as gone.
+        for sig, wait in ((None, 1), (signal.SIGTERM, 3), (signal.SIGKILL, 5)):
+            if sig is not None:
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    return True
+                except OSError:
+                    pass
+            end = time.monotonic() + wait
+            while True:
+                if self.group_alive(pgid) is False:
+                    return True
+                if time.monotonic() >= end:
+                    break
+                time.sleep(0.05)
+        return False
 
     def abort_current(self):
         with self.lock:
@@ -732,12 +767,14 @@ def check_inputs(cfg, runner, *, at_run=False):
     for part in (cfg.child_path or "").split(":"):
         if not part or not Path(part).is_absolute() or not Path(part).is_dir():
             raise Refused("--child-path must be absolute, existing directories (the children's whole PATH)")
-    if not cfg.unit_path or not all(Path(part).is_absolute() for part in cfg.unit_path.split(":")):
-        raise Refused("--unit-path must be absolute directories (pulumi and node for the bounded units)")
+    if not cfg.unit_path or not all(Path(p).is_absolute() and Path(p).is_dir() for p in cfg.unit_path.split(":")):
+        raise Refused("--unit-path must be absolute, existing directories (pulumi and node for the bounded units)")
+    path_directories = {part: directory_identity(part, cfg.store_dir)
+                        for part in cfg.child_path.split(":") + cfg.unit_path.split(":")}
     ok("tools", f"{len(tools)} executables resolved; children get PATH={cfg.child_path} and nothing else inherited")
     env = cfg.child_env()
     code, output = outcome_of(runner.run(cfg.py("infra", "nixos", "lease_host_steps.py") + ["list"], 60,
-                                         label="plan-host-steps-list", env=env))[:2]
+                                         label="plan-host-steps-list", env=env, cwd=str(R)))[:2]
     if code:
         raise Refused("lease_host_steps.py list failed in the staged tree")
     host_steps = [line.rstrip() for line in output.decode(errors="replace").splitlines() if line.strip()][:200]
@@ -754,7 +791,7 @@ def check_inputs(cfg, runner, *, at_run=False):
         raise Refused("G5: kexec archive refused (diagnostic or missing)")
     code, output = runner.run([cfg.nix, "eval", "--raw", "--offline", "--impure", "--file",
                                cfg.tool("infra", "nixos", "kexec-installer.nix"), "archive.outPath"],
-                              600, label="plan-kexec-eval", env=env)
+                              600, label="plan-kexec-eval", env=env, cwd=str(R))
     expected = output.decode(errors="replace").strip()
     if code or not rescue_install.STORE.fullmatch(expected):
         raise Refused("G5: could not evaluate infra/nixos/kexec-installer.nix at the staged revision")
@@ -779,12 +816,12 @@ def check_inputs(cfg, runner, *, at_run=False):
             or not all(isinstance(v, str) and rescue_install.STORE.fullmatch(v) for v in variants.values())):
         raise Refused("G6: variants are not lease-host.nix's `variants` for this install")
     paths = [outputs["system"], outputs["disko"], outputs["installer"], *(variants[n] for n in names[1:])]
-    code, _ = runner.run([cfg.nix_store, "--check-validity", *paths], 120, label="plan-store-validity", env=env)
+    code, _ = runner.run([cfg.nix_store, "--check-validity", *paths], 120, label="plan-store-validity", env=env, cwd=str(R))
     if code:
         raise Refused("G6: a prestaged store path is missing (a build would be needed inside the lease)")
     for link in (cfg.install_outputs, cfg.variants):
         code, output = runner.run([cfg.nix_store, "--query", "--roots", os.path.realpath(link)], 120,
-                                  label="plan-store-roots", env=env)
+                                  label="plan-store-roots", env=env, cwd=str(R))
         if code or not any(line.startswith(f"{link} -> ") for line in output.decode(errors="replace").splitlines()):
             raise Refused(f"G6: {Path(link).name} is not a GC root inside the run directory")
     ok("prestaged closures (G6)", f"{len(paths)} store paths valid, rooted by RUN/lease and RUN/variants")
@@ -802,7 +839,8 @@ def check_inputs(cfg, runner, *, at_run=False):
               "install": {k: outputs[k] for k in ("system", "disko", "installer", "device")}, "variants": variants,
               "sshCidr": cfg.ssh_cidr, "expectBaseline": cfg.expect_baseline, "serverType": SERVER_TYPE,
               "location": LOCATION, "image": IMAGE, "leaseSeconds": LEASE_SECONDS, "tools": tools,
-              "childEnvironment": {k: v for k, v in env.items()}, "unitPath": cfg.unit_path, "hostSteps": host_steps,
+              "childEnvironment": {k: v for k, v in env.items()}, "unitPath": cfg.unit_path, "pathDirectories": path_directories,
+              "hostSteps": host_steps,
               "queueCommand": cfg.queue_command}
     return inputs, checks
 
@@ -812,13 +850,13 @@ def idle_checks(cfg, runner):
     for scope in ([], ["--user"]):
         code, output = runner.run([SYSTEMCTL, *scope, "list-units", "--plain",
                                    "--no-legend", "terrace-cloud-*", "terrace-lease-sftp-*"], 30, label="idle-units",
-                                  env=cfg.child_env())
+                                  env=cfg.child_env(), cwd=str(cfg.run_directory))
         if code or output.strip():
             raise Refused(f"builder not idle: {'user' if scope else 'system'} units of a lease are loaded "
                           "(or systemctl could not tell)")
     checks.append({"check": "builder units", "result": "pass", "detail": "no terrace-cloud-*/terrace-lease-sftp-* unit"})
     if cfg.queue_command:
-        code, _ = runner.run([cfg.queue_command], 60, label="idle-queue", env=cfg.child_env())
+        code, _ = runner.run([cfg.queue_command], 60, label="idle-queue", env=cfg.child_env(), cwd=str(cfg.run_directory))
         if code:
             raise Refused(f"heavy-queue check {cfg.queue_command} exited {code}: not idle")
         checks.append({"check": "heavy queue", "result": "pass", "detail": f"supplied: {cfg.queue_command} exit 0"})
@@ -954,19 +992,15 @@ class Driver:
 
     # Signals only set a flag; nothing raises out of the handler.
     def on_signal(self, signum, _frame):
+        """Record only: no output, nothing that can raise. The main flow reports the signals."""
         self.signals.append(signum)
-        if self.teardown_running:
-            self.say(f"lease driver: signal {signum} ignored; teardown in progress", self.err)
-        elif self.interrupted:
-            self.say(f"lease driver: signal {signum} ignored; already stopping", self.err)
-        else:
+        if not self.teardown_running:
             self.interrupted = True
-            self.say(f"lease driver: signal {signum}: stopping the current step, then teardown", self.err)
 
     def run_child(self, argv, bound, *, label, grace=CHILD_GRACE, foreground=True, interruptible=True):
         result = self.runner.run(argv, self.cfg.bound(bound), label=label, grace=self.cfg.bound(grace),
                                  foreground=foreground,
-                                 env=self.cfg.child_env(),
+                                 env=self.cfg.child_env(), cwd=str(self.R),
                                  interrupted=(lambda: self.interrupted) if interruptible else None)
         return outcome_of(result)
 
@@ -1062,9 +1096,13 @@ class Driver:
             "binding", PHASE, "--directory", str(self.R), "--credential-file", str(self.cfg.credential_file),
             "--role", ROLE]
         while not self.refresh_stop.wait(self.cfg.refresh_seconds):
-            outcome = self.run_child(argv, 60, label="1.4-refresh", foreground=False, interruptible=False)
+            try:
+                outcome = self.run_child(argv, 60, label="1.4-refresh", foreground=False, interruptible=False)
+                code = outcome.code
+            except Exception:  # noqa: BLE001 - a refresher that cannot run is a failed refresh
+                code = None
             self.refreshes += 1
-            if outcome.code != 0:
+            if code != 0:
                 self.refresh_failed = True
                 self.runner.abort_current()
                 return
@@ -1369,12 +1407,10 @@ class Driver:
         code = self.tear("7.6", "disarm the expiry timer",
                          self.cfg.py("infra", "cloud", "rehearsal_timer.py") + ["disarm", *creds], 60)
         if code != 0:
-            self.state["timer"] = "unknown: disarm failed"
             self.finish_unverified("disarm failed")
             return False
         if not self.units_stopped(timer_units(self.cfg.run), "7.6-show"):
-            self.state["timer"] = "unknown: disarm reported success but the timer could not be read inactive"
-            self.finish_unverified("the timer state after disarm is unknown")
+            self.finish_unverified("disarm reported success but the timer could not be read inactive")
             return False
         self.state.update(provider="verified absent, baseline preserved", timer="disarmed")
         self.local_checks()
@@ -1387,12 +1423,31 @@ class Driver:
         return True
 
     def finish_unverified(self, why):
-        """(i) provider side not verified: the timer stays armed. Keep what recovery needs, delete the rest."""
+        """(i) provider side not verified: the timer stays as it is. Keep what recovery needs, delete the rest."""
         self.state["provider"] = "NOT verified: " + why
+        self.observe_timer()
         self.local_checks()
         self.delete(SECRET_FILES + SECRET_DIRECTORIES)
         self.state["kept"] = list(RECOVERY_KEEP) + (list(LOCAL_DIRECTORIES) if self.problems else []) + [
             "driver/ (evidence)"]
+
+    def observe_timer(self):
+        """State the timer from what is read now, never from what was intended."""
+        unit = timer_units(self.cfg.run)[0]
+        read = self.unit_state(unit, "7.7-timer")
+        if read == "active":
+            self.state["timer"] = f"ARMED (read active now); it runs the cleanup at {self.expiry_text()}"
+        elif read in ("inactive", "failed"):
+            self.state["timer"] = (f"NOT armed (read {read} now): nothing will clean up at expiry by itself; "
+                                   "run resume-teardown")
+        else:
+            self.state["timer"] = "UNKNOWN (its state could not be read): check it by hand"
+
+    def expiry_text(self):
+        try:
+            return stamp(self.expires())
+        except Exception:  # noqa: BLE001
+            return "the lease expiry"
 
     def make_audit_dir(self):
         self.audit_dir = self.R / f"audit-{time.time_ns()}"
@@ -1465,7 +1520,11 @@ class Driver:
                                         if self.host_exit is not None or not self.host_verified else None),
                    "state": self.state, "problems": self.problems, "bindingRefreshes": self.refreshes}
         if code == EXIT_ESCALATE:
-            self.say(recovery_text(self.cfg, summary), self.err)  # before any write (M1)
+            self.say(self.guard("recovery-text", lambda: recovery_text(self.cfg, summary),
+                                minimal_recovery_text(self.cfg)), self.err)  # before any write (M1)
+        if self.signals:
+            self.say(f"lease driver: signals received {self.signals}; the first stopped the run, any later one and any "
+                     "during teardown were ignored", self.err)
         self.guard("close-time", lambda: summary.update(closedAt=stamp(self.now())))
         self.guard("closing.json", lambda: lease.write_private(self.evidence / f"closing-{time.time_ns()}.json",
                                                                summary))
@@ -1539,6 +1598,13 @@ def recovery_text(cfg, summary):
     return "\n".join(lines)
 
 
+def minimal_recovery_text(cfg):
+    """Fixed text that cannot fail: used when the full recovery text cannot be built."""
+    return ("ESCALATE: a clean-up could NOT be verified and the full recovery text could not be built. Read the timer "
+            "with `systemctl show terrace-cloud-<run>.timer`, then run `rehearsal_lease_driver.py resume-teardown "
+            "--run-directory <run directory>` from the staged tree. Do not delete the run directory.")
+
+
 def resume_teardown(cfg, runner, *, delete_after_person_check=False, out=sys.stdout, err=sys.stderr, now=time.time,
                     sleep=time.sleep):
     R = cfg.run_directory
@@ -1550,6 +1616,7 @@ def resume_teardown(cfg, runner, *, delete_after_person_check=False, out=sys.std
         return EXIT_INPUTS
     driver = Driver(cfg, runner, out=out, err=err, now=now, sleep=sleep, evidence_name=f"driver-resume-{time.time_ns()}")
     driver.arm_dispatched = True
+    driver.state["timer"] = "not read yet"
     pointer = R.parent / (cfg.run + ".open")
     handlers = {sig: signal.signal(sig, driver.on_signal) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     driver.teardown_running = True
@@ -1723,9 +1790,12 @@ def main(argv=None, runner=None):
             run_dir = Path(args.run_directory)
             if (run_dir / "lease.json").exists() or (run_dir.parent / (run_dir.name + ".open")).exists():
                 print(f"lease driver: unexpected {type(problem).__name__} after the run started", file=sys.stderr)
-                if cfg is not None:
-                    print(recovery_text(cfg, {"failedStep": "driver error", "state": {
-                        "provider": "unknown", "timer": "unknown (possibly armed)"}}), file=sys.stderr)
+                try:
+                    text = recovery_text(cfg, {"failedStep": "driver error", "state": {
+                        "provider": "unknown", "timer": "UNKNOWN (not read): check it by hand"}})
+                except BaseException:  # noqa: BLE001
+                    text = minimal_recovery_text(cfg)
+                print(text, file=sys.stderr)
                 return EXIT_ESCALATE
             print(f"lease driver: refused: {type(problem).__name__} before anything started", file=sys.stderr)
             return EXIT_INPUTS
@@ -1741,10 +1811,17 @@ def main(argv=None, runner=None):
             print("Staged creator source", stage_project(args.run_directory, args.source, args.bun, runner))
             return EXIT_PASS
         if args.command == "resume-teardown":
-            cfg = Config(run_directory=private_run_directory(args.run_directory), source=args.source,
-                         python=args.python, credential_file=args.credential_file, sudo=args.sudo,
-                         child_path=args.child_path)
-            return resume_teardown(cfg, runner, delete_after_person_check=args.delete_after_person_check)
+            try:
+                cfg = Config(run_directory=private_run_directory(args.run_directory), source=args.source,
+                             python=args.python, credential_file=args.credential_file, sudo=args.sudo,
+                             child_path=args.child_path)
+                return resume_teardown(cfg, runner, delete_after_person_check=args.delete_after_person_check)
+            except BaseException as problem:  # noqa: BLE001 - a lease exists: never "refused"
+                if (Path(args.run_directory) / "lease.json").exists():
+                    print(f"resume-teardown: unexpected {type(problem).__name__}", file=sys.stderr)
+                    print(minimal_recovery_text(None), file=sys.stderr)
+                    return EXIT_ESCALATE
+                raise
         cfg = config_from(args)
         start = time.time() if args.start is None else datetime.strptime(args.start, "%Y-%m-%dT%H:%M").replace(
             tzinfo=timezone.utc).timestamp()

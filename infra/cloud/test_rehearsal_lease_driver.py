@@ -41,7 +41,6 @@ VARIANTS = {"v0": SYSTEM, **{name: f"/nix/store/{letter * 32}-nixos-system-app-{
 ADDRESS = "203.0.113.7"
 FIXED = datetime(2026, 12, 1, 8, 0, tzinfo=timezone.utc).timestamp()
 USER = "operator-test"
-UNIT_PATH = "/fake/pulumi/bin:/fake/node/bin"
 HOST_LIST = b"2.1  first-boot window\n3.1  throwaway SFTP endpoint and reverse forward\n6  final evidence\n"
 PLANTED = {"token": "PLANTEDtokenVALUE0123456789abcdefXYZ", "bootstrap": "PLANTED-BOOTSTRAP-PRIVATE-KEY-material",
            "deploy": "PLANTED-DEPLOY-SECRET-material", "spare": "PLANTED-SPARE-SECRET-material",
@@ -66,6 +65,7 @@ class FakeTools:
         self.case = case
         self.calls = []
         self.envs = []
+        self.cwds = []
         self.fail = {}          # label -> exit code
         self.signal_at = {}     # label -> signal(s) sent to this process while the tool "runs"
         self.after_fail = set()  # labels whose side effects happen before the non-zero exit
@@ -78,6 +78,7 @@ class FakeTools:
     def run(self, argv, timeout, *, label, foreground=True, grace=30, cwd=None, env=None, interrupted=None):
         self.calls.append((label, list(argv)))
         self.envs.append(env)
+        self.cwds.append(cwd)
         if label in self.real:
             outcome = self.real_runner.run(self.real[label], timeout, label=label, grace=grace, env=None,
                                            interrupted=interrupted)
@@ -122,6 +123,8 @@ class FakeTools:
             return 0, b"inactive\n"
         if label == "resume-load":
             return 0, b"not-found\n"
+        if label == "7.7-timer":
+            return 0, b"active\n"
         if label == "0.6a":
             key = Path(argv[-1])
             key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n" + PLANTED["bootstrap"] + "\n")
@@ -201,7 +204,14 @@ class Harness(unittest.TestCase):
         self.R.mkdir(mode=0o700)
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        for name in ("ssh-keygen", "nix", "nix-store", "sudo", "rclone", "restic", "sops", "terrace-secrets",
+        for name in ("pulumi-bin", "node-bin"):
+            (self.tmp / name).mkdir()
+        self.unit_path = f"{self.tmp / 'pulumi-bin'}:{self.tmp / 'node-bin'}"
+        self.sbin = self.tmp / "sbin"  # outside --child-path: only the tool digest can see a changed sudo
+        self.sbin.mkdir()
+        (self.sbin / "sudo").write_text("#!/bin/sh\nexit 0\n")
+        (self.sbin / "sudo").chmod(0o755)
+        for name in ("ssh-keygen", "nix", "nix-store", "rclone", "restic", "sops", "terrace-secrets",
                      "queue-idle"):
             (self.bin / name).write_text("#!/bin/sh\nexit 0\n")
             (self.bin / name).chmod(0o755)
@@ -276,9 +286,9 @@ class Harness(unittest.TestCase):
         b = str(self.bin)
         values = dict(run_directory=self.R, source=self.source, python=sys.executable, revision=REV,
                       manifest_sha256=self.manifest, ssh_keygen=b + "/ssh-keygen", nix=b + "/nix",
-                      nix_store=b + "/nix-store", sudo=b + "/sudo", kexec_archive=self.archive,
+                      nix_store=b + "/nix-store", sudo=str(self.sbin / "sudo"), kexec_archive=self.archive,
                       kexec_sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(), ssh_cidr="198.51.100.9/32",
-                      unit_path=UNIT_PATH, child_path=f"{b}:/usr/bin:/bin", rclone=b + "/rclone",
+                      unit_path=self.unit_path, child_path=f"{b}:/usr/bin:/bin", rclone=b + "/rclone",
                       restic=b + "/restic", sops=b + "/sops", terrace_secrets=b + "/terrace-secrets",
                       expect_baseline=COUNTS, min_free_bytes=0, store_dir=str(self.store), user=USER)
         values.update(changes)
@@ -309,13 +319,19 @@ class Harness(unittest.TestCase):
         return [sys.executable, *FLAGS, str(self.source.joinpath(*parts))]
 
     def unit(self, name, argv):
-        return [str(self.bin / "sudo"), "-n", SYSTEMD_RUN, "--quiet", "--collect", "--wait", "--pipe",
+        return [str(self.sbin / "sudo"), "-n", SYSTEMD_RUN, "--quiet", "--collect", "--wait", "--pipe",
                 f"--unit=terrace-cloud-{RUN}-{name}.service", "--uid=" + USER, "--service-type=exec",
                 "--property=KillMode=control-group", "--property=RuntimeMaxSec=230", "--property=TimeoutStopSec=10s",
-                "--property=UMask=0077", "--property=NoNewPrivileges=yes", "--setenv=PATH=" + UNIT_PATH, *argv]
+                "--property=UMask=0077", "--property=NoNewPrivileges=yes", "--setenv=PATH=" + self.unit_path, *argv]
 
     def assert_teardown_complete(self):
         self.assertEqual(self.labels()[-len(TEARDOWN_LABELS):], TEARDOWN_LABELS)
+
+
+def wait_for(path, seconds=30):
+    deadline = time.monotonic() + seconds
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def normalize(argv):
@@ -403,7 +419,7 @@ class HappyPath(Harness):
                 "--rclone", b + "/rclone", "--restic", b + "/restic", "--sops", b + "/sops",
                 "--terrace-secrets", b + "/terrace-secrets", "--nix", b + "/nix"]),
             *(show("7.1-wait", unit) for unit in writers),
-            ("7.1", [b + "/sudo", "-n", SYSTEMCTL, "stop", *writers]),
+            ("7.1", [str(self.sbin / "sudo"), "-n", SYSTEMCTL, "stop", *writers]),
             *(show("7.1-show", unit) for unit in writers),
             ("7.3", lease_tool + ["cleanup", *creds]),
             ("7.4", lease_tool + ["prepare", "--directory", R + "/audit-<NS>", "--credential-file", T, "--run",
@@ -625,6 +641,7 @@ class Interrupts(Harness):
             self.assertIsNone(d.on_signal(signal.SIGTERM, None))
         self.assertTrue(d.interrupted)
         self.assertEqual(d.signals, [signal.SIGTERM] * 3)
+        self.assertEqual((self.out.getvalue(), self.err.getvalue()), ("", ""))  # the handler writes nothing
 
     def test_interrupt_before_anything_is_armed(self):
         self.assertEqual(self.interrupt("0.8a", signal.SIGINT), driver.EXIT_INTERRUPTED)
@@ -651,7 +668,8 @@ class Interrupts(Harness):
         self.tools.signal_at["7.3"] = signal.SIGTERM
         self.assertEqual(self.drive(), driver.EXIT_STEP_FAILED)
         self.assert_teardown_complete()
-        self.assertIn("teardown in progress", self.err.getvalue())
+        self.assertEqual(self.driver.signals, [signal.SIGTERM])
+        self.assertIn("signals received", self.err.getvalue())
 
     def test_writer_unit_finishes_before_it_is_stopped(self):
         states = iter([b"active\n"] * 7 + [b"inactive\n"] * 100)
@@ -703,9 +721,15 @@ class RealChildren(Harness):
 
     def test_host_steps_trapping_sigterm_report_through_two_signals(self):
         # The host steps get SIGTERM, take a moment for their clean-up and report 3; a second signal changes nothing.
-        self.tools.real["2.1-6"] = ["/bin/sh", "-c", "trap 'sleep 0.5; exit 3' TERM; sleep 30 & wait"]
-        timer = threading.Timer(0.7, lambda: (os.kill(os.getpid(), signal.SIGTERM), time.sleep(0.2),
-                                              os.kill(os.getpid(), signal.SIGINT)))
+        ready = self.tmp / "ready"
+        self.tools.real["2.1-6"] = ["/bin/sh", "-c", f"trap 'sleep 1.5; exit 3' TERM; touch {ready}; sleep 60 & wait"]
+
+        def signals():
+            wait_for(ready)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.5)  # the child is now in its 1.5 s clean-up
+            os.kill(os.getpid(), signal.SIGINT)
+        timer = threading.Thread(target=signals)
         original = self.tools.run
 
         def run(argv, timeout, **kwargs):
@@ -724,8 +748,9 @@ class RealChildren(Harness):
         self.tools.signal_at["1.7c"] = signal.SIGTERM  # interrupted already: the host step never starts
         self.assertEqual(self.drive(self.scaled()), driver.EXIT_INTERRUPTED)
         self.setUp()
-        self.tools.real["2.1-6"] = ["/bin/sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"]
-        timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        ready = self.tmp / "ready"
+        self.tools.real["2.1-6"] = ["/bin/sh", "-c", f"trap '' TERM; touch {ready}; while :; do sleep 0.1; done"]
+        timer = threading.Thread(target=lambda: (wait_for(ready), os.kill(os.getpid(), signal.SIGTERM)))
         original = self.tools.run
 
         def run(argv, timeout, **kwargs):
@@ -747,7 +772,7 @@ class TeardownFailure(Harness):
             self.assertFalse(os.path.lexists(self.R / name), name)  # not needed by recovery
         self.assertTrue((self.leases / (RUN + ".open")).exists())
         self.assertFalse((self.R / "lease-closed.json").exists())
-        self.assertIn("armed", self.err.getvalue())
+        self.assertIn("ARMED (read active now)", self.err.getvalue())
         self.assertIn("resume-teardown", self.err.getvalue())
         self.assertIn("Kept on purpose", self.err.getvalue())
 
@@ -789,7 +814,7 @@ class TeardownFailure(Harness):
         self.drive()
         self.assertEqual(self.code, driver.EXIT_ESCALATE)
         self.assertTrue((self.R / "provider-token").exists())
-        self.assertIn("unknown: disarm failed", self.err.getvalue())
+        self.assertIn("NOT verified: disarm failed", self.err.getvalue())
 
     def test_timer_not_read_inactive_after_disarm_escalates(self):
         self.tools.overrides["7.6-show"] = lambda argv: (1, b"")
@@ -1200,9 +1225,11 @@ class Refresher(Harness):
         self.tools.hang.add("1.6b")
         self.tools.fail["1.4-refresh"] = 1
         self.assertEqual(self.drive(cfg), driver.EXIT_STEP_FAILED)
-        receipt = json.loads((self.R / "driver/receipts/1.6b.json").read_text())
-        self.assertEqual(receipt["status"], "failed")
-        self.assertIn("binding refresh failed", receipt["error"])
+        # The failed refresh stops whichever binding consumer is running when it lands (1.5a to 1.6b).
+        failed = [json.loads(path.read_text()) for path in (self.R / "driver/receipts").glob("1.[56]*.json")]
+        failed = [r for r in failed if r["status"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("binding refresh failed", failed[0]["error"])
         self.assertNotIn("1.7a", self.labels())
         self.assertIn("7.3", self.labels())
 
@@ -1221,6 +1248,164 @@ class Refresher(Harness):
         self.assertTrue(refreshes)
         self.assertGreater(min(refreshes), labels.index("1.4"))
         self.assertLess(max(refreshes), labels.index("1.7a"))
+
+
+class Verification(Harness):
+    """Children that cannot be verified gone, teardown children that raise, and the last-resort nets."""
+
+    def test_teardown_child_not_verified_gone_escalates_and_never_disarms(self):
+        self.tools.overrides["7.3"] = lambda argv: driver.Outcome(0, b"", None, False)
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertNotIn("7.4", self.labels())
+        self.assertNotIn("7.6", self.labels())
+        self.assertIn("[7.3] FAILED", self.out.getvalue())
+
+    def test_stop_child_not_verified_gone_escalates_although_the_rest_verifies(self):
+        self.tools.overrides["7.1"] = lambda argv: driver.Outcome(0, b"", None, False)
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertIn("7.6", self.labels())
+        self.assertIn("7.1: its child could not be verified gone", self.err.getvalue())
+
+    def test_host_steps_child_not_verified_gone_escalates(self):
+        def host(argv):
+            self.tools.effect("2.1-6", argv)
+            return driver.Outcome(0, b"", None, False)
+        self.tools.overrides["2.1-6"] = host
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertFalse(self.driver.host_verified)
+
+    def test_leftover_child_not_settled_escalates(self):
+        self.tools.settle = lambda seconds: False
+        self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        self.assertIn("not verified gone", self.err.getvalue())
+
+    def test_a_teardown_child_that_raises_is_never_read_as_success(self):
+        for label, absent in (("7.3", "7.4"), ("7.4", "7.5-show"), ("7.6", "7.6-show")):
+            with self.subTest(label=label):
+                self.setUp()
+                original = driver.Driver.run_child
+
+                def raising(this, argv, bound, *, label, original=original, target=label, **kwargs):
+                    if label == target:
+                        raise RuntimeError("child could not be started")
+                    return original(this, argv, bound, label=label, **kwargs)
+                driver.Driver.run_child = raising
+                try:
+                    self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+                finally:
+                    driver.Driver.run_child = original
+                self.assertNotIn(absent, self.labels())
+                self.assertNotEqual(self.driver.state["timer"], "disarmed")
+                self.assertTrue((self.R / "provider-token").exists())
+
+    def test_teardown_that_raises_still_escalates(self):
+        original = driver.Driver.teardown
+        driver.Driver.teardown = lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        finally:
+            driver.Driver.teardown = original
+        self.assertIn("teardown raised unexpectedly", self.err.getvalue())
+
+    def test_recovery_text_that_raises_falls_back_to_the_fixed_text(self):
+        original = driver.recovery_text
+        driver.recovery_text = lambda cfg, summary: (_ for _ in ()).throw(KeyError("x"))
+        try:
+            self.tools.fail["1.4"] = 1
+            self.tools.fail["7.3"] = 1
+            self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+        finally:
+            driver.recovery_text = original
+        self.assertIn("full recovery text could not be built", self.err.getvalue())
+
+    def test_every_child_runs_in_the_run_directory(self):
+        self.drive()
+        self.assertEqual(set(self.tools.cwds), {str(self.R)})
+
+    def test_timer_state_is_reported_as_read(self):
+        for answer, text in (((0, b"active\n"), "ARMED (read active now)"),
+                             ((0, b"inactive\n"), "NOT armed (read inactive now)"),
+                             ((1, b""), "UNKNOWN (its state could not be read)")):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.lease_baseline = dict(BASELINE, ssh_keys={})  # fails at 1.1a, before arming
+                self.tools.overrides["7.7-timer"] = lambda argv, answer=answer: answer
+                self.assertEqual(self.drive(), driver.EXIT_ESCALATE)
+                self.assertNotIn("1.1b", self.labels())
+                self.assertIn(text, self.err.getvalue())
+
+    def test_resume_error_after_a_lease_exists_is_escalate(self):
+        original = driver.resume_teardown
+        driver.resume_teardown = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            lease.write_private(self.R / "lease.json", {"schema": 1})
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(driver.main(["resume-teardown", "--run-directory", str(self.R)], runner=self.tools),
+                                 driver.EXIT_ESCALATE)
+            self.assertIn("ESCALATE", err.getvalue())
+        finally:
+            driver.resume_teardown = original
+
+    def test_person_check_refuses_while_a_writer_unit_is_active(self):
+        self.tools.fail["1.3d"] = 1
+        self.tools.fail["7.3"] = 1
+        self.drive()
+        self.tools.overrides["resume-units"] = lambda argv: (0, b"active\n")
+        self.tools.calls.clear()
+        self.assertEqual(driver.resume_teardown(self.config(), self.tools, delete_after_person_check=True,
+                                                out=self.out, err=self.err), driver.EXIT_ESCALATE)
+        self.assertNotIn("7.4", self.labels())
+        self.assertTrue((self.R / "provider-token").exists())
+
+    def test_plan_records_the_real_bounds(self):
+        cfg = self.config(bound_scale=0.01)
+        plan = driver.make_plan(cfg, self.tools, FIXED)
+        self.assertEqual([s["boundSeconds"] for s in plan["steps"]], [s.bound for s in driver.run_steps(cfg)])
+        self.assertIn(7200, [s["boundSeconds"] for s in plan["steps"]])
+
+    def test_sudo_and_path_directories_are_bound_into_the_digest(self):
+        def changed_sudo():
+            (self.sbin / "sudo").write_text("#!/bin/sh\nexit 7\n")
+            return lambda: None
+
+        def other_sudo_path():
+            other = self.tmp / "other-sudo"
+            shutil.copy(self.sbin / "sudo", other)
+            original = self.config
+            self.config = lambda **changes: original(**{"sudo": str(other), **changes})
+            return lambda: setattr(self, "config", original)
+
+        def new_binary_in_child_path():
+            (self.bin / "extra").write_text("#!/bin/sh\n")
+            return lambda: None
+
+        def new_binary_in_unit_path():
+            (self.tmp / "node-bin" / "node").write_text("#!/bin/sh\n")
+            return lambda: None
+        for name, change in (("sudo contents", changed_sudo), ("sudo path", other_sudo_path),
+                             ("child path", new_binary_in_child_path), ("unit path", new_binary_in_unit_path)):
+            with self.subTest(name=name):
+                self.setUp()
+                cfg = self.config()
+                digest = self.plan(cfg)
+                undo = change()
+                try:
+                    d = driver.Driver(self.config(), self.tools, out=self.out, err=self.err, now=lambda: FIXED)
+                    self.assertEqual(d.run(digest), driver.EXIT_INPUTS)
+                finally:
+                    undo()
+                self.assertIn("changed since the plan", self.err.getvalue())
+
+
+class Draining(unittest.TestCase):
+    def test_a_child_printing_on_sigterm_is_drained_and_reports_its_own_status(self):
+        ready = Path(tempfile.mkdtemp()) / "ready"
+        script = f"trap 'head -c 300000 /dev/zero; exit 0' TERM; touch {ready}; sleep 60 & wait"
+        started = time.monotonic()
+        outcome = driver.Runner().run(["/bin/sh", "-c", script], 60, label="t", grace=12,
+                                      interrupted=lambda: ready.exists())
+        self.assertEqual((outcome.code, outcome.reason, outcome.gone), (0, "interrupted", True))
+        self.assertLess(time.monotonic() - started, 8)
 
 
 class RealRunner(unittest.TestCase):
