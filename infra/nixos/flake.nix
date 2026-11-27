@@ -51,6 +51,10 @@
   in {
     nixosModules.cloud-disk = diskModule;
     nixosModules.cloud-host = hostModule;
+    # A production host on Hetzner Cloud: the disk above plus hetzner-hardware.nix (virtio, DHCP).
+    nixosModules.hetzner-production-hardware = {...}: {
+      imports = [diskModule ./hetzner-hardware.nix];
+    };
     checks.${system}.disk-install = installConfig.config.system.build.installTest;
   };
 }

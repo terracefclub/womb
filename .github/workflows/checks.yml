@@ -28,6 +28,7 @@ jobs:
           python3 tests/platform/test_github_ci.py -v
           python3 tests/platform/test_gitlab_mirror.py -v
           python3 -B infra/nixos/test_rescue_install.py -v
+          python3 -B infra/nixos/test_lease_install_plan.py -v
           python3 -B infra/nixos/test_console_fingerprint.py -v
           python3 -B tests/platform/test_cms_tool.py -v
           python3 -B tests/platform/test_terrace_production.py -v

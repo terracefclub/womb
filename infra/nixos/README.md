@@ -27,6 +27,16 @@ The module accepts canonical whole `sd`, `vd`, `xvd`, and `nvme` device names,
 or a single `/dev/disk/by-id/` name without a `-partN` suffix. This syntax
 check cannot prove where a by-id symlink points; verify that in Rescue.
 
+## Production hosts on Hetzner Cloud
+
+`nixosModules.hetzner-production-hardware` is the hardware module a production
+host (`production-config.nix`) uses on Hetzner Cloud: `cloud-disk` plus
+`hetzner-hardware.nix` (virtio drivers, DHCP). `lease-host.nix` builds the one
+leased production app host and its update variants from run inputs, and
+`lease_install_plan.py` writes the install plan and installed host key that
+`rescue_install.py` checks. See
+[cloud rehearsal](../../docs/cloud-rehearsal.md#production-lease-host-prepared-for-lease-6).
+
 ## Independent recovery relay
 
 Use the `cloud-disk` export when composing the disk layout with a separately

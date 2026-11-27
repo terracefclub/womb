@@ -1,5 +1,6 @@
 # Production profile invariants on fully evaluated Hetzner app and relay hosts,
-# a static-network host and the rehearsal instance, plus variants that must be
+# a static-network host, the rehearsal instance, an app on the Hetzner hardware
+# module and the lease host with its update variants, plus variants that must be
 # rejected, each for the stated reason. No builds, provider calls, credentials
 # or guest state. docs/production-profile.md
 let
@@ -416,6 +417,7 @@ let
     });
     relayAcmeRehearsal = violations "relay" (relayAcme "rehearsal" {});
     rehearsalAcme = violations "app" rehearsalAcme;
+    hetzner = violations "app" hetznerApp;
   };
   # The production relay with a documentation address must fail for that reason alone,
   # which proves every other relay invariant in production mode without a real address.
@@ -433,6 +435,54 @@ let
     extra = settings.extra-trusted-public-keys or null;
   };
   appWithKey = app {terrace.production.deploy.trustedKeys = [deployKey];};
+  # Hetzner Cloud hardware (hetzner-hardware.nix with the cloud disk): the production app on it, DHCP included.
+  hetznerApp = import ./production-config.nix {
+    role = "app";
+    inherit release;
+    identityContract = stub;
+    hardwareModule = {
+      imports = [install.nixosModules.hetzner-production-hardware];
+      terrace.cloudDisk.device = "/dev/sda";
+    };
+    localModule = {
+      networking.hostName = "app";
+      terrace.production = appParameters;
+    };
+  };
+  # The lease host (lease-host.nix) with eval-only stand-ins for the run inputs, and its update variants.
+  previousPin = builtins.fromJSON (builtins.readFile ../../platform/production/deploy-previous-release.json);
+  spareKey = "terrace-eval-spare-1:" + lib.concatStrings (lib.replicate 43 "B") + "=";
+  leaseInputs = {
+    disk = "/dev/sda";
+    operatorKeys = ["${operatorKey} eval-only"];
+    inherit escrowRecipient;
+    deployKeys = [deployKey spareKey];
+    runCa = stub;
+    backupPort = 22433;
+    backupHostKey = operatorKey;
+    release = release // {inherit (pin) migrations;};
+    previous = {
+      web = stub;
+      cms = stub;
+      inherit (previousPin) revision migrations;
+    };
+    identityContract = stub;
+  };
+  leaseWith = changes: import ./lease-host.nix (leaseInputs // changes);
+  lease = leaseWith {};
+  leaseSystems = lease.systems;
+  leaseExtend = extra: leaseSystems.v0.extendModules {modules = [extra];};
+  # Refused by the builder itself, before any system evaluates.
+  leaseRefused = changes: lib.assertMsg (!(builtins.tryEval (leaseWith changes).systems.v0.config.system.build.toplevel.drvPath).success) "Lease host inputs accepted: ${builtins.toJSON (builtins.attrNames changes)}";
+  # What the switch compares: kernel, initrd and modules (activate demands --boot when one differs), and sshd's restart trigger.
+  bootParts = system: {
+    kernel = system.config.boot.kernelPackages.kernel.drvPath;
+    initrd = system.config.system.build.initialRamdisk.drvPath;
+    modules = system.config.system.modulesTree.drvPath;
+  };
+  sshdConfig = system: "${system.config.environment.etc."ssh/sshd_config".source}";
+  leaseManifest = name: manifestOf leaseSystems.${name};
+  leaseViolations = lib.mapAttrs (_: violations "app") leaseSystems;
   negatives = [
     (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["not-a-key"];}))
     (rejects "deploy keys must be distinct Nix public keys" (app {terrace.production.deploy.trustedKeys = ["terrace-eval-deploy-1:${lib.concatStrings (lib.replicate 86 "A")}=="];}))
@@ -654,6 +704,31 @@ let
     (outOfRange ["terrace" "website" "lifecycleLockTimeoutMs"] 10001)
     (outOfRange ["terrace" "website" "operatorToolMaxSeconds"] 59)
     (outOfRange ["terrace" "website" "operatorToolMaxSeconds"] 86401)
+    # The lease host keeps every rule of the profile: only the rehearsal instance accepts its names and run CA,
+    # and a forbidden setting added to it is rejected as on any production host.
+    (rejects "refuses a synthetic or reserved hostname (web.terrace.invalid" (leaseExtend {terrace.production.instance = lib.mkForce "production";}))
+    (rejects "refuses a TLS trust anchor override" (leaseExtend {terrace.production.instance = lib.mkForce "production";}))
+    (rejects "free-form firewall, sshd or sudo configuration" (leaseExtend {services.openssh.extraConfig = "PermitTunnel yes";}))
+    (rejects "boot services: rogue-writer" (leaseExtend {
+      systemd.services.rogue-writer = {
+        wantedBy = ["multi-user.target"];
+        script = "true";
+      };
+    }))
+    (rejects "ssh policy" (leaseExtend {services.openssh.settings.PasswordAuthentication = lib.mkForce true;}))
+    (rejects ": 8443 from" (leaseExtend {networking.firewall.allowedTCPPorts = [8443];}))
+    (rejects "enabled services: qemuGuest" (leaseExtend {services.qemuGuest.enable = true;}))
+    (rejects "runs no container or VM daemon" (leaseExtend {virtualisation.podman.enable = true;}))
+    # V4, the failing switch, is rejected for its broken unit (and, below, for nothing else).
+    (rejects "boot services: terrace-lease-broken" leaseSystems.v4)
+    # Run inputs the builder refuses: one deploy key (the offline spare is trusted from the first install), a
+    # repeated key, a privileged or non-IPv4 backup endpoint, another host key type, a CA that is not a path.
+    (leaseRefused {deployKeys = [deployKey];})
+    (leaseRefused {deployKeys = [deployKey deployKey];})
+    (leaseRefused {backupPort = 22;})
+    (leaseRefused {backupAddress = "backup.terrace.invalid";})
+    (leaseRefused {backupHostKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ";})
+    (leaseRefused {runCa = "/var/lib/run-ca.pem";})
   ];
   # The new options' own bounds are accepted (not counted as rejected variants).
   boundsAccepted = [
@@ -695,4 +770,53 @@ in
   assert lib.assertMsg (positive.rehearsalAcme == []) "ACME rehearsal instance violations: ${toString positive.rehearsalAcme}";
   assert lib.assertMsg (relayAcmeDocumentation == relayDocumentation) "Production relay with ACME and a documentation address: ${toString relayAcmeDocumentation}";
   assert lib.assertMsg (relayDocumentation == ["assertion: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)." "toplevel does not evaluate: Terrace production relay needs its verified public IPv4 (no private, shared, loopback, link-local, benchmarking or documentation range)."]) "Production relay with a documentation address: ${toString relayDocumentation}";
-  assert lib.all lib.id negatives; "PASS: production app, static-network app, relay and rehearsal instance (app, relay and rehearsal also with ACME) hold every invariant; ${toString (builtins.length negatives)} rejected variants"
+  # Hetzner hardware: DHCP on every interface (none pinned), the virtio drivers, systemd-boot without firmware variables, the verified disk.
+  assert lib.assertMsg (positive.hetzner == []) "Production app on the Hetzner hardware module violations: ${toString positive.hetzner}";
+  assert lib.assertMsg (let
+    c = hetznerApp.config;
+  in
+    c.networking.useDHCP
+    && c.networking.interfaces == {}
+    && builtins.elem "multi-user.target" c.systemd.services.dhcpcd.wantedBy
+    && subset ["virtio_net" "virtio_pci" "virtio_scsi"] c.boot.initrd.availableKernelModules
+    && c.boot.loader.systemd-boot.enable
+    && !c.boot.loader.efi.canTouchEfiVariables
+    && !c.boot.loader.grub.enable
+    && c.disko.devices.disk.system.device == "/dev/sda") "Hetzner hardware module: DHCP, virtio drivers, boot loader or disk differ";
+  # The lease host: V0 to V3 hold every invariant; V4 breaks exactly one, its failing unit.
+  assert lib.assertMsg (lib.all (name: leaseViolations.${name} == []) ["v0" "v1" "release" "v2" "v3"]) "Lease host violations: ${builtins.toJSON leaseViolations}";
+  assert lib.assertMsg (leaseViolations.v4 == ["boot services: terrace-lease-broken"]) "Lease V4 violations: ${toString leaseViolations.v4}";
+  # Each variant changes only what its lease step exercises.
+  assert lib.assertMsg (let
+    p = lib.mapAttrs (_: bootParts) leaseSystems;
+  in
+    p.v1 == p.v0 && p.release == p.v0 && p.v2.kernel == p.v0.kernel && p.v2.modules == p.v0.modules && p.v2.initrd != p.v0.initrd && p.v3 == p.v2 && p.v4 == p.v2) "Lease variants: kernel, initrd or modules differ unexpectedly";
+  assert lib.assertMsg (let
+    s = lib.mapAttrs (_: sshdConfig) leaseSystems;
+  in
+    s.v1 == s.v0 && s.release == s.v0 && s.v2 == s.v0 && s.v3 != s.v2 && s.v4 == s.v3) "Lease variants: sshd configuration changes elsewhere than V3";
+  assert lib.assertMsg (lib.length (lib.unique (lib.mapAttrsToList (_: system: system.config.system.build.toplevel.drvPath) leaseSystems)) == 6) "Lease variants are not six distinct systems";
+  assert lib.assertMsg (lib.all (name: let
+    m = leaseManifest name;
+    r =
+      if builtins.elem name ["v0" "v1"]
+      then previousPin
+      else pin;
+  in
+    m.role == "app" && m.hostName == "app" && m.instance == "rehearsal" && m.website.revision == r.revision && m.website.migrations == r.migrations) (lib.attrNames leaseSystems)) "Lease manifests: ${builtins.toJSON (lib.mapAttrs (name: _: leaseManifest name) leaseSystems)}";
+  # Two trusted deploy keys from the first install, and Nix's defaults otherwise.
+  assert lib.assertMsg (nixTrust leaseSystems.v0
+    == {
+      trusted-users = ["root"];
+      require-sigs = true;
+      trusted-public-keys = [cacheKey];
+      extra = [deployKey spareKey];
+    }) "Lease deploy key trust: ${builtins.toJSON (nixTrust leaseSystems.v0)}";
+  # The backup repository the later SFTP endpoint serves: only the address, port and host key come from the run.
+  assert lib.assertMsg (let
+    c = leaseSystems.v0.config;
+    t = c.terrace.backup.targets.primary;
+  in
+    t.repository == "sftp:terrace@127.0.0.1:app" && t.sftp.port == 22433 && c.environment.etc."terrace/backup/primary-known-hosts".text == "[127.0.0.1]:22433 ${operatorKey}\n") "Lease backup repository";
+  assert lib.assertMsg (lease.installOutputs.device == "/dev/sda" && lease.installOutputs.role == "app" && toString lease.installOutputs.system == toString leaseSystems.v0.config.system.build.toplevel) "Lease install outputs";
+  assert lib.all lib.id negatives; "PASS: production app, static-network app, Hetzner-hardware app, relay and rehearsal instance (app, relay and rehearsal also with ACME) hold every invariant; the lease host and its variants V1 to V3 and the release change too, V4 fails only for its broken unit; ${toString (builtins.length negatives)} rejected variants"
