@@ -307,14 +307,6 @@ while [[ $1 != -- ]]; do shift; done
 shift
 # A unit stopped in the middle of its switch (`systemctl stop terrace-switch.service`): systemd counts the SIGTERM as a
 # clean exit, so `systemd-run --wait` returns 0 (seen in the update drill). The switch stub sends the signal.
-# systemd-run --wait not returning after its unit ended: the unit (active while it runs) ends, the waiter stays.
-if [[ -e $FAKE_DIR/wait-hangs ]]; then
-  echo active >"$FAKE_UNITS/terrace-switch.service"
-  "$BASH_BIN" -euo pipefail "$@" || true
-  command -p sleep 2
-  echo inactive >"$FAKE_UNITS/terrace-switch.service"
-  exec "$(command -p -v sleep)" 60
-fi
 if [[ -e $FAKE_DIR/stop-mid-switch ]]; then
   "$BASH_BIN" -euo pipefail "$@" &
   echo $! >"$FAKE_DIR/unit.pid"
@@ -600,15 +592,6 @@ class DeployPath(Harness):
         (self.dir / "switch-generation-fails").unlink()
         self.assertIn("the boot default goes back to generation 1", self.accepted("rollback").stdout)
         self.assertEqual(self.generation(), "system-1-link")
-
-    def test_a_watched_wait_that_does_not_return(self):
-        # systemd-run --wait not returning after its unit ended (seen once in the update drill): the client stops waiting
-        # after switch_gone_seconds and the records decide.
-        (self.dir / "wait-hangs").touch()
-        result = self.run_tool("activate", str(self.new))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("the terrace-switch unit has ended, but systemd-run --wait had not returned 10 s later; stopped waiting for it, the records decide", result.stderr)
-        self.assertEqual((self.records()[-1]["phase"], self.generation()), ("finished", "system-2-link"))
 
     def test_a_release_switch_with_the_gate_closed(self):
         # switch-to-configuration exits 4 when units failed: here the CMS and the website, both refused by their migration

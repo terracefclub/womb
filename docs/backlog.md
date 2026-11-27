@@ -533,12 +533,12 @@ From the written [host updates](host-updates.md) procedure. None is done in that
 pull request; the deploy path pull request (2026-11-24) closes or narrows the items
 marked so.
 
-- Decide (owner, before any production install): how a new system closure reaches
-  an installed production host. **Narrowed 2026-11-24**: option 1 (a signing key
-  trusted by the host) now exists as an opt-in, `terrace.production.deploy.trustedKeys`
-  ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)),
-  VM-proven on the app role; the owner has not chosen it, and the decision stays
-  open. SSH accepts only `operator` (`AllowUsers operator`,
+- Decided by the owner on 2026-11-26: a new system closure reaches an installed
+  production host by the signed deploy path (option 1: a signing key trusted by the
+  host, `terrace.production.deploy.trustedKeys`,
+  [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+  It stays a setting that the module a host is installed with must carry, and it has
+  run only in VMs. History: built 2026-11-24 as an opt-in, then not chosen. SSH accepts only `operator` (`AllowUsers operator`,
   `PermitRootLogin no`, `platform/production/base.nix`), `operator` is not a trusted
   Nix user and signatures are required (nixpkgs defaults, unchanged by the
   production modules), and nothing in the repository copies or activates a closure
@@ -620,11 +620,13 @@ marked so.
   `sudo nix-store --import`, the raw step 7 commands), and key rotation with two
   trusted keys ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   written, not run.
-- Decide (reviewer, then owner): whether `terrace-production activate` should set the
-  system profile back to the previous generation when `switch-to-configuration`
-  fails (today it leaves the failed generation as the boot default, as
-  `nixos-rebuild` does; `status` warns, and the host updates document gives the
-  manual commands, not run).
+- Done 2026-11-26 (the owner decided on 2026-11-26 that it should be automatic): when
+  `terrace-production activate` or `rollback` fails after registering its generation
+  without the new system running, the command makes the running system the boot
+  default again, inside the same unit, once, and records it (`revert`,
+  `bootDefaultAfter`); never after a success or a gated switch, never with `--boot`
+  ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+  A switch unit stopped mid-switch is only reported (`rollback` cancels by hand).
 - Done 2026-11-25 (deploy path follow-ups, found in review round 2 of the deploy
   path pull request; [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   `rollback` passes over a generation whose last finished record is a failure
@@ -653,9 +655,12 @@ marked so.
   - A slow start job for any writer under the target, not only the CMS or website,
     holds the wait for up to 300 s, and the attempt then ends as a named timeout
     failure (`waitTimedOut`, `stillStarting`).
-- Decide (owner): whether to keep an offline spare deploy key trusted from the
-  first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
-  means the manual bootstrap route.
+- Decided by the owner on 2026-11-26: keep an offline spare deploy key, trusted by
+  every host from its first install (two public keys in `deploy.trustedKeys`;
+  [secrets](secrets.md#deploy-signing-key)). Losing the working key is then not an
+  outage; the manual bootstrap route remains only for losing both. A build signed by
+  the second key only is activated in the update drill (VM); the spare's custody and
+  a real loss are not exercised.
 - Docs: the owner runbook's 9.7 is labelled TESTED IN CODE ONLY while G-37 calls
   9.7 NOT YET BUILT; 6.15 ("Deploy a release") is labelled PROVEN IN VM REHEARSAL
   but its evidence migrates and starts a host built with the release, not a release

@@ -268,8 +268,6 @@ untouched() {
 # gated switch the units fail their gate at once and restart (Restart=on-failure, 10 s apart) until their start limit:
 # the record must say how they ended, not where they were. Sets settle_timed_out and still_moving.
 settle_seconds=300
-# How long the client keeps waiting for systemd-run --wait after the switch unit has ended (deploy()).
-switch_gone_seconds=10
 settle() {
   local unit waited=0 jobs
   while :; do
@@ -441,7 +439,7 @@ apply() {
   exit "$rc"
 }
 deploy() {
-  local action=$1 target="" generation="" chosen="" rc=0 running lines last result item old_umask current waiter run_pid line seen=0 gone=0 abandoned=0 revert
+  local action=$1 target="" generation="" chosen="" rc=0 running lines last result item old_umask current revert
   shift
   mode=switch cms_stays_down=0 accept_upstream=0 dry_run=0 not_quiesced=()
   while (( $# )); do
@@ -522,32 +520,11 @@ deploy() {
   fi
   lines=0
   if [[ -e $records ]]; then lines=$(wc -l <"$records"); fi
-  # systemd-run --wait, watched: in the update drill it once did not return after its unit had been stopped (a client that
-  # never returns also keeps the lock). If the unit has ended and systemd-run still waits switch_gone_seconds later, stop
-  # waiting for it; the records below decide.
-  exec {waiter}< <(systemd-run --unit=terrace-switch --collect --service-type=exec --wait --quiet -p "Description=terrace-production $action" -- "$self" __apply "$action" "$mode" "$target" "$generation" "$running" "$(gen_of)" >&2 &
-    echo "pid $!"; wait "$!" && echo 'rc 0' || echo "rc $?")
-  read -r _ run_pid <&"$waiter"
-  while :; do
-    if read -r -t 1 -u "$waiter" line; then rc=${line#rc }; break
-    elif (( $? <= 128 )); then rc=1; break; fi
-    case $(systemctl show terrace-switch.service -p ActiveState --value 2>/dev/null) in
-      active | activating | deactivating | reloading) seen=1 gone=0 ;;
-      *) if (( seen )); then gone=$((gone + 1)); fi ;;
-    esac
-    if (( gone >= switch_gone_seconds )); then abandoned=1; kill "$run_pid" 2>/dev/null || true; break; fi
-  done
-  exec {waiter}<&-
+  systemd-run --unit=terrace-switch --collect --service-type=exec --wait --quiet -p "Description=terrace-production $action" -- "$self" __apply "$action" "$mode" "$target" "$generation" "$running" "$(gen_of)" || rc=$?
   # Only the records this run wrote.
   last=""
   if [[ -e $records ]]; then last=$(tail -n +"$((lines + 1))" "$records"); fi
   if [[ -n $last ]]; then printf '%s\n' "$last"; last=$(tail -n 1 <<<"$last"); fi
-  if (( abandoned )); then
-    echo "terrace-production: the terrace-switch unit has ended, but systemd-run --wait had not returned ${switch_gone_seconds} s later; stopped waiting for it, the records decide" >&2
-    rc=1
-    result=$(jq -r 'select(.phase == "finished") | .result' <<<"${last:-null}" 2>/dev/null || true)
-    if [[ $result == success || $result == switched* ]]; then rc=0; fi
-  fi
   # The unit's exit status alone does not show that the switch ended: a unit stopped mid-switch (`systemctl stop`)
   # ends "successfully" for systemd (SIGTERM is a clean exit), so systemd-run --wait returns 0. Only this run's
   # finished record does (seen in the update drill, platform/production/update-drill-test.nix).

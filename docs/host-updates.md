@@ -22,8 +22,8 @@ U0 (signed closures, section 1.2) is now built: an option that makes a host trus
 build machine's public signing key, a manifest in every production system, the
 commands `terrace-production activate` and `terrace-production rollback`, and an
 operator-side helper that signs and copies. It is off unless the private host
-module sets the option. **The owner has not chosen it**: U0 is still his decision,
-and options 2 and 3 remain open. Section 1.5 describes it; the steps below say where
+module sets the option. (When this was written the owner had not chosen it; on
+2026-11-26 he chose it, see the update of that date below.) Section 1.5 describes it; the steps below say where
 it replaces a hand-typed command. Its proof is a VM rehearsal of the production app
 role, `platform/production/deploy-test.nix` (synthetic data), which updates a
 populated host from one website release to the next, including a real CMS
@@ -31,8 +31,8 @@ migration, and rolls back; it has not run on any real host. Where the document
 below still says "not exercised anywhere", that is true outside that proof.
 
 **Update of 2026-11-25: follow-ups to the deploy path, and the website gate.** The
-website now has the CMS's migration gate (H7, closed by an engineering change: the
-owner was told it was planned and has not answered). `rollback` passes over a
+website now has the CMS's migration gate (H7, closed by an engineering change; on
+2026-11-26 the owner said to keep it). `rollback` passes over a
 generation whose last record is a failure and takes `--generation N`; a dry run
 before the quiesce reports what else would stop the update instead of stopping at
 the first check; the record is written once the gated units have stopped retrying,
@@ -151,10 +151,11 @@ copy is now VM rehearsal, section 1.5):
 - `operator` has passwordless `sudo` (`security.sudo.wheelNeedsPassword = false`,
   `base.nix`), so anything root can do on the host, the operator can.
 
-**Owner decision U0: how closures reach the hosts.** It is a precondition of step
-1: **without an agreed, tried transfer mechanism, do not start an update.** The
-repository supports none of these; each is a standard Nix mechanism that nobody has
-tried on this profile:
+**Owner decision U0: how closures reach the hosts. Decided 2026-11-26: option 1, the
+signed deploy path (section 1.5).** It is a precondition of step 1: a host whose
+private module does not trust a deploy key has no path (H3). The three options as
+they were put to him (options 2 and 3 are not built and nobody has tried them on this
+profile):
 
 1. **Sign on the builder, trust the key on the host.** Add the builder's signing
    public key to `nix.settings.trusted-public-keys` in the private host module and
@@ -174,15 +175,17 @@ tried on this profile:
    item 4) and reserves nothing for a build. Its memory and time are not measured.
 
 Options 1 and 2 are themselves private-module changes, so they must be in the
-module a host is **installed** with, or the first update has no path. Record the
-choice; section 8 lists the drill it needs. Option 1 now exists in the repository as
-an opt-in (section 1.5); building it does not choose it.
+module a host is **installed** with, or the first update has no path. Option 1 exists
+in the repository as a setting (section 1.5) and is the owner's choice (2026-11-26);
+it has run only in VMs. On the same day he decided to keep an offline spare deploy
+key, trusted by every host from its first install: two public keys in
+`deploy.trustedKeys` ([secrets](secrets.md#deploy-signing-key)).
 
 ### 1.3 What must exist before an update
 
 | Item | Why | Where |
 | --- | --- | --- |
-| U0 decided and the mechanism present on this host | No closure reaches the host otherwise (1.2) | Owner; the host's private module |
+| U0 (decided 2026-11-26: the signed deploy path) present on this host: `deploy.trustedKeys` set in the module it was installed with | No closure reaches the host otherwise (1.2) | The host's private module |
 | The new revision merged, with the VM checks that match the change passed at that revision | A pin change must re-run the matching VM check (runbook 9.7) | `platform/production-check` (always), `platform/website-check` and `platform/website-gateway-check` (re-pin), `platform/production-identity-check` (realm producer changed), `platform/production-tls-check` (TLS change); [production profile](production-profile.md#verification), [website host](website-host.md#reproduce-the-actual-artifact-vm-check), [identity administration](identity-admin.md#verification) |
 | The **new** kept release archives and the TFC source at the new revision | The build reads them; the archives are not byte-reproducible, so only the one kept build matches its pinned hash; a rebuild of the same commit will not ([website host](website-host.md#accepted-inputs); website `tools/release/README.md` at `dd1aef7`) | Operator's protected storage |
 | The **previous** kept archives and TFC source | To rebuild the previous revision if its generation is gone, and for a restore-based rollback onto a replacement (section 4) | Same; runbook 9.17 "Worked if: the previous release is still on disk for rollback" |
@@ -197,7 +200,7 @@ Each is a stop point: nothing after it runs until the owner says go.
 
 | Point | Decision | Needs to be known first |
 | --- | --- | --- |
-| U0, before step 1 | How closures reach the hosts | Section 1.2 |
+| U0, before step 1 | How closures reach the hosts. **Decided 2026-11-26: the signed deploy path** (section 1.5), with an offline spare deploy key trusted from the first install (also decided 2026-11-26) | Section 1.2 |
 | U1, step 1 | Go for this update, on this host, in this window | The diff between the running and the new revision, the VM check results, whether the pin, the realm producer, the inventory, the kernel or Keycloak/Headscale/PostgreSQL versions change (step 2), that today's scheduled backup has completed (step 5), and the day (the weekly repository check runs on Sundays) |
 | U2, after step 6 | Accept the pre-update snapshot as the way back | Its ID and time; that the CMS was stopped while it was taken; how long retention keeps it (step 6, "How long the snapshot lasts") |
 | U3, before step 7, only when step 2 found a Keycloak or Headscale version change | Activate: **for such an update this is the point of no return** for that service's database | Upstream schema changes happen when the new version starts; whether the old version starts on the new schema is not determined (section 4.3) |
@@ -209,8 +212,10 @@ Each is a stop point: nothing after it runs until the owner says go.
 
 ### 1.5 The deploy path (option 1 of U0, opt-in)
 
-Built 2026-11-24 as one way to settle U0; **not chosen by the owner**. Nothing in it
-is active unless the private host module sets `terrace.production.deploy.trustedKeys`.
+Built 2026-11-24 as one way to settle U0; **the owner chose it on 2026-11-26** as the
+way builds reach the hosts. It stays a setting: nothing in it is active unless the
+private host module sets `terrace.production.deploy.trustedKeys`, so a host must be
+installed with it. It has run only in VMs (synthetic data), never on a real host.
 Evidence labels in this section: **RAN IN VM** (the deploy VM rehearsal,
 `platform/production/deploy-test.nix`, run with `platform/production-deploy-check`,
 synthetic data, the production app role at instance `rehearsal`); **unit test**
@@ -423,10 +428,12 @@ key's custody is in [secrets](secrets.md#deploy-signing-key).
   signing to the new key; remove the old public half; build, sign with the **new**
   key and deploy; destroy the old secret key. Check after each deploy that `nix
   config show trusted-public-keys` on the host lists what you expect.
-- *Loss*: no new closure can be signed with that key. If a second trusted key was
-  kept (the documented suggestion: an offline spare, trusted from the first
-  install), sign with it and rotate. Otherwise use the bootstrap route above for one
-  update that trusts a new key.
+- *Loss*: no new closure can be signed with that key. The owner decided on
+  2026-11-26 to keep an offline spare trusted by every host from its first install,
+  so: sign with the spare and rotate (a new working key beside it). RAN IN VM (update
+  drill): a host trusting two deploy keys activates a build signed by the second
+  only. Only if both keys are lost, use the bootstrap route above for one update that
+  trusts a new key.
 - *Leak*: copying still needs the `operator` login and activation still needs
   `sudo`, so a leaked key alone does not reach a host; rotate as above.
 
@@ -439,8 +446,9 @@ nothing on the host and the site stays up; the site is down from step 6 to step 
 
 ### Part A. Prepare (the site stays up)
 
-**Step 1. U0 settled, then owner decision U1.** If U0 is not decided and present on
-this host, stop here. Record who decided U1, when and why.
+**Step 1. U0 present on this host, then owner decision U1.** U0 is decided (the
+signed deploy path, 2026-11-26); if this host does not trust a deploy key
+(`terrace-production status` prints `deploy path: off`), stop here (H3). Record who decided U1, when and why.
 
 **Step 2. Operator machine: classify the change.** At the new revision, against the
 revision the host runs:
@@ -1377,8 +1385,7 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
 - **H6. Going back after a migration means a whole restore promotion onto a
   replacement**, losing everything written since the snapshot (section 4.3).
 - **H7. The website had no revision gate. Closed 2026-11-25** by an engineering
-  change (the owner was told it was planned; he has not answered, and nothing here
-  is his approval): `terrace-web.service` now runs the CMS's `requireMigration`
+  change; on 2026-11-26 the owner said to keep it: `terrace-web.service` now runs the CMS's `requireMigration`
   (`platform/website.nix`, as root because the marker is in the CMS account's
   private directory). Before, after a re-pin the activation's switch started the
   new website bundle against the gated CMS; it failed its health check and

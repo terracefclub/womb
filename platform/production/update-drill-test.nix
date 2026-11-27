@@ -35,10 +35,14 @@
   signing = pkgs.runCommand "terrace-update-drill-signing-key" {nativeBuildInputs = [pkgs.nix];} ''
     mkdir $out
     export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/state NIX_CONF_DIR=$TMPDIR/conf
-    nix --extra-experimental-features nix-command key generate-secret --key-name terrace-drill-deploy-1 >$out/deploy.sec
-    nix --extra-experimental-features nix-command key convert-secret-to-public <$out/deploy.sec >$out/deploy.pub
+    # The working key and the offline spare, both trusted by the app from its installation.
+    for name in deploy spare; do
+      nix --extra-experimental-features nix-command key generate-secret --key-name terrace-drill-$name-1 >$out/$name.sec
+      nix --extra-experimental-features nix-command key convert-secret-to-public <$out/$name.sec >$out/$name.pub
+    done
   '';
   deployPublic = lib.removeSuffix "\n" (builtins.readFile "${signing}/deploy.pub");
+  sparePublic = lib.removeSuffix "\n" (builtins.readFile "${signing}/spare.pub");
   users = pkgs.runCommand "terrace-update-drill-users" {} ''
     mkdir $out
     cp -r ${contract}/. $out/
@@ -129,7 +133,7 @@ in {
         memoryMiB = 9216;
         inherit escrowRecipient;
         operatorKeys = [(publicKey "operator")];
-        deploy.trustedKeys = [deployPublic];
+        deploy.trustedKeys = [deployPublic sparePublic];
         wombRevision = revisions.old;
         app = {
           webHostname = "web.terrace.invalid";
@@ -247,8 +251,8 @@ in {
     def ssh(host):
         return f"ssh -i /root/.ssh/operator -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/{host}_known_hosts operator@{host} "
 
-    def deploy(host, path):
-        out = op(f"terrace-deploy --key /root/signing/deploy.sec --address {host} --identity /root/.ssh/operator --known-hosts /root/{host}_known_hosts {path}")
+    def deploy(host, path, key="deploy"):
+        out = op(f"terrace-deploy --key /root/signing/{key}.sec --address {host} --identity /root/.ssh/operator --known-hosts /root/{host}_known_hosts {path}")
         ok(f"Signed the closure of {path}" in out and f"Copied to operator@{host}." in out and out.strip().endswith(f"ssh -t operator@{host} sudo terrace-production activate {path}"),
            f"{host}: {path} signed and copied as operator, the activation command printed")
 
@@ -361,7 +365,7 @@ in {
     operator.wait_for_unit("multi-user.target")
     operator.succeed("install -d -m 0700 /root/escrow /root/.ssh /root/signing " + STORE + " && install -m 0600 ${keys}/operator /root/.ssh/operator")
     operator.succeed("install -m 0600 ${escrow}/escrow.age " + ESCROW + " && install -m 0644 ${escrow}/escrow.pub " + STORE + "/escrow.recipient")
-    operator.succeed("install -m 0600 ${signing}/deploy.sec /root/signing/")
+    operator.succeed("install -m 0600 ${signing}/deploy.sec ${signing}/spare.sec /root/signing/")
 
     with subtest("operator creates both hosts' keys and secrets"):
         for host, extension, cn, extra in [("app", "${appExtension}", "web.terrace.invalid", " --rehearsal"), ("relay", "${relayExtension}", "relay.terrace.invalid", "")]:
@@ -494,15 +498,20 @@ in {
         app.succeed("terrace-production activate " + GOOD)
         finished(records(app)[-1], "activate", "1", "2", GOOD, "success")
         deploy("app", PROBE)
-        app.succeed("(terrace-production activate " + PROBE + " >/tmp/probe.log 2>&1; echo $? >/tmp/probe.rc) >/dev/null 2>&1 </dev/null &")
+        # The client runs in its own transient unit, whose plain shell writes the output and the exit status. (The test
+        # driver runs every command with `set -euo pipefail`, so a backgrounded `(client; echo $? >file)` stops at the
+        # client's exit 1 without writing the file: that, not the client, is what failed the second and third runs.)
+        app.succeed("systemd-run --unit=terrace-drill-client --collect -p StandardOutput=file:/tmp/probe.log -p StandardError=file:/tmp/probe.log "
+                    + "/run/current-system/sw/bin/bash -c " + shlex.quote("rc=0; /run/current-system/sw/bin/terrace-production activate " + PROBE + " || rc=$?; echo $rc >/tmp/probe.rc"))
         app.wait_until_succeeds("test -e /run/terrace-drill-probe-started && systemctl is-active --quiet terrace-switch.service", timeout=300)
         # As a killed unit or a host losing power mid-switch would leave it: the switch never finishes.
         app.succeed("systemctl stop terrace-switch.service")
-        # Diagnostics if the client does not return (the second run of this drill saw it hang here): its processes, its output.
+        # Diagnostics if no exit status appears: the client's processes, its output, the unit, the lock.
         try:
             app.wait_until_succeeds("test -e /tmp/probe.rc", timeout=120)
         except Exception:
             print("UPDATE-DRILL-DIAGNOSTICS " + json.dumps({"ps": app.execute("ps -eo pid,ppid,etimes,args | grep -E '[t]errace-production|[s]ystemd-run|[s]witch-to-conf'")[1],
+                  "client": app.execute("systemctl status --no-pager terrace-drill-client.service 2>&1; journalctl -u terrace-drill-client.service -o cat --no-pager")[1],
                   "log": app.execute("cat /tmp/probe.log")[1], "unit": app.execute("systemctl status --no-pager terrace-switch.service 2>&1")[1],
                   "lock": app.execute("flock -n /var/lib/terrace-production/deploy.lock true && echo free || echo held")[1]}))
             raise
@@ -510,10 +519,9 @@ in {
         last = records(app)[-1]
         # systemd counts the stopped unit as a clean exit (systemd-run --wait returns 0); the client reads the missing
         # finished record instead (the first run of this drill found the client reporting success here).
-        # Either way (systemd-run returned 0, or did not return and the client stopped waiting), the records decide.
         ok(rc == 1 and "the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch)" in out and "activate FAILED (exit 1)" in out
            and "Running generation" not in out and (last["phase"], last["action"], last["to"], last["generationBefore"]) == ("started", "activate", PROBE, "2"),
-           f"the client reported FAILED (exit {rc}), and the log ends with the attempt's started record, no finished one (watchdog: {'had not returned' in out}): {last}; {out.strip()[-600:]!r}")
+           f"the client reported FAILED (exit {rc}), and the log ends with the attempt's started record, no finished one: {last}; {out.strip()[-600:]!r}")
         ok("Nothing was set back: to make the running system the boot default again, run terrace-production rollback" in out, "the client says it set nothing back (no automatic revert without the unit) and names the way back")
         ok(app.execute("flock -n /var/lib/terrace-production/deploy.lock true")[0] == 0, "the client released the lock")
         ok(app.execute("test -e /run/terrace-drill-probe-done")[0] != 0, "the activation never completed")
@@ -542,8 +550,13 @@ in {
         ok("activate FAILED (exit 4)" in out and record["unexpectedUnits"] == ["terrace-drill-broken.service"] and record["failedUnits"] == [], f"generation 4 failed, naming the broken unit: {record}")
         ok(app.execute("test -e /etc/terrace-drill-variant")[0] != 0, "the completed (failed) switch replaced the attempt's /etc")
         app.succeed("systemctl stop terrace-drill-broken.service; systemctl reset-failed terrace-drill-broken.service")
-        deploy("app", GOOD2)
-        app.succeed("terrace-production activate " + GOOD2)
+        # Signed with the offline spare key only (the app trusts both from its installation): accepted like the working key.
+        ok("deploy path: on, 2 trusted deploy key(s)" in app.succeed("terrace-production status"), "the app trusts two deploy keys, the working key and the spare")
+        deploy("app", GOOD2, key="spare")
+        sigs = app.succeed("nix --extra-experimental-features nix-command path-info --sigs " + GOOD2)
+        ok("terrace-drill-spare-1:" in sigs and "terrace-drill-deploy-1:" not in sigs, f"the system's toplevel carries the spare key's signature only: {sigs.strip()}")
+        out = app.succeed("terrace-production activate " + GOOD2)
+        ok("Signatures: " in out and "Signatures: 0 new" not in out and "verified against 2 trusted deploy key(s)" in out, f"activate verified the new paths against both deploy keys: {out.strip()[-300:]!r}")
         finished(records(app)[-1], "activate", "4", "5", GOOD2, "success")
         status = app.succeed("terrace-production status")
         ok(f"previous generation: 2 {GOOD}" in status and "skipped by rollback, its last record failed: generation 4 ('failed (exit 4)')" in status
