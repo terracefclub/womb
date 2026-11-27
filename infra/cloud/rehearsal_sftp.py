@@ -32,8 +32,13 @@ ADDRESS = "127.0.0.1"
 KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]{68}")
 RCLONE = re.compile(r"/nix/store/[0-9a-z]{32}-rclone-[0-9.]+/bin/rclone")
 KEYGEN = re.compile(r"/nix/store/[0-9a-z]{32}-openssh-[0-9.]+p[0-9]+/bin/ssh-keygen")
-MIN_SECONDS, MAX_SECONDS = 300, 21600
-UNIT = re.compile(r"terrace-lease-sftp-[0-9a-f]{16}\.service")
+# The endpoint is needed from the backup step to teardown of a lease planned at about 90 minutes and capped at 4 hours.
+MIN_SECONDS, DEFAULT_SECONDS, MAX_SECONDS = 300, 7200, 14400
+DEFAULT_LIMIT_MIB, MIN_LIMIT_MIB, MAX_LIMIT_MIB = 2048, 16, 65536
+WATCH_INTERVAL, WATCH_GRACE = 2, 60
+PROC = Path("/proc")
+TRIPPED = "sftp-limit-tripped.json"
+UNIT = re.compile(r"terrace-lease-sftp-[0-9a-f]{16}(-watch)?\.service")
 SERVED = "/var/empty"
 PATH = re.compile(r"/[A-Za-z0-9/._-]+")
 
@@ -72,7 +77,7 @@ def read_public_key(path):
 
 
 def run_names(directory):
-    return [directory / name for name in (HOST_KEY, HOST_PUB, AUTHORIZED, REPOSITORY, LOGS, RECEIPT, STOPPED)]
+    return [directory / name for name in (HOST_KEY, HOST_PUB, AUTHORIZED, REPOSITORY, LOGS, RECEIPT, STOPPED, TRIPPED)]
 
 
 def prepare(directory, keygen, public_key_file):
@@ -136,7 +141,7 @@ def banner(port, timeout=2.0):
         return None
 
 
-def unit_properties(directory, unit, rclone, port, seconds):
+def server_properties(directory, seconds, watcher):
     run = directory.resolve(strict=True)
     repository, logs = run / REPOSITORY, run / LOGS
     return [
@@ -146,6 +151,8 @@ def unit_properties(directory, unit, rclone, port, seconds):
         "--property=ProtectHome=tmpfs", "--property=ProtectKernelTunables=yes", "--property=ProtectControlGroups=yes",
         "--property=RestrictAddressFamilies=AF_INET AF_UNIX", "--property=MemoryMax=1G", "--property=TasksMax=256",
         "--property=LimitNOFILE=4096",
+        # The server cannot outlive its size watcher (the watcher also ends when the server does).
+        "--property=BindsTo=" + watcher, "--property=After=" + watcher,
         # The run directory shows only what the server needs: the host key and keys read-only, the log writable, and the
         # repository as the single writable entry in an otherwise empty read-only served root (/var/empty/app, so the
         # client's relative path `app` is the repository and it cannot create anything beside it).
@@ -158,19 +165,78 @@ def unit_properties(directory, unit, rclone, port, seconds):
 
 def server_command(directory, rclone, port):
     run = directory.resolve(strict=True)
+    # Errors only, and the log rotates at 5M keeping two old files, so client activity cannot grow it without bound.
     return [safe_path(rclone), "serve", "sftp", ":local:" + SERVED,
             "--addr", "%s:%d" % (ADDRESS, port), "--key", safe_path(run / HOST_KEY),
             "--authorized-keys", safe_path(run / AUTHORIZED), "--config", "/dev/null",
-            "--log-file", safe_path(run / LOGS / "rclone.log"), "--log-level", "INFO", "--vfs-cache-mode", "off",
+            "--log-file", safe_path(run / LOGS / "rclone.log"), "--log-level", "ERROR",
+            "--log-file-max-size", "5M", "--log-file-max-backups", "2", "--vfs-cache-mode", "off",
             "--no-modtime", "--umask", "077"]
 
 
-def start(directory, rclone, seconds, port=None):
+def watcher_properties(directory, seconds):
+    run = directory.resolve(strict=True)
+    return [
+        "--property=Type=exec", "--property=RuntimeMaxSec=" + str(seconds), "--property=TimeoutStopSec=10s",
+        "--property=KillMode=control-group", "--property=UMask=0077", "--property=NoNewPrivileges=yes",
+        "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=ProtectSystem=strict",
+        "--property=ProtectHome=read-only", "--property=ReadWritePaths=" + safe_path(run),
+        "--property=RestrictAddressFamilies=AF_UNIX", "--property=MemoryMax=256M", "--property=TasksMax=32",
+    ]
+
+
+def watcher_command(directory, unit, limit_bytes):
+    python = Path(sys.executable).resolve(strict=True)
+    script = Path(__file__).resolve(strict=True)
+    return [safe_path(python), "-B", safe_path(script), "watch", "--directory", safe_path(directory.resolve(strict=True)),
+            "--unit", unit, "--limit-bytes", str(limit_bytes), "--interval", str(WATCH_INTERVAL)]
+
+
+def used_bytes(directory):
+    return directory_size(directory / REPOSITORY) + directory_size(directory / LOGS)
+
+
+def watch(directory, unit, limit_bytes, interval, sleep=time.sleep):
+    """Stop the server unit as soon as the repository plus log exceed the limit; end when the server has ended."""
+    if not UNIT.fullmatch(unit) or unit.endswith("-watch.service") or limit_bytes <= 0:
+        raise lease.Rejected("watch arguments rejected")
+    seen, waited = False, 0
+    while True:
+        if properties(unit, ["ActiveState"]).get("ActiveState") in ("active", "activating"):
+            seen = True
+        elif seen or waited >= WATCH_GRACE:
+            return False
+        used = used_bytes(directory)
+        if used > limit_bytes:
+            lease.write_private(directory / TRIPPED, {"limitBytes": limit_bytes, "usedBytes": used, "at": int(time.time())})
+            systemctl("stop", unit, allow_inactive=True)
+            return True
+        sleep(interval)
+        waited += interval
+
+
+def check_namespace(pid, directory, proc=PROC):
+    """Through /proc/<pid>/root, the server must see exactly the repository in its root and exactly the three expected
+    entries where the run directory is. Anything else, or anything unreadable, is a failure."""
+    root = proc / str(pid) / "root"
+    run = directory.resolve(strict=True)
+    try:
+        served = sorted(os.listdir(root / SERVED.lstrip("/")))
+        visible = sorted(os.listdir(root / str(run).lstrip("/")))
+        repository = (root / SERVED.lstrip("/") / "app")
+        ok = served == ["app"] and repository.is_dir() and not repository.is_symlink() and visible == sorted([HOST_KEY, AUTHORIZED, LOGS])
+    except OSError:
+        ok = False
+    if not ok:
+        raise lease.Rejected("sandbox layout check failed")
+
+
+def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB):
     if not RCLONE.fullmatch(str(rclone)) or not rclone.is_file():
         raise lease.Rejected("pinned rclone required")
-    if not MIN_SECONDS <= seconds <= MAX_SECONDS:
-        raise lease.Rejected("runtime limit rejected")
-    if os.path.lexists(directory / RECEIPT) or os.path.lexists(directory / STOPPED):
+    if not MIN_SECONDS <= seconds <= MAX_SECONDS or not MIN_LIMIT_MIB <= limit_mib <= MAX_LIMIT_MIB:
+        raise lease.Rejected("runtime or size limit rejected")
+    if os.path.lexists(directory / RECEIPT) or os.path.lexists(directory / STOPPED) or os.path.lexists(directory / TRIPPED):
         raise lease.Rejected("endpoint already started in this run directory")
     for name in (HOST_KEY, HOST_PUB, AUTHORIZED):
         lease.read_private(directory / name, 4096)
@@ -182,15 +248,21 @@ def start(directory, rclone, seconds, port=None):
     if not 1024 <= port <= 65535 or banner(port, 0.5) is not None:
         raise lease.Rejected("port unavailable")
     unit = "terrace-lease-sftp-" + secrets.token_hex(8) + ".service"
+    watcher = unit[:-len(".service")] + "-watch.service"
     if properties(unit, ["LoadState"]).get("LoadState") != "not-found":
         raise lease.Rejected("unit name in use")
-    try:
-        result = subprocess.run([str(SYSTEMD / "systemd-run"), "--user", "--quiet", "--collect", "--unit=" + unit,
-                                 *unit_properties(directory, unit, rclone, port, seconds), *server_command(directory, rclone, port)],
+    limit_bytes = limit_mib * 1024 * 1024
+
+    def launch(name, props, command):
+        result = subprocess.run([str(SYSTEMD / "systemd-run"), "--user", "--quiet", "--collect", "--unit=" + name, *props, *command],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=dict(os.environ, LC_ALL="C"), timeout=30, check=False)
         if result.returncode:
             raise lease.Rejected("unit did not start")
+
+    try:
+        launch(watcher, watcher_properties(directory, seconds), watcher_command(directory, unit, limit_bytes))
+        launch(unit, server_properties(directory, seconds, watcher), server_command(directory, rclone, port))
         for _ in range(40):
             if banner(port, 0.5):
                 break
@@ -200,13 +272,17 @@ def start(directory, rclone, seconds, port=None):
         facts = properties(unit, ["MainPID", "ActiveState"])
         if facts.get("ActiveState") != "active" or not facts.get("MainPID", "0").isdigit() or facts["MainPID"] == "0":
             raise lease.Rejected("unit not active")
-        receipt = {"schema": 1, "unit": unit, "pid": int(facts["MainPID"]), "address": ADDRESS, "port": port,
+        if properties(watcher, ["ActiveState"]).get("ActiveState") != "active":
+            raise lease.Rejected("size watcher not active")
+        check_namespace(int(facts["MainPID"]), directory)
+        now = int(time.time())
+        receipt = {"schema": 1, "unit": unit, "watcher": watcher, "pid": int(facts["MainPID"]), "address": ADDRESS, "port": port,
                    "hostKey": host, "knownHosts": "[%s]:%d %s" % (ADDRESS, port, host), "repository": "sftp:terrace@%s:app" % ADDRESS,
-                   "started": int(time.time()), "expires": int(time.time()) + seconds}
+                   "started": now, "expires": now + seconds, "limitBytes": limit_bytes}
         lease.write_private(directory / RECEIPT, receipt)
         return receipt
     except BaseException:
-        systemctl("stop", unit, allow_inactive=True)
+        systemctl("stop", unit, watcher, allow_inactive=True)
         raise
 
 
@@ -232,41 +308,42 @@ def directory_size(path):
 def status(directory):
     receipt = read_receipt(directory)
     facts = properties(receipt["unit"], ["ActiveState", "SubState", "MainPID", "LoadState"])
+    tripped = None
+    if os.path.lexists(directory / TRIPPED):
+        tripped = json.loads(lease.read_private(directory / TRIPPED, 4096))
     return {"unit": receipt["unit"], "active": facts.get("ActiveState") == "active", "state": facts.get("ActiveState"),
             "pid": int(facts.get("MainPID", "0") or 0), "port": receipt["port"], "listening": bool(banner(receipt["port"])),
-            "expires": receipt["expires"], "repositoryBytes": directory_size(directory / REPOSITORY)}
+            "expires": receipt["expires"], "repositoryBytes": directory_size(directory / REPOSITORY),
+            "logBytes": directory_size(directory / LOGS), "limitBytes": receipt.get("limitBytes"), "limitTripped": tripped}
 
 
-def pid_alive(pid):
+def server_running(pid, port, proc=None):
+    """True if /proc/<pid> still holds the server (its command line names the port), whatever systemd says."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        cmdline = ((PROC if proc is None else proc) / str(pid) / "cmdline").read_bytes()
+    except OSError:
         return False
-    except PermissionError:
-        return True
-    return True
+    return b"rclone" in cmdline and ("127.0.0.1:%d" % port).encode() in cmdline
 
 
 def stop(directory):
-    """Stop the unit, then prove the unit, its processes and the listener are gone."""
+    """Stop the server and its size watcher, then prove the units, the process and the listener are gone."""
     receipt = read_receipt(directory)
-    unit = receipt["unit"]
-    systemctl("stop", unit, allow_inactive=True)
-    facts = properties(unit, ["ActiveState", "MainPID", "ControlPID", "ControlGroup"])
-    if (facts.get("ActiveState", "inactive") not in ("inactive", "failed") or facts.get("MainPID", "0") != "0"
-            or facts.get("ControlPID", "0") != "0" or facts.get("ControlGroup", "")):
-        raise lease.Rejected("unit is not inactive")
-    if receipt["pid"] and pid_alive(receipt["pid"]):
-        cmdline = Path("/proc/%d/cmdline" % receipt["pid"])
-        try:
-            if str(receipt["port"]).encode() in cmdline.read_bytes():
-                raise lease.Rejected("server process still running")
-        except OSError:
-            pass
+    units = [receipt["unit"]] + ([receipt["watcher"]] if receipt.get("watcher") else [])
+    if not all(UNIT.fullmatch(unit) for unit in units):
+        raise lease.Rejected("receipt rejected")
+    systemctl("stop", *units, allow_inactive=True)
+    for unit in units:
+        facts = properties(unit, ["ActiveState", "MainPID", "ControlPID", "ControlGroup"])
+        if (facts.get("ActiveState", "inactive") not in ("inactive", "failed") or facts.get("MainPID", "0") != "0"
+                or facts.get("ControlPID", "0") != "0" or facts.get("ControlGroup", "")):
+            raise lease.Rejected("unit is not inactive")
+    if receipt["pid"] and server_running(receipt["pid"], receipt["port"]):
+        raise lease.Rejected("server process still running")
     if banner(receipt["port"], 1.0) is not None:
         raise lease.Rejected("listener still answering")
     if not os.path.lexists(directory / STOPPED):
-        lease.write_private(directory / STOPPED, {"unit": unit, "port": receipt["port"], "stopped": int(time.time())})
+        lease.write_private(directory / STOPPED, {"unit": receipt["unit"], "port": receipt["port"], "stopped": int(time.time())})
 
 
 def forward_option(directory, host_port=None):
@@ -279,12 +356,16 @@ def forward_option(directory, host_port=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "start", "status", "stop", "forward"))
+    parser.add_argument("action", choices=("prepare", "start", "status", "stop", "forward", "watch"))
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--ssh-keygen", type=Path)
     parser.add_argument("--rclone", type=Path)
     parser.add_argument("--client-public-key", type=Path, help="file holding the one ssh-ed25519 public key allowed to connect")
-    parser.add_argument("--seconds", type=int, default=14400, help="hard runtime limit, 300 to 21600")
+    parser.add_argument("--seconds", type=int, default=DEFAULT_SECONDS, help="hard runtime limit, %d to %d (default %d: a lease planned at about 90 minutes plus margin)" % (MIN_SECONDS, MAX_SECONDS, DEFAULT_SECONDS))
+    parser.add_argument("--limit-mib", type=int, default=DEFAULT_LIMIT_MIB, help="stop the endpoint when repository plus log exceed this size (default %d)" % DEFAULT_LIMIT_MIB)
+    parser.add_argument("--unit", help="(internal, `watch`) the server unit to stop")
+    parser.add_argument("--limit-bytes", type=int, help="(internal, `watch`)")
+    parser.add_argument("--interval", type=int, default=WATCH_INTERVAL, help="(internal, `watch`)")
     parser.add_argument("--port", type=int, help="loopback port on this machine (default: a free one)")
     parser.add_argument("--host-port", type=int, help="loopback port on the lease host for `forward` (default: same as --port)")
     args = parser.parse_args()
@@ -295,13 +376,15 @@ def main():
             prepare(directory, args.ssh_keygen, args.client_public_key)
             print(json.dumps({"hostKey": host_key_line(directory)}, sort_keys=True))
         elif args.action == "start" and args.rclone:
-            receipt = start(directory, args.rclone, args.seconds, args.port)
-            print(json.dumps({key: receipt[key] for key in ("unit", "pid", "port", "hostKey", "knownHosts", "repository", "expires")}, sort_keys=True))
+            receipt = start(directory, args.rclone, args.seconds, args.port, args.limit_mib)
+            print(json.dumps({key: receipt[key] for key in ("unit", "pid", "port", "watcher", "hostKey", "knownHosts", "repository", "expires", "limitBytes")}, sort_keys=True))
         elif args.action == "status":
             print(json.dumps(status(directory), sort_keys=True))
         elif args.action == "stop":
             stop(directory)
             print("Throwaway SFTP endpoint stopped; unit, processes and listener verified gone.")
+        elif args.action == "watch" and args.unit and args.limit_bytes:
+            watch(directory, args.unit, args.limit_bytes, args.interval)
         elif args.action == "forward":
             print(forward_option(directory, args.host_port))
         else:

@@ -137,6 +137,27 @@ say "no probe wrote outside the served root (run directory holds: $(ls "$RUN" | 
 if [ "$LAYER" = 1 ]; then say "inside the served root (expected in layer mode): $(ls -A "$ROOTD" | tr '\n' ' ')"; fi
 say "outside secret unchanged: $([ "$(sha256sum "$OUTSIDE" | cut -d' ' -f1)" = "$OUTSIDE_SUM" ] && echo yes || echo NO)"
 
+say "== hard links, renames out of the root, the endpoint's own key files, other usernames, other subsystems"
+printf 'ln %s app/hl-abs\nln app/config ../hl-out\nln app/config /hl-root\nrename app/config ../moved-out\nrename app/config /moved-root\n' "$OUTSIDE" | timeout 40 sftp "${SFTPO[@]}" -b - terrace@127.0.0.1 >"$PROBEWORK/sftp.out" 2>&1
+say "--- hard link and rename attempts: $(tr '\n' ' ' < "$PROBEWORK/sftp.out" | head -c 600)"
+for p in "$APPDIR/hl-abs" "$OUTER/hl-out" "$OUTER/moved-out" /hl-root /moved-root; do
+  if [ -e "$p" ] || [ -L "$p" ]; then say "!!! found on the builder: $p"; FAIL=1; fi
+done
+if [ "$LAYER" != 1 ] && [ -e "$ROOTD/hl-out" -o -e "$ROOTD/moved-out" -o ! -e "$APPDIR/config" ]; then say "!!! hard link or rename took effect"; FAIL=1; fi
+for target in "$RUN/sftp-host-key" "$RUN/sftp-authorized-keys" "$RUN/sftp-listener.json" /proc/self/environ /proc/self/cmdline; do
+  rm -f "$PROBEWORK/got"
+  printf 'get %s %s\n' "$target" "$PROBEWORK/got" | timeout 40 sftp "${SFTPO[@]}" -b - terrace@127.0.0.1 >"$PROBEWORK/sftp.out" 2>&1; rc=$?
+  say "--- get $(basename "$target"): exit $rc; $(tr '\n' ' ' < "$PROBEWORK/sftp.out" | head -c 200 | sed "s|$RUN|RUN|g")"
+  if [ -s "$PROBEWORK/got" ]; then say "!!! LEAK: $target served"; FAIL=1; fi
+done
+for u in root nobody terrace2; do
+  out=$(printf 'ls -a /\nget /etc/passwd %s\n' "$PROBEWORK/got" | timeout 40 sftp "${SFTPO[@]}" -b - "$u@127.0.0.1" 2>&1 | tr '\n' ' ' | head -c 300)
+  say "--- as user $u (any name authenticates with the one key; same root): $out"
+  if [ -s "$PROBEWORK/got" ]; then say "!!! LEAK as $u"; FAIL=1; fi
+done
+expect_fail "other subsystem (netconf)" ssh -s "${SSHO[@]}" terrace@127.0.0.1 netconf
+expect_fail "other subsystem (shell)" ssh -s "${SSHO[@]}" terrace@127.0.0.1 shell
+
 say "== authentication"
 ssh-keygen -q -t ed25519 -N "" -f "$PROBEWORK/other" -C unlisted-probe >/dev/null
 expect_fail "second, unlisted key" ssh -i "$PROBEWORK/other" -p "$PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KH" -o ConnectTimeout=10 terrace@127.0.0.1 true

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -103,24 +104,46 @@ class PrepareTest(unittest.TestCase):
 
 
 class ServerTest(unittest.TestCase):
-    def test_confinement_shape_of_the_server_and_unit(self):
+    def test_exact_server_command(self):
         holder, root = run_directory()
         with holder:
-            command = sftp.server_command(root, RCLONE, 40222)
-            self.assertEqual(command[:4], [str(RCLONE), "serve", "sftp", ":local:/var/empty"])
-            self.assertEqual(command[command.index("--addr") + 1], "127.0.0.1:40222")
-            self.assertEqual(command.count("--key"), 1)
-            for forbidden in ("--no-auth", "--user", "--pass", "--links", "--vfs-links", "-L", "--copy-links", "--auth-proxy", "--stdio"):
-                self.assertNotIn(forbidden, command)
-            self.assertEqual(command[command.index("--vfs-cache-mode") + 1], "off")
-            properties = sftp.unit_properties(root, "u", RCLONE, 40222, 600)
-            joined = "\n".join(properties)
-            for expected in ("RuntimeMaxSec=600", "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=tmpfs", "PrivateTmp=yes",
-                             "RestrictAddressFamilies=AF_INET AF_UNIX", "TemporaryFileSystem=", "/var/empty/app", "KillMode=control-group"):
-                self.assertIn(expected, joined)
-            # Only the repository is writable; the keys are read-only binds.
-            self.assertIn("BindReadOnlyPaths=" + str(root.resolve() / sftp.HOST_KEY), joined)
-            self.assertNotIn(str(root.resolve() / sftp.HOST_KEY) + ":", [line.split("=", 1)[1] for line in properties if line.startswith("--property=BindPaths")][0])
+            run = str(root.resolve())
+            self.assertEqual(sftp.server_command(root, RCLONE, 40222), [
+                str(RCLONE), "serve", "sftp", ":local:/var/empty", "--addr", "127.0.0.1:40222",
+                "--key", run + "/sftp-host-key", "--authorized-keys", run + "/sftp-authorized-keys", "--config", "/dev/null",
+                "--log-file", run + "/sftp-logs/rclone.log", "--log-level", "ERROR", "--log-file-max-size", "5M",
+                "--log-file-max-backups", "2", "--vfs-cache-mode", "off", "--no-modtime", "--umask", "077"])
+
+    def test_exact_server_properties(self):
+        holder, root = run_directory()
+        with holder:
+            run = str(root.resolve())
+            self.assertEqual(sftp.server_properties(root, 600, "w.service"), [
+                "--property=Type=exec", "--property=RuntimeMaxSec=600", "--property=TimeoutStopSec=10s",
+                "--property=KillMode=control-group", "--property=UMask=0077", "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=ProtectSystem=strict",
+                "--property=ProtectHome=tmpfs", "--property=ProtectKernelTunables=yes", "--property=ProtectControlGroups=yes",
+                "--property=RestrictAddressFamilies=AF_INET AF_UNIX", "--property=MemoryMax=1G", "--property=TasksMax=256",
+                "--property=LimitNOFILE=4096", "--property=BindsTo=w.service", "--property=After=w.service",
+                "--property=TemporaryFileSystem=" + run + ":ro /var/empty:ro",
+                "--property=BindReadOnlyPaths=" + run + "/sftp-host-key " + run + "/sftp-authorized-keys",
+                "--property=BindPaths=" + run + "/sftp-logs " + run + "/app:/var/empty/app",
+                "--property=WorkingDirectory=/var/empty"])
+
+    def test_exact_watcher_unit(self):
+        holder, root = run_directory()
+        with holder:
+            run = str(root.resolve())
+            self.assertEqual(sftp.watcher_properties(root, 600), [
+                "--property=Type=exec", "--property=RuntimeMaxSec=600", "--property=TimeoutStopSec=10s",
+                "--property=KillMode=control-group", "--property=UMask=0077", "--property=NoNewPrivileges=yes",
+                "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=ProtectSystem=strict",
+                "--property=ProtectHome=read-only", "--property=ReadWritePaths=" + run,
+                "--property=RestrictAddressFamilies=AF_UNIX", "--property=MemoryMax=256M", "--property=TasksMax=32"])
+            command = sftp.watcher_command(root, "terrace-lease-sftp-" + "1" * 16 + ".service", 1048576)
+            self.assertEqual(command[1:3], ["-B", str(Path(sftp.__file__).resolve())])
+            self.assertEqual(command[3:], ["watch", "--directory", run, "--unit", "terrace-lease-sftp-" + "1" * 16 + ".service",
+                                           "--limit-bytes", "1048576", "--interval", "2"])
 
     def test_unsafe_paths_rejected(self):
         for bad in ("relative", "/a/../b", "/a b", "/a;b", "/a$b"):
@@ -131,32 +154,121 @@ class ServerTest(unittest.TestCase):
         holder, root = run_directory()
         with holder:
             with patch.object(Path, "is_file", return_value=True):
-                for seconds in (0, 299, 21601):
+                for seconds in (0, 299, 14401, 21600):
                     with self.assertRaises(lease.Rejected):
                         sftp.start(root, RCLONE, seconds)
+                for limit in (0, 15, 65537):
+                    with self.assertRaises(lease.Rejected):
+                        sftp.start(root, RCLONE, 600, limit_mib=limit)
                 with self.assertRaises(lease.Rejected):
                     sftp.start(root, Path("/usr/bin/rclone"), 600)
-                (root / sftp.RECEIPT).touch()
-                with self.assertRaises(lease.Rejected):
-                    sftp.start(root, RCLONE, 600)
+                for name in (sftp.RECEIPT, sftp.STOPPED, sftp.TRIPPED):
+                    (root / name).touch()
+                    with self.assertRaises(lease.Rejected):
+                        sftp.start(root, RCLONE, 600)
+                    (root / name).unlink()
 
     def test_free_port_is_unprivileged_loopback(self):
         self.assertGreaterEqual(sftp.free_port(), 1024)
 
+    def test_default_runtime_fits_the_lease(self):
+        self.assertEqual((sftp.DEFAULT_SECONDS, sftp.MAX_SECONDS), (7200, 14400))
+
+
+class NamespaceTest(unittest.TestCase):
+    def tree(self, served=("app",), visible=(sftp.HOST_KEY, sftp.AUTHORIZED, sftp.LOGS)):
+        holder, root = run_directory()
+        proc = root / "proc"
+        base = proc / "77" / "root"
+        (base / "var/empty").mkdir(parents=True)
+        for name in served:
+            (base / "var/empty" / name).mkdir()
+        run = str(root.resolve()).lstrip("/")
+        (base / run).mkdir(parents=True)
+        for name in visible:
+            (base / run / name).touch()
+        return holder, root, proc
+
+    def test_exact_layout_passes_and_anything_else_fails(self):
+        for served, visible, ok in (((), None, False), (("app",), None, True), (("app", "x"), None, False), (("other",), None, False),
+                                    (("app",), (sftp.HOST_KEY, sftp.AUTHORIZED), False),
+                                    (("app",), (sftp.HOST_KEY, sftp.AUTHORIZED, sftp.LOGS, sftp.RECEIPT), False)):
+            holder, root, proc = self.tree(served, visible if visible is not None else (sftp.HOST_KEY, sftp.AUTHORIZED, sftp.LOGS))
+            with holder:
+                if ok:
+                    sftp.check_namespace(77, root, proc)
+                else:
+                    with self.assertRaises(lease.Rejected):
+                        sftp.check_namespace(77, root, proc)
+
+    def test_unreadable_process_fails(self):
+        holder, root, proc = self.tree()
+        with holder:
+            with self.assertRaises(lease.Rejected):
+                sftp.check_namespace(78, root, proc)
+
+
+class WatchTest(unittest.TestCase):
+    UNIT = "terrace-lease-sftp-" + "2" * 16 + ".service"
+
+    def test_stops_the_server_over_the_limit_and_records_it(self):
+        holder, root = run_directory()
+        with holder:
+            (root / sftp.REPOSITORY).mkdir()
+            (root / sftp.LOGS).mkdir()
+            (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 100)
+
+            def sleeper(_):
+                (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 5000)
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertTrue(sftp.watch(root, self.UNIT, 1000, 2, sleep=sleeper))
+                self.assertEqual(systemctl.call_args.args[:2], ("stop", self.UNIT))
+            self.assertEqual(json.loads((root / sftp.TRIPPED).read_text())["limitBytes"], 1000)
+
+    def test_counts_the_log_and_ends_with_the_server(self):
+        holder, root = run_directory()
+        with holder:
+            (root / sftp.REPOSITORY).mkdir()
+            (root / sftp.LOGS).mkdir()
+            (root / sftp.LOGS / "rclone.log").write_bytes(b"x" * 2000)
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertTrue(sftp.watch(root, self.UNIT, 1000, 2, sleep=lambda _: None))
+                self.assertTrue(systemctl.called)
+            (root / sftp.TRIPPED).unlink()
+            states = iter([{"ActiveState": "active"}, {"ActiveState": "inactive"}])
+            (root / sftp.LOGS / "rclone.log").write_bytes(b"x")
+            with patch.object(sftp, "properties", side_effect=lambda *a: next(states)), patch.object(sftp, "systemctl") as systemctl:
+                self.assertFalse(sftp.watch(root, self.UNIT, 1000, 2, sleep=lambda _: None))
+                self.assertFalse(systemctl.called)
+
+    def test_gives_up_when_the_server_never_appears_and_refuses_foreign_units(self):
+        holder, root = run_directory()
+        with holder:
+            (root / sftp.REPOSITORY).mkdir()
+            (root / sftp.LOGS).mkdir()
+            with patch.object(sftp, "properties", return_value={"ActiveState": "inactive"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertFalse(sftp.watch(root, self.UNIT, 1000, 30, sleep=lambda _: None))
+                self.assertFalse(systemctl.called)
+                for unit in ("sshd.service", self.UNIT[:-8] + "-watch.service"):
+                    with self.assertRaises(lease.Rejected):
+                        sftp.watch(root, unit, 1000, 2)
+
 
 class StopTest(unittest.TestCase):
-    def receipt(self, root):
-        lease.write_private(root / sftp.RECEIPT, {"schema": 1, "unit": "terrace-lease-sftp-" + "0" * 16 + ".service", "pid": 0,
+    def receipt(self, root, pid=0):
+        lease.write_private(root / sftp.RECEIPT, {"schema": 1, "unit": "terrace-lease-sftp-" + "0" * 16 + ".service",
+                                                  "watcher": "terrace-lease-sftp-" + "0" * 16 + "-watch.service", "pid": pid,
                                                   "address": "127.0.0.1", "port": 40222})
 
-    def test_stop_requires_inactive_unit_and_silent_listener(self):
+    def test_stop_requires_inactive_units_and_silent_listener(self):
         holder, root = run_directory()
         with holder:
             self.receipt(root)
             gone = {"ActiveState": "inactive", "MainPID": "0", "ControlPID": "0", "ControlGroup": ""}
             with patch.object(sftp, "systemctl") as systemctl, patch.object(sftp, "properties", return_value=gone), patch.object(sftp, "banner", return_value=None):
                 sftp.stop(root)
-                self.assertEqual(systemctl.call_args.args[:2], ("stop", "terrace-lease-sftp-" + "0" * 16 + ".service"))
+                self.assertEqual(systemctl.call_args.args[:3], ("stop", "terrace-lease-sftp-" + "0" * 16 + ".service",
+                                                                "terrace-lease-sftp-" + "0" * 16 + "-watch.service"))
                 self.assertTrue((root / sftp.STOPPED).exists())
                 sftp.stop(root)  # idempotent
             (root / sftp.STOPPED).unlink()
@@ -166,6 +278,23 @@ class StopTest(unittest.TestCase):
                     with self.assertRaises(lease.Rejected):
                         sftp.stop(root)
             self.assertFalse((root / sftp.STOPPED).exists())
+
+    def test_stop_fails_while_the_server_process_is_still_there(self):
+        holder, root = run_directory()
+        with holder:
+            self.receipt(root, pid=91)
+            gone = {"ActiveState": "inactive", "MainPID": "0", "ControlPID": "0", "ControlGroup": ""}
+            proc = root / "proc"
+            (proc / "91").mkdir(parents=True)
+            (proc / "91" / "cmdline").write_bytes(b"/nix/store/x-rclone-1.75.2/bin/rclone\x00serve\x00sftp\x00--addr\x00127.0.0.1:40222\x00")
+            with (patch.object(sftp, "PROC", proc), patch.object(sftp, "systemctl"), patch.object(sftp, "properties", return_value=gone),
+                  patch.object(sftp, "banner", return_value=None)):
+                with self.assertRaises(lease.Rejected):
+                    sftp.stop(root)
+                self.assertFalse(sftp.server_running(92, 40222, proc))
+                self.assertFalse(sftp.server_running(91, 40999, proc))
+                (proc / "91" / "cmdline").write_bytes(b"sleep\x00100\x00")  # a reused pid is not the server
+                sftp.stop(root)
 
     def test_forward_option_binds_the_host_loopback_only(self):
         holder, root = run_directory()
