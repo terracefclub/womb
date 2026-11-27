@@ -300,8 +300,11 @@ store's public half at the receipt's address). It refuses a staged key that is
 not the stored one, the installer's own key, build outputs for another disk than
 the receipt's (the Disko script formats the device it was built for) or another
 role, store paths that are not a system, a Disko script and an installer, and
-any existing file; it then validates the plan with `rescue_install.checked_plan`
-and prints the digest to approve. The installer writes that key to
+any existing file or link at an output path (each file is created new, mode 0600,
+never through a link). It checks that the store paths exist before writing
+anything, validates the plan with `rescue_install.checked_plan` and prints the
+digest to approve; if a step after the first write fails, it removes exactly the
+files it created (the key copy overwritten first), so a rerun starts clean. The installer writes that key to
 `/mnt/etc/ssh/ssh_host_ed25519_key`, the only host key the production sshd and
 sops use, and `terrace-secrets push` pins the same stored key, so no step trusts
 a key on first use. `rescue_install.py` itself is unchanged.
