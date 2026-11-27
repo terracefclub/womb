@@ -35,6 +35,8 @@ KEYGEN = re.compile(r"/nix/store/[0-9a-z]{32}-openssh-[0-9.]+p[0-9]+/bin/ssh-key
 # The endpoint is needed from the backup step to teardown of a lease planned at about 90 minutes and capped at 4 hours.
 MIN_SECONDS, DEFAULT_SECONDS, MAX_SECONDS = 300, 7200, 14400
 DEFAULT_LIMIT_MIB, MIN_LIMIT_MIB, MAX_LIMIT_MIB = 2048, 16, 65536
+# Every file and directory counts at least one filesystem block against the size limit, and the number of entries is capped.
+ENTRY_BYTES, DEFAULT_MAX_ENTRIES, MIN_MAX_ENTRIES, MAX_MAX_ENTRIES = 4096, 200000, 1000, 5000000
 WATCH_INTERVAL, WATCH_GRACE = 2, 60
 PROC = Path("/proc")
 TRIPPED = "sftp-limit-tripped.json"
@@ -185,20 +187,31 @@ def watcher_properties(directory, seconds):
     ]
 
 
-def watcher_command(directory, unit, limit_bytes):
+def watcher_command(directory, unit, limit_bytes, max_entries):
     python = Path(sys.executable).resolve(strict=True)
     script = Path(__file__).resolve(strict=True)
     return [safe_path(python), "-B", safe_path(script), "watch", "--directory", safe_path(directory.resolve(strict=True)),
-            "--unit", unit, "--limit-bytes", str(limit_bytes), "--interval", str(WATCH_INTERVAL)]
+            "--unit", unit, "--limit-bytes", str(limit_bytes), "--max-entries", str(max_entries), "--interval", str(WATCH_INTERVAL)]
 
 
-def used_bytes(directory):
-    return directory_size(directory / REPOSITORY) + directory_size(directory / LOGS)
+def usage(directory):
+    """(bytes, entries) held by the repository and the log. Each file and directory counts at least ENTRY_BYTES, so
+    empty files and directories use up the limit too."""
+    total = entries = 0
+    for name in (REPOSITORY, LOGS):
+        for root, directories, files in os.walk(directory / name):
+            for entry in directories + files:
+                entries += 1
+                try:
+                    total += max(os.lstat(os.path.join(root, entry)).st_size, ENTRY_BYTES)
+                except OSError:
+                    total += ENTRY_BYTES
+    return total, entries
 
 
-def watch(directory, unit, limit_bytes, interval, sleep=time.sleep):
-    """Stop the server unit as soon as the repository plus log exceed the limit; end when the server has ended."""
-    if not UNIT.fullmatch(unit) or unit.endswith("-watch.service") or limit_bytes <= 0:
+def watch(directory, unit, limit_bytes, max_entries, interval, sleep=time.sleep):
+    """Stop the server unit as soon as the repository plus log exceed the size or entry limit; end when the server has ended."""
+    if not UNIT.fullmatch(unit) or unit.endswith("-watch.service") or limit_bytes <= 0 or max_entries <= 0:
         raise lease.Rejected("watch arguments rejected")
     seen, waited = False, 0
     while True:
@@ -206,9 +219,10 @@ def watch(directory, unit, limit_bytes, interval, sleep=time.sleep):
             seen = True
         elif seen or waited >= WATCH_GRACE:
             return False
-        used = used_bytes(directory)
-        if used > limit_bytes:
-            lease.write_private(directory / TRIPPED, {"limitBytes": limit_bytes, "usedBytes": used, "at": int(time.time())})
+        used, entries = usage(directory)
+        if used > limit_bytes or entries > max_entries:
+            lease.write_private(directory / TRIPPED, {"limitBytes": limit_bytes, "usedBytes": used, "maxEntries": max_entries,
+                                                      "entries": entries, "at": int(time.time())})
             systemctl("stop", unit, allow_inactive=True)
             return True
         sleep(interval)
@@ -231,10 +245,11 @@ def check_namespace(pid, directory, proc=PROC):
         raise lease.Rejected("sandbox layout check failed")
 
 
-def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB):
+def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB, max_entries=DEFAULT_MAX_ENTRIES):
     if not RCLONE.fullmatch(str(rclone)) or not rclone.is_file():
         raise lease.Rejected("pinned rclone required")
-    if not MIN_SECONDS <= seconds <= MAX_SECONDS or not MIN_LIMIT_MIB <= limit_mib <= MAX_LIMIT_MIB:
+    if not MIN_SECONDS <= seconds <= MAX_SECONDS or not MIN_LIMIT_MIB <= limit_mib <= MAX_LIMIT_MIB \
+            or not MIN_MAX_ENTRIES <= max_entries <= MAX_MAX_ENTRIES:
         raise lease.Rejected("runtime or size limit rejected")
     if os.path.lexists(directory / RECEIPT) or os.path.lexists(directory / STOPPED) or os.path.lexists(directory / TRIPPED):
         raise lease.Rejected("endpoint already started in this run directory")
@@ -261,7 +276,7 @@ def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB):
             raise lease.Rejected("unit did not start")
 
     try:
-        launch(watcher, watcher_properties(directory, seconds), watcher_command(directory, unit, limit_bytes))
+        launch(watcher, watcher_properties(directory, seconds), watcher_command(directory, unit, limit_bytes, max_entries))
         launch(unit, server_properties(directory, seconds, watcher), server_command(directory, rclone, port))
         for _ in range(40):
             if banner(port, 0.5):
@@ -278,11 +293,15 @@ def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB):
         now = int(time.time())
         receipt = {"schema": 1, "unit": unit, "watcher": watcher, "pid": int(facts["MainPID"]), "address": ADDRESS, "port": port,
                    "hostKey": host, "knownHosts": "[%s]:%d %s" % (ADDRESS, port, host), "repository": "sftp:terrace@%s:app" % ADDRESS,
-                   "started": now, "expires": now + seconds, "limitBytes": limit_bytes}
+                   "started": now, "expires": now + seconds, "limitBytes": limit_bytes, "maxEntries": max_entries}
         lease.write_private(directory / RECEIPT, receipt)
         return receipt
     except BaseException:
         systemctl("stop", unit, watcher, allow_inactive=True)
+        # Re-verify before returning the error: a unit that is still running must not be mistaken for a clean failure.
+        for name in (unit, watcher):
+            if properties(name, ["ActiveState"]).get("ActiveState", "inactive") not in ("inactive", "failed"):
+                raise lease.Rejected("units still running after a failed start")
         raise
 
 
@@ -308,13 +327,15 @@ def directory_size(path):
 def status(directory):
     receipt = read_receipt(directory)
     facts = properties(receipt["unit"], ["ActiveState", "SubState", "MainPID", "LoadState"])
+    counted = usage(directory)
     tripped = None
     if os.path.lexists(directory / TRIPPED):
         tripped = json.loads(lease.read_private(directory / TRIPPED, 4096))
     return {"unit": receipt["unit"], "active": facts.get("ActiveState") == "active", "state": facts.get("ActiveState"),
             "pid": int(facts.get("MainPID", "0") or 0), "port": receipt["port"], "listening": bool(banner(receipt["port"])),
             "expires": receipt["expires"], "repositoryBytes": directory_size(directory / REPOSITORY),
-            "logBytes": directory_size(directory / LOGS), "limitBytes": receipt.get("limitBytes"), "limitTripped": tripped}
+            "logBytes": directory_size(directory / LOGS), "countedBytes": counted[0], "entries": counted[1],
+            "limitBytes": receipt.get("limitBytes"), "maxEntries": receipt.get("maxEntries"), "limitTripped": tripped}
 
 
 def server_running(pid, port, proc=None):
@@ -363,6 +384,7 @@ def main():
     parser.add_argument("--client-public-key", type=Path, help="file holding the one ssh-ed25519 public key allowed to connect")
     parser.add_argument("--seconds", type=int, default=DEFAULT_SECONDS, help="hard runtime limit, %d to %d (default %d: a lease planned at about 90 minutes plus margin)" % (MIN_SECONDS, MAX_SECONDS, DEFAULT_SECONDS))
     parser.add_argument("--limit-mib", type=int, default=DEFAULT_LIMIT_MIB, help="stop the endpoint when repository plus log exceed this size (default %d)" % DEFAULT_LIMIT_MIB)
+    parser.add_argument("--max-entries", type=int, default=DEFAULT_MAX_ENTRIES, help="stop the endpoint when the repository and log hold more files and directories than this (default %d)" % DEFAULT_MAX_ENTRIES)
     parser.add_argument("--unit", help="(internal, `watch`) the server unit to stop")
     parser.add_argument("--limit-bytes", type=int, help="(internal, `watch`)")
     parser.add_argument("--interval", type=int, default=WATCH_INTERVAL, help="(internal, `watch`)")
@@ -376,15 +398,15 @@ def main():
             prepare(directory, args.ssh_keygen, args.client_public_key)
             print(json.dumps({"hostKey": host_key_line(directory)}, sort_keys=True))
         elif args.action == "start" and args.rclone:
-            receipt = start(directory, args.rclone, args.seconds, args.port, args.limit_mib)
-            print(json.dumps({key: receipt[key] for key in ("unit", "pid", "port", "watcher", "hostKey", "knownHosts", "repository", "expires", "limitBytes")}, sort_keys=True))
+            receipt = start(directory, args.rclone, args.seconds, args.port, args.limit_mib, args.max_entries)
+            print(json.dumps({key: receipt[key] for key in ("unit", "pid", "port", "watcher", "hostKey", "knownHosts", "repository", "expires", "limitBytes", "maxEntries")}, sort_keys=True))
         elif args.action == "status":
             print(json.dumps(status(directory), sort_keys=True))
         elif args.action == "stop":
             stop(directory)
             print("Throwaway SFTP endpoint stopped; unit, processes and listener verified gone.")
         elif args.action == "watch" and args.unit and args.limit_bytes:
-            watch(directory, args.unit, args.limit_bytes, args.interval)
+            watch(directory, args.unit, args.limit_bytes, args.max_entries, args.interval)
         elif args.action == "forward":
             print(forward_option(directory, args.host_port))
         else:

@@ -246,12 +246,16 @@ fails.
 
 **Size limit.** Nothing without root can set a disk quota, so a companion unit (`<server unit>-watch`) measures the
 repository plus the server log every 2 seconds and stops the server when the total exceeds `--limit-mib` (default
-2048). The two units are bound to each other: the watcher has the same runtime limit, ends when the server ends, and
-the server has `BindsTo=` the watcher, so neither outlives the other. The server's log is at error level and rotates
-at 5 MiB keeping two old files. A tripped limit is recorded in `sftp-limit-tripped.json`; `status` shows the
-repository and log sizes, the limit and whether it tripped, and the receipt records the limit. The limit is checked
-between measurements, so a client can overshoot it by about what it can write in 2 seconds; it is a bound on
-exposure, not an exact quota. Put the run directory on scratch storage with ample free space that is not
+2048) or when the number of files and directories exceeds `--max-entries` (default 200000). Every file and directory
+counts at least 4096 bytes, so empty files and directories use up the limit too (they cost real storage). The two
+units are bound to each other: the watcher has the same runtime limit, ends when the server ends, and the server has
+`BindsTo=` the watcher, so neither outlives the other. The server's log is at error level and rotates at 5 MiB
+keeping two old files. A tripped limit is recorded in `sftp-limit-tripped.json`; `status` shows the repository and
+log sizes, the counted bytes and entries, the limits and whether one tripped, and the receipt records both limits.
+The limit is checked between measurements, so a client can overshoot it by about what it can write in 2 seconds; it
+is a bound on exposure, not an exact quota. Measured on loopback, a client wrote 64 MiB in 0.7 s against a 16 MiB
+limit (about 48 MiB over) before the server stopped; a real reverse forward over the internet is much slower, but
+choose `--limit-mib` with that margin. Put the run directory on scratch storage with ample free space that is not
 snapshotted (a deleted file's space stays allocated while snapshots hold it); the limit protects the disk, it does
 not make snapshotted storage a good place for it.
 
@@ -259,7 +263,7 @@ not make snapshotted storage a good place for it.
 
 ```sh
 python3 -B infra/cloud/rehearsal_sftp.py prepare --directory RUN --ssh-keygen KEYGEN --client-public-key CLIENT.pub
-python3 -B infra/cloud/rehearsal_sftp.py start   --directory RUN --rclone RCLONE [--seconds 7200] [--limit-mib 2048] [--port N]
+python3 -B infra/cloud/rehearsal_sftp.py start   --directory RUN --rclone RCLONE [--seconds 7200] [--limit-mib 2048] [--max-entries 200000] [--port N]
 python3 -B infra/cloud/rehearsal_sftp.py forward --directory RUN [--host-port N]
 python3 -B infra/cloud/rehearsal_sftp.py status  --directory RUN
 python3 -B infra/cloud/rehearsal_sftp.py stop    --directory RUN
@@ -296,7 +300,7 @@ exec, `-L`, `-R`, agent/X11, other subsystems, reads outside the repository by a
 key files and a symlink planted inside the repository, client-created symlinks, hard links, renames out of the root,
 writes outside, an unlisted second key, password authentication and a non-ed25519 host key; the namespace check
 passed on a real start and `start` refused with the namespace removed; a write past a small size limit stopped both
-units within seconds; `stop` left no listener, process or unit; a 300 s runtime limit ended the unit by itself.
+units within seconds, and so did 6000 empty files against a small limit and an entry cap; `stop` left no listener, process or unit; a 300 s runtime limit ended the unit by itself.
 Evidence is kept on the build machine, not in the repository.
 
 **What was only read or evaluated:** the production profile's sshd settings were read in `platform/production/base.nix`

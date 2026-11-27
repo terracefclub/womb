@@ -4,7 +4,9 @@
 # Usage: rehearsal_sftp_evidence.sh <scratch-dir> <evidence-dir> <rclone> <openssh-bin-dir> <restic>
 # <scratch-dir> must not exist (it is created 0700, should be on non-snapshotted scratch storage) and is deleted at
 # the end, with the throwaway client key and every run directory in it. <evidence-dir> receives logs and public keys.
-# Needs a systemd user manager and /var/empty. Takes about 6 minutes (it waits out a 300 s runtime limit).
+# Needs a systemd user manager and /var/empty. Takes about 7 minutes (it waits out a 300 s runtime limit).
+# Its leftover-units checks are machine-wide (any `terrace-lease-sftp-*` unit of this user counts): run it with no
+# other endpoint unit present, or it reports RESULT: FAIL.
 set -u
 SCRATCH=$1 EVID=$2 RCLONE=$3 OPENSSH=$4 RESTIC=$5
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -67,6 +69,31 @@ say "server unit $(systemctl --user is-active "$UD" 2>&1 | head -1) $(python3 -c
 say "limit marker: $(cat "$SCRATCH/runD/sftp-limit-tripped.json" | tr -d '\n ')"
 say "status: $($H status --directory "$SCRATCH/runD")"
 $H stop --directory "$SCRATCH/runD" | tee -a "$LOG" || FAIL=1
+
+say "## D2. empty files count: 16 MiB limit, client creates 6000 empty files (about 0 bytes of data)"
+newrun runF
+$H start --directory "$SCRATCH/runF" --rclone "$RCLONE" --seconds 300 --limit-mib 16 | tee -a "$LOG" >/dev/null
+PF=$(field "$SCRATCH/runF/sftp-listener.json" port); UF=$(field "$SCRATCH/runF/sftp-listener.json" unit)
+KHF="$SCRATCH/khf"; echo "[127.0.0.1]:$PF $(cat "$SCRATCH/runF/sftp-host-key.pub")" > "$KHF"; : > "$SCRATCH/empty"
+seq 1 6000 | sed "s|.*|put $SCRATCH/empty app/e&|" > "$SCRATCH/batch"
+timeout 200 "$OPENSSH/sftp" -i "$SCRATCH/client/id" -P "$PF" -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile="$KHF" -b "$SCRATCH/batch" terrace@127.0.0.1 >/dev/null 2>&1
+for i in $(seq 1 15); do [ "$(systemctl --user is-active "$UF" 2>&1 | head -1)" = active ] || break; sleep 1; done
+say "server unit $(systemctl --user is-active "$UF" 2>&1 | head -1); units left: [$(leftovers)]; $(listener "$PF")"
+say "limit marker: $(cat "$SCRATCH/runF/sftp-limit-tripped.json" | tr -d '\n ')"
+$H stop --directory "$SCRATCH/runF" | tee -a "$LOG" || FAIL=1
+
+say "## D3. entry cap: --max-entries 1000, client creates 3000 empty files"
+newrun runG
+$H start --directory "$SCRATCH/runG" --rclone "$RCLONE" --seconds 300 --max-entries 1000 | tee -a "$LOG" >/dev/null
+PG=$(field "$SCRATCH/runG/sftp-listener.json" port); UG=$(field "$SCRATCH/runG/sftp-listener.json" unit)
+KHG="$SCRATCH/khg"; echo "[127.0.0.1]:$PG $(cat "$SCRATCH/runG/sftp-host-key.pub")" > "$KHG"
+seq 1 3000 | sed "s|.*|put $SCRATCH/empty app/e&|" > "$SCRATCH/batch"
+timeout 200 "$OPENSSH/sftp" -i "$SCRATCH/client/id" -P "$PG" -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile="$KHG" -b "$SCRATCH/batch" terrace@127.0.0.1 >/dev/null 2>&1
+for i in $(seq 1 15); do [ "$(systemctl --user is-active "$UG" 2>&1 | head -1)" = active ] || break; sleep 1; done
+say "server unit $(systemctl --user is-active "$UG" 2>&1 | head -1); units left: [$(leftovers)]; $(listener "$PG")"
+say "limit marker: $(cat "$SCRATCH/runG/sftp-limit-tripped.json" | tr -d '\n ')"
+say "status: $($H status --directory "$SCRATCH/runG")"
+$H stop --directory "$SCRATCH/runG" | tee -a "$LOG" || FAIL=1
 
 say "## E. runtime limit: 300 s, nobody stops it"
 newrun runE

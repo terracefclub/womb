@@ -140,10 +140,10 @@ class ServerTest(unittest.TestCase):
                 "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=ProtectSystem=strict",
                 "--property=ProtectHome=read-only", "--property=ReadWritePaths=" + run,
                 "--property=RestrictAddressFamilies=AF_UNIX", "--property=MemoryMax=256M", "--property=TasksMax=32"])
-            command = sftp.watcher_command(root, "terrace-lease-sftp-" + "1" * 16 + ".service", 1048576)
+            command = sftp.watcher_command(root, "terrace-lease-sftp-" + "1" * 16 + ".service", 1048576, 5000)
             self.assertEqual(command[1:3], ["-B", str(Path(sftp.__file__).resolve())])
             self.assertEqual(command[3:], ["watch", "--directory", run, "--unit", "terrace-lease-sftp-" + "1" * 16 + ".service",
-                                           "--limit-bytes", "1048576", "--interval", "2"])
+                                           "--limit-bytes", "1048576", "--max-entries", "5000", "--interval", "2"])
 
     def test_unsafe_paths_rejected(self):
         for bad in ("relative", "/a/../b", "/a b", "/a;b", "/a$b"):
@@ -160,6 +160,9 @@ class ServerTest(unittest.TestCase):
                 for limit in (0, 15, 65537):
                     with self.assertRaises(lease.Rejected):
                         sftp.start(root, RCLONE, 600, limit_mib=limit)
+                for entries in (0, 999, 5000001):
+                    with self.assertRaises(lease.Rejected):
+                        sftp.start(root, RCLONE, 600, max_entries=entries)
                 with self.assertRaises(lease.Rejected):
                     sftp.start(root, Path("/usr/bin/rclone"), 600)
                 for name in (sftp.RECEIPT, sftp.STOPPED, sftp.TRIPPED):
@@ -208,50 +211,172 @@ class NamespaceTest(unittest.TestCase):
                 sftp.check_namespace(78, root, proc)
 
 
+def bounded(action=lambda: None, limit=10):
+    """A sleep that fails the test instead of letting a broken watcher loop forever."""
+    calls = []
+
+    def sleeper(_):
+        calls.append(1)
+        if len(calls) > limit:
+            raise AssertionError("watcher kept looping")
+        action()
+    return sleeper
+
+
 class WatchTest(unittest.TestCase):
     UNIT = "terrace-lease-sftp-" + "2" * 16 + ".service"
 
-    def test_stops_the_server_over_the_limit_and_records_it(self):
+    def run_dir(self):
         holder, root = run_directory()
-        with holder:
-            (root / sftp.REPOSITORY).mkdir()
-            (root / sftp.LOGS).mkdir()
-            (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 100)
+        (root / sftp.REPOSITORY).mkdir()
+        (root / sftp.LOGS).mkdir()
+        return holder, root
 
-            def sleeper(_):
-                (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 5000)
+    def test_stops_the_server_over_the_limit_and_records_it(self):
+        holder, root = self.run_dir()
+        with holder:
+            (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 100)
+            grow = lambda: (root / sftp.REPOSITORY / "pack").write_bytes(b"x" * 50000)
             with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
-                self.assertTrue(sftp.watch(root, self.UNIT, 1000, 2, sleep=sleeper))
+                self.assertTrue(sftp.watch(root, self.UNIT, 10000, 100, 2, sleep=bounded(grow)))
                 self.assertEqual(systemctl.call_args.args[:2], ("stop", self.UNIT))
-            self.assertEqual(json.loads((root / sftp.TRIPPED).read_text())["limitBytes"], 1000)
+            marker = json.loads((root / sftp.TRIPPED).read_text())
+            self.assertEqual((marker["limitBytes"], marker["maxEntries"]), (10000, 100))
 
     def test_counts_the_log_and_ends_with_the_server(self):
-        holder, root = run_directory()
+        holder, root = self.run_dir()
         with holder:
-            (root / sftp.REPOSITORY).mkdir()
-            (root / sftp.LOGS).mkdir()
-            (root / sftp.LOGS / "rclone.log").write_bytes(b"x" * 2000)
+            (root / sftp.LOGS / "rclone.log").write_bytes(b"x" * 20000)
             with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
-                self.assertTrue(sftp.watch(root, self.UNIT, 1000, 2, sleep=lambda _: None))
+                self.assertTrue(sftp.watch(root, self.UNIT, 10000, 100, 2, sleep=bounded()))
                 self.assertTrue(systemctl.called)
             (root / sftp.TRIPPED).unlink()
             states = iter([{"ActiveState": "active"}, {"ActiveState": "inactive"}])
             (root / sftp.LOGS / "rclone.log").write_bytes(b"x")
             with patch.object(sftp, "properties", side_effect=lambda *a: next(states)), patch.object(sftp, "systemctl") as systemctl:
-                self.assertFalse(sftp.watch(root, self.UNIT, 1000, 2, sleep=lambda _: None))
+                self.assertFalse(sftp.watch(root, self.UNIT, 10000, 100, 2, sleep=bounded()))
+                self.assertFalse(systemctl.called)
+
+    def test_empty_files_and_directories_count(self):
+        holder, root = self.run_dir()
+        with holder:
+            self.assertEqual(sftp.usage(root), (0, 0))
+            (root / sftp.REPOSITORY / "d").mkdir()
+            for index in range(3):
+                (root / sftp.REPOSITORY / "d" / str(index)).touch()
+            (root / sftp.LOGS / "log").touch()
+            self.assertEqual(sftp.usage(root), (5 * sftp.ENTRY_BYTES, 5))
+            # Three empty files and a directory exceed a 4 * block limit by bytes alone.
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertTrue(sftp.watch(root, self.UNIT, 4 * sftp.ENTRY_BYTES, 1000, 2, sleep=bounded()))
+                self.assertTrue(systemctl.called)
+
+    def test_entry_cap_trips_before_the_byte_limit(self):
+        holder, root = self.run_dir()
+        with holder:
+            for index in range(6):
+                (root / sftp.REPOSITORY / str(index)).touch()
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertTrue(sftp.watch(root, self.UNIT, 10**12, 5, 2, sleep=bounded()))
+                self.assertTrue(systemctl.called)
+            marker = json.loads((root / sftp.TRIPPED).read_text())
+            self.assertEqual((marker["entries"], marker["maxEntries"]), (6, 5))
+            (root / sftp.TRIPPED).unlink()
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertTrue(sftp.watch(root, self.UNIT, 10**12, 5, 2, sleep=bounded()) is True)
+            (root / sftp.TRIPPED).unlink()
+            with patch.object(sftp, "properties", return_value={"ActiveState": "active"}), patch.object(sftp, "systemctl") as systemctl:
+                self.assertRaises(AssertionError, sftp.watch, root, self.UNIT, 10**12, 6, 2, bounded())
                 self.assertFalse(systemctl.called)
 
     def test_gives_up_when_the_server_never_appears_and_refuses_foreign_units(self):
-        holder, root = run_directory()
+        holder, root = self.run_dir()
         with holder:
-            (root / sftp.REPOSITORY).mkdir()
-            (root / sftp.LOGS).mkdir()
             with patch.object(sftp, "properties", return_value={"ActiveState": "inactive"}), patch.object(sftp, "systemctl") as systemctl:
-                self.assertFalse(sftp.watch(root, self.UNIT, 1000, 30, sleep=lambda _: None))
+                self.assertFalse(sftp.watch(root, self.UNIT, 1000, 100, 30, sleep=bounded()))
                 self.assertFalse(systemctl.called)
                 for unit in ("sshd.service", self.UNIT[:-8] + "-watch.service"):
                     with self.assertRaises(lease.Rejected):
-                        sftp.watch(root, unit, 1000, 2)
+                        sftp.watch(root, unit, 1000, 100, 2)
+
+
+class StartTest(unittest.TestCase):
+    """start() with systemd-run, systemd state, the listener and the sandbox check replaced."""
+
+    def prepared(self):
+        holder, root = run_directory()
+        key = root / "client.pub"
+        key.write_text(CLIENT + "\n")
+        with patch.object(sftp.subprocess, "run", side_effect=fake_keygen), patch.object(Path, "is_file", return_value=True):
+            sftp.prepare(root, KEYGEN, key)
+        return holder, root
+
+    def run_start(self, root, watcher_state="active", layout=None, after_stop="inactive"):
+        calls, state = [], {"stopped": False}
+
+        def run(argv, **_):
+            calls.append([part for part in argv if part.startswith("--unit=")][0][len("--unit="):])
+            return type("Done", (), {"returncode": 0})()
+
+        def properties(name, keys):
+            if keys == ["LoadState"]:
+                return {"LoadState": "not-found"}
+            if state["stopped"]:
+                return {"ActiveState": after_stop}
+            if name.endswith("-watch.service"):
+                return {"ActiveState": watcher_state}
+            return {"ActiveState": "active", "MainPID": "4242"}
+
+        def systemctl(*args, **_):
+            state["stopped"] = args[0] == "stop"
+        banners = iter([None] + [True] * 10)
+        patches = (patch.object(sftp.subprocess, "run", side_effect=run), patch.object(sftp, "properties", side_effect=properties),
+                   patch.object(sftp, "systemctl", side_effect=systemctl), patch.object(sftp, "banner", side_effect=lambda *a: next(banners)),
+                   patch.object(sftp, "free_port", return_value=40222), patch.object(sftp.time, "sleep"), patch.object(Path, "is_file", return_value=True),
+                   patch.object(sftp, "check_namespace", side_effect=layout) if layout else patch.object(sftp, "check_namespace"))
+        for item in patches:
+            item.start()
+        self.addCleanup(patch.stopall)
+        return calls
+
+    def test_launches_the_watcher_first_and_writes_the_receipt(self):
+        holder, root = self.prepared()
+        with holder:
+            calls = self.run_start(root)
+            receipt = sftp.start(root, RCLONE, 600, limit_mib=32, max_entries=2000)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0].endswith("-watch.service") and calls[1] == receipt["unit"])
+            self.assertEqual((receipt["limitBytes"], receipt["maxEntries"], receipt["pid"]), (32 * 1024 * 1024, 2000, 4242))
+            self.assertEqual(sftp.read_receipt(root)["watcher"], calls[0])
+
+    def test_failing_layout_check_stops_both_units_and_writes_no_receipt(self):
+        holder, root = self.prepared()
+        with holder:
+            self.run_start(root, layout=lease.Rejected("sandbox layout check failed"))
+            with self.assertRaises(lease.Rejected):
+                sftp.start(root, RCLONE, 600)
+            sftp.systemctl.assert_called_with("stop", sftp.systemctl.call_args.args[1], sftp.systemctl.call_args.args[2], allow_inactive=True)
+            self.assertTrue(sftp.systemctl.call_args.args[2].endswith("-watch.service"))
+            self.assertFalse((root / sftp.RECEIPT).exists())
+
+    def test_inactive_watcher_aborts_start(self):
+        holder, root = self.prepared()
+        with holder:
+            self.run_start(root, watcher_state="inactive")
+            with self.assertRaises(lease.Rejected):
+                sftp.start(root, RCLONE, 600)
+            self.assertEqual(sftp.systemctl.call_args.args[0], "stop")
+            self.assertFalse(sftp.check_namespace.called)
+            self.assertFalse((root / sftp.RECEIPT).exists())
+
+    def test_a_unit_that_survives_the_stop_is_reported(self):
+        holder, root = self.prepared()
+        with holder:
+            self.run_start(root, layout=lease.Rejected("sandbox layout check failed"), after_stop="active")
+            with self.assertRaises(lease.Rejected) as caught:
+                sftp.start(root, RCLONE, 600)
+            self.assertIn("still running", str(caught.exception))
+            self.assertFalse((root / sftp.RECEIPT).exists())
 
 
 class StopTest(unittest.TestCase):
