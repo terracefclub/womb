@@ -69,11 +69,16 @@ def staged_host_key(stage, stored_public):
 
 
 def write_new_bytes(path, data):
+    """Create a new 0600 file; never follow a link or reuse an existing file. A failed write removes it again."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        remove_created(path)
+        raise
 
 
 def record_plan(directory, phase, role, outputs_path, stage, stored_public, store_dir=STORE_DIR):
@@ -93,12 +98,36 @@ def record_plan(directory, phase, role, outputs_path, stage, stored_public, stor
     rescue.require(outputs["device"] == receipt["disk"]["device"], "build outputs format another disk than the receipt")
     key_bytes, public = staged_host_key(stage, stored_public)
     rescue.require(public != receipt["rescueKey"], "installed host key is the installer's key")
-    write_new_bytes(written[1], key_bytes)
-    write_new_bytes(written[2], f"{ipv4} ssh-ed25519 {public}\n".encode("ascii"))
-    rescue.write_private(written[0], {"diskSha256": disk_digest, **{name: outputs[name] for name in PLAN_FIELDS}})
-    _, approved = rescue.read_json(written[0])
-    rescue.checked_plan(directory, prefix, approved, disk_digest)
+    # Everything checked_plan will check, before anything is written.
+    rescue.require(all(Path(outputs[name]).exists() for name in PLAN_FIELDS), "missing reviewed Nix store output")
+    created = []
+    try:
+        for path, data in ((written[1], key_bytes), (written[2], f"{ipv4} ssh-ed25519 {public}\n".encode("ascii"))):
+            write_new_bytes(path, data)
+            created.append(path)
+        rescue.write_private(written[0], {"diskSha256": disk_digest, **{name: outputs[name] for name in PLAN_FIELDS}})
+        created.append(written[0])
+        _, approved = rescue.read_json(written[0])
+        rescue.checked_plan(directory, prefix, approved, disk_digest)
+    except BaseException:
+        # Remove exactly what this call created (the key copy overwritten first), so a rerun can start again.
+        for path in created:
+            remove_created(path)
+        raise
     return approved
+
+
+def remove_created(path):
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    with os.fdopen(descriptor, "wb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        stream.write(b"\0" * size)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.unlink(path)
 
 
 def main():

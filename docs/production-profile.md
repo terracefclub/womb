@@ -84,7 +84,7 @@ Optional, with defaults:
 
 | Option (`terrace.production.*`) | Role | Meaning |
 | --- | --- | --- |
-| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. The owner chose this signed deploy path (owner decision U0) on 2026-11-26; it has run only in VMs |
+| `deploy.trustedKeys` | both | the build machine's **public** Nix signing keys for the opt-in deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)); default `[]`, which leaves the host's Nix settings unchanged (only root trusted, signatures required): a copy as `operator` of an unsigned or foreign-signed closure is refused (paths signed by the nixpkgs cache key, which Nix trusts by default, are accepted; root, and so `operator` through `sudo`, can still import anything), and `terrace-production activate` refuses everything. A deploy key may not be one of the keys Nix trusts by default. Set it in the module a host is **installed** with, or its first update has no path. It is one way to settle owner decision U0, which the owner has not taken |
 | `wombRevision` | both | the Womb commit built, recorded in the system manifest; `production-config.nix` sets it from its `wombRevision` argument; default `null` |
 | `app.releaseMigrations` | app | the release's CMS migration list, recorded in the manifest; default the pin's list when the host runs the pinned revision, otherwise `null` (`activate` and `rollback` then refuse any release change on a migrated database) |
 
@@ -390,8 +390,6 @@ optional and informational (`terrace-production status` shows it). With the depl
 path, the private module also sets `terrace.production.deploy.trustedKeys`, and
 the built toplevel reaches an installed host by
 `platform/production/terrace-deploy.sh` ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
-The owner chose this signed deploy path on 2026-11-26 and keeps an offline spare
-deploy key trusted from the first install.
 
 For the one provider lease the owner approved on 2026-11-26, the committed
 builder `infra/nixos/lease-host.nix` composes this same file with the Hetzner

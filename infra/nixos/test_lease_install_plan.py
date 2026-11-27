@@ -187,6 +187,78 @@ class LeaseInstallPlanTest(unittest.TestCase):
         with self.assertRaises(rescue.Rejected):
             self.record()
 
+    def test_a_failure_after_the_key_write_leaves_nothing_and_a_rerun_succeeds(self):
+        real_write = plan.write_new_bytes
+        calls = []
+
+        def pin_fails(path, data):
+            calls.append(path.name)
+            if path.name.endswith("known-hosts"):
+                raise OSError("pin write failed")
+            real_write(path, data)
+
+        failures = [patch.object(plan, "write_new_bytes", pin_fails),
+                    patch.object(rescue, "write_private", side_effect=OSError("plan write failed")),
+                    patch.object(rescue, "checked_plan", side_effect=rescue.Rejected("plan check failed"))]
+        for failure in failures:
+            with self.subTest(failure=failure.attribute), failure, self.assertRaises((OSError, rescue.Rejected)):
+                self.record()
+            self.assertEqual(self.written(), [])
+        self.assertEqual(calls, ["original-app-installed-ed25519", "original-app-installed-known-hosts"])
+        # A missing store output is refused before anything is written.
+        with patch.object(Path, "exists", lambda path: False if str(path).startswith("/nix/store/") else REAL_EXISTS(path)):
+            with self.assertRaises(rescue.Rejected):
+                plan.record_plan(self.directory, "original", "app", self.outputs, self.stage, self.stored, self.store)
+        self.assertEqual(self.written(), [])
+        self.record()
+        info = (self.directory / "original-app-installed-ed25519").lstat()
+        self.assertEqual((stat.S_IMODE(info.st_mode), info.st_nlink), (0o600, 1))
+
+    def test_a_symlink_at_an_output_path_is_refused_and_its_target_untouched(self):
+        target = self.root / "target"
+        for name in ("install.json", "installed-ed25519", "installed-known-hosts"):
+            for dangling in (False, True):
+                with self.subTest(name=name, dangling=dangling):
+                    if not dangling:
+                        target.write_text("target\n")
+                    path = self.directory / f"original-app-{name}"
+                    path.symlink_to(target)
+                    with self.assertRaises(rescue.Rejected):
+                        self.record()
+                    self.assertTrue(path.is_symlink())
+                    if dangling:
+                        self.assertFalse(target.exists())
+                    else:
+                        self.assertEqual(target.read_text(), "target\n")
+                    path.unlink()
+                    target.unlink(missing_ok=True)
+                    self.assertEqual(self.written(), [])
+
+    def test_outputs_are_created_exclusively_even_past_the_existence_check(self):
+        # write_new_bytes itself: a new 0600 file, never an existing file or a link (O_EXCL, O_NOFOLLOW).
+        fresh = self.directory / "fresh"
+        plan.write_new_bytes(fresh, b"new\n")
+        self.assertEqual((fresh.read_bytes(), stat.S_IMODE(fresh.lstat().st_mode)), (b"new\n", 0o600))
+        with self.assertRaises(FileExistsError):
+            plan.write_new_bytes(fresh, b"replaced\n")
+        self.assertEqual(fresh.read_bytes(), b"new\n")
+        target = self.root / "link-target"
+        target.write_bytes(b"target\n")
+        link = self.directory / "link"
+        link.symlink_to(target)
+        with self.assertRaises(FileExistsError):
+            plan.write_new_bytes(link, b"replaced\n")
+        self.assertEqual(target.read_bytes(), b"target\n")
+        link.unlink()
+        fresh.unlink()
+        # A file created between the existence check and the write is never replaced, and nothing else is left.
+        key = self.directory / "original-app-installed-ed25519"
+        key.write_bytes(b"earlier\n")
+        with patch.object(plan.os.path, "lexists", return_value=False), self.assertRaises(FileExistsError):
+            self.record()
+        self.assertEqual(key.read_bytes(), b"earlier\n")
+        self.assertEqual(self.written(), ["original-app-installed-ed25519"])
+
     def test_a_receipt_for_another_phase_or_role_is_refused(self):
         for change in ({"phase": "replacement"}, {"role": "relay"}):
             with self.subTest(change=change):
