@@ -225,8 +225,9 @@ The owner approved one more lease (lease 6) on 2026-11-26, to install the
 adoption, a reboot and the signed deploy path. **Lease 6 has not run.** What
 follows is the committed install side only. It has been evaluated and built on
 the Linux builder; nothing of it has run at a provider, and no VM has booted
-these systems yet (the VM rehearsal of the run sheet is separate, later work, as
-are the single-host cohort, the throwaway SFTP endpoint and the lease driver).
+these systems yet. The provider side is the single-host cohort shape above
+(`"roles": ["app"]`, tested offline only); the throwaway SFTP endpoint, the VM
+rehearsal of the run sheet and the lease driver are separate, later work.
 
 **Hardware.** `nixosModules.hetzner-production-hardware` (`infra/nixos/flake.nix`):
 the cloud disk module (GPT, 512 MiB ESP, ext4, systemd-boot with
@@ -324,7 +325,16 @@ also runs `rescue_install.install` on the written files through its authority,
 disk receipt, plan and installed-key stages (it stops at the first remote
 command).
 
-What ran on 2026-11-26 is in the pull request that added these files. Not run
+Ran on 2026-11-26 on the Linux builder, with throwaway inputs (public halves
+only kept): the evaluation check (PASS, including the lease host, its variants
+and the Hetzner hardware module); builds of `install` and `variants` (each of
+the six system closures about 2.6 GiB, the Disko script's closure 357 MiB, the
+installer's 51 MiB); and `lease_install_plan.py` against those real outputs,
+with a throwaway secrets store (`terrace-secrets host create app --role app`)
+and a stand-in disk receipt at a documentation address: the plan passed
+`rescue_install.checked_plan`, the installed key equalled the stored host key
+and the pin carried it. The comparison of derivations with trunk showed every
+flake check, VM proof and rehearsal driver unchanged. Not run
 anywhere: an install of these systems, a boot (VM or provider), DHCP on the
 production closure, any activation of a variant, the backup endpoint, and the
 lease itself.
