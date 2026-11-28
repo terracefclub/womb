@@ -374,9 +374,11 @@ before the new system ran, so the boot default was set back to generation <n>, t
 running system; generation <m> stays in the list, recorded as failed (rollback passes
 over it).`, then `FAILED`, exit 1. It never runs after a success or a `switched; down
 until the CMS migration`; never with `--boot` (there the pending default is what was
-asked for, also when the boot step fails); never for `cancel`. A switch that exits 4
-has already switched (the new system runs and is the boot default), so nothing is set
-back. If the revert itself fails, there is no second attempt: the record says
+asked for, also when the boot step fails); never for `cancel`. The revert covers only a switch that fails
+**before** switching. A switch that switches and then has failed units (exit 4, or
+`failed (exit 0, then units failed ...)`) leaves the new system running and the boot
+default, so nothing is set back: going back is then `rollback`, the operator's step
+(after reading the record and the journal). If the revert itself fails, there is no second attempt: the record says
 `failed (exit <n>)` in `revert.result`, the client warns (`the boot default is still
 generation <m>, which a reboot would boot`, or, when only the boot loader step failed,
 `the profile names the running system again, but its boot loader step failed, so the
@@ -537,8 +539,10 @@ in the final evidence chain (2026-11-27), a defect on trunk since 2026-11-25: wh
 wait after a switch saw a start job still queued, it named it with `awk`, which is not
 among the command's runtime inputs and so not on the switch unit's PATH; the unit died
 (`awk: command not found`, exit 127) without its finished record. This was the
-queued-job window no VM run had caught before; the names are now joined in bash, and
-the unit tests run with an `awk` that fails. Also, more generally (unit-tested; no VM
+queued-job window no VM run had caught before. On trunk since PR 79 (2026-11-25);
+found by repeating the deploy proof: 1 failure in 2 runs of one derivation before the
+fix, 5 passes in 5 after it (five passes are not a failure rate). The names are now
+joined in bash, and the unit tests run with an `awk` that fails. Also, more generally (unit-tested; no VM
 case): a unit already failed before the switch and not run again by it (same
 `InvocationID`) is named in `preexistingFailedUnits` and as a WARNING, not counted
 against the switch; one the switch ran again counts. And the automatic revert of the
@@ -547,13 +551,22 @@ boot default (owner decision of 2026-11-26).
 **What it changed in this document.** Step 6 to step 13: an activation or rollback
 starts again the timers step 6 stopped (section 2, step 7). Step 10: a failed
 migration writes nothing to the journal (website gap, fixed in the website at
-`57b4649`, not on hosts until the pin moves); what the command allows after each kind
+tfc-website dev `57b4649`, not on hosts until the pin moves); what the command allows after each kind
 of failure; the orphaned database session after a timeout. Section 3: the relay's
 update is now run in a VM. Section 1.5: the stopped-switch report, the revert, units
 failed before a switch.
 
-**Runs.** See the pull request and the evidence list there for every run, failed runs
-included with their causes.
+**Runs** (build machine, synthetic data, 2026-11-27, Womb `ea720df`, rebased since with
+documentation only): the update drill passed 5 of 5 as separate builds of one
+derivation, 174 assertions each, 1146 to 1158 s; the deploy proof 5 of 5, 133
+assertions each; the production proof (263 assertions, 198 of them the shared protocol),
+identity administration (347), TLS (148) and the restore promotion drill (230) once
+each; unit tests in a separate clean clone. Five passes are not a failure rate. Failed
+runs on the way, and their causes: the client reporting success for a stopped switch
+(defect 1); a drill wrapper that the test driver's `set -e` cut short (two runs, the
+drill's own bug, not a hang); the user manager race (once); the namespace journal read
+for A1 (two runs: the line never exists, the website gap); the deploy proof's second
+run in the first final chain (defect 3). The pull request lists each run.
 
 ## 2. The app host procedure
 
@@ -1128,7 +1141,9 @@ runner logs the error through the Payload logger and calls `process.exit(1)` its
 (`node_modules/@payloadcms/drizzle/dist/migrate.js`), and `release-migrate.ts` (website
 `dd1aef7`) silences that logger, so its own `CMS release migration failed; ...` line
 is never reached. That line appears only for failures outside a migration (for
-example at start-up). A gap in the website release, recorded in the
+example at start-up). A gap in the website release, fixed there at tfc-website dev
+`57b4649` (one redacted line naming the migration and the error class); it reaches a
+host only when Womb's pin moves past it. Recorded in the
 [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24); the cause
 of a failed migration is therefore not visible on the host. Then:
 
@@ -1607,7 +1622,7 @@ Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-r
 - **H10. An activation re-arms the timers step 6 stopped** (step 7): RAN IN VM for the
   sweep timer; stop them again after each activation or rollback.
 - **H11. A failed migration is silent** in the pinned release (step 10): only the
-  unit's result and exit status show it. Fixed in the website at `57b4649`; not on
+  unit's result and exit status show it. Fixed in the website at tfc-website dev `57b4649`; not on
   hosts until Womb's pin moves.
 
 ## 6. Traceability: evidence per step
