@@ -1556,6 +1556,7 @@ class ClaimedBehaviours(unittest.TestCase):
         self.assertEqual(code, steps.EXIT_INPUTS)
         self.assertIn("is not a release record", err)
 
+    @unittest.skipUnless(shutil.which("ssh-keygen") and shutil.which("openssl"), "needs ssh-keygen and openssl")
     def test_prepare_returns_3_when_a_scratch_file_stays(self):
         with mock.patch.object(steps, "wipe_scratch", return_value=["tls-x/ca-key.pem"]):
             where = Path(self.tmp) / "p"
