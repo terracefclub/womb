@@ -94,7 +94,7 @@ MUTANTS = (
     ("G5 archive provenance check removed", DRIVER,
      "    if archive != store / Path(expected).name", "    if False and archive != store / Path(expected).name"),
     ("G6 store validity check removed", DRIVER,
-     "    if code:\n        raise Refused(\"G6: a prestaged", "    if False:\n        raise Refused(\"G6: a prestaged"),
+     "    if code:\n        missing = []\n        for role, path in labelled:", "    if False:\n        missing = []\n        for role, path in labelled:"),
     ("open lease pointer check removed", DRIVER,
      "        if entry.name.endswith(\".open\") and", "        if False and entry.name.endswith(\".open\") and"),
     ("own open pointer check removed", DRIVER,
