@@ -710,7 +710,15 @@ user from the process's own uid, and the rest are fixed. The driver itself refus
 `ssh`, `ssh-keygen`, `nix`, `bash` and `curl` for the tools), `HOME`, `USER`, `LOGNAME`, `LANG=C.UTF-8` and `TZ=UTC`,
 nothing inherited. Python tools run with `-E -s -B` (not `-I`: it implies `-P`, which drops a tool's own directory
 from `sys.path` and breaks every sibling import). Every executable is given by absolute path and resolved once at
-plan time to its real path, with its sha256 when it is outside the Nix store. Every directory in `--child-path` and
+plan time to its real path, with its sha256 when it is outside the Nix store. A tool outside the store that
+cannot be read cannot be hashed: the NixOS setuid wrapper `/run/wrappers/bin/sudo` (mode 4511) is one, and
+before 2026-11-27 `plan` refused its own default `--sudo` with `PermissionError`. Such a tool is bound by
+its file attributes instead: path, resolved path, device, inode, mode (with the setuid bit), uid, gid, size
+and modification time in nanoseconds. `run` re-reads them like a digest, and any difference refuses. This is
+accepted only when the file and every directory on its resolved path are owned by root and not writable by
+group or others, so that only root could have changed it; anything else unreadable is refused, naming the
+path and the reason. The plan says, for each such tool, that it is bound by its file attributes and not its
+content. Every directory in `--child-path` and
 `--unit-path` is resolved too: a store path by its real path (a system profile directory such as
 `/run/current-system/sw/bin` resolves into the store, so a profile switch changes it), any other directory by a
 digest of its entries (each name's target, size and modification time). Those, the child environment and the host

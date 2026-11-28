@@ -227,8 +227,35 @@ def remove_inside(run, relative):
     return True
 
 
+def file_status(path):
+    """os.stat, one seam for the tests (they do not run as root)."""
+    return os.stat(path)
+
+
+def root_only(info):
+    """Owned by root and writable by nobody else."""
+    return info.st_uid == 0 and not info.st_mode & 0o022
+
+
+def attributes_of(path, real):
+    """What binds a tool that cannot be read (a setuid wrapper such as /run/wrappers/bin/sudo, mode 4511): its
+    file attributes, accepted only when the file and every directory on its resolved path are root-owned and
+    writable by nobody else, so only root could have changed it. Re-read at `run` like a digest."""
+    info = file_status(real)
+    if not root_only(info):
+        raise Refused(f"tool {path} cannot be read, and {real} is not owned by root or is writable by group or others")
+    parent = Path(real).parent
+    for directory in (parent, *parent.parents):
+        if not root_only(file_status(directory)):
+            raise Refused(f"tool {path} cannot be read, and the directory {directory} on its resolved path is not "
+                          "owned by root or is writable by group or others")
+    return {"device": info.st_dev, "inode": info.st_ino, "mode": oct(info.st_mode), "uid": info.st_uid,
+            "gid": info.st_gid, "size": info.st_size, "mtimeNs": info.st_mtime_ns}
+
+
 def resolve_tool(path, store_dir):
-    """An executable given by absolute path, resolved once: its real path, and its sha256 unless it is in the store."""
+    """An executable given by absolute path, resolved once: its real path, and its sha256 unless it is in the store;
+    a tool outside the store that cannot be read is bound by its file attributes instead (attributes_of)."""
     if not path or not Path(path).is_absolute():
         raise Refused(f"tool {path!r} must be an absolute path")
     real = os.path.realpath(path)
@@ -237,7 +264,22 @@ def resolve_tool(path, store_dir):
     store = os.path.realpath(store_dir) + "/"
     if real.startswith(store):
         return {"path": str(path), "real": real}
-    return {"path": str(path), "real": real, "sha256": sha256_file(real)}
+    try:
+        digest = sha256_file(real)
+    except PermissionError:
+        return {"path": str(path), "real": real, "attributes": attributes_of(path, real)}
+    return {"path": str(path), "real": real, "sha256": digest}
+
+
+def tool_line(name, tool):
+    if "sha256" in tool:
+        return f"  {name}: {tool['real']} sha256 {tool['sha256']}"
+    if "attributes" in tool:
+        a = tool["attributes"]
+        return (f"  {name}: {tool['real']} bound by its FILE ATTRIBUTES, not its content (it cannot be read: a setuid "
+                f"wrapper; root-owned, it and its directories writable only by root): device {a['device']} inode "
+                f"{a['inode']} mode {a['mode']} uid {a['uid']} gid {a['gid']} size {a['size']} mtime {a['mtimeNs']} ns")
+    return f"  {name}: {tool['real']} (store)"
 
 
 def directory_identity(path, store_dir):
@@ -913,8 +955,7 @@ def render_plan(plan, digest):
              "Variants: " + ", ".join(f"{k} {v}" for k, v in inputs["variants"].items()),
              f"Kexec archive: {inputs['kexecArchive']} sha256 {inputs['kexecSha256']}",
              "Tools (resolved now; a different binary at run time is refused):"]
-    lines += [f"  {name}: {t['real']}" + (f" sha256 {t['sha256']}" if "sha256" in t else " (store)")
-              for name, t in inputs["tools"].items()]
+    lines += [tool_line(name, t) for name, t in inputs["tools"].items()]
     lines.append(f"Children's whole environment: {inputs['childEnvironment']}; bounded units PATH {inputs['unitPath']}")
     lines.append("Checks:")
     lines += [f"  [{c['result']}] {c['check']}: {c['detail']}" for c in plan["checks"]]

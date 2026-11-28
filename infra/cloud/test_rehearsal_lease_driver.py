@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import rehearsal_apply as apply
 import rehearsal_lease as lease
@@ -1434,6 +1435,90 @@ class Verification(Harness):
                 finally:
                     undo()
                 self.assertIn("changed since the plan", self.err.getvalue())
+
+
+class FakeStat:
+    def __init__(self, uid=0, mode=0o104511, ino=7, mtime=1_000_000_000, dev=1, gid=0, size=1234):
+        self.st_uid, self.st_mode, self.st_ino, self.st_mtime_ns = uid, mode, ino, mtime
+        self.st_dev, self.st_gid, self.st_size = dev, gid, size
+
+
+class UnreadableTools(Harness):
+    """A setuid wrapper (NixOS /run/wrappers/bin/sudo, mode 4511) cannot be read, so it cannot be hashed: it is bound
+    by its file attributes, only when it and every directory on its resolved path are root-owned and not writable by
+    group or others. Tests do not run as root: the unreadable file and its root ownership are stand-ins."""
+
+    def unreadable(self, file_stat=None, directory_stat=None):
+        sudo = os.path.realpath(self.sbin / "sudo")
+        real_hash = driver.sha256_file
+        stats = {"file": file_stat or FakeStat(), "dir": directory_stat or (lambda path: FakeStat(mode=0o40755))}
+
+        def sha(path):
+            if os.path.realpath(path) == sudo:
+                raise PermissionError(13, "Permission denied")
+            return real_hash(path)
+
+        def status(path):
+            if os.path.realpath(path) == sudo:
+                return stats["file"]
+            return stats["dir"](path)
+        patches = [mock.patch.object(driver, "sha256_file", side_effect=sha),
+                   mock.patch.object(driver, "file_status", side_effect=status)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return stats
+
+    def test_root_owned_unreadable_tool_is_bound_by_its_attributes(self):
+        self.unreadable()
+        tool = driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+        self.assertNotIn("sha256", tool)
+        self.assertEqual(tool["attributes"], {"device": 1, "inode": 7, "mode": oct(0o104511), "uid": 0, "gid": 0,
+                                              "size": 1234, "mtimeNs": 1_000_000_000})
+        line = driver.tool_line("sudo", tool)
+        self.assertIn("bound by its FILE ATTRIBUTES, not its content", line)
+        self.assertIn("cannot be read", line)
+        text = driver.render_plan(driver.make_plan(self.config(), self.tools, FIXED), "f" * 64)
+        self.assertIn(f"sudo: {os.path.realpath(self.sbin / 'sudo')} bound by its FILE ATTRIBUTES", text)
+
+    def test_a_changed_inode_or_mtime_between_plan_and_run_refuses(self):
+        for field, value in (("st_ino", 8), ("st_mtime_ns", 2_000_000_000), ("st_mode", 0o100511)):
+            with self.subTest(field=field):
+                self.setUp()
+                stats = self.unreadable()
+                cfg = self.config()
+                digest = self.plan(cfg)
+                setattr(stats["file"], field, value)
+                d = driver.Driver(self.config(), self.tools, out=self.out, err=self.err, now=lambda: FIXED)
+                self.assertEqual(d.run(digest), driver.EXIT_INPUTS)
+                self.assertIn("changed since the plan", self.err.getvalue())
+
+    def test_a_group_writable_directory_on_the_path_refuses(self):
+        sbin = os.path.realpath(self.sbin)
+        self.unreadable(directory_stat=lambda path: FakeStat(mode=0o40775 if os.path.realpath(path) == sbin else 0o40755))
+        with self.assertRaises(driver.Refused) as caught:
+            driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+        self.assertIn(f"the directory {sbin} on its resolved path", str(caught.exception))
+
+    def test_a_directory_owned_by_another_user_refuses(self):
+        self.unreadable(directory_stat=lambda path: FakeStat(uid=1000, mode=0o40755))
+        with self.assertRaises(driver.Refused):
+            driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+
+    def test_an_unreadable_file_not_owned_by_root_or_group_writable_refuses(self):
+        for stat_value in (FakeStat(uid=1000), FakeStat(mode=0o104531)):
+            with self.subTest(mode=oct(stat_value.st_mode), uid=stat_value.st_uid):
+                self.setUp()
+                self.unreadable(file_stat=stat_value)
+                with self.assertRaises(driver.Refused) as caught:
+                    driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+                self.assertIn("cannot be read", str(caught.exception))
+                self.assertIn(str(self.sbin / "sudo"), str(caught.exception))
+
+    def test_a_readable_tool_is_still_hashed(self):
+        tool = driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+        self.assertEqual(tool["sha256"], driver.sha256_file(os.path.realpath(self.sbin / "sudo")))
+        self.assertNotIn("attributes", tool)
 
 
 class Draining(unittest.TestCase):
