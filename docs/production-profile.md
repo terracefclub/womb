@@ -172,6 +172,35 @@ for the stated reason:
   sudo rules only for root and `wheel`, and no `sudo-rs` or `doas`;
   SSH key-only, `AllowUsers operator`, no `extraConfig`, one ed25519 host key;
   no emergency shell and no debug or rescue kernel parameters.
+
+**Refused logins lock out their source for a while.** The production sshd keeps
+OpenSSH's default `PerSourcePenalties` (OpenSSH 10.6p1 in the pinned nixpkgs; the
+profile sets none of them). From the `sshd_config` manual of that version:
+- a connection that ends without trying to authenticate costs its source address 1 s;
+- a failed authentication costs 5 s, and so does a user that is not allowed (anyone
+  but `operator`);
+- once a source's accrued penalty reaches 15 s (`min`), every new connection from it
+  is dropped before authentication until the penalty runs out, accruing up to 10
+  minutes (`max`);
+- a penalty that has not reached 15 s lapses after its own duration.
+
+So a few refused attempts in quick succession lock the source out: for example a
+wrong key, then `root`, then a wrong key again. That includes the operator's own
+address, for about 15 s or longer if the attempts go on. All connections to a host
+usually come from one address (the build machine; at a lease, the build machine's
+address).
+
+RAN IN VM (the lease host VM rehearsal, development run 3, 2026-11-27): four refusal
+probes back to back, then the next connection was closed before authentication.
+RAN, the same sshd with the production settings on the build machine: after those
+probes, a connection with the right key was refused too. The penalty was logged as
+`activating ipv4 penalty of 15.498 seconds`, and logins worked again once it had run
+out.
+
+The host steps driver now runs its probes 7 s apart and proves the operator login
+before and after them. Whether production should exempt the operator's source
+(`PerSourcePenaltyExemptList`) or tune the penalties is the owner's decision; nothing
+here changes them. Recorded in the [backlog](backlog.md).
 - **Units**: services, timers, sockets, paths and targets wanted at boot are a
   subset of an explicit allowlist (operating-system plumbing plus
   `sops-install-secrets` and `terrace-production-boot`); no boot target pulls a
@@ -269,7 +298,15 @@ shows an unfinished adoption.
 2. Install the host with the operator-generated host key staged
    ([Rescue installer](cloud-rescue-install.md)). The installer does **not**
    stage the encrypted secrets file (see the gap below), so the first boot has
-   no secrets and nothing writes.
+   no secrets and nothing writes. It writes only the private host key
+   (`/etc/ssh/ssh_host_ed25519_key`), no `.pub` file. Until 2026-11-27 the host
+   side of `terrace-secrets` (`install`, `verify`, `reencrypt`) read the host's
+   public key from that missing file, so the first `push` to a host installed this
+   way failed with `FileNotFoundError during install`. It ran in a VM: the lease host
+   VM rehearsal, development run 4. Every VM proof staged both files and could not
+   show it. The tool now derives the public key from the private key with
+   `ssh-keygen -y`, and refuses a `.pub` file that does not match (unit tests in
+   `platform/production/test_terrace_secrets.py`).
 3. `terrace-secrets push` over SSH pinned to that host key; it installs and
    verifies the secrets. `terrace-secrets host unstage`.
 4. `terrace-production adopt --new`.

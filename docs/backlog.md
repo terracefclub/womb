@@ -631,10 +631,11 @@ marked so.
   1 for the app role without backup, realm and secrets steps. **Narrowed 2026-11-27**:
   the update drill covers drill 7 (a failed and a timed-out migration, with the limit
   lowered to 60 s in the failing build) and drill 12 without peers. Open: the rest.
-- Drill: a reboot into a new generation and `activate --boot` (kernel change). A
-  NixOS test VM boots its first system directly, not through the boot loader, so
-  the deploy proof cannot show it; it needs a VM with `useBootLoader` or a lease.
-  The kernel guard is unit-tested only.
+- Drill: a reboot into a new generation and `activate --boot` (kernel change).
+  **Ran in a VM 2026-11-27** (the lease host VM rehearsal, [cloud rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps)):
+  a UEFI guest booting systemd-boot from its disk refused an initrd change without
+  `--boot`, took it with `--boot` and rebooted into it. Open: a kernel change (only
+  the initrd differed), a real disk and firmware, the provider console (H4).
 - Drill: the relay's update through the deploy path. **Ran in a VM 2026-11-27**
   (update drill): signed copy, dry run, activation over SSH, record and `status`,
   Headscale restarted with its keys and users unchanged, HTTPS health, a broken-unit
@@ -663,7 +664,8 @@ marked so.
   ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
   It sets the boot default back and undoes nothing else an aborted activation already
   changed (stopped units, files under `/etc`). A switch unit stopped mid-switch is only
-  reported (`rollback` cancels by hand). No reboot after the revert is verified.
+  reported (`rollback` cancels by hand). A reboot after the revert ran in the lease
+  host VM rehearsal (2026-11-27): it booted the running system's generation.
 - Open defect found in review of PR 87 (READ, not reproduced): `untouched()` in
   `terrace-production.sh` counts a unit as untouched when it was failed before the
   switch and is still failed with the same `InvocationID`, or with an empty one before
@@ -682,6 +684,27 @@ marked so.
   only as `failedBefore` in the started record; tests wanted for a failure after `/etc`
   is rewritten but before `/run/current-system` moves; and the H10 question, whether
   `activate` and `rollback` should keep stopped timers stopped.
+- The automatic revert does not cover a switch that switches and then has failed units (exit 4): the new
+  system runs and stays the boot default until the operator runs `rollback` (found
+  while preparing the lease host VM rehearsal, 2026-11-27; both cases side by side in
+  host updates, section 1.5).
+- Owner decision, not taken: the production sshd keeps OpenSSH's default
+  `PerSourcePenalties` (OpenSSH 10.6p1). A few refused logins from one address within
+  seconds lock that address out for at least 15 s; repeated attempts extend it up to
+  10 minutes. That address is the operator's own: the build machine, and at a lease
+  the only address that may connect. Seen in the lease host VM rehearsal
+  (2026-11-27) and reproduced against the same sshd. Options: keep the defaults;
+  exempt the operator's source (`PerSourcePenaltyExemptList`); tune them. The
+  owner decides; nothing is changed
+  ([production profile](production-profile.md#invariants-enforced-at-evaluation)).
+- `platform/production/terrace-deploy.sh` has no port option. Given an address with a
+  port (`--address 127.0.0.1:2222`, as the lease host VM rehearsal does through its
+  loopback forward), the copy works (Nix's `ssh-ng://operator@127.0.0.1:2222` passes
+  the port to ssh, with `[127.0.0.1]:2222` in the known-hosts file), but the activation
+  command it prints, `ssh -t operator@127.0.0.1:2222 sudo terrace-production activate
+  ...`, is wrong: ssh reads that as a host name. Harmless at port 22 (every real host);
+  the tool is unchanged. Fix: print `ssh -t -p <port> operator@<address>` when a port
+  is given, with a unit test.
 - Done 2026-11-25 (deploy path follow-ups, found in review round 2 of the deploy
   path pull request; [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   `rollback` passes over a generation whose last finished record is a failure

@@ -224,13 +224,14 @@ The owner approved one more lease (lease 6) on 2026-11-26, to install the
 **production** app profile on one Hetzner server and exercise its first boot,
 adoption, a reboot and the signed deploy path. **Lease 6 has not run.** What
 follows is the committed install side only. It has been evaluated and built on
-the Linux builder; nothing of it has run at a provider, and no VM has booted
-these systems yet. The provider side is the single-host cohort shape above
+the Linux builder, and the [VM rehearsal](#vm-rehearsal-of-the-host-steps) installed
+and booted them and ran every host step against them; nothing of it has run at a
+provider. The provider side is the single-host cohort shape above
 (`"roles": ["app"]`, tested offline only) and the backup repository is the
 [throwaway SFTP repository](#throwaway-sftp-repository-for-the-production-lease-host)
 below (`infra/cloud/rehearsal_sftp.py prepare|start|status|stop|forward`; defaults
-7200 s runtime, 2048 MiB, 200000 entries); the VM rehearsal of the run sheet is
-separate work, and the lease driver is [below](#production-lease-driver-lease-6).
+7200 s runtime, 2048 MiB, 200000 entries); the host steps driver and its VM rehearsal
+are [below](#host-steps-driver), and the lease driver is [below](#production-lease-driver-lease-6).
 
 **Hardware.** `nixosModules.hetzner-production-hardware` (`infra/nixos/flake.nix`):
 the cloud disk module (GPT, 512 MiB ESP, ext4, systemd-boot with
@@ -264,7 +265,7 @@ are the run's, passed at build time and never committed:
 | `wombRevision` | optional, recorded in each manifest |
 
 Outputs: `install`, a JSON file naming the role, the disk device, and V0's
-toplevel, Disko script and installer; `variants`, a JSON file naming the six
+toplevel, Disko script and installer; `variants`, a JSON file naming the seven
 toplevels below; `systems`, the evaluated systems (for the evaluation check).
 Each variant extends the one the lease runs before it, the way
 `platform/production/deploy-test.nix` makes its variants (`extendModules`), so it
@@ -277,11 +278,12 @@ differs from the running system by its change alone:
 | release | release change with migration | `680ad56` to `dd1aef7`, its migration list | switch; down until the CMS migration |
 | V2 | boot into a new generation | one more initrd driver (`virtio_input`) | refuse without `--boot`, then `--boot` and a reboot |
 | V3 | a switch that restarts sshd | `services.openssh.settings.LogLevel = "VERBOSE"` (sshd's restart trigger is its config file) | switch, restarting sshd |
-| V4 | a failed switch | a unit wanted at boot that fails and restarts, as in the update drill | register the generation, fail (exit 4) |
+| V4 | a failed switch | a unit wanted at boot that fails and restarts, as in the update drill | register the generation, switch, fail (exit 4): the new system runs, nothing is set back |
+| V5 | a switch that fails before switching | `boot.loader.systemd-boot.extraInstallCommands` exits 1 (added 2026-11-27) | fail at the boot loader step (exit 1) and set the boot default back to the running system by itself |
 
 The evaluation check (`infra/nixos/production-eval-check.nix`) asserts that V0
-to V3 and the release change break no production invariant and V4 breaks exactly
-one (its unit); that the kernel, initrd and modules are V0's in V1 and the
+to V3, V5 and the release change break no production invariant and V4 breaks exactly
+one (its unit); that only V5 has a boot loader install command; that the kernel, initrd and modules are V0's in V1 and the
 release change and differ from it only in V2's initrd; that only V3 changes the
 sshd configuration; the manifests' release and migration list; the two trusted
 keys with Nix's defaults otherwise; the backup repository and its pin; and that
@@ -340,10 +342,240 @@ with a throwaway secrets store (`terrace-secrets host create app --role app`)
 and a stand-in disk receipt at a documentation address: the plan passed
 `rescue_install.checked_plan`, the installed key equalled the stored host key
 and the pin carried it. The comparison of derivations with trunk showed every
-flake check, VM proof and rehearsal driver unchanged. Not run
-anywhere: an install of these systems, a boot (VM or provider), DHCP on the
-production closure, any activation of a variant, a backup from these systems to the SFTP
-endpoint, and the lease itself.
+flake check, VM proof and rehearsal driver unchanged. Since then (2026-11-27) the
+install, the boot, DHCP on the production closure, every variant's activation and a
+backup to the SFTP endpoint ran in the VM rehearsal below; not run at a provider, and
+the lease itself has not run.
+
+## Host steps driver
+
+`infra/nixos/lease_host_steps.py` carries out the lease 6 run sheet's host steps 2.1 to
+6 against one installed production app host over pinned SSH. The same program serves
+the VM rehearsal below and the lease: the lease wrapper (later work) adds only the
+provider's create and teardown around it. Lease 6 was approved once on 2026-11-26 and
+has not run.
+
+```sh
+python3 -B infra/nixos/lease_host_steps.py list            # the steps, guards, expected observations, evidence
+python3 -B infra/nixos/lease_host_steps.py prepare RUN --terrace-secrets TS --openssl OPENSSL --ssh-keygen KEYGEN \
+  --web-archive W --cms-archive C --previous-web-archive PW --previous-cms-archive PC --tfc-source TFC --womb-revision SHA
+# build (import infra/nixos/lease-host.nix (import RUN/lease-inputs.nix)).install and .variants, install V0, then:
+python3 -B infra/nixos/lease_host_steps.py pin RUN --address IPV4 [--port 22]
+python3 -B infra/nixos/lease_host_steps.py run RUN --address IPV4 [--port 22] --evidence NEW_DIR --variants VARIANTS \
+  --rclone RCLONE --restic RESTIC --sops SOPS --terrace-secrets TS [--steps 2.1,3.1 | --from 5.1 --to 5.3] [--dry-run]
+```
+
+`prepare` is run sheet step 0.6. In the 0700 run directory it creates, each file new:
+- the installed operator key `host-operator-ed25519`;
+- the two Nix signing keys `deploy-key.sec` and `spare-key.sec`, with their public
+  halves;
+- the escrow identity `escrow.age`;
+- the secrets store `secrets/`: `escrow create`, `host create app --role app --stage
+  host-stage`, `generate`, then `tls/certificate` and `tls/key` set from a P-256 run CA
+  leaf for the three `.invalid` names, then `check`;
+- `run-ca.pem`, the run CA certificate (the CA and the leaf are valid 30 days: the host's expiry check fails a certificate with fewer than 14 days left, and `prepare` checks that the leaf clears it by a week). The CA key and the leaf files are overwritten
+  and removed before it exits;
+- the SFTP directory `sftp/` (`rehearsal_sftp.py prepare` with the store's
+  `backup/primary/sftp-key` public half);
+- the build inputs `lease-inputs.json` and `lease-inputs.nix`.
+
+`pin` writes `host-known-hosts` from the store's host key: `<address>` at port 22,
+`[<address>]:<port>` otherwise. The lease tooling's bootstrap root key stays
+`operator-ed25519`; the driver uses it only to show that the installed host refuses
+it.
+
+`run` refuses (exit 2, nothing contacted) any of these:
+- a run directory or key that is not private;
+- a known-hosts file that does not pin the store's key at that address and port;
+- two equal deploy keys;
+- a variants file without exactly `v0`, `v1`, `release`, `v2` to `v5`;
+- an existing evidence directory, or a leftover `host-steps/` scratch directory.
+
+Then it runs one step at a time. It stops at the first non-zero exit or failed guard
+with no retry (G1), then runs only its own clean-up:
+- the reverse forward, the HTTPS forward and the second session, by recorded PID;
+- `rehearsal_sftp.py stop`, if it started the endpoint;
+- its scratch `host-steps/`.
+
+It never touches the host in clean-up, and never deletes the run directory or the
+caller's material.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every selected step passed |
+| 1 | A step failed; clean-up ran and was verified |
+| 2 | Inputs refused |
+| 3 | Clean-up could not be verified (escalate) |
+| 4 | Interrupted; clean-up ran and was verified |
+
+The evidence directory holds:
+- `steps.log`, one line per step and exit;
+- `transcripts/<step>.log`, with every command, exit code and output. Output that
+  contains private key material or a known secret value fails the step and is never
+  written;
+- `receipts/<step>.json`;
+- `ledger.json` with the durations;
+- `summary.json`;
+- `SHA256SUMS`, written last.
+
+SSH is always pinned: `StrictHostKeyChecking=yes`, no global known hosts, `BatchMode`,
+`IdentitiesOnly`, ed25519 host keys only, and no agent. Unit tests (CI):
+`python3 -B infra/nixos/test_lease_host_steps.py -v`.
+
+What each step does, by the documented operator commands
+([host updates](host-updates.md), [production profile](production-profile.md#cold-start-of-a-new-deployment)):
+
+| Step | Commands and assertions |
+| --- | --- |
+| 2.1 first-boot window | Pinned operator SSH, then the refusal probes 7 s apart (sshd's per-source penalties: four back to back lock the source out for about 15 s, see [production profile](production-profile.md#invariants-enforced-at-evaluation)), then the operator login again. A wrong pin, `root@`, password and keyboard-interactive (the host lists only `publickey`) and the bootstrap key (as `operator` and as `root`) are refused. Booted and current system V0; `not adopted: no writer starts at boot`; `terrace-production.target` and every unit it wants inactive; `sops-install-secrets` not succeeded; only TCP 22 listens; TCP 443 at the host's address does not answer (not applicable through the VM's loopback forward); `/sys/firmware/efi`, `bootctl status` names systemd-boot; a global IPv4 address leased by DHCP; `df`; closure size |
+| 3.1 | `rehearsal_sftp.py start` (runtime 14400 s, the helper's maximum), then `ssh -N -o ExitOnForwardFailure=yes -R 127.0.0.1:<backup port>:127.0.0.1:<endpoint port>` as `operator`; the host binds it on loopback only and it answers with the endpoint's SSH banner. Reopened after each reboot |
+| 3.2 | `terrace-secrets push app --address --port --identity` (no `--rehearsal`: the store has no `rehearsal/*` entries), `Installed <n> encrypted secrets.` and `Host state: not adopted`; `host unstage`; on the host `terrace-secrets verify` PASS, `sops-install-secrets` succeeded |
+| 3.3 | `sudo terrace-production adopt --new` (it reads the repository through the forward: not initialised, so new); every wanted unit active except the CMS and website, skipped by their migration condition |
+| 3.4 | `systemctl start terrace-cms-migrate.service`: marker and ledger the installed release's (`680ad56`); start the CMS and website; `terrace-backup init primary`; `systemctl start terrace-backup.service`; one snapshot of host `app`; the hourly freshness check run once after it (it fails until the first backup exists); on the build machine `restic check --read-data` of the endpoint's repository directory, the password decrypted with the run's escrow into a 0600 file removed at once |
+| 3.5 | An SSH local forward to the host's `127.0.0.1:443`; `curl --cacert run-ca.pem --resolve`: OIDC discovery (issuer `https://identity.terrace.invalid/realms/terrace`), the CMS `/api/events?limit=1`, the website `/events/`, each 200 |
+| 4.1 | No busy unit or job; `sudo systemctl reboot`; back with the same pinned key and a new boot ID; `systemctl is-system-running --wait` says `running`; V0 booted; adopted; every wanted unit active; nothing failed |
+| 5.1 | Guard: no writer timer within 10 minutes, deploy path on with two keys. `terrace-deploy.sh` with the working key; step 5's record; `activate V1 --dry-run` exits **0** (the release does not change, so no NOT READY); step 6's quiesce without a backup; dry run; `activate`; the timers stopped again (H10); record `success`; the marker file; `rollback --dry-run`, `rollback` to V0; restart after quiesce |
+| 5.2 | The release system with the working key; dry run with the site up exits 3 (`NOT READY`); step 6 with the pre-update backup (a second snapshot the same day, against H2: synthetic data); dry run 0; `activate` records `switched; down until the CMS migration` naming exactly the CMS and website; timers stopped again; step 10 twice (marker and ledger the pin's, the second run applies nothing); steps 11 to 13 (verify, `terrace-tls check`, the timers); HTTPS again. Step 9 (realm) is not run: no administrator account on this host |
+| 5.3 | V2 signed by the **spare key only** (its toplevel on the host carries the spare's signature and not the working key's); `activate V2 --dry-run` and `activate V2` refused (`initrd differ(s) ... repeat with --boot`), nothing changed; `--boot` dry run and activation; `status` warns; reboot through the boot loader; `/run/booted-system` and its initrd are V2's |
+| 5.4 | V3; a second session printing once a second; the activation over `ssh -tt`; recorded: the activating session's exit, whether the second session and the reverse forward survived, the sshd PID and invocation before and after, whether the same key reconnects, the switch journal's lines on sshd; asserted: the switch records `success`, sshd runs `LogLevel VERBOSE`, the key reconnects |
+| 5.5 | V4: `failed (exit 4)` naming `terrace-lease-broken.service`, `revert` null, `bootDefaultAfter` V4's generation (it runs), then `rollback` to V3. V5: `failed (exit 1)`, `switchExit` 1, `revert {from V5, to V3, result success}`, `bootDefaultAfter` V3, the client's revert line, `status` without WARNING, then a reboot that boots V3 |
+| 6 | Generations, the deployments log, boot entries, disk and ESP use, this boot's journal errors, failed units, `status`, closure size, the snapshot count read on the build machine |
+
+Where the run sheet's plan was wrong or silent, the driver follows the tools and this
+document says so:
+- V1's dry run exits 0, not 3 (NOT READY): V1 does not change the release, and exit 3
+  is only for a release change (step 5.2 asserts it).
+- Step 5.5 cannot show the automatic revert with V4. V4's switch does switch (exit 4)
+  and the new system runs and is the boot default, so nothing is set back. V5, a
+  switch that fails at the boot loader step, was added for the revert (both cases in
+  [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+- `push` needs no `--rehearsal`: the store has no `rehearsal/*` entries.
+- `terrace-deploy.sh` takes no port. Through a forwarded port the driver passes
+  `--address 127.0.0.1:<port>`, which Nix's `ssh-ng` store URL turns into `ssh -p`
+  (Nix 2.35.2, checked); the command the script prints is then wrong (backlog).
+- TCP 443 at the host's address cannot be probed through the VM's loopback forward
+  (recorded as not applicable); at a lease it is asserted.
+- Step 9 of the update procedure (the realm) is not run: there is no administrator
+  account on this host (no rehearsal harness).
+- Step 5.2's pre-update backup is the day's second snapshot, against H2: harmless on
+  synthetic data.
+- The hourly backup freshness check fails until the first backup exists; step 3.4 runs
+  it once after that backup.
+- The run sheet's G7 window (the sweep at 03:30 UTC and the arming block) stays the
+  wrapper's; the driver guards only "no writer timer within 10 minutes" before each
+  update step.
+- One activation is signed by the spare key only: V2, in step 5.3.
+- The driver gives the SFTP helper `XDG_RUNTIME_DIR=/run/user/<uid>` when its
+  environment lacks it: the lease driver passes its children only `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG` and `TZ`, and `systemctl --user` needs it.
+
+## VM rehearsal of the host steps
+
+`infra/nixos/test_lease_host_vm.py`, run by `infra/nixos/lease-host-vm-run.sh`, gives
+the driver a host installed the lease's way. One UEFI/KVM guest is shaped like the
+CPX42:
+- OVMF with a private variable store;
+- 16 GiB and 8 vCPUs;
+- one 320 GiB sparse qcow2 disk on virtio-SCSI (`/dev/sda`) beside a CD-ROM;
+- a virtio NIC on QEMU's user network, whose built-in DHCP server hands out the
+  address.
+
+It boots the pinned Debian 13 stock image. Then the fixture:
+- runs `lease_host_steps.py prepare` and builds V0's install outputs and the seven
+  variants with `lease-host.nix`;
+- proves the stock guest's host key by the keyed banner, kexecs the RAM installer
+  (`stock_kexec.dispatch`, `verify_ram`) and records the disk receipt
+  (`inspect_ram_target`, 320 GiB);
+- writes the plan and the installed key with `lease_install_plan.py` from the store's
+  staged key;
+- installs V0 with `rescue_install.install` and the approved digest (store copy,
+  `FORMAT`, target copy, `FINISH`);
+- resets the guest (the provider's reboot into the disk). The firmware boots
+  systemd-boot through `\EFI\BOOT\BOOTX64.EFI`, and the installed production system
+  takes its address by DHCP (`networking.useDHCP`, the Hetzner hardware module's
+  path);
+- runs `pin` and `run` against `127.0.0.1:<port>`, a loopback forward to the guest's
+  port 22.
+
+The reboots in steps 4.1, 5.3 and 5.5 are real reboots of the guest through the
+firmware and the boot loader. Only the provider binding, the bootstrap review and the
+store copy's address are substituted, as in `test_stock_kexec_native.py`. The guest is
+stopped when the fixture ends, pass or fail.
+
+How the VM differs from the provider:
+
+| | VM | Hetzner CPX42 (leases 2 to 5) |
+| --- | --- | --- |
+| NIC | virtio-net-pci on QEMU's user network, `restrict=on` (no way out) | virtio NIC on Hetzner's network |
+| Address | IPv4 from QEMU's DHCP server, `10.0.2.15/24` with a gateway at `10.0.2.2`; no IPv6 | public IPv4 from Hetzner's DHCP (a /32 with an on-link gateway); IPv6 disabled on the run server |
+| Reached at | `127.0.0.1:<port>`, a forward of port 22 only, so TCP 443 cannot be probed from outside | its public IPv4, port 22 open to the build machine only by the provider firewall |
+| Disk | qcow2 overlay on virtio-SCSI, `/dev/sda`, 320 GiB (sparse) | `/dev/sda`, 327,684,194,304 bytes |
+| Firmware | the pinned nixpkgs OVMF with an empty variable store | Hetzner's UEFI |
+| Console | serial captured by the fixture (bounded, scanned for key material); VGA unread | the provider console, which no tool here uses (H4) |
+| Clock and timings | the build machine's load, KVM, local copies | real network copies and provider timings |
+
+What it cannot show:
+- the provider's create, binding and cleanup;
+- the provider firewall (TCP 443 filtered);
+- Hetzner's DHCP, NIC and disk;
+- the provider console;
+- real copy and reboot timings;
+- anything about a second server.
+
+Rerun on the Linux build machine, from a clean clone of the revision under test. The
+command checks for 100 GB free on both datasets, runs the evaluation check, builds
+the pinned tools and the kexec archive, and holds the shared heavy lock for the
+evaluation, the build and the VM run. It writes the run's disks and keys only under
+`~/work/terrace-rehearsal/<run>` and purges them by exact path at the end, pass or
+fail. It keeps the evidence (fixture facts, driver evidence, build logs) in the
+evidence directory:
+
+```sh
+infra/nixos/lease-host-vm-run.sh RUN_NAME EVIDENCE_DIR TFC_SOURCE NEXT_RELEASE_DIR PREVIOUS_RELEASE_DIR DEBIAN_IMAGE PORT
+```
+
+Before the fixture the runner waits out the hours in which the host steps would meet a writer timer (the backup at 03:15 UTC, the sweep at 03:30, the weekly check on Sunday at 05:30), because the update steps refuse to start within 10 minutes of one. It is heavy (seven system builds per run, because the run's keys are build inputs,
+and a 16 GiB guest for about an hour) and is not a CI job.
+
+**What ran (2026-11-27, on the Linux build machine, synthetic data, no provider).**
+Development runs, each failure with its cause:
+
+| Run | Ended | Cause | Fixed by |
+| --- | --- | --- | --- |
+| dev1 | `prepare` | the runner took `ssh-keygen` from openssh's `man` output (a multi-output package) | each tool by its `out` output, checked as an executable before the long stages |
+| dev2 | `prepare` (the runner's preflight) | `terrace-secrets check` needs `TERRACE_ESCROW_RECIPIENT`, the recipient pinned in the host parameters | `prepare` and the driver set it from the store and `lease-inputs.json` |
+| dev3 | step 2.1 | OpenSSH's per-source penalties dropped the fifth probe: four refusals back to back accrued 16 s | the probes 7 s apart, the operator login proven before and after ([production profile](production-profile.md#invariants-enforced-at-evaluation)) |
+| dev4 | step 3.2 | **product defect**: the installer writes no `.pub` host key, and the host side of `terrace-secrets` read one (`FileNotFoundError during install`) | `terrace-secrets` derives the public key from the private key (unit tests) |
+| dev5 | step 5.2 | the run's leaf was valid 7 days; the host's `terrace-tls check` wants 14 | a 30-day leaf, checked in `prepare` |
+| dev6 | step 6 | the driver's own second read of the repository password matched its leak guard (nothing on the host printed a secret) | that read kept out of the guard; refusals name the command and the rule |
+| dev7 | **pass** | | |
+
+dev7 (a development head) passed every step:
+- install 71 s; boot from disk 25 s; host steps 404 s;
+- 2.1 40.9 s (the probe pauses), 3.3 56.5 s, 3.4 27.1 s, 4.1 35.0 s, 5.1 24.7 s,
+  5.2 75.7 s, 5.3 49.8 s, 5.4 24.9 s, 5.5 58.0 s, 6 4.9 s;
+- each of the three reboots: TCP 22 after 25.4 s, SSH after 26 s, `running` after
+  32 to 34 s (the driver probes every 5 s);
+- 2.1: DHCP leased `10.0.2.15/24` on the installed system's NIC, and only TCP 22
+  listened;
+- the V0 closure was 2.76 GB, and the ESP held 72 MB after seven generations.
+
+What step 5.4 recorded:
+- `sshd.service` restarted, with a new main PID and invocation;
+- the activating session stayed open and printed the result;
+- the second session kept printing and the reverse forward kept answering;
+- the same key reconnected.
+
+What step 5.5 recorded:
+- V4: `failed (exit 4)`, `revert` null;
+- V5: `failed (exit 1)`, `revert {from 7, to 5, result success}`, `bootDefaultAfter`
+  5, and the reboot booted generation 5.
+
+The two complete runs at the pull request's head are recorded in its description.
+Two passes are not a failure rate.
+
 
 ## Throwaway SFTP repository for the production lease host
 
@@ -448,8 +680,8 @@ private `rehearsal_lease.py` copy the timer runs).
 
 **Status.** The driver has run only offline: unit tests with a fake tool layer and real child processes, and a
 mutation check (below). It has never contacted a provider or a host. Lease 6 was approved once on 2026-11-26 and has
-not run. The driver is usable only once `infra/nixos/lease_host_steps.py` is on trunk (it lands with the host-steps
-change); until then `plan` refuses with that message.
+not run. Its `plan` refused until `infra/nixos/lease_host_steps.py` was on trunk; that file lands with the host
+steps driver (above).
 
 **Fixed choices.** CPX42 in nbg1, `debian-13` then kexec, one IPv4, no IPv6; the single-host cohort
 (`"roles": ["app"]`); the provider firewall allows TCP 22 from the build machine's /32 only; the lease expires at

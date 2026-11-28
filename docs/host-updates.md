@@ -65,7 +65,10 @@ with a control.
 section 1.2), with an offline spare deploy key trusted from every host's first install;
 keep the website's migration gate (H7); and a failed switch that leaves the new
 generation as boot default is undone automatically (section 1.5, "A switch that
-fails"). A second VM proof, the update drill (`platform/production/update-drill-test.nix`,
+fails"). That automatic step covers only a switch that fails before it switches; a
+switch that switches and then has failed units (exit 4) leaves the new system running
+and as the boot default until the operator runs `rollback` (the two cases side by side
+are in section 1.5). A second VM proof, the update drill (`platform/production/update-drill-test.nix`,
 run with `platform/production-update-drill-check`, synthetic data), exercises what the
 deploy proof leaves out: the relay's update and rollbacks, a real rollback past a
 failed and an unfinished generation, `rollback --generation N`, a switch that fails at
@@ -393,7 +396,25 @@ generation <m>, which a reboot would boot`, or, when only the boot loader step f
 `the profile names the running system again, but its boot loader step failed, so the
 boot menu may still default to generation <m>`), exits 1, and `status` keeps warning.
 Unit tests for each of these, with a mutant for each guard. VM (update drill, subtest
-"E"): see section 1.6. The ways out when the automatic step did not work:
+"E"): see section 1.6.
+
+**The automatic step covers only a switch that fails before it switches.** A failed
+update has two shapes, and they end differently (READ in `terrace-production.sh`, the
+revert's condition is that the boot default is not the running system; both RAN IN VM,
+lease host VM rehearsal, step 5.5, see [cloud rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps)):
+
+| | Fails before it switches (for example at the boot loader step) | Switches, then units fail (`switch-to-configuration` exit 4) |
+| --- | --- | --- |
+| What runs afterwards | The old system, unchanged | **The new system**, with its failed units |
+| Boot default right after the switch | The new generation (registered first) | The new generation |
+| What `activate` does | Sets the boot default back to the running system's generation itself: `revert {from, to, result: success}`, `bootDefaultAfter` = the running generation | **Nothing is set back**: `revert` is `null`, `bootDefaultAfter` = the new generation, because the new system is the running system |
+| What the client prints | `failed (exit <n>)`, then `the switch failed before the new system ran, so the boot default was set back ...` | `failed (exit 4)` and the units, no revert line |
+| What a reboot would boot | The old system (the running one) | The new system, with the same failed units |
+| What the operator does | Nothing for the boot default; `status` shows no WARNING. Fix the cause and activate again, or stay | Read `systemctl --failed` and the switch journal; to go back, run `sudo terrace-production rollback` (it passes over the failed generation and runs the previous good one); without it the failed version stays the running system and the next boot's default |
+
+So the owner's decision that a failed update must not leave the failed version as the
+next boot is met by the command alone only in the first case; in the second it is the
+operator's `rollback`. The ways out when the automatic step did not work:
 
 - the cause is fixed: repeat `activate` with the same toplevel (the profile already
   points to it, so Nix reuses that generation);
@@ -453,7 +474,8 @@ network; a boot loader on a real disk (the test nodes only write the GRUB menu; 
 update drill's failing GRUB install is a VM disk that cannot take it); a kernel change
 and a reboot into a new generation (a test VM boots its first system directly;
 `--boot` runs only as far as the boot step, then is cancelled; after the automatic
-revert no reboot is made); a switch that restarts sshd; a Keycloak, Headscale or
+revert no reboot is made); a switch that restarts sshd (these three ran later in the
+[lease host VM rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps), see section 5); a Keycloak, Headscale or
 PostgreSQL version change; the inventory and realm steps (8, 9); the old migration
 unit on the newer schema (H1); backups, retention and the backup window (steps 5, 6,
 13; both proofs hold the backup timers with hand-placed markers); the bootstrap route
@@ -996,8 +1018,9 @@ release and Womb revision, registered in the system profile and switched with
 `switch` under `systemd-run --unit=terrace-switch --collect --wait` by
 `terrace-production activate`, with the SSH session killed mid-switch; on a re-pin
 the switch started the stopped CMS and website, and both failed with the gate
-message at their start limit. `boot`, the
-relay role and a reboot into the new generation: not exercised anywhere. The operator tool refused with the
+message at their start limit. `boot` with a reboot into the new generation: RAN IN
+VM, app role, the [lease host VM rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps) (section 5). The relay role's `boot`: not exercised
+anywhere. The operator tool refused with the
 marker moved away: VM rehearsal (synthetic data), `platform/website-test.nix`, the
 website module only.
 
@@ -1575,8 +1598,27 @@ reboot of an adopted app host into the **same** generation, writers back by
 themselves, secrets from the ciphertext, VM rehearsal (synthetic data):
 `platform/production/test.nix` ("reboot: ramfs vanishes, ...") and
 `platform/production/tls-test.nix` ("reboot keeps the certificate and the account
-key", including the persistent freshness timer firing at boot). A reboot into a
-**new** generation: not exercised anywhere.
+key", including the persistent freshness timer firing at boot).
+
+**A reboot into a new generation, through the boot loader.** RAN IN VM on 2026-11-27:
+the [lease host VM rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps). A UEFI guest boots systemd-boot from its disk, as an installed
+host does. Its steps 5.3 to 5.5:
+- `activate` of a system whose initrd differs: refused without `--boot`, with nothing
+  changed. Then `--boot` (signed by the spare deploy key only), with the `status`
+  WARNING, and a reboot: `/run/booted-system` and its initrd were the new
+  generation's, the writers started, and nothing failed.
+- A switch that restarts sshd, activated over `ssh -tt` with a second session open.
+  `sshd.service` was restarted (new main PID and invocation). The activating session
+  stayed open and printed the result, the second session and the reverse forward
+  survived, and the same key reconnected.
+- A switch that exits 4: recorded `failed (exit 4)`, no revert, the new system running,
+  then `rollback`.
+- A switch that fails at the boot loader step: the automatic revert set the boot
+  default back, and a reboot booted the running system's generation.
+
+One development run passed every step. The pull request records two more complete
+runs at its head. Two runs are not a failure rate. Not on a real disk, firmware or
+provider (cloud rehearsal, "How the VM differs from the provider").
 
 Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24):
 
@@ -1647,7 +1689,7 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
 | 4. Copy the closure | `platform/production/terrace-deploy.sh` (opt-in deploy path); `copy_store` in `infra/nixos/rescue_install.py` (root, Rescue system, install only) | Signed copy as `operator` accepted; unsigned and foreign-signed copies refused by the host's Nix daemon | RAN IN VM (`deploy-test.nix`, app role, operator guest as build machine). The Rescue copy is not an update path. A real host and the relay: not exercised anywhere |
 | 5. Record state | `terrace-production status` in `base.nix`; `test.nix` asserts only the "adoption as new not finished" string | That string | The `adopted <time>` and `active` outputs: READ. The window checks: not exercised anywhere |
 | 6. Quiesce, back up | "back up, destroy the host" subtest, `test.nix` | Backup succeeds, snapshot listed | VM rehearsal (synthetic data); that subtest also stops Keycloak and nginx. An activation starting the stopped sweep timer again: RAN IN VM (update drill). Keeping Keycloak up, the backup timers themselves (held in both drills), retention of the pre-update snapshot: not exercised anywhere |
-| 7. Activate | `terrace-production activate` (`deploy-test.nix`); `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | The refusals of section 1.5 with controls; the new generation runs, its record and `status`; the switch completes after the SSH client is killed | RAN IN VM for the app role, `switch` mode, a new release; in the update drill also the relay's update, a switch stopped mid-way, a switch failed at the boot loader with the boot default set back, a build signed by the second deploy key; the relay's same-build `test` switch as before. `boot` with a reboot into a new generation: not exercised anywhere |
+| 7. Activate | `terrace-production activate` (`deploy-test.nix`); `switch-to-configuration test` to a specialisation, relay, `tls-test.nix` | The refusals of section 1.5 with controls; the new generation runs, its record and `status`; the switch completes after the SSH client is killed | RAN IN VM for the app role, `switch` mode, a new release; in the update drill also the relay's update, a switch stopped mid-way, a switch failed at the boot loader with the boot default set back, a build signed by the second deploy key; the relay's same-build `test` switch as before. `boot` with a reboot into a new generation, a switch that restarts sshd, a reboot after the automatic revert: RAN IN VM ([lease host VM rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps), app role) |
 | 7. Gate closes on a re-pin | `requireMigration`; the tool and website refusals in `website-test.nix`; the re-pin in `deploy-test.nix` | `CMS migration gate is closed` from the tool and the website; on a real re-pin the CMS's and website's gate messages and `start-limit-hit`, the switch (exit 0 or 4) recorded as `switched; down until the CMS migration`, neither bundle started | VM rehearsal (synthetic data): the tool and the website with the marker moved away or wrong (website module), and the CMS and website on a re-pin of the production app role. The sweep refusal: READ |
 | 8. Secrets after activation | `cmd_install`, `cmd_verify`; "rotate the intake secret" in `test.nix` | Push, verify, CMS and website restarted | VM rehearsal (synthetic data) for a push to an adopted host; an inventory change, a push with the CMS stopped: not exercised anywhere |
 | 9. Realm | "realm reconciliation" in `identity-admin-test.nix` | One planned change applied; users and credentials unchanged; converged; back to pinned keeps roles, clients, mappers, scopes | VM rehearsal (synthetic data); re-pin simulated by rewriting the tool's configuration |
@@ -1658,7 +1700,7 @@ below ran on a provider: lease 5 ran the rehearsal profile and no update.
 | R1-R5 Relay | "production relay role" subtest in `test.nix`; the relay switch in `tls-test.nix` | Adoption, HTTPS, backup; live switch | VM rehearsal (synthetic data) for boot and a same-build switch; the update, a broken switch and two rollbacks: RAN IN VM (update drill); R1's backup, R5, Headscale version changes and clients: not exercised anywhere |
 | 4.1-4.3 Rollback | `terrace-production rollback` (`deploy-test.nix`) | Case A: previous site back, data and ledger unchanged. Case B: refused without `--cms-stays-down`; with it, the previous CMS fails its gate; what reverts and what does not (4.1) | RAN IN VM, app role; the update drill adds real rollbacks past failed and unfinished generations, `--generation N`, the refusals after a migration killed after its commit (H9), and the relay's rollbacks. Restore onto a replacement (4.3, item 2), a rollback after a Keycloak or Headscale change: not exercised anywhere |
 | 4.4 Realm | the realm back-to-pinned block | Realm: kept items, exact-list removals | VM rehearsal (synthetic data) |
-| 5. Reboot into a new generation | reboot subtests in `test.nix`, `tls-test.nix` (same generation) | Writers start alone; secrets return; certificate kept | VM rehearsal (synthetic data) for the same generation only |
+| 5. Reboot into a new generation | reboot subtests in `test.nix`, `tls-test.nix` (same generation) | Writers start alone; secrets return; certificate kept | VM rehearsal (synthetic data) for the same generation; into a new generation through the boot loader: RAN IN VM ([lease host VM rehearsal](cloud-rehearsal.md#vm-rehearsal-of-the-host-steps)) |
 
 ## 7. What this document does not cover
 
