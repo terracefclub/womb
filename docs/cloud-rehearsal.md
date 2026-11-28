@@ -459,9 +459,14 @@ The evidence directory holds:
 SSH is always pinned: `StrictHostKeyChecking=yes`, no global known hosts, `BatchMode`,
 `IdentitiesOnly`, ed25519 host keys only, and no agent. Unit tests (CI):
 `python3 -B infra/nixos/test_lease_host_steps.py -v`; they drive every step's body
-with a scripted host (a good transcript passes; each named assertion broken in turn
-fails the step). Mutation check (any machine, a few minutes; every mutant must be
-killed): `python3 -B infra/nixos/host_steps_mutants.py`.
+with a scripted host (a good transcript passes; a failing transcript for each
+assertion fails the step). Mutation check (any machine, several minutes; every mutant
+must be killed): `python3 -B infra/nixos/host_steps_mutants.py`. Besides its listed
+mutants it generates one for every assertion site of the driver (each call of its
+assertion helper, in the steps and in the driver's own methods), making that one
+assertion always hold: every assertion site is killed by a unit test, with no site
+left to the VM rehearsal alone (the runner's allow-list `VM_ONLY` is empty). It also
+runs the SFTP helper's tests, for the helper's mutants.
 
 Asserted only by the VM rehearsal, not by a unit test: that the real hosts and tools
 answer as the scripted transcripts do. Among them: the installed sshd's refusals and

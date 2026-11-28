@@ -5,6 +5,7 @@ checkout is never modified. Run from the repository root: python3 -B infra/nixos
 Exit 0 only if every mutant is killed, none fails to apply, and the unmutated copy passes.
 """
 
+import ast
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
@@ -15,7 +16,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = "infra/nixos/lease_host_steps.py"
 TEST = "infra/nixos/test_lease_host_steps.py"
+HELPER = "infra/cloud/rehearsal_sftp.py"
+TESTS = (TEST, "infra/cloud/test_rehearsal_sftp.py")
 COPIED = ("infra/nixos/lease_host_steps.py", "infra/nixos/test_lease_host_steps.py", "infra/cloud/rehearsal_sftp.py",
+          "infra/cloud/test_rehearsal_sftp.py", "infra/cloud/rehearsal_lease.py",
           "platform/production/terrace-deploy.sh", "platform/website-release.json",
           "platform/production/deploy-previous-release.json")
 
@@ -91,6 +95,17 @@ MUTANTS = (
      '            self.command([systemctl, "--user", "stop", *left], 60, ok=None)', "            pass"),
     ("another run's units counted as this run's", DRIVER, "        return [name for name in loaded if name in names], names",
      "        return loaded, names"),
+    # Review round 3 (part B).
+    ("unit names from the directory's basename", HELPER,
+     "    tag = hashlib.sha256(os.path.realpath(directory).encode()).hexdigest()[:16]",
+     "    tag = hashlib.sha256(os.path.basename(directory).encode()).hexdigest()[:16]"),
+    ("an interrupted helper exits 0", HELPER, "        return 130\n", "        return 0\n"),
+    ("the driver's unit-name shape check removed", DRIVER,
+     '        if not names or not all(re.fullmatch(r"terrace-lease-sftp-[0-9a-f]{16}(-watch)?\\.service", n) for n in names):',
+     "        if not names:"),
+    ("prepare with a private handler that keeps later signals live", DRIVER,
+     "    previous = {sig: signal.signal(sig, interrupt_once) for sig in signals}\n    code = EXIT_PASS",
+     "    previous = {sig: signal.signal(sig, lambda *_: (_ for _ in ()).throw(Interrupted())) for sig in signals}\n    code = EXIT_PASS"),
     # The rest of review round 1.
     ("restic errors not looked for", DRIVER,
      '        d.expect("no errors were found" in check.out,', "        d.expect(True,"),
@@ -133,6 +148,50 @@ MUTANTS = (
 )
 
 
+# Every assertion site: each call of the driver's own assertion helper (`d.expect(...)` in a step or helper function,
+# `self.expect(...)` in a Driver method) gets one generated mutant whose condition always holds. A site a scripted
+# host cannot reach goes here, with its reason; docs/cloud-rehearsal.md lists the same sites.
+VM_ONLY = {
+}
+
+
+def assertion_sites(source):
+    """(function, line, start offset, end offset, condition text) of each assertion's condition, in source order."""
+    tree = ast.parse(source)
+    starts = [0]
+    for line in source.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    sites = []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "expect"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id in ("d", "self") and node.args):
+                condition = node.args[0]
+                start = starts[condition.lineno - 1] + len(source.splitlines(keepends=True)[condition.lineno - 1]
+                                                           .encode()[:condition.col_offset].decode())
+                end = starts[condition.end_lineno - 1] + len(source.splitlines(keepends=True)[condition.end_lineno - 1]
+                                                             .encode()[:condition.end_col_offset].decode())
+                sites.append((function.name, condition.lineno, start, end, source[start:end]))
+    unique = {}
+    for site in sites:
+        unique.setdefault(site[2], site)  # a nested function is walked twice
+    return sorted(unique.values(), key=lambda site: site[2])
+
+
+def generated_mutants():
+    source = (ROOT / DRIVER).read_text()
+    mutants = []
+    for function, line, start, end, text in assertion_sites(source):
+        key = f"{function}: {' '.join(text.split())[:70]}"
+        if key in VM_ONLY:
+            continue
+        mutants.append((f"assertion always holds, {function} line {line}: {' '.join(text.split())[:60]}", DRIVER,
+                        (start, end), "True"))
+    return mutants
+
+
 def copy_tree(target):
     for part in COPIED:
         (target / part).parent.mkdir(parents=True, exist_ok=True)
@@ -140,11 +199,14 @@ def copy_tree(target):
 
 
 def passes(tree):
-    try:
-        result = subprocess.run([sys.executable, "-B", str(tree / TEST)], cwd=tree, capture_output=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return False
-    return result.returncode == 0
+    for test in TESTS:
+        try:
+            result = subprocess.run([sys.executable, "-B", str(tree / test)], cwd=tree, capture_output=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            return False
+        if result.returncode != 0:
+            return False
+    return True
 
 
 def check(name, index, title, path, old, new):
@@ -152,9 +214,14 @@ def check(name, index, title, path, old, new):
     shutil.copytree(Path(name) / "base", tree)
     try:
         source = (tree / path).read_text()
-        if source.count(old) != 1:
+        if isinstance(old, tuple):
+            # A generated assertion mutant: an exact source span.
+            start, end = old
+            (tree / path).write_text(source[:start] + new + source[end:])
+        elif source.count(old) != 1:
             return f"NOT APPLIED {index:2d}. {title} (pattern not found exactly once)", None
-        (tree / path).write_text(source.replace(old, new))
+        else:
+            (tree / path).write_text(source.replace(old, new))
         killed = not passes(tree)
         return f"{'killed  ' if killed else 'SURVIVED'} {index:2d}. {title}", killed
     finally:
@@ -170,14 +237,16 @@ def main():
             print("UNMUTATED COPY FAILS: fix the tests first", flush=True)
             return 1
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(check, name, index, *mutant) for index, mutant in enumerate(MUTANTS, 1)]
+            mutants = MUTANTS + tuple(generated_mutants())
+            futures = [pool.submit(check, name, index, *mutant) for index, mutant in enumerate(mutants, 1)]
             results = [future.result() for future in futures]
         for line, _ in results:
             print(line, flush=True)
         killed = sum(1 for _, ok in results if ok)
         broken = sum(1 for _, ok in results if ok is None)
-        print(f"{killed} of {len(MUTANTS)} mutants killed, {broken} not applied", flush=True)
-        return 0 if killed == len(MUTANTS) else 1
+        print(f"{killed} of {len(mutants)} mutants killed ({len(mutants) - len(MUTANTS)} generated assertion mutants, "
+              f"{len(VM_ONLY)} assertion sites listed as VM only), {broken} not applied", flush=True)
+        return 0 if killed == len(mutants) else 1
 
 
 if __name__ == "__main__":

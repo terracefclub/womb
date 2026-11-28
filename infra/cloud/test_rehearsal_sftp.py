@@ -434,6 +434,29 @@ class UnitNameTest(unittest.TestCase):
             self.assertTrue(sftp.UNIT.fullmatch(ua) and sftp.UNIT.fullmatch(wa) and wa == ua[:-8] + "-watch.service")
 
 
+class UnitNameBasenameTest(unittest.TestCase):
+    def test_two_directories_with_the_same_basename_get_different_names(self):
+        holder, root = run_directory()
+        with holder:
+            a, b = root / "one" / "sftp", root / "two" / "sftp"
+            a.mkdir(parents=True)
+            b.mkdir(parents=True)
+            self.assertNotEqual(sftp.unit_names(a), sftp.unit_names(b))
+            link = root / "link"
+            link.symlink_to(a)
+            self.assertEqual(sftp.unit_names(link), sftp.unit_names(a), "the realpath names the run")
+
+
+class InterruptedExitTest(unittest.TestCase):
+    def test_an_interrupted_helper_exits_130(self):
+        holder, root = run_directory()
+        with holder, patch.object(sys, "argv", ["rehearsal_sftp.py", "start", "--directory", str(root), "--rclone", str(RCLONE)]), \
+                patch.object(sftp, "start", side_effect=KeyboardInterrupt), patch.object(sftp, "install_signal_handlers"), \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(sftp.main(), 130)
+        self.assertIn("interrupted", err.getvalue())
+
+
 class StopTest(unittest.TestCase):
     def receipt(self, root, pid=0):
         lease.write_private(root / sftp.RECEIPT, {"schema": 1, "unit": "terrace-lease-sftp-" + "0" * 16 + ".service",
