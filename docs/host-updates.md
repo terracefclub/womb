@@ -362,9 +362,11 @@ loader before it changes the running system. So a switch that fails, for example
 at the boot loader step, would leave the system profile (the boot default) on the new
 generation while the old system keeps running: **a reboot would boot a system that
 never ran.** Since 2026-11-26 (the owner decided that day that this must be undone
-automatically) the command undoes it itself: when an `activate` or `rollback` in
-`switch` mode ends as a failure and the boot default is not the running system, the
-same `terrace-switch` unit, under the same lock, runs once `nix-env -p
+automatically) the command undoes it itself. The test, exactly as the code makes it
+(the revert block in `terrace-production.sh`): the mode is `switch`, the result is
+neither `success` nor `switched; ...`, and the profile (the boot default) is not
+`/run/current-system`; that is, the running system was not replaced. Then the same
+`terrace-switch` unit, under the same lock, runs once `nix-env -p
 /nix/var/nix/profiles/system --switch-generation <the running system's generation>`
 and the running system's `switch-to-configuration boot`. The finished record keeps
 `generationAfter` (the attempted generation, so that generation stays in the list,
@@ -372,10 +374,17 @@ recorded as failed, and a plain `rollback` keeps passing over it) and adds `reve
 (`{from, to, result}`) and `bootDefaultAfter`. The client prints `the switch failed
 before the new system ran, so the boot default was set back to generation <n>, the
 running system; generation <m> stays in the list, recorded as failed (rollback passes
-over it).`, then `FAILED`, exit 1. It never runs after a success or a `switched; down
+over it).`, then `FAILED`, exit 1. That sentence is the tool's text and is looser than the test:
+the revert runs whenever the running system was not replaced, which is wider than
+"nothing happened". An activation that died part-way may already have stopped units
+or rewritten files under `/etc` (the update drill saw a stopped activation leave the
+new `/etc` in place). **The revert sets the boot default back and undoes nothing
+else**, so after it still read `terrace-production status`, `systemctl --failed` and
+`journalctl -u terrace-switch.service -o cat --no-pager`. No reboot after the revert
+is verified anywhere. It never runs after a success or a `switched; down
 until the CMS migration`; never with `--boot` (there the pending default is what was
-asked for, also when the boot step fails); never for `cancel`. The revert covers only a switch that fails
-**before** switching. A switch that switches and then has failed units (exit 4, or
+asked for, also when the boot step fails); never for `cancel`. So two cases: a switch
+that did not replace the running system is reverted as above; a switch that switches and then has failed units (exit 4, or
 `failed (exit 0, then units failed ...)`) leaves the new system running and the boot
 default, so nothing is set back: going back is then `rollback`, the operator's step
 (after reading the record and the journal). If the revert itself fails, there is no second attempt: the record says

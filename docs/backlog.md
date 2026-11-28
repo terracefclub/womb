@@ -655,12 +655,33 @@ marked so.
   trusted keys ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   written, not run.
 - Done 2026-11-26 (the owner decided on 2026-11-26 that it should be automatic): when
-  `terrace-production activate` or `rollback` fails after registering its generation
-  without the new system running, the command makes the running system the boot
-  default again, inside the same unit, once, and records it (`revert`,
-  `bootDefaultAfter`); never after a success or a gated switch, never with `--boot`
+  `terrace-production activate` or `rollback` in `switch` mode ends neither as success
+  nor as a gated switch while the profile is not `/run/current-system` (the running
+  system was not replaced), the command makes the running system the boot default
+  again, inside the same unit, once, and records it (`revert`, `bootDefaultAfter`);
+  never after a success or a gated switch, never with `--boot`
   ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
-  A switch unit stopped mid-switch is only reported (`rollback` cancels by hand).
+  It sets the boot default back and undoes nothing else an aborted activation already
+  changed (stopped units, files under `/etc`). A switch unit stopped mid-switch is only
+  reported (`rollback` cancels by hand). No reboot after the revert is verified.
+- Open defect found in review of PR 87 (READ, not reproduced): `untouched()` in
+  `terrace-production.sh` counts a unit as untouched when it was failed before the
+  switch and is still failed with the same `InvocationID`, or with an empty one before
+  and after, including when the switch did try to start it and the start job failed
+  without creating a new invocation (a failed dependency, a failed assert). An exit-4
+  switch can then be recorded `success` with only the `preexistingFailedUnits`
+  warning, and its generation stays eligible for `rollback`. Intended fix: an empty
+  `InvocationID` is never "untouched"; a unit that the switch's own "the following
+  units failed" line names is judged by more than its invocation; unit tests for both
+  (the test stub always prints an invocation). To be fixed together with the next
+  change to the script (the website pin move, which reruns the drills anyway).
+- Notes from the same review, for that change: tighten the client's revert sentence
+  ("the switch failed before the new system ran" is looser than the test); `status`
+  prints a misleading revert warning if the last record line is torn; the migration
+  unit's failure is cleared from `systemctl --failed` by any later switch and survives
+  only as `failedBefore` in the started record; tests wanted for a failure after `/etc`
+  is rewritten but before `/run/current-system` moves; and the H10 question, whether
+  `activate` and `rollback` should keep stopped timers stopped.
 - Done 2026-11-25 (deploy path follow-ups, found in review round 2 of the deploy
   path pull request; [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   `rollback` passes over a generation whose last finished record is a failure
