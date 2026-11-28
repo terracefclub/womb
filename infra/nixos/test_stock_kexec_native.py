@@ -130,7 +130,7 @@ def private_text(path, text):
         stream.write(text)
 
 
-def render_seed(args, directory, seed, nonce, operator_public):
+def render_seed(args, directory, seed, nonce, operator_public, prefix=PREFIX, context=PROOF_CONTEXT):
     renderer = Path(__file__).resolve().parents[1] / "cloud/rehearsal-create/bootstrap.ts"
     script = """
 import { pathToFileURL } from "node:url";
@@ -140,8 +140,8 @@ const nonce = (await Bun.file(noncePath).text()).trim();
 process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, operatorPublicKey));
 """
     user_data = install.checked_process(
-        ["bun", "-e", script, str(renderer), str(directory / f"{PREFIX}-bootstrap-nonce"),
-         *PROOF_CONTEXT, operator_public], 10, capture=True
+        ["bun", "-e", script, str(renderer), str(directory / f"{prefix}-bootstrap-nonce"),
+         *context, operator_public], 10, capture=True
     ).decode("utf-8")
     install.require("PRIVATE KEY" not in user_data and nonce in user_data, "unexpected bootstrap user data")
     install.require(user_data.startswith("#cloud-config\n"), "creator did not return cloud config")
@@ -170,11 +170,11 @@ process.stdout.write(renderBootstrapCloudConfig({ nonce, run, phase, role }, ope
 
 
 @contextmanager
-def guest(args, overlay, seed, serial, facts, qmp, efi_vars):
+def guest(args, overlay, seed, serial, facts, qmp, efi_vars, memory_mib=4096, cpus=2):
     # Hetzner's server types boot UEFI, so the fixture does too: read-only OVMF code
     # and this run's private copy of the variable store, like a server's NVRAM.
     command = [
-        args.qemu, "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "4096", "-smp", "2",
+        args.qemu, "-machine", "q35,accel=kvm", "-cpu", "host", "-m", str(memory_mib), "-smp", str(cpus),
         "-nodefaults", "-boot", "order=c", "-vga", "std", "-display", "none",
         "-monitor", "none", "-serial", "stdio",
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}",
@@ -214,11 +214,11 @@ def guest(args, overlay, seed, serial, facts, qmp, efi_vars):
             install.require(facts["qemuOff"] and not reader.is_alive(), "offline guest did not stop")
 
 
-def await_proof(process, seconds, nonce, target):
+def await_proof(process, seconds, nonce, target, context=PROOF_CONTEXT):
     """Wait for the guest's keyed banner; a wrong proof fails at once."""
     deadline = time.monotonic() + seconds
     while process.poll() is None and time.monotonic() < deadline:
-        key = install.verified_host_key(nonce, PROOF_CONTEXT, "root@127.0.0.1", target, 20)
+        key = install.verified_host_key(nonce, context, "root@127.0.0.1", target, 20)
         if key is not None:
             return key
         time.sleep(2)

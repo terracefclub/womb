@@ -36,6 +36,12 @@ leased production app host and its update variants from run inputs, and
 `lease_install_plan.py` writes the install plan and installed host key that
 `rescue_install.py` checks. See
 [cloud rehearsal](../../docs/cloud-rehearsal.md#production-lease-host-prepared-for-lease-6).
+`lease_host_steps.py` runs the run sheet's host steps 2.1 to 6 against the installed
+host (unit tests: `python3 -B infra/nixos/test_lease_host_steps.py -v`), and
+`lease-host-vm-run.sh` runs the whole path in one UEFI guest on the Linux build machine
+(`test_lease_host_vm.py`; heavy, not in CI). See
+[host steps driver](../../docs/cloud-rehearsal.md#host-steps-driver) and
+[VM rehearsal](../../docs/cloud-rehearsal.md#vm-rehearsal-of-the-host-steps).
 
 ## Independent recovery relay
 
