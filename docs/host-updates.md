@@ -412,9 +412,9 @@ lease host VM rehearsal, step 5.5, see [cloud rehearsal](cloud-rehearsal.md#vm-r
 | What a reboot would boot | The old system (the running one) | The new system, with the same failed units |
 | What the operator does | Nothing for the boot default; `status` shows no WARNING. Fix the cause and activate again, or stay | Read `systemctl --failed` and the switch journal; to go back, run `sudo terrace-production rollback` (it passes over the failed generation and runs the previous good one); without it the failed version stays the running system and the next boot's default |
 
-So the owner's decision that a failed update must not leave the failed version as the
-next boot is met by the command alone only in the first case; in the second it is the
-operator's `rollback`. The ways out when the automatic step did not work:
+So the owner's decision of 2026-11-26, that a failed switch's boot default reverts
+automatically, is carried out by the command alone only in the first case; in the
+second the new system is running, and going back is the operator's `rollback`. The ways out when the automatic step did not work:
 
 - the cause is fixed: repeat `activate` with the same toplevel (the profile already
   points to it, so Nix reuses that generation);
@@ -1616,8 +1616,8 @@ host does. Its steps 5.3 to 5.5:
 - A switch that fails at the boot loader step: the automatic revert set the boot
   default back, and a reboot booted the running system's generation.
 
-One development run passed every step. The pull request records two more complete
-runs at its head. Two runs are not a failure rate. Not on a real disk, firmware or
+One development run passed every step; runs are listed in the cloud rehearsal
+document and its pull request. A few passing runs are not a failure rate. Not on a real disk, firmware or
 provider (cloud rehearsal, "How the VM differs from the provider").
 
 Hazards, each also in the [backlog](backlog.md#host-update-follow-ups-g-37--97-recorded-2026-11-24):

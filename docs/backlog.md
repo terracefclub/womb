@@ -697,6 +697,17 @@ marked so.
   exempt the operator's source (`PerSourcePenaltyExemptList`); tune them. The
   owner decides; nothing is changed
   ([production profile](production-profile.md#invariants-enforced-at-evaluation)).
+- `platform/production/terrace-deploy.sh` runs `nix copy` with `NIX_SSHOPTS` that lack
+  `-F /dev/null`, a port option and a connect timeout, so the operator's own SSH
+  configuration applies to the copy (host key checking stays strict: its known-hosts
+  options are set). Found in review of the lease host steps driver (2026-11-28); not
+  changed there because it would change the deploy proof's derivation. Fix with a unit
+  test and a deploy proof run.
+- The lease driver binds each tool by its resolved file (hash, or the attributes of a
+  root-owned unreadable one) and executes it by the path given. Not covered, for either
+  form: ACLs, the sticky bit, a symlink on the given path above the resolved file, and
+  a swap between the check and the execution. Found in review (2026-11-28); older than
+  the attribute form.
 - `platform/production/terrace-deploy.sh` has no port option. Given an address with a
   port (`--address 127.0.0.1:2222`, as the lease host VM rehearsal does through its
   loopback forward), the copy works (Nix's `ssh-ng://operator@127.0.0.1:2222` passes

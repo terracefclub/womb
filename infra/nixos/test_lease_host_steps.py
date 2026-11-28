@@ -18,6 +18,29 @@ import lease_host_steps as steps  # noqa: E402
 
 HOST_KEY = "A" * 68
 SFTP_KEY = "B" * 68
+FAKE_PRIVATE = ("-----BEGIN OPENSSH " + "PRIVATE KEY-----\nAAAAprivatekeybodyline0123456789\n"
+                "-----END OPENSSH " + "PRIVATE KEY-----\n")
+STORED_VALUE = "0123456789abcdef" * 4
+STORE_TREE = {"backup": {"primary": {"repository-password": STORED_VALUE}},
+              "website": {"payload-secret": "f" * 64}, "tls": {"certificate": "PUBLIC CERTIFICATE BODY LINE 1234"},
+              "short": "abc123", "sops": {"mac": "metadata, not a secret value of the store"}}
+PATCHES = []
+
+
+def setUpModule():
+    # The tests have no Nix store: the seven variant paths "exist".
+    patch = mock.patch.object(steps, "store_path_exists", return_value=True)
+    patch.start()
+    PATCHES.append(patch)
+
+
+def tearDownModule():
+    for patch in PATCHES:
+        patch.stop()
+
+
+def ssh_keygen(path):
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True)
 
 
 def nix_secret(name):
@@ -31,8 +54,9 @@ class RunDirectory:
         self.root = Path(root)
         self.run = self.root / "run"
         self.run.mkdir(mode=0o700)
-        for name in (steps.BOOTSTRAP_KEY, steps.OPERATOR_KEY, steps.ESCROW):
-            self.private(name, "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nAAAAprivatekeybodyline0123456789\n-----END OPENSSH PRIVATE KEY-----\n")
+        for name in (steps.BOOTSTRAP_KEY, steps.OPERATOR_KEY):
+            ssh_keygen(self.run / name)
+        self.private(steps.ESCROW, FAKE_PRIVATE)
         self.private(steps.DEPLOY_KEY, nix_secret("terrace-lease-t-deploy-1"))
         self.private(steps.SPARE_KEY, nix_secret("terrace-lease-t-spare-1"))
         (self.run / steps.RUN_CA).write_text("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n")
@@ -50,6 +74,10 @@ class RunDirectory:
         self.tool = self.root / "tool"
         self.tool.write_text("#!/bin/sh\nexit 0\n")
         os.chmod(self.tool, 0o755)
+        # sops decrypt of the whole store: what the redactor loads before the first step.
+        self.sops = self.root / "sops"
+        self.sops.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(STORE_TREE)}\nEOF\n")
+        os.chmod(self.sops, 0o755)
         self.evidence = self.root / "evidence"
 
     def private(self, name, text):
@@ -60,7 +88,8 @@ class RunDirectory:
     def argv(self, *extra):
         return ["run", str(self.run), "--address", "127.0.0.1", "--port", "2222", "--evidence", str(self.evidence),
                 "--variants", str(self.variants), "--rclone", str(self.tool), "--restic", str(self.tool),
-                "--sops", str(self.tool), "--terrace-secrets", str(self.tool), *extra]
+                "--sops", str(self.sops), "--terrace-secrets", str(self.tool), "--curl", str(self.tool),
+                "--ssh", str(self.tool), "--nix", str(self.tool), *extra]
 
 
 def quiet(function, *args):
@@ -291,7 +320,7 @@ class Redaction(unittest.TestCase):
         try:
             directory = RunDirectory(tmp)
             d = driver(directory)
-            d.redactor.add_file(directory.run / steps.OPERATOR_KEY)
+            d.redactor.add_file(directory.run / steps.ESCROW)
             d.evidence.open_step(steps.STEPS[0])
             with mock.patch.object(d, "execute", return_value=(0, b"AAAAprivatekeybodyline0123456789", b"", 0.1)):
                 with self.assertRaises(steps.Leak):
@@ -325,7 +354,7 @@ class SecretReads(unittest.TestCase):
         return (self.dir.evidence / "transcripts" / "6.log").read_text()
 
     def test_reading_a_known_secret_again_is_not_refused_and_never_written(self):
-        with mock.patch.object(self.driver, "execute", return_value=(0, self.PASSWORD + b"\n", b"", 0.1)):
+        with mock.patch.object(self.driver, "pipe", return_value=(0, self.PASSWORD + b"\n", b"", 0.1)):
             value = self.driver.read_secret(["sops", "decrypt"], 60, shown="sops decrypt --extract backup/primary/repository-password")
             again = self.driver.read_secret(["sops", "decrypt"], 60, shown="sops decrypt --extract backup/primary/repository-password")
         self.assertEqual(value.strip().encode(), self.PASSWORD)
@@ -344,15 +373,15 @@ class SecretReads(unittest.TestCase):
         self.assertIn("REFUSED: its stdout carried the backup repository password", self.transcript())
 
     def test_secret_reads_still_check_standard_error(self):
-        with mock.patch.object(self.driver, "execute", return_value=(0, b"x", b"-----BEGIN OPENSSH " + b"PRIVATE KEY-----", 0.1)):
+        with mock.patch.object(self.driver, "pipe", return_value=(0, b"x", b"-----BEGIN OPENSSH " + b"PRIVATE KEY-----", 0.1)):
             with self.assertRaises(steps.Leak) as caught:
                 self.driver.read_secret(["sops"], 60, shown="sops decrypt")
         self.assertIn("a PEM or OpenSSH private key marker", str(caught.exception))
 
     def test_rules_name_their_source(self):
         redactor = steps.Redactor()
-        redactor.add_file(self.dir.run / steps.OPERATOR_KEY)
-        self.assertEqual(redactor.rule(b"AAAAprivatekeybodyline0123456789"), f"a line of {steps.OPERATOR_KEY}")
+        redactor.add_file(self.dir.run / steps.ESCROW)
+        self.assertEqual(redactor.rule(b"AAAAprivatekeybodyline0123456789"), f"a line of {steps.ESCROW}")
         self.assertEqual(redactor.rule(b"AGE-SECRET-KEY-1X"), "an age secret key marker")
         self.assertIsNone(redactor.rule(b"ssh-ed25519 public"))
 
@@ -387,16 +416,24 @@ class HostFacts(unittest.TestCase):
     def answer(self, text):
         return mock.patch.object(self.driver, "execute", return_value=(0, text.encode(), b"", 0.1))
 
+    @staticmethod
+    def timers(backup, check="", sweep=""):
+        return (f"Id=terrace-backup.timer\nNextElapseUSecRealtime={backup}\n\n"
+                f"Id=terrace-backup-check.timer\nNextElapseUSecRealtime={check}\n\n"
+                f"Id=terrace-cms-sweep.timer\nNextElapseUSecRealtime={sweep}\n")
+
     def test_timer_guard(self):
         soon = int(time.time()) + 300
         later = int(time.time()) + 3600
-        with self.answer(f"Id=terrace-backup.timer\nNextElapseUSecRealtime=@{later}\n\nId=terrace-cms-sweep.timer\n"
-                         "NextElapseUSecRealtime=\n"):
+        with self.answer(self.timers(f"@{later}")):
             self.driver.timers_clear()
-        with self.answer(f"Id=terrace-backup.timer\nNextElapseUSecRealtime=@{soon}\n"):
-            with self.assertRaises(steps.Failed):
-                self.driver.timers_clear()
-        with self.answer("Id=terrace-backup.timer\nNextElapseUSecRealtime=Sat 2026-11-28 03:22:11 UTC\n"):
+        for text in (self.timers(f"@{soon}"), self.timers("Sat 2026-11-28 03:22:11 UTC"),
+                     # S1/N1: an empty or partial answer never passes the absence check.
+                     "", f"Id=terrace-backup.timer\nNextElapseUSecRealtime=@{later}\n"):
+            with self.subTest(text=text[:40]), self.answer(text):
+                with self.assertRaises(steps.Failed):
+                    self.driver.timers_clear()
+        with mock.patch.object(self.driver, "execute", return_value=(255, b"", b"", 0.1)):
             with self.assertRaises(steps.Failed):
                 self.driver.timers_clear()
 
@@ -537,9 +574,10 @@ class Cleanup(unittest.TestCase):
             with mock.patch.object(d, "execute", return_value=(0, b"", b"", 0.1)) as execute:
                 self.assertTrue(d.cleanup())
                 execute.assert_not_called()
-                d.sftp_started = True
+                d.sftp_attempted = True
                 self.assertTrue(d.cleanup())
-            self.assertIn("stop", execute.call_args[0][0])
+            self.assertTrue(any("stop" in call[0][0] for call in execute.call_args_list))
+            self.assertIn("list-units", execute.call_args_list[-1][0][0])
         finally:
             shutil.rmtree(tmp)
 
@@ -638,6 +676,537 @@ else:
                                              "-in", str(run / steps.RUN_CA)], capture_output=True).returncode, 0)
         finally:
             shutil.rmtree(tmp)
+
+
+# ---- The steps' own safety logic, driven with a scripted host ------------------------------------------------------
+
+import re  # noqa: E402
+
+BOOT_A, BOOT_B = "11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"
+
+
+class Fake:
+    """A scripted `execute`: the first rule whose pattern matches the joined command answers (code, stdout, stderr);
+    an unexpected command fails the test's step."""
+
+    def __init__(self, rules):
+        self.rules = list(rules)
+        self.calls = []
+
+    def __call__(self, argv, timeout, *, stdin=None, env=None):
+        text = " ".join(argv)
+        self.calls.append((list(argv), env))
+        for pattern, answer in self.rules:
+            if re.search(pattern, text):
+                code, out, err = answer(argv) if callable(answer) else answer
+                return code, out.encode(), err.encode(), 0.1
+        raise AssertionError("unexpected command: " + text[-160:])
+
+    def ran(self, pattern):
+        return [argv for argv, _ in self.calls if re.search(pattern, " ".join(argv))]
+
+
+class StepHarness(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir = RunDirectory(self.tmp)
+        self.d = driver(self.dir)
+        self.d.work.mkdir(mode=0o700)
+        self.d.evidence.open_step(steps.STEPS[0])
+        self.sleeps = []
+        for patch in (mock.patch.object(steps.time, "sleep", side_effect=self.sleeps.append),):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.d.evidence.close_step()
+        shutil.rmtree(self.tmp)
+
+    def host(self, rules):
+        fake = Fake(rules)
+        patch = mock.patch.object(self.d, "execute", side_effect=fake)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return fake
+
+    def fails(self, function, *args, text=None):
+        with self.assertRaises(steps.Failed) as caught:
+            function(*args)
+        if text:
+            self.assertIn(text, str(caught.exception))
+        return caught.exception
+
+
+def first_boot_rules(d, **overrides):
+    v0 = d.variants["v0"]
+    rules = {
+        "wrong": (r"wrong-known-hosts", (255, "", "Host key verification failed.\n")),
+        "password": (r"PubkeyAuthentication=no", (255, "", "operator@127.0.0.1: Permission denied (publickey).\n")),
+        "bootstrap-root": (r"/operator-ed25519 .* root@127\.0\.0\.1 true$",
+                           (255, "", "root@127.0.0.1: Permission denied (publickey).\n")),
+        "bootstrap": (r"/operator-ed25519 .* operator@127\.0\.0\.1 true$",
+                      (255, "", "operator@127.0.0.1: Permission denied (publickey).\n")),
+        "root": (r"root@127\.0\.0\.1 true$", (255, "", "root@127.0.0.1: Permission denied (publickey).\n")),
+        "operator": (r"operator@127\.0\.0\.1 true$", (0, "", "")),
+        "boot": (r"boot_id", (0, BOOT_A + "\n", "")),
+        "systems": (r"readlink -f /run/current-system", (0, f"{v0}\n{v0}\n{v0}\n", "")),
+        "status": (r"terrace-production status",
+                   (0, "not adopted: no writer starts at boot\ninactive\ndeploy path: on, 2 trusted deploy key(s)\n", "")),
+        "wants": (r"terrace-production.target -p Wants", (0, "a.service b.timer\n", "")),
+        "sops": (r"sops-install-secrets.service",
+                 (0, "Id=sops-install-secrets.service\nActiveState=inactive\nResult=exit-code\nConditionResult=yes\n", "")),
+        "units": (r"systemctl show -p Id -p ActiveState", (0, "\n\n".join(
+            f"Id={u}\nActiveState=inactive\nResult=success\nConditionResult=yes" for u in
+            ("terrace-production.target", "a.service", "b.timer")) + "\n", "")),
+        "listen": (r"ss -Htln", (0, "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 [::]:22 [::]:*\n", "")),
+        "efi": (r"test -d /sys/firmware/efi", (0, "", "")),
+        "pub": (r"test -e /etc/ssh/ssh_host_ed25519_key.pub", (1, "", "")),
+        "bootctl": (r"bootctl status", (0, "     Product: systemd-boot 258\n", "")),
+        "ip": (r"ip -4 -j addr", (0, json.dumps([{"ifname": "enp0s3", "addr_info": [
+            {"family": "inet", "local": "10.0.2.15", "prefixlen": 24, "dynamic": True}]}]), "")),
+        "df": (r"df -B1", (0, "Mounted on 1B-blocks\n/ 1\n/boot 1\n", "")),
+        "closure": (r"path-info -S /run/current-system", (0, "/nix/store/x 2763041312\n", "")),
+    }
+    rules.update(overrides)
+    return list(rules.values())
+
+
+class FirstBootWindow(StepHarness):
+    def test_the_good_transcript_passes_with_paced_probes_and_the_login_proven_twice(self):
+        fake = self.host(first_boot_rules(self.d))
+        observed = steps.step_2_1(self.d)
+        self.assertEqual(self.sleeps, [steps.PROBE_PAUSE] * 5)
+        logins = [argv for argv in fake.ran(r"/host-operator-ed25519 .* operator@127\.0\.0\.1 true$")
+                  if "PubkeyAuthentication=no" not in argv and not any("wrong-known-hosts" in a for a in argv)]
+        self.assertEqual(len(logins), 2)
+        self.assertEqual(observed["listeningPorts"], ["22"])
+        self.assertIs(observed["hostKeyPubPresent"], False)
+        self.assertEqual(observed["dhcp"], [("enp0s3", "10.0.2.15", 24)])
+        self.assertFalse(os.path.lexists(self.d.work / "wrong-known-hosts"), "the wrong pin is removed")
+
+    def test_each_refusal_must_be_a_refusal(self):
+        cases = {
+            "root": (r"root@127\.0\.0\.1 true$", (0, "", "")),
+            # Only exit 255 is a refusal, whatever the message says.
+            "root-exit-0": (r"root@127\.0\.0\.1 true$", (0, "", "root@127.0.0.1: Permission denied (publickey).\n")),
+            "bootstrap": (r"/operator-ed25519 .* operator@127\.0\.0\.1 true$", (0, "", "")),
+            "bootstrap-root": (r"/operator-ed25519 .* root@127\.0\.0\.1 true$", (0, "", "")),
+            "wrong": (r"wrong-known-hosts", (0, "", "")),
+            "password": (r"PubkeyAuthentication=no", (255, "", "Permission denied (publickey,password).\n")),
+        }
+        for name, rule in cases.items():
+            with self.subTest(probe=name):
+                self.setUp()
+                self.host(first_boot_rules(self.d, **{name.replace("-exit-0", ""): rule}))
+                self.fails(steps.step_2_1, self.d)
+                self.assertFalse(os.path.lexists(self.d.work / "wrong-known-hosts"))
+
+    def test_a_refusal_with_the_wrong_message_fails(self):
+        self.host(first_boot_rules(self.d, root=(r"root@127\.0\.0\.1 true$", (255, "", "Connection closed by 127.0.0.1\n"))))
+        self.fails(steps.step_2_1, self.d, text="seen: Connection closed by 127.0.0.1")
+
+    def test_adopted_listening_or_secrets_installed_fail(self):
+        for name, rule in (("status", (r"terrace-production status", (0, "adopted 2026-11-27T10:00:00Z\nactive\ndeploy path: on\n", ""))),
+                           ("listen", (r"ss -Htln", (0, "LISTEN 0 128 0.0.0.0:22 *\nLISTEN 0 511 0.0.0.0:443 *\n", ""))),
+                           ("sops", (r"sops-install-secrets.service", (0, "Id=sops-install-secrets.service\nActiveState=active\n"
+                                                                       "Result=success\nConditionResult=yes\n", ""))),
+                           ("ip", (r"ip -4 -j addr", (0, json.dumps([{"ifname": "e", "addr_info": [
+                               {"family": "inet", "local": "10.0.2.15", "prefixlen": 24}]}]), "")))):
+            with self.subTest(case=name):
+                self.setUp()
+                self.host(first_boot_rules(self.d, **{name: rule}))
+                self.fails(steps.step_2_1, self.d)
+
+
+class SftpAndForward(StepHarness):
+    def test_an_interrupted_start_still_gets_a_stop_and_a_unit_check(self):
+        def interrupted(_argv):
+            raise steps.Interrupted()
+        fake = self.host([(r"rehearsal_sftp.py start", interrupted), (r"rehearsal_sftp.py stop", (1, "", "")),
+                          (r"list-units", (0, "terrace-lease-sftp-0123456789abcdef.service loaded active running x\n", ""))])
+        (self.d.run / steps.SFTP / "sftp-host-key.pub").write_text(f"ssh-ed25519 {SFTP_KEY}\n")
+        with self.assertRaises(steps.Interrupted):
+            steps.step_3_1(self.d)
+        self.assertTrue(self.d.sftp_attempted)
+        self.assertFalse(self.d.cleanup(), "a helper unit is still loaded: not verified")
+        self.assertTrue(fake.ran(r"rehearsal_sftp.py stop"))
+        self.assertIn("the SFTP endpoint not verified stopped", self.d.cleanup_failures)
+
+    def test_no_receipt_and_no_unit_left_is_verified(self):
+        self.d.sftp_attempted = True
+        self.host([(r"rehearsal_sftp.py stop", (1, "", "")), (r"list-units", (0, "", ""))])
+        self.assertTrue(self.d.cleanup())
+
+    def test_a_failed_stop_or_listing_is_not_verified(self):
+        for stop, listing in (((1, "", ""), (0, "", "")), ((0, "", ""), (1, "", ""))):
+            with self.subTest(stop=stop[0], listing=listing[0]):
+                self.setUp()
+                self.d.sftp_attempted = True
+                (self.d.run / steps.SFTP / "sftp-listener.json").write_text("{}")
+                self.host([(r"rehearsal_sftp.py stop", stop), (r"list-units", listing)])
+                self.assertFalse(self.d.cleanup())
+
+    def forward(self, option, listen):
+        self.host([(r"rehearsal_sftp.py forward", (0, option, "")), (r"ss -Htln", (0, listen, "")),
+                   (r"/dev/tcp/127\.0\.0\.1/22433", (0, "SSH-2.0-", ""))])
+        for patch in (mock.patch.object(self.d, "start_background"), mock.patch.object(self.d, "alive", return_value=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_forward_binds_the_hosts_loopback_only(self):
+        self.forward("-R 127.0.0.1:22433:127.0.0.1:40000\n", "LISTEN 0 128 127.0.0.1:22433 0.0.0.0:*\n")
+        self.d.open_forward()
+        self.setUp()
+        self.forward("-R 127.0.0.1:22433:127.0.0.1:40000\n", "LISTEN 0 128 0.0.0.0:22433 0.0.0.0:*\n")
+        self.fails(self.d.open_forward, text="loopback only")
+        self.setUp()
+        self.forward("-R 127.0.0.1:22433:127.0.0.1:40000 -o GatewayPorts=yes\n", "LISTEN 0 128 127.0.0.1:22433 *\n")
+        self.fails(self.d.open_forward)
+
+    def test_a_dead_forward_fails_unless_the_step_explains_it(self):
+        self.host([(r"/dev/tcp/", (1, "", ""))])
+        self.fails(self.d.require_forward, text="still answers")
+        with mock.patch.object(self.d, "open_forward") as reopened:
+            self.assertEqual(self.d.reopen_forward("the reboot"), {"reopened": True, "reason": "the reboot"})
+        reopened.assert_called_once()
+
+
+class OffHostCheck(StepHarness):
+    def run_check(self, check_out="no errors were found\n", snapshots=1):
+        fake = self.host([(r"check --read-data", (0, check_out, "")),
+                          (r"snapshots --json", (0, json.dumps([{"hostname": "app"}] * snapshots), ""))])
+        with mock.patch.object(self.d, "read_secret", return_value=STORED_VALUE + "\n"):
+            result = steps.restic_offhost(self.d, 1)
+        return fake, result
+
+    def test_check_read_data_runs_and_the_password_file_is_gone(self):
+        fake, result = self.run_check()
+        self.assertTrue(fake.ran(r"--password-file .* check --read-data"))
+        self.assertEqual(result, {"checkReadData": True, "snapshots": 1})
+        self.assertFalse(os.path.lexists(self.d.work / "repository-password"))
+
+    def test_errors_or_a_wrong_count_fail(self):
+        self.fails(self.run_check, "Fatal: repository contains errors\n")
+        self.setUp()
+        self.fails(self.run_check, "no errors were found\n", 2)
+
+
+class Reboot(StepHarness):
+    def setUp(self):
+        super().setUp()
+        clock = iter(range(0, 10_000_000, 50))
+        connection = mock.MagicMock()
+        connection.__enter__.return_value.recv.return_value = b"SSH-2.0-OpenSSH"
+        for patch in (mock.patch.object(steps.time, "monotonic", side_effect=lambda: next(clock)),
+                      mock.patch.object(steps.socket, "create_connection", return_value=connection)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def reboot_host(self, changes=True):
+        state = {"rebooted": False}
+
+        def boot(_argv):
+            return 0, (BOOT_B if state["rebooted"] and changes else BOOT_A) + "\n", ""
+
+        def reboot(_argv):
+            state["rebooted"] = True
+            return 255, "", ""
+        return self.host([(r"systemctl show -p ActiveState", (0, "ActiveState=inactive\n" * 5, "")),
+                          (r"list-jobs", (0, "", "")), (r"boot_id", boot), (r"systemctl reboot", reboot),
+                          (r"is-system-running --wait", (0, "running\n", ""))])
+
+    def test_back_with_a_new_boot_id(self):
+        self.reboot_host()
+        facts = self.d.reboot("t")
+        self.assertEqual((facts["bootIdBefore"], facts["bootIdAfter"]), (BOOT_A, BOOT_B))
+
+    def test_the_same_boot_id_is_never_taken_for_a_reboot(self):
+        self.reboot_host(changes=False)
+        self.fails(self.d.reboot, "t", text="came back within 900 s")
+
+
+class Signatures(StepHarness):
+    def test_names_are_compared_exactly(self):
+        target = self.d.variants["v2"]
+        names = {steps.DEPLOY_KEY: "x-deploy-1", steps.SPARE_KEY: "x-spare-1"}
+        self.assertEqual(steps.signed_by(f"{target}  x-spare-1:AAA= cache.nixos.org-1:BBB=\n", target, names),
+                         [steps.SPARE_KEY])
+        self.assertEqual(steps.signed_by(f"{target}  ax-deploy-1:AAA= x-spare-1x:BBB=\n", target, names), [])
+        self.assertEqual(steps.signed_by(f"/nix/store/other  x-deploy-1:AAA=\n", target, names), [])
+
+    def test_v2_must_carry_the_spare_key_only(self):
+        for signed in ([steps.DEPLOY_KEY, steps.SPARE_KEY], [steps.DEPLOY_KEY], []):
+            with self.subTest(signed=signed), mock.patch.object(steps, "update_guard"), \
+                    mock.patch.object(self.d, "deploy", return_value={"signedBy": signed}):
+                self.fails(steps.step_5_3, self.d, text="spare key")
+
+
+class FailedSwitches(StepHarness):
+    """5.5: V4 switches and fails (exit 4, nothing set back); V5 fails at the boot loader and is reverted."""
+
+    def scenario(self, v4=None, v5=None, after_v5=None):
+        v = self.d.variants
+        v4_record = {"phase": "finished", "result": "failed (exit 4)", "unexpectedUnits": ["terrace-lease-broken.service"],
+                     "revert": None, "bootDefaultAfter": "6", "to": v["v4"]}
+        v4_record.update(v4 or {})
+        v5_record = {"phase": "finished", "result": "failed (exit 1)", "switchExit": 1, "generationAfter": "7",
+                     "revert": {"from": "7", "to": "5", "result": "success"}, "bootDefaultAfter": "5", "to": v["v5"]}
+        v5_record.update(v5 or {})
+        started = {"phase": "started", "failedBefore": []}
+        records = iter([[started, v4_record],
+                        [started, {"phase": "finished", "result": "success", "action": "rollback", "to": v["v3"]}],
+                        [started, v5_record]])
+        systems = iter([{"current": v["v3"]}, {"current": v["v4"]}, {"current": v["v3"]},
+                        after_v5 or {"current": v["v3"], "bootDefault": v["v3"]},
+                        {"current": v["v3"], "booted": v["v3"], "bootDefault": v["v3"]}])
+
+        def activate(*args, ok=(0,), timeout=1200):
+            if "--dry-run" in args:
+                return steps.Result(0, "Checks passed", "", 1)
+            if args[0] == "rollback":
+                return steps.Result(0, "Running generation 5", "", 1)
+            if args[1] == v["v4"]:
+                return steps.Result(1, "terrace-production: activate result: failed (exit 4)\n", "", 1)
+            return steps.Result(1, "terrace-production: the switch failed before the new system ran, so the boot "
+                                   "default was set back to generation 5, the running system; ...\n", "", 1)
+        generations = {v["v3"]: 5, v["v4"]: 6, v["v5"]: 7}
+        patches = [mock.patch.object(steps, "update_guard"),
+                   mock.patch.object(self.d, "deploy", return_value={"signedBy": [steps.DEPLOY_KEY]}),
+                   mock.patch.object(self.d, "activate", side_effect=activate),
+                   mock.patch.object(self.d, "records", side_effect=lambda: next(records)),
+                   mock.patch.object(self.d, "systems", side_effect=lambda: next(systems)),
+                   mock.patch.object(self.d, "generation_of", side_effect=generations.get),
+                   mock.patch.object(self.d, "no_warning"), mock.patch.object(self.d, "settled"),
+                   mock.patch.object(self.d, "reboot", return_value={}),
+                   mock.patch.object(self.d, "reopen_forward", return_value={})]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_good_transcript_passes(self):
+        self.scenario()
+        observed = steps.step_5_5(self.d)
+        self.assertEqual(observed["v5"]["record"]["revert"], {"from": "7", "to": "5", "result": "success"})
+
+    def test_each_wrong_record_fails(self):
+        cases = [({"v4": {"revert": {"from": "6", "to": "5", "result": "success"}}}, "no revert"),
+                 ({"v4": {"unexpectedUnits": []}}, "terrace-lease-broken"),
+                 ({"v4": {"bootDefaultAfter": "5"}}, "boot default"),
+                 ({"v5": {"revert": {"from": "7", "to": "5", "result": "failed (exit 1)"}}}, "revert success"),
+                 ({"v5": {"revert": None}}, "revert success"),
+                 ({"v5": {"bootDefaultAfter": "7"}}, "boot default V3"),
+                 ({"after_v5": {"current": self.d.variants["v3"], "bootDefault": self.d.variants["v5"]}},
+                  "is the boot default")]
+        for changes, text in cases:
+            with self.subTest(changes=changes):
+                self.setUp()
+                self.scenario(**changes)
+                self.fails(steps.step_5_5, self.d, text=text)
+
+
+class AbsenceChecks(StepHarness):
+    def test_status_must_answer_before_no_warning_can_pass(self):
+        good = "adopted 2026-11-27T10:00:00Z\nactive\nrunning system: x\ndeploy path: on, 2 trusted deploy key(s)\n"
+        self.host([(r"terrace-production status", (0, good, ""))])
+        self.d.no_warning()
+        for answer in ((255, "", ""), (0, "", ""), (0, "deploy path: on\n", ""), (0, good + "WARNING: x\n", ""),
+                       (1, good, "")):
+            with self.subTest(answer=answer[:2]):
+                self.setUp()
+                self.host([(r"terrace-production status", answer)])
+                self.fails(self.d.no_warning)
+
+    def test_no_busy_needs_every_unit_read(self):
+        self.host([(r"systemctl show -p ActiveState", (0, "ActiveState=inactive\n" * 4, "")), (r"list-jobs", (0, "", ""))])
+        self.fails(self.d.no_busy)
+
+
+class Https(StepHarness):
+    def test_curl_ignores_rc_files_and_every_proxy(self):
+        body = json.dumps({"issuer": steps.ISSUER})
+        fake = self.host([(r"identity\.terrace\.invalid", (0, body + "\n200", "")), (r"curl", (0, "{}\n200", ""))])
+        for patch in (mock.patch.object(self.d, "start_background"), mock.patch.object(self.d, "alive", return_value=True),
+                      mock.patch.object(self.d, "stop_background", return_value=True),
+                      mock.patch.object(steps.socket, "create_connection"),
+                      mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy.invalid:3128", "all_proxy": "x"})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.assertEqual(self.d.https("t")["issuer"], steps.ISSUER)
+        for argv, env in fake.calls:
+            self.assertEqual(argv[1:4], ["-q", "--noproxy", "*"])
+            self.assertFalse({"HTTPS_PROXY", "https_proxy", "all_proxy", "ALL_PROXY"} & set(env))
+
+
+class Guards(StepHarness):
+    def test_stderr_is_checked_like_stdout(self):
+        self.d.redactor.add_bytes(STORED_VALUE.encode(), "the backup repository password")
+        self.host([(r"journalctl", (0, "fine\n", "pw " + STORED_VALUE))])
+        with self.assertRaises(steps.Leak) as caught:
+            self.d.ssh("journalctl -p err", 30)
+        self.assertIn("the stderr of", str(caught.exception))
+
+    def test_a_process_that_survives_is_not_verified(self):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: (process.kill(), process.wait()))
+        self.d.processes["second-session"] = (process, None)
+        with mock.patch.object(steps, "stop_group", return_value=False):
+            self.assertFalse(self.d.cleanup())
+        self.assertIn("second-session not verified gone", self.d.cleanup_failures)
+
+    def test_one_failing_clean_up_item_does_not_skip_the_rest(self):
+        self.d.sftp_attempted = True
+        fake = self.host([(r"rehearsal_sftp.py stop", (0, "", "")), (r"list-units", (0, "", ""))])
+        self.d.processes["reverse-forward"] = (mock.MagicMock(), None)
+        with mock.patch.object(self.d, "stop_background", side_effect=OSError("boom")):
+            self.assertFalse(self.d.cleanup())
+        self.assertTrue(fake.ran(r"rehearsal_sftp.py stop"), "the SFTP stop still ran")
+        self.assertFalse(self.d.work.exists(), "the scratch directory was still removed")
+
+    def test_write_new_never_replaces(self):
+        path = self.d.work / "x"
+        steps.write_new(path, "a")
+        with self.assertRaises(FileExistsError):
+            steps.write_new(path, "b")
+        self.assertEqual(path.read_text(), "a")
+
+
+class StoreRedactor(unittest.TestCase):
+    def test_store_values_are_loaded_except_short_and_public_ones(self):
+        redactor = steps.Redactor()
+        loaded = redactor.add_store(STORE_TREE)
+        self.assertEqual(loaded, {"loaded": 2, "short": ["short"]})
+        self.assertEqual(redactor.rule(b"x" + STORED_VALUE.encode()), "the store value backup/primary/repository-password")
+        self.assertEqual(redactor.rule(("f" * 64).encode()), "the store value website/payload-secret")
+        self.assertIsNone(redactor.rule(b"abc123 is short and ordinary"))
+        self.assertIsNone(redactor.rule(b"PUBLIC CERTIFICATE BODY LINE 1234"))
+        self.assertIsNone(redactor.rule(b"metadata, not a secret value of the store"))
+        self.assertEqual(steps.MIN_SECRET_LENGTH, 16)
+
+    def test_a_run_loads_the_store_before_the_first_step(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        directory = RunDirectory(tmp)
+        seen = {}
+
+        def first(d):
+            seen["rule"] = d.redactor.rule(STORED_VALUE.encode())
+            return {}
+        with mock.patch.dict(steps.STEP_FUNCTIONS, {"2.1": first}), mock.patch.object(steps.Driver, "cleanup", return_value=True):
+            code, _, _ = quiet(steps.main, directory.argv("--steps", "2.1"))
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["rule"], "the store value backup/primary/repository-password")
+        summary = json.loads((directory.evidence / "summary.json").read_text())
+        self.assertEqual(summary["redactor"], {"loaded": 2, "short": ["short"]})
+        self.assertNotIn(STORED_VALUE, "".join(p.read_text() for p in directory.evidence.rglob("*") if p.is_file()))
+
+
+class LateValidation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dir = RunDirectory(self.tmp)
+
+    def refused(self, *extra, text):
+        code, _, err = quiet(steps.main, self.dir.argv(*extra))
+        self.assertEqual(code, steps.EXIT_INPUTS, err)
+        self.assertIn(text, err)
+        self.assertFalse(self.dir.evidence.exists())
+
+    def test_a_garbage_bootstrap_key_is_refused(self):
+        self.dir.private(steps.BOOTSTRAP_KEY, FAKE_PRIVATE)
+        self.refused(text="ed25519 SSH private keys")
+
+    def test_the_bootstrap_key_must_differ_from_the_operator_key(self):
+        shutil.copy(self.dir.run / steps.OPERATOR_KEY, self.dir.run / steps.BOOTSTRAP_KEY)
+        self.refused(text="must differ")
+
+    def test_tools_variants_and_the_sftp_runtime(self):
+        self.refused("--nix", "/nonexistent/nix", text="--nix")
+        self.refused("--sftp-seconds", "20000", text="--sftp-seconds")
+        with mock.patch.object(steps, "store_path_exists", return_value=False):
+            self.refused(text="variant store paths missing")
+
+
+class EvidenceOnEveryPath(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dir = RunDirectory(self.tmp)
+
+    def test_an_interrupted_step_gets_its_receipt_and_the_summary_names_it(self):
+        def interrupted(_d):
+            raise steps.Interrupted()
+        with mock.patch.dict(steps.STEP_FUNCTIONS, {"3.2": interrupted}), \
+                mock.patch.object(steps.Driver, "cleanup", return_value=True):
+            code, _, _ = quiet(steps.main, self.dir.argv("--steps", "3.2"))
+        self.assertEqual(code, steps.EXIT_INTERRUPTED)
+        self.assertEqual(json.loads((self.dir.evidence / "receipts" / "3.2.json").read_text())["status"], "interrupted")
+        self.assertEqual(json.loads((self.dir.evidence / "summary.json").read_text())["interruptedStep"], "3.2")
+        self.assertIn("3.2 interrupted", (self.dir.evidence / "steps.log").read_text())
+        self.assertTrue((self.dir.evidence / "SHA256SUMS").is_file())
+
+    def test_a_receipt_that_cannot_be_written_still_ends_with_summary_and_sums(self):
+        with mock.patch.dict(steps.STEP_FUNCTIONS, {"2.1": lambda d: {}}), \
+                mock.patch.object(steps.Driver, "cleanup", return_value=True), \
+                mock.patch.object(steps.Evidence, "receipt", side_effect=OSError("disk full")):
+            code, _, _ = quiet(steps.main, self.dir.argv("--steps", "2.1"))
+        self.assertEqual(code, steps.EXIT_STEP_FAILED)
+        self.assertEqual(json.loads((self.dir.evidence / "summary.json").read_text())["failedStep"], "2.1")
+        self.assertTrue((self.dir.evidence / "SHA256SUMS").is_file())
+
+
+class PrepareInterrupted(unittest.TestCase):
+    def test_wipe_names_what_it_could_not_remove(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        scratch = tmp / "tls-x"
+        scratch.mkdir()
+        (scratch / "ca-key.pem").write_text("k")
+        (scratch / "leaf-key.pem").write_text("k")
+        os.chmod(scratch / "ca-key.pem", 0o400)
+        self.addCleanup(lambda: os.chmod(scratch / "ca-key.pem", 0o600) if (scratch / "ca-key.pem").exists() else None)
+        left = steps.wipe_scratch(scratch)
+        if os.geteuid() != 0:
+            self.assertEqual(left, ["tls-x/ca-key.pem"])
+        self.assertFalse((scratch / "leaf-key.pem").exists(), "the next file was still removed")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen") and shutil.which("openssl"), "needs ssh-keygen and openssl")
+    def test_sigterm_during_prepare_still_wipes_the_ca_and_leaf_keys(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        run = tmp / "run"
+        run.mkdir(mode=0o700)
+        archive = tmp / "a.tar.gz"
+        archive.write_text("x")
+        stub = tmp / "terrace-secrets"
+        stub.write_text(f"""#!{sys.executable}
+import os, sys
+from pathlib import Path
+store = Path(os.environ["TERRACE_SECRETS_STORE"]); store.mkdir(mode=0o700, exist_ok=True)
+a = sys.argv[1:]
+if a[:2] == ["escrow", "create"]:
+    Path(a[2]).write_text("AGE-SECRET-KEY-1STUB\\n"); os.chmod(a[2], 0o600)
+    (store / "escrow.recipient").write_text("age1" + "q" * 58 + "\\n")
+elif a[:2] == ["host", "create"]:
+    os.makedirs(a[a.index("--stage") + 1], mode=0o700)
+""")
+        nix = tmp / "nix"
+        nix.write_text(f"""#!{sys.executable}
+import sys
+print(sys.argv[-1] + ":" + "E" * 86 + "==", end="") if "generate-secret" in sys.argv else sys.stdout.write("k:" + "F" * 43 + "=")
+""")
+        openssl = tmp / "openssl"
+        # At the leaf's signature (the CA key and the leaf key exist by then) the parent gets SIGTERM.
+        openssl.write_text(f"#!/bin/sh\ncase \"$*\" in *-req\\ -in*) kill -TERM $PPID; sleep 5;; esac\nexec {shutil.which('openssl')} \"$@\"\n")
+        for path in (stub, nix, openssl):
+            os.chmod(path, 0o755)
+        argv = ["prepare", str(run), "--terrace-secrets", str(stub), "--openssl", str(openssl), "--ssh-keygen",
+                shutil.which("ssh-keygen"), "--nix", str(nix), "--web-archive", str(archive), "--cms-archive", str(archive),
+                "--previous-web-archive", str(archive), "--previous-cms-archive", str(archive), "--tfc-source", str(tmp),
+                "--womb-revision", "1" * 40, "--key-tag", "t1"]
+        code, _, err = quiet(steps.main, argv)
+        self.assertEqual(code, steps.EXIT_INTERRUPTED, err)
+        self.assertFalse([p for p in run.iterdir() if p.name.startswith("tls-")], "the CA and leaf keys are wiped")
 
 
 if __name__ == "__main__":

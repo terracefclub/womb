@@ -365,7 +365,9 @@ python3 -B infra/nixos/lease_host_steps.py run RUN --address IPV4 [--port 22] --
   --rclone RCLONE --restic RESTIC --sops SOPS --terrace-secrets TS [--steps 2.1,3.1 | --from 5.1 --to 5.3] [--dry-run]
 ```
 
-`prepare` is run sheet step 0.6. In the 0700 run directory it creates, each file new:
+`prepare` is run sheet step 0.6 (exit 0 done, 1 failed, 2 refused, 4 interrupted, 3 a
+private scratch file could not be removed, named). It handles INT, TERM and HUP, so the
+CA key and the leaf files are wiped on every path. In the 0700 run directory it creates, each file new:
 - the installed operator key `host-operator-ed25519`;
 - the two Nix signing keys `deploy-key.sec` and `spare-key.sec`, with their public
   halves;
@@ -388,14 +390,36 @@ it.
 - a run directory or key that is not private;
 - a known-hosts file that does not pin the store's key at that address and port;
 - two equal deploy keys;
-- a variants file without exactly `v0`, `v1`, `release`, `v2` to `v5`;
+- a variants file without exactly `v0`, `v1`, `release`, `v2` to `v5`, or a variant
+  store path missing on the build machine;
+- a tool (`--rclone`, `--restic`, `--sops`, `--terrace-secrets`, `--curl`, `--ssh`,
+  `--nix`) that is not an executable file;
+- `--sftp-seconds` outside the helper's 300 to 14400;
+- a missing deploy tool, SFTP helper or release file;
+- a bootstrap key or operator key that is not an ed25519 SSH private key, an operator
+  `.pub` that is not that key's, or a bootstrap key equal to the operator key (the
+  2.1 probes would pass on nothing);
 - an existing evidence directory, or a leftover `host-steps/` scratch directory.
 
+Before the first step it decrypts the run's store in memory (through a pipe, never a
+file) and gives the redactor every value of 16 characters or more, except the public
+TLS certificate. Every generated value is far longer; a shorter one would be named in
+`summary.json` and not matched.
+
 Then it runs one step at a time. It stops at the first non-zero exit or failed guard
-with no retry (G1), then runs only its own clean-up:
-- the reverse forward, the HTTPS forward and the second session, by recorded PID;
-- `rehearsal_sftp.py stop`, if it started the endpoint;
-- its scratch `host-steps/`.
+with no retry (G1). A reverse forward that died is a failed step, except right after
+a reboot (4.1, 5.3, 5.5) or the sshd restart (5.4): there it is opened again and the
+receipt says so. After the steps it runs only its own clean-up, every item whatever
+the others did:
+- the reverse forward, the HTTPS forward and the second session, by recorded PID
+  (SIGTERM, a grace period, then SIGKILL);
+- `rehearsal_sftp.py stop` whenever a start was attempted, then a listing that no
+  `terrace-lease-sftp-*` user unit is left (a start interrupted before its receipt
+  is covered by the listing);
+- the repository password file and its scratch `host-steps/`, each verified gone.
+
+A first signal interrupts the running step (it gets a receipt saying so); later
+signals are ignored until the clean-up and the evidence are written.
 
 It never touches the host in clean-up, and never deletes the run directory or the
 caller's material.
@@ -405,16 +429,20 @@ Exit codes:
 | Code | Meaning |
 | --- | --- |
 | 0 | Every selected step passed |
-| 1 | A step failed; clean-up ran and was verified |
+| 1 | A step failed (or the store could not be loaded into the redactor); clean-up ran and was verified |
 | 2 | Inputs refused |
 | 3 | Clean-up could not be verified (escalate) |
 | 4 | Interrupted; clean-up ran and was verified |
 
 The evidence directory holds:
-- `steps.log`, one line per step and exit;
+- `steps.log`, one line per step and exit, plus the start, redactor, interruption and
+  clean-up lines;
 - `transcripts/<step>.log`, with every command, exit code and output. Output that
-  contains private key material or a known secret value fails the step and is never
-  written;
+  carries a PEM, OpenSSH or age private key marker, a line of the run's private key
+  files, a Nix secret key, or a value of the run's store fails the step and is never
+  written. The redactor does not know secrets that are not in those files or the store
+  (for example a value a host service derives and logs), and does not catch a value
+  split across lines or encoded differently;
 - `receipts/<step>.json`;
 - `ledger.json` with the durations;
 - `summary.json`;
@@ -422,7 +450,9 @@ The evidence directory holds:
 
 SSH is always pinned: `StrictHostKeyChecking=yes`, no global known hosts, `BatchMode`,
 `IdentitiesOnly`, ed25519 host keys only, and no agent. Unit tests (CI):
-`python3 -B infra/nixos/test_lease_host_steps.py -v`.
+`python3 -B infra/nixos/test_lease_host_steps.py -v`; they drive each step's safety
+checks with a scripted host. Mutation check (any machine, a few minutes; every mutant
+must be killed): `python3 -B infra/nixos/host_steps_mutants.py`.
 
 What each step does, by the documented operator commands
 ([host updates](host-updates.md), [production profile](production-profile.md#cold-start-of-a-new-deployment)):
@@ -573,8 +603,7 @@ What step 5.5 recorded:
 - V5: `failed (exit 1)`, `revert {from 7, to 5, result success}`, `bootDefaultAfter`
   5, and the reboot booted generation 5.
 
-The two complete runs at the pull request's head are recorded in its description.
-Two passes are not a failure rate.
+One passing run, or a few, is not a failure rate.
 
 
 ## Throwaway SFTP repository for the production lease host
@@ -718,7 +747,12 @@ and modification time in nanoseconds. `run` re-reads them like a digest, and any
 accepted only when the file and every directory on its resolved path are owned by root and not writable by
 group or others, so that only root could have changed it; anything else unreadable is refused, naming the
 path and the reason. The plan says, for each such tool, that it is bound by its file attributes and not its
-content. Every directory in `--child-path` and
+content. A reboot or a system update of the build machine rebuilds `/run/wrappers`, which changes the
+wrapper's device, inode and modification time: the plan is then invalid, `run` refuses (exit 2, nothing
+armed) naming each tool whose binding changed and which fields, and the plan must be made and approved
+again. What the binding does not cover, for hashed and attribute-bound tools alike: ACLs, the sticky bit,
+symlinks on the path as given above the resolved file, and a swap between the check and the execution
+(backlog). Every directory in `--child-path` and
 `--unit-path` is resolved too: a store path by its real path (a system profile directory such as
 `/run/current-system/sw/bin` resolves into the store, so a profile switch changes it), any other directory by a
 digest of its entries (each name's target, size and modification time). Those, the child environment and the host
@@ -753,14 +787,14 @@ python3 -B STAGE/infra/cloud/rehearsal_lease_driver.py plan --run-directory RUN 
   [--sudo /run/wrappers/bin/sudo] [--curl /abs] [--ssh /abs] [--queue-idle-command /abs] [--start YYYY-MM-DDTHH:MM]
 ```
 
-It refuses (exit 2) unless: it is not run as root; the run directory is fresh and private and no other lease beside
+`--nix-store` must be the `nix-store` link itself (for example `/run/current-system/sw/bin/nix-store`), not the `nix` binary it resolves to: Nix selects the command by the name it is called by. It refuses (exit 2) unless: it is not run as root; the run directory is fresh and private and no other lease beside
 it is open (a `<run>.open` pointer or a lease directory without `lease-closed.json`); the token copy is a 0600 file in
 the run directory (it is never opened by the driver); the host-steps `prepare` layout is complete and was made for
 this revision; the staged tree's manifest equals the approved digest and contains `lease_host_steps.py`; every tool
 resolves; the staged creator equals the tree's (0.4); the kexec archive is exactly the output of this revision's
 `infra/nixos/kexec-installer.nix` (evaluated offline), its digest matches and its path names no diagnostic build
 (G5); the install and the seven variants are valid store paths, rooted by `RUN/lease` and `RUN/variants`, so nothing
-is built inside the lease (G6); free space suffices; no `terrace-cloud-*` or `terrace-lease-sftp-*` unit is loaded;
+is built inside the lease (G6; a refusal names each missing path and what it is); free space suffices; no `terrace-cloud-*` or `terrace-lease-sftp-*` unit is loaded;
 and the planned lease, from start to the timer's own cleanup after expiry (4.5 h worst case), does not overlap 03:30
 UTC +-15 min or 22:25 to 03:10 UTC (G7). The latest start is therefore 17:55 UTC and the earliest 03:45 UTC; the
 window is checked again just before arming, over the lease plus the timer's cleanup. Any unexpected error while

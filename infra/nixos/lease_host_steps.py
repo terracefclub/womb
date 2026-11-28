@@ -28,6 +28,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -73,6 +74,14 @@ LEAF_DAYS = 30
 # Seconds between the refusal probes of step 2.1 (sshd's PerSourcePenalties: see step_2_1).
 PROBE_PAUSE = 7
 OUTPUT_LIMIT = 1024 * 1024
+TERM_GRACE = 15
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy")
+# The shortest secret value the redactor matches. Every generated value of the store is far longer (hex64, an
+# OpenSSH key, a PEM key); a shorter one could match ordinary text, so it is not loaded (and is reported).
+MIN_SECRET_LENGTH = 16
+SFTP_SECONDS = (300, 14400)
+PUBLIC_STORE_VALUES = ("tls/certificate",)
+SYSTEMCTL = "/run/current-system/sw/bin/systemctl"
 TRANSCRIPT_LIMIT = 64 * 1024
 
 EXIT_PASS, EXIT_STEP_FAILED, EXIT_INPUTS, EXIT_CLEANUP, EXIT_INTERRUPTED = 0, 1, 2, 3, 4
@@ -92,6 +101,29 @@ class Interrupted(Exception):
 
 class Leak(Failed):
     """Output contained private key material or a secret value: never written anywhere."""
+
+
+def stop_group(process, grace=TERM_GRACE):
+    """Stop a child's process group: SIGTERM, up to GRACE seconds for its own clean-up (the SFTP helper stops its
+    units on SIGTERM), then SIGKILL. True when the child has exited."""
+    if process.poll() is not None:
+        return True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            return False
+    return process.poll() is not None
 
 
 # ---- Steps --------------------------------------------------------------------------------------------------------
@@ -310,11 +342,31 @@ class Redactor:
         lines = [line.strip() for line in data.splitlines()]
         body = lines[1:-1] if len(lines) > 2 and lines[0].startswith(b"-----BEGIN") else lines
         for line in body:
-            if len(line) >= 16:
+            if len(line) >= MIN_SECRET_LENGTH:
                 self.forbidden.setdefault(line, source)
         match = re.search(rb":([A-Za-z0-9+/]{86}==)", data)
         if match:
             self.forbidden.setdefault(match[1], f"the secret half of {source}")
+
+    def add_store(self, tree, prefix=""):
+        """Every value of a decrypted store (its sops metadata and the public TLS certificate left out). Values shorter
+        than MIN_SECRET_LENGTH are not loaded and are named (none of the generated ones is that short)."""
+        loaded, short = 0, []
+        for key, value in tree.items():
+            if not prefix and key == "sops":
+                continue
+            name = prefix + key
+            if isinstance(value, dict):
+                inner = self.add_store(value, name + "/")
+                loaded += inner["loaded"]
+                short += inner["short"]
+            elif isinstance(value, str) and name not in PUBLIC_STORE_VALUES:
+                if len(value.strip()) < MIN_SECRET_LENGTH:
+                    short.append(name)
+                else:
+                    self.add_bytes(value.encode(), f"the store value {name}")
+                    loaded += 1
+        return {"loaded": loaded, "short": short}
 
     def rule(self, data):
         """The first rule DATA breaks, or None."""
@@ -412,7 +464,9 @@ class Driver:
     redactor: Redactor = field(default_factory=Redactor)
     processes: dict = field(default_factory=dict)
     obs: dict = field(default_factory=dict)
-    sftp_started: bool = False
+    sftp_attempted: bool = False
+    cleanup_failures: list = field(default_factory=list)
+    interrupted_step: str = None
     timings: dict = field(default_factory=dict)
 
     # -- low level --
@@ -420,8 +474,9 @@ class Driver:
     def work(self):
         return self.run / WORK
 
-    def env(self, extra=None):
-        env = {key: value for key, value in os.environ.items() if key not in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")}
+    def env(self, extra=None, without=()):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("SSH_AUTH_SOCK", "SSH_AGENT_PID") and key.lower() not in without}
         env["LC_ALL"] = "C"
         # The SFTP helper talks to the user's systemd manager (`systemctl --user`, `systemd-run --user`), which needs
         # XDG_RUNTIME_DIR. The lease driver gives its children only PATH, HOME, USER, LOGNAME, LANG and TZ.
@@ -445,12 +500,7 @@ class Driver:
             except subprocess.TimeoutExpired:
                 code = 124
             finally:
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=10)
+                stop_group(process)
             out.seek(0)
             err.seek(0)
             return code, out.read(OUTPUT_LIMIT), err.read(OUTPUT_LIMIT), time.monotonic() - start
@@ -479,11 +529,28 @@ class Driver:
             raise Failed(f"exit {code}: {shown or shlex.join(argv[:3])}")
         return result
 
+    def pipe(self, argv, timeout, *, env=None):
+        """Like execute, but standard output and error through pipes into memory (no temporary file)."""
+        start = time.monotonic()
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=env or self.env(), start_new_session=True)
+        try:
+            out, err = process.communicate(timeout=timeout)
+            code = process.returncode
+        except subprocess.TimeoutExpired:
+            out, err, code = b"", b"", 124
+        finally:
+            stop_group(process)
+        return code, out[:OUTPUT_LIMIT], err[:OUTPUT_LIMIT], time.monotonic() - start
+
     def read_secret(self, argv, timeout, *, shown, env=None):
-        """A command whose standard output IS a secret the driver needs (the repository password for the off-host
-        check): kept in memory only, never written or logged, and never matched against the known values (it is one
-        of them). Its standard error is checked like any other output."""
-        code, out, err, seconds = self.execute(argv, timeout, env=env)
+        """A command whose standard output IS a secret the driver needs (the store's values for the redactor, the
+        repository password for the off-host check). The output is read through a pipe into this process's memory,
+        never into a file, the transcript or a receipt, and is not matched against the known values (it is one of
+        them); its standard error is checked like any other output. Only `restic_offhost` puts one value on disk:
+        RUN/host-steps/repository-password (0600, in a 0700 directory), for the length of the restic commands, then
+        overwritten and removed, and its absence is verified again by the clean-up."""
+        code, out, err, seconds = self.pipe(argv, timeout, env=env)
         self.evidence.write(f"\n$ {shown}\n# exit {code} after {seconds:.1f} s (standard output is a secret: not kept)\n")
         rule = self.redactor.rule(err)
         if rule:
@@ -548,16 +615,7 @@ class Driver:
         if not entry:
             return True
         process = entry[0]
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=10)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=10)
+        stop_group(process, grace=10)
         gone = process.poll() is not None and not Path(f"/proc/{process.pid}").exists()
         self.note(f"stopped {name} (pid {process.pid}); gone: {gone}")
         return gone
@@ -605,8 +663,16 @@ class Driver:
         out = self.root(f"tail -n {int(count)} /var/lib/terrace-production/deployments.log", 30).out
         return [json.loads(line) for line in out.splitlines() if line.strip()]
 
+    STATUS_FIRST = re.compile(r"(adopted [0-9T:-]+Z|not adopted: no writer starts at boot|adoption as [a-z]+ not finished)")
+
     def status(self):
-        return self.root("terrace-production status", 60, ok=None).out
+        """`terrace-production status`: exit 0 and its first line, always one of three, or the step fails (an empty or
+        failed read must never pass an absence check such as no_warning)."""
+        result = self.root("terrace-production status", 60, ok=(0,))
+        first = (result.out.splitlines() or [""])[0]
+        self.expect(self.STATUS_FIRST.fullmatch(first), f"terrace-production status answered (first line: {first!r})")
+        self.expect("deploy path: " in result.out, "terrace-production status printed its deploy path line")
+        return result.out
 
     def generation_of(self, system):
         out = self.root('for l in /nix/var/nix/profiles/system-*-link; do echo "$l $(readlink -f "$l")"; done',
@@ -628,8 +694,11 @@ class Driver:
         out = self.ssh(shlex.join(["systemctl", "show", "-p", "Id", "-p", "NextElapseUSecRealtime", "--timestamp=unix",
                                    *TIMERS]), 30).out
         now = time.time()
-        for block in out.strip().split("\n\n"):
-            fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        blocks = [dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+                  for block in out.strip().split("\n\n")]
+        self.expect(sorted(fields.get("Id", "") for fields in blocks) == sorted(TIMERS),
+                    "systemctl show answered for each writer timer")
+        for fields in blocks:
             value = fields.get("NextElapseUSecRealtime", "")
             if not value:
                 continue  # a stopped timer elapses never
@@ -642,7 +711,8 @@ class Driver:
         out = self.ssh(shlex.join(["systemctl", "show", "-p", "ActiveState", "terrace-switch.service",
                                    "terrace-backup.service", "terrace-backup-check.service",
                                    "terrace-cms-migrate.service", "terrace-cms-sweep.service"]), 30).out
-        self.expect(all(line in ("ActiveState=inactive", "ActiveState=failed") for line in out.split()),
+        lines = out.split()
+        self.expect(len(lines) == 5 and all(line in ("ActiveState=inactive", "ActiveState=failed") for line in lines),
                     "no switch, backup, check, migration or sweep is running")
         self.expect(self.ssh("systemctl list-jobs --no-legend", 30).out.strip() == "", "no queued systemd job")
 
@@ -659,7 +729,8 @@ class Driver:
         backup_port = int(self.inputs["backupPort"])
         option = self.command([self.tools.python, "-B", str(SFTP_TOOL), "forward", "--directory", str(self.run / SFTP),
                                "--host-port", str(backup_port)], 30).out.split()
-        self.expect(option[:1] == ["-R"] and option[1].startswith(f"127.0.0.1:{backup_port}:127.0.0.1:"),
+        self.expect(len(option) == 2 and option[0] == "-R"
+                    and re.fullmatch(rf"127\.0\.0\.1:{backup_port}:127\.0\.0\.1:[0-9]{{4,5}}", option[1]),
                     "the helper's forward binds the host's loopback and ends at the endpoint's loopback")
         argv = self.ssh_argv(None, extra=["-N", "-o", "ExitOnForwardFailure=yes", *option])
         self.start_background("reverse-forward", argv)
@@ -673,12 +744,23 @@ class Driver:
         self.expect(bound and all(word in (f"127.0.0.1:{backup_port}", f"[::1]:{backup_port}") for word in bound),
                     f"the host binds the forward on loopback only ({' '.join(bound)})")
 
-    def ensure_forward(self):
+    def require_forward(self):
+        """The reverse forward must still answer: a forward that died where nothing explains it fails the step (no
+        silent repair)."""
+        backup_port = int(self.inputs["backupPort"])
+        self.expect(self.alive("reverse-forward") and self.forward_answers(backup_port),
+                    "the reverse forward opened in step 3.1 still answers")
+
+    def reopen_forward(self, reason):
+        """After a loss the step explains (a reboot ends every SSH connection; an sshd restart may): open the forward
+        again and record why. Returns the observation for the receipt."""
         backup_port = int(self.inputs["backupPort"])
         if self.alive("reverse-forward") and self.forward_answers(backup_port):
-            return
+            return {"reopened": False, "reason": reason}
         self.stop_background("reverse-forward")
         self.open_forward()
+        self.note(f"reverse forward reopened: {reason}")
+        return {"reopened": True, "reason": reason}
 
     # -- reboots --
     def reboot(self, label):
@@ -724,8 +806,7 @@ class Driver:
                                target], 3600, env=self.env({"PATH": self.path_with_ssh()}))
         sigs = self.ssh(shlex.join(["nix", "--extra-experimental-features", "nix-command", "path-info", "--sigs", target]),
                         60).out
-        names = {key: nix_key_name(self.run / key) for key in (DEPLOY_KEY, SPARE_KEY)}
-        carried = sorted(key for key, value in names.items() if f"{value}:" in sigs)
+        carried = signed_by(sigs, target, {key: nix_key_name(self.run / key) for key in (DEPLOY_KEY, SPARE_KEY)})
         self.timings[f"copy-{name}"] = {"seconds": round(result.seconds, 1), "closureBytes": int(size[-1])}
         return {"target": target, "copySeconds": round(result.seconds, 1), "closureBytes": int(size[-1]),
                 "signedBy": carried}
@@ -784,10 +865,11 @@ class Driver:
             for name, path in (("identity", "/realms/terrace/.well-known/openid-configuration"),
                                ("cms", "/api/events?limit=1"), ("web", "/events/")):
                 host = f"{name}.terrace.invalid"
-                result = self.command([self.tools.curl, "--silent", "--show-error", "--max-time", "30",
+                # -q first: no ~/.curlrc; no proxy for the loopback forward, and none in the environment.
+                result = self.command([self.tools.curl, "-q", "--noproxy", "*", "--silent", "--show-error", "--max-time", "30",
                                        "--cacert", str(self.run / RUN_CA), "--resolve", f"{host}:{local}:127.0.0.1",
                                        "--output", "-", "--write-out", "\n%{http_code}", f"https://{host}:{local}{path}"],
-                                      60, ok=None, quiet=True)
+                                      60, ok=None, quiet=True, env=self.env(without=PROXY_VARIABLES))
                 body, _, code = result.out.rpartition("\n")
                 self.note(f"{label}: https://{host}{path} -> {code} ({len(body)} bytes)")
                 facts[name] = code
@@ -801,22 +883,62 @@ class Driver:
             self.stop_background("https-forward")
 
     # -- clean-up: only what this driver started or created --
+    def sftp_units(self):
+        """The helper's user units still loaded (its unit names, `terrace-lease-sftp-<16 hex>[-watch]`); None if the
+        listing failed."""
+        systemctl = SYSTEMCTL if os.path.exists(SYSTEMCTL) else "systemctl"
+        code, out, _, _ = self.execute([systemctl, "--user", "list-units", "--all", "--plain", "--no-legend",
+                                        "terrace-lease-sftp-*"], 30)
+        if code != 0:
+            return None
+        return [line.split()[0] for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+
     def cleanup(self):
-        ok = True
-        for name in list(self.processes):
-            ok = self.stop_background(name) and ok
-        if self.sftp_started:
-            result = self.command([self.tools.python, "-B", str(SFTP_TOOL), "stop", "--directory", str(self.run / SFTP)],
-                                  120, ok=None)
-            ok = ok and result.code == 0
-        for name in ("repository-password", "heartbeat.out"):
-            remove_file(self.work / name)
-        if self.work.exists():
+        """Every action runs whatever the others did; each failure is recorded; any unverified item means exit 3."""
+        failures = self.cleanup_failures
+
+        def attempt(label, action):
             try:
+                if not action():
+                    failures.append(label)
+            except Exception as problem:  # noqa: BLE001 - one failure never skips the rest
+                failures.append(f"{label} ({type(problem).__name__})")
+
+        for name in list(self.processes):
+            attempt(f"{name} not verified gone", lambda name=name: self.stop_background(name))
+        if self.sftp_attempted:
+            def sftp():
+                result = self.command([self.tools.python, "-B", str(SFTP_TOOL), "stop", "--directory",
+                                       str(self.run / SFTP)], 120, ok=None)
+                left = self.sftp_units()
+                self.note(f"SFTP stop exit {result.code}; helper units still loaded: {left}")
+                # With no receipt (`start` interrupted before writing it) `stop` cannot name the units: the listing
+                # decides. Anything left, or a listing that failed, is not verified.
+                return left == [] and (result.code == 0 or not (self.run / SFTP / "sftp-listener.json").exists())
+            attempt("the SFTP endpoint not verified stopped", sftp)
+        for name in ("repository-password", "heartbeat.out", "wrong-known-hosts"):
+            attempt(f"{name} not removed", lambda name=name: (remove_file(self.work / name),
+                                                              not os.path.lexists(self.work / name))[1])
+
+        def scratch():
+            if self.work.exists():
                 self.work.rmdir()
-            except OSError:
-                ok = False
-        return ok
+            return not os.path.lexists(self.work)
+        attempt(f"{WORK}/ not removed", scratch)
+        for item in failures:
+            self.note(f"CLEAN-UP NOT VERIFIED: {item}")
+        return not failures
+
+
+def signed_by(output, target, names):
+    """Which of NAMES ({file: key name}) signed TARGET, from `nix path-info --sigs`: `<path> <name>:<sig> ...`. Key
+    names are compared exactly."""
+    found = set()
+    for line in output.splitlines():
+        fields = line.split()
+        if fields[:1] == [target]:
+            found.update(token.split(":", 1)[0] for token in fields[1:] if ":" in token)
+    return sorted(key for key, name in names.items() if name in found)
 
 
 # ---- The steps ----------------------------------------------------------------------------------------------------
@@ -898,6 +1020,8 @@ def step_2_1(d):
         d.expect(not answered, "TCP 443 at the host's address does not answer from the build machine")
         o["tcp443"] = "filtered"
     d.ssh("test -d /sys/firmware/efi", 30)
+    # Recorded, not required: the installer writes only the private host key (docs/production-profile.md, cold start).
+    o["hostKeyPubPresent"] = d.ssh("test -e /etc/ssh/ssh_host_ed25519_key.pub", 30, ok=(0, 1)).code == 0
     o["bootctl"] = d.root("bootctl status --no-pager 2>&1", 60, ok=None).out
     d.expect("systemd-boot" in o["bootctl"], "bootctl reports systemd-boot")
     addresses = json.loads(d.ssh("ip -4 -j addr show scope global", 30).out)
@@ -915,9 +1039,11 @@ def step_3_1(d):
     sftp = d.run / SFTP
     d.expect(not os.path.lexists(sftp / "sftp-listener.json") and (sftp / "sftp-host-key.pub").is_file(),
              "the SFTP directory is prepared and was never started")
+    # Recorded BEFORE `start`: a start that is interrupted, times out or fails after launching a unit still gets a
+    # stop and a check that no helper unit is left (clean-up).
+    d.sftp_attempted = True
     result = d.command([d.tools.python, "-B", str(SFTP_TOOL), "start", "--directory", str(sftp), "--rclone",
                         d.tools.rclone, "--seconds", str(d.sftp_seconds)], 120)
-    d.sftp_started = True
     receipt = d.sftp_receipt()
     d.expect(receipt["hostKey"] == d.inputs["sftpHostKey"], "the endpoint serves the host key the build pinned")
     d.open_forward()
@@ -940,7 +1066,7 @@ def step_3_2(d):
 
 
 def step_3_3(d):
-    d.ensure_forward()
+    d.require_forward()
     result = d.root("terrace-production adopt --new", 600)
     d.expect("Adopted: the writers start now and at every boot." in result.out, "adopted")
     states = d.settled(cms_running=False)
@@ -951,7 +1077,7 @@ def step_3_3(d):
 
 def step_3_4(d):
     previous = json.loads(PREVIOUS_RELEASE.read_text())
-    d.ensure_forward()
+    d.require_forward()
     migrate = d.root("systemctl start terrace-cms-migrate.service", 400)
     d.timings["migration-install"] = round(migrate.seconds, 1)
     d.expect(d.marker() == previous["revision"], "the marker holds the installed release's revision")
@@ -985,7 +1111,8 @@ def restic_offhost(d, count):
         write_new(password, value.strip() + "\n")
         repository = str(d.run / SFTP / "app")
         base = [d.tools.restic, "--repo", repository, "--password-file", str(password), "--no-cache"]
-        d.command([*base, "check", "--read-data"], 1800)
+        check = d.command([*base, "check", "--read-data"], 1800)
+        d.expect("no errors were found" in check.out, "restic check --read-data found no errors")
         snapshots = json.loads(d.command([*base, "snapshots", "--json"], 300).out)
     finally:
         remove_file(password)
@@ -1005,7 +1132,7 @@ def step_4_1(d):
     status = d.status()
     d.expect(re.match(r"adopted [0-9T:-]+Z\nactive\n", status), "adopted, target active")
     facts["units"] = d.settled()
-    d.ensure_forward()
+    facts["forward"] = d.reopen_forward("the reboot ended every SSH connection")
     return facts
 
 
@@ -1064,7 +1191,7 @@ def step_5_2(d):
     first = d.activate("activate", d.variants["release"], "--dry-run", ok=(3,))
     d.expect("Every other check passed" in first.out and "dry run NOT READY" in first.out,
              "dry run with the site up: exit 3, NOT READY")
-    d.ensure_forward()
+    d.require_forward()
     # Step 6: quiesce, then the pre-update backup.
     d.quiesce()
     backup = d.root("systemctl start terrace-backup.service", 1200)
@@ -1136,7 +1263,7 @@ def step_5_3(d):
     facts["units"] = d.settled()
     facts["esp"] = d.ssh("df -B1 --output=size,used,avail /boot", 30).out
     facts["entries"] = d.root("bootctl list --no-pager 2>/dev/null | grep -c '^ *title:' || true", 30).out.strip()
-    d.ensure_forward()
+    facts["forward"] = d.reopen_forward("the reboot ended every SSH connection")
     return {"deploy": deploy, "record": record, "reboot": facts}
 
 
@@ -1186,7 +1313,7 @@ def step_5_4(d):
         "switchJournal": journal,
     }
     d.note("5.4 observed: " + json.dumps({k: v for k, v in observed.items() if k != "switchJournal"}, sort_keys=True))
-    d.ensure_forward()
+    observed["forwardAfter"] = d.reopen_forward("sshd was restarted by the switch")
     d.no_warning()
     return {"deploy": deploy, "record": record, "observed": observed, "activateSeconds": round(session.seconds, 1)}
 
@@ -1231,7 +1358,7 @@ def step_5_5(d):
     systems = d.systems()
     d.expect(systems["booted"] == systems["current"] == v3, "the reboot boots V3, the reverted default")
     facts["units"] = d.settled()
-    d.ensure_forward()
+    facts["forward"] = d.reopen_forward("the reboot ended every SSH connection")
     return {"v4": {"deploy": deploy4, "record": record, "client": result.out[-2000:], "rollback": rollback,
                    "rollbackSeconds": round(back.seconds, 1)},
             "v5": {"deploy": deploy5, "record": record5, "client": failed.out[-2000:]}, "reboot": facts}
@@ -1271,11 +1398,51 @@ def load_inputs(run):
     return inputs
 
 
-def check_run(run, address, port, variants_path):
+def executable(tool, label):
+    """A tool given by name (looked up on PATH) or by path; it must be an executable file."""
+    path = tool if os.sep in tool else shutil.which(tool)
+    if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise Refused(f"--{label}: {tool} is not an executable file")
+    return path
+
+
+def check_tools(tools, sftp_seconds):
+    for label, tool in (("rclone", tools.rclone), ("restic", tools.restic), ("sops", tools.sops),
+                        ("terrace-secrets", tools.terrace_secrets), ("curl", tools.curl), ("ssh", tools.ssh),
+                        ("nix", tools.nix)):
+        executable(tool, label)
+    if not SFTP_SECONDS[0] <= sftp_seconds <= SFTP_SECONDS[1]:
+        raise Refused(f"--sftp-seconds must be {SFTP_SECONDS[0]} to {SFTP_SECONDS[1]} (the helper's bounds)")
+    for path in (DEPLOY_TOOL, SFTP_TOOL):
+        if not path.is_file():
+            raise Refused(f"{path.relative_to(ROOT)} is missing from this tree")
+    for path in (PREVIOUS_RELEASE, NEXT_RELEASE):
+        release = json.loads(path.read_text())
+        if not re.fullmatch(r"[0-9a-f]{40}", release.get("revision", "")) or not release.get("migrations"):
+            raise Refused(f"{path.relative_to(ROOT)} names no revision and migration list")
+
+
+def ssh_public(keygen, path):
+    """The public half of an SSH private key file, by `ssh-keygen -y`; None if it is not one."""
+    try:
+        result = subprocess.run([keygen, "-y", "-f", str(path)], stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = result.stdout.decode("ascii", "replace").split()
+    return " ".join(fields[:2]) if result.returncode == 0 and fields[:1] == ["ssh-ed25519"] else None
+
+
+def store_path_exists(path):
+    """A built system on this machine (one seam for the tests, which have no Nix store)."""
+    return os.path.isdir(path)
+
+
+def check_run(run, address, port, variants_path, tools=None, sftp_seconds=14400):
     run = private_directory(run)
     for name in (BOOTSTRAP_KEY, OPERATOR_KEY, DEPLOY_KEY, SPARE_KEY, ESCROW):
         private_file(run / name)
-    for name in (KNOWN_HOSTS, RUN_CA, INPUTS_JSON):
+    for name in (KNOWN_HOSTS, RUN_CA, INPUTS_JSON, OPERATOR_KEY + ".pub"):
         if not (run / name).is_file():
             raise Refused(f"{name} missing from the run directory")
     for name in (STORE, SFTP):
@@ -1286,7 +1453,42 @@ def check_run(run, address, port, variants_path):
         raise Refused("the two deploy keys must differ")
     if os.path.lexists(run / WORK):
         raise Refused(f"{WORK} exists in the run directory: an earlier run did not clean up")
-    return run, read_variants(variants_path), load_inputs(run)
+    variants = read_variants(variants_path)
+    if tools is not None:
+        check_tools(tools, sftp_seconds)
+        missing = [name for name, path in variants.items() if not store_path_exists(path)]
+        if missing:
+            raise Refused(f"variant store paths missing on this machine: {', '.join(missing)}")
+        keygen = os.path.join(os.path.dirname(executable(tools.ssh, "ssh")), "ssh-keygen")
+        keygen = keygen if os.access(keygen, os.X_OK) else executable("ssh-keygen", "ssh")
+        bootstrap = ssh_public(keygen, run / BOOTSTRAP_KEY)
+        operator = ssh_public(keygen, run / OPERATOR_KEY)
+        if bootstrap is None or operator is None:
+            raise Refused("the bootstrap key and the installed operator key must both be ed25519 SSH private keys")
+        if operator != " ".join((run / (OPERATOR_KEY + ".pub")).read_text().split()[:2]):
+            raise Refused("host-operator-ed25519.pub is not the operator key's public half")
+        if bootstrap == operator:
+            raise Refused("the bootstrap key must differ from the installed operator key (step 2.1 shows it refused)")
+    return run, variants, load_inputs(run)
+
+
+def step_receipt(driver, step, status, started, seconds, error, observations):
+    receipt = {"step": step.id, "title": step.title, "status": status, "started": int(started),
+               "seconds": seconds, "error": error}
+    if status == "passed":
+        try:
+            driver.redactor.check(json.dumps(observations).encode(), f"step {step.id}'s observations")
+            receipt["observations"] = observations
+        except Leak as leak:
+            receipt.update(status="failed", error=str(leak))
+    try:
+        driver.evidence.receipt(step.id, receipt)
+        driver.evidence.ledger.append({"step": step.id, "seconds": seconds, "status": receipt["status"]})
+        exit_word = {"passed": "exit 0", "interrupted": "interrupted"}.get(receipt["status"], "exit 1")
+        driver.evidence.log(f"{step.id} {exit_word} {seconds}s {step.title}")
+    except (OSError, TypeError, ValueError):
+        receipt.update(status="failed", error=receipt.get("error") or "the step's receipt could not be written")
+    return receipt["status"]
 
 
 def run_steps(driver, steps):
@@ -1302,40 +1504,44 @@ def run_steps(driver, steps):
         except Failed as failure:
             status, error = "failed", str(failure)
         except Interrupted:
+            # Signals are ignored from here (the handler did that); the step still gets its receipt.
+            seconds = round(time.monotonic() - start, 1)
+            driver.evidence.write(f"\n# step {step.id} interrupted after {seconds} s\n")
+            driver.evidence.close_step()
+            step_receipt(driver, step, "interrupted", started, seconds, "interrupted by a signal", {})
+            driver.interrupted_step = step.id
             raise
         except Exception as problem:  # noqa: BLE001 - any other error fails the step; only its type is recorded
             status, error = "failed", f"{type(problem).__name__} in step {step.id}"
         seconds = round(time.monotonic() - start, 1)
         driver.evidence.write(f"\n# step {step.id} {status} after {seconds} s{': ' + error if error else ''}\n")
         driver.evidence.close_step()
-        receipt = {"step": step.id, "title": step.title, "status": status, "started": int(started),
-                   "seconds": seconds, "error": error}
-        if status == "passed":
-            try:
-                driver.redactor.check(json.dumps(observations).encode(), f"step {step.id}'s observations")
-                receipt["observations"] = observations
-            except Leak as leak:
-                receipt.update(status="failed", error=str(leak))
-                status = "failed"
-        driver.evidence.receipt(step.id, receipt)
-        driver.evidence.ledger.append({"step": step.id, "seconds": seconds, "status": status})
-        driver.evidence.log(f"{step.id} {'exit 0' if status == 'passed' else 'exit 1'} {seconds}s {step.title}")
-        if status != "passed":
+        if step_receipt(driver, step, status, started, seconds, error, observations) != "passed":
             failed = step.id
             break  # G1: stop at the first failure, no retry.
     return failed
 
 
+def load_store_secrets(driver):
+    """Every value of the run's store into the redactor, read in memory (read_secret), never written."""
+    driver.evidence.open_step(Step("redactor", "the store's values into the redactor", "none",
+                                   f"every value of {MIN_SECRET_LENGTH} characters or more loaded", "transcript"))
+    try:
+        text = driver.read_secret([driver.tools.sops, "decrypt", "--input-type", "json", "--output-type", "json",
+                                   str(driver.run / STORE / "hosts" / HOST / "secrets.sops.json")], 60,
+                                  env=driver.secrets_env(), shown="sops decrypt (the run's store, into the redactor only)")
+        return driver.redactor.add_store(json.loads(text))
+    finally:
+        driver.evidence.close_step()
+
+
 def cmd_run(args):
     try:
         address = checked_address(args.address, args.port)
-        run, variants, inputs = check_run(args.run, address, args.port, args.variants)
-        steps = select_steps(args.steps, args.start, args.end)
         tools = Tools(rclone=args.rclone, restic=args.restic, sops=args.sops, terrace_secrets=args.terrace_secrets,
                       curl=args.curl, ssh=args.ssh_binary, nix=args.nix)
-        for tool in (tools.rclone, tools.restic, tools.sops, tools.terrace_secrets):
-            if not os.access(tool, os.X_OK):
-                raise Refused("a tool given on the command line is not executable")
+        run, variants, inputs = check_run(args.run, address, args.port, args.variants, tools, args.sftp_seconds)
+        steps = select_steps(args.steps, args.start, args.end)
         if args.dry_run:
             print(f"Inputs accepted; would run against {known_hosts_name(address, args.port)}:")
             print(listing(steps), end="")
@@ -1345,44 +1551,66 @@ def cmd_run(args):
         message = str(error) if isinstance(error, Refused) else f"{type(error).__name__} while reading inputs"
         print(f"lease_host_steps: refused: {message}", file=sys.stderr)
         return EXIT_INPUTS
-    (run / WORK).mkdir(mode=0o700)
     driver = Driver(run=run, address=address, port=args.port, evidence=evidence, tools=tools, variants=variants,
                     inputs=inputs, sftp_seconds=args.sftp_seconds)
-    for name in (BOOTSTRAP_KEY, OPERATOR_KEY, DEPLOY_KEY, SPARE_KEY, ESCROW, SFTP + "/sftp-host-key"):
-        driver.redactor.add_file(run / name)
-    evidence.log(f"run start: {len(steps)} step(s) {' '.join(step.id for step in steps)}; "
-                 f"womb {inputs.get('wombRevision', 'unrecorded')}")
-    interrupted = False
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
     def stop(_signum, _frame):
+        # The first signal interrupts; from then on every signal is ignored until the evidence is complete.
+        for sig in signals:
+            signal.signal(sig, signal.SIG_IGN)
         raise Interrupted()
 
-    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-    failed = None
+    previous = {sig: signal.signal(sig, stop) for sig in signals}
+    failed = redactor = None
+    interrupted = False
+    clean = False
     try:
-        failed = run_steps(driver, steps)
+        (run / WORK).mkdir(mode=0o700)
+        for name in (BOOTSTRAP_KEY, OPERATOR_KEY, DEPLOY_KEY, SPARE_KEY, ESCROW, SFTP + "/sftp-host-key"):
+            driver.redactor.add_file(run / name)
+        evidence.log(f"run start: {len(steps)} step(s) {' '.join(step.id for step in steps)}; "
+                     f"womb {inputs.get('wombRevision', 'unrecorded')}")
+        try:
+            redactor = load_store_secrets(driver)
+            evidence.log(f"redactor exit 0: {redactor['loaded']} store values loaded")
+        except (Failed, OSError, ValueError, KeyError, TypeError) as problem:
+            failed = "redactor"
+            evidence.log(f"redactor exit 1: {problem if isinstance(problem, Failed) else type(problem).__name__}")
+        if failed is None:
+            failed = run_steps(driver, steps)
     except Interrupted:
         interrupted = True
-        evidence.close_step()
-        evidence.log("interrupted")
-    finally:
-        for sig in previous:
-            signal.signal(sig, signal.SIG_IGN)
-        evidence.open_step(Step("cleanup", "host-independent clean-up", "always runs (G1)",
-                                "forwards and second session stopped; SFTP endpoint stopped; scratch removed",
-                                "transcript"))
         try:
+            evidence.close_step()
+            evidence.log(f"interrupted in step {getattr(driver, 'interrupted_step', None) or 'between steps'}")
+        except Exception:  # noqa: BLE001 - the evidence write must not skip the clean-up
+            pass
+    except Exception as problem:  # noqa: BLE001 - an error outside the steps still reaches clean-up and evidence
+        failed = failed or f"driver ({type(problem).__name__})"
+    finally:
+        for sig in signals:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            evidence.open_step(Step("cleanup", "host-independent clean-up", "always runs (G1)",
+                                    "forwards and second session stopped; SFTP endpoint stopped; scratch removed",
+                                    "transcript"))
             clean = driver.cleanup()
-        except (OSError, Failed, subprocess.SubprocessError):
+            evidence.close_step()
+            evidence.log(f"cleanup {'exit 0' if clean else 'exit 1'}")
+        except Exception:  # noqa: BLE001 - an unverifiable clean-up is exit 3
             clean = False
-        evidence.close_step()
-        evidence.log(f"cleanup {'exit 0' if clean else 'exit 1'}")
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
     code = EXIT_CLEANUP if not clean else EXIT_INTERRUPTED if interrupted else EXIT_STEP_FAILED if failed else EXIT_PASS
-    evidence.finish({"result": {0: "pass", 1: "step failed", 3: "clean-up not verified", 4: "interrupted"}[code],
-                     "exit": code, "failedStep": failed, "steps": [step.id for step in steps], "timings": driver.timings,
-                     "address": known_hosts_name(address, args.port), "wombRevision": inputs.get("wombRevision")})
+    try:
+        evidence.finish({"result": {0: "pass", 1: "step failed", 3: "clean-up not verified", 4: "interrupted"}[code],
+                         "exit": code, "failedStep": failed, "interruptedStep": getattr(driver, "interrupted_step", None),
+                         "cleanupNotVerified": driver.cleanup_failures, "redactor": redactor,
+                         "steps": [step.id for step in steps], "timings": driver.timings,
+                         "address": known_hosts_name(address, args.port), "wombRevision": inputs.get("wombRevision")})
+    except Exception:  # noqa: BLE001 - say so; the exit code still comes from the state
+        print("lease_host_steps: WARNING: the summary or SHA256SUMS could not be written", file=sys.stderr)
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
     print(f"lease_host_steps: {('PASS' if code == 0 else 'FAILED')} (exit {code}); evidence in {evidence.directory}")
     return code
 
@@ -1423,6 +1651,17 @@ def cmd_prepare(args):
         return result.stdout
 
     scratch = None
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def stop(_signum, _frame):
+        for sig in signals:
+            signal.signal(sig, signal.SIG_IGN)
+        raise Interrupted()
+
+    # A signal must not skip the wipe of the run CA key and the leaf files (the default action of TERM and HUP ends
+    # the process without running `finally`).
+    previous = {sig: signal.signal(sig, stop) for sig in signals}
+    code = EXIT_PASS
     try:
         call([args.ssh_keygen, "-q", "-t", "ed25519", "-N", "", "-C", f"terrace-lease-operator-{tag}", "-f",
               str(run / OPERATOR_KEY)])
@@ -1493,15 +1732,51 @@ def cmd_prepare(args):
         what = str(error) if isinstance(error, Failed) else type(error).__name__ + (
             f" ({error.filename})" if isinstance(error, OSError) and error.filename else "")
         print(f"lease_host_steps: prepare failed: {what}; remove the run directory and start again", file=sys.stderr)
-        return EXIT_STEP_FAILED
+        code = EXIT_STEP_FAILED
+    except Interrupted:
+        print("lease_host_steps: prepare interrupted; remove the run directory and start again", file=sys.stderr)
+        code = EXIT_INTERRUPTED
     finally:
-        if scratch is not None and scratch.exists():
-            for path in scratch.iterdir():
-                remove_file(path)
-            scratch.rmdir()
+        for sig in signals:
+            signal.signal(sig, signal.SIG_IGN)
+        left = wipe_scratch(scratch)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if left:
+        # Names only, never contents.
+        print(f"lease_host_steps: prepare could NOT remove: {', '.join(left)}; remove them by hand", file=sys.stderr)
+        return EXIT_CLEANUP
+    if code != EXIT_PASS:
+        return code
     print(f"Run material written in {run}: {', '.join(names)}. Build with: (import infra/nixos/lease-host.nix "
           f"(import {run / INPUTS_NIX})).install and .variants")
     return EXIT_PASS
+
+
+def wipe_scratch(scratch):
+    """Overwrite and remove every file of prepare's TLS scratch directory, then the directory; one failure never stops
+    the rest. Returns what is still there (names, relative to the run directory)."""
+    left = []
+    if scratch is None or not os.path.lexists(scratch):
+        return left
+    try:
+        names = os.listdir(scratch)
+    except OSError:
+        return [scratch.name]
+    for name in names:
+        try:
+            remove_file(scratch / name)
+        except OSError:
+            pass
+        if os.path.lexists(scratch / name):
+            left.append(f"{scratch.name}/{name}")
+    try:
+        scratch.rmdir()
+    except OSError:
+        pass
+    if os.path.lexists(scratch) and not left:
+        left.append(scratch.name)
+    return left
 
 
 def cmd_pin(args):
