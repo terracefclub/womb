@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -574,12 +575,68 @@ class Cleanup(unittest.TestCase):
             with mock.patch.object(d, "execute", return_value=(0, b"", b"", 0.1)) as execute:
                 self.assertTrue(d.cleanup())
                 execute.assert_not_called()
-                d.sftp_attempted = True
+            d.sftp_attempted = True
+            fake = Fake([UNITS_RULE, (r"rehearsal_sftp.py stop", (0, "", "")), (r"list-units", (0, "", ""))])
+            with mock.patch.object(d, "execute", side_effect=fake):
                 self.assertTrue(d.cleanup())
-            self.assertTrue(any("stop" in call[0][0] for call in execute.call_args_list))
-            self.assertIn("list-units", execute.call_args_list[-1][0][0])
+            self.assertTrue(fake.ran(r"rehearsal_sftp.py stop"))
+            self.assertIn(OURS, fake.ran(r"list-units")[-1])
         finally:
             shutil.rmtree(tmp)
+
+
+def stub_prepare(tmp):
+    """`prepare` with stand-in tools in TMP; returns (run, code, out, err)."""
+    root = Path(tmp)
+    run = root / "run"
+    run.mkdir(mode=0o700)
+    archive = root / "a.tar.gz"
+    archive.write_text("x")
+    stub = root / "terrace-secrets"
+    stub.write_text(f"""#!{sys.executable}
+import os, sys
+from pathlib import Path
+store = Path(os.environ["TERRACE_SECRETS_STORE"])
+store.mkdir(mode=0o700, exist_ok=True)
+args = sys.argv[1:]
+if args[:2] == ["escrow", "create"]:
+    Path(args[2]).write_text("AGE-SECRET-KEY-1STUB\\n"); os.chmod(args[2], 0o600)
+    (store / "escrow.recipient").write_text("age1" + "q" * 58 + "\\n")
+elif args[:2] == ["host", "create"]:
+    os.makedirs(args[args.index("--stage") + 1], mode=0o700)
+elif args[0] == "public":
+    print("ssh-ed25519 " + "D" * 68 + " client")
+elif args[0] == "set":
+    sys.stdin.read()
+""")
+    os.chmod(stub, 0o755)
+    nix = root / "nix"
+    nix.write_text(f"""#!{sys.executable}
+import sys
+if "generate-secret" in sys.argv:
+    print(sys.argv[-1] + ":" + "E" * 86 + "==", end="")
+else:
+    sys.stdout.write(sys.stdin.read().split(":")[0] + ":" + "F" * 43 + "=")
+""")
+    os.chmod(nix, 0o755)
+    argv = ["prepare", str(run), "--terrace-secrets", str(stub), "--openssl", shutil.which("openssl"),
+            "--ssh-keygen", shutil.which("ssh-keygen"), "--nix", str(nix), "--web-archive", str(archive),
+            "--cms-archive", str(archive), "--previous-web-archive", str(archive),
+            "--previous-cms-archive", str(archive), "--tfc-source", tmp, "--womb-revision", "1" * 40,
+            "--key-tag", "t1"]
+    # The SFTP helper needs the pinned ssh-keygen; stand in for it.
+    real = subprocess.run
+
+    def run_stub(command, *args, **kwargs):
+        if str(steps.SFTP_TOOL) in command:
+            directory = Path(command[command.index("--directory") + 1])
+            (directory / "sftp-host-key.pub").write_text(f"ssh-ed25519 {SFTP_KEY}\n")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        return real(command, *args, **kwargs)
+
+    with mock.patch.object(steps.subprocess, "run", side_effect=run_stub):
+        code, out, err = quiet(steps.main, argv)
+    return run, code, out, err
 
 
 class Prepare(unittest.TestCase):
@@ -608,55 +665,7 @@ class Prepare(unittest.TestCase):
         """Every file created new and private; nothing secret printed; the scratch TLS files are gone."""
         tmp = tempfile.mkdtemp()
         try:
-            root = Path(tmp)
-            run = root / "run"
-            run.mkdir(mode=0o700)
-            archive = root / "a.tar.gz"
-            archive.write_text("x")
-            stub = root / "terrace-secrets"
-            stub.write_text(f"""#!{sys.executable}
-import os, sys
-from pathlib import Path
-store = Path(os.environ["TERRACE_SECRETS_STORE"])
-store.mkdir(mode=0o700, exist_ok=True)
-args = sys.argv[1:]
-if args[:2] == ["escrow", "create"]:
-    Path(args[2]).write_text("AGE-SECRET-KEY-1STUB\\n"); os.chmod(args[2], 0o600)
-    (store / "escrow.recipient").write_text("age1" + "q" * 58 + "\\n")
-elif args[:2] == ["host", "create"]:
-    os.makedirs(args[args.index("--stage") + 1], mode=0o700)
-elif args[0] == "public":
-    print("ssh-ed25519 " + "D" * 68 + " client")
-elif args[0] == "set":
-    sys.stdin.read()
-""")
-            os.chmod(stub, 0o755)
-            nix = root / "nix"
-            nix.write_text(f"""#!{sys.executable}
-import sys
-if "generate-secret" in sys.argv:
-    print(sys.argv[-1] + ":" + "E" * 86 + "==", end="")
-else:
-    sys.stdout.write(sys.stdin.read().split(":")[0] + ":" + "F" * 43 + "=")
-""")
-            os.chmod(nix, 0o755)
-            argv = ["prepare", str(run), "--terrace-secrets", str(stub), "--openssl", shutil.which("openssl"),
-                    "--ssh-keygen", shutil.which("ssh-keygen"), "--nix", str(nix), "--web-archive", str(archive),
-                    "--cms-archive", str(archive), "--previous-web-archive", str(archive),
-                    "--previous-cms-archive", str(archive), "--tfc-source", tmp, "--womb-revision", "1" * 40,
-                    "--key-tag", "t1"]
-            # The SFTP helper needs the pinned ssh-keygen; stand in for it.
-            real = subprocess.run
-
-            def run_stub(command, *args, **kwargs):
-                if str(steps.SFTP_TOOL) in command:
-                    directory = Path(command[command.index("--directory") + 1])
-                    (directory / "sftp-host-key.pub").write_text(f"ssh-ed25519 {SFTP_KEY}\n")
-                    return subprocess.CompletedProcess(command, 0, b"", b"")
-                return real(command, *args, **kwargs)
-
-            with mock.patch.object(steps.subprocess, "run", side_effect=run_stub):
-                code, out, err = quiet(steps.main, argv)
+            run, code, out, err = stub_prepare(tmp)
             self.assertEqual(code, 0, err)
             self.assertNotIn("PRIVATE", out + err)
             for name in (steps.OPERATOR_KEY, steps.DEPLOY_KEY, steps.SPARE_KEY):
@@ -682,6 +691,9 @@ else:
 
 import re  # noqa: E402
 
+OURS = "terrace-lease-sftp-0123456789abcdef.service"
+OURS_WATCH = "terrace-lease-sftp-0123456789abcdef-watch.service"
+UNITS_RULE = (r"rehearsal_sftp.py units", (0, json.dumps({"unit": OURS, "watcher": OURS_WATCH}), ""))
 BOOT_A, BOOT_B = "11111111-2222-3333-4444-555555555555", "66666666-7777-8888-9999-000000000000"
 
 
@@ -822,8 +834,9 @@ class SftpAndForward(StepHarness):
     def test_an_interrupted_start_still_gets_a_stop_and_a_unit_check(self):
         def interrupted(_argv):
             raise steps.Interrupted()
-        fake = self.host([(r"rehearsal_sftp.py start", interrupted), (r"rehearsal_sftp.py stop", (1, "", "")),
-                          (r"list-units", (0, "terrace-lease-sftp-0123456789abcdef.service loaded active running x\n", ""))])
+        fake = self.host([(r"rehearsal_sftp.py start", interrupted), (r"rehearsal_sftp.py stop", (1, "", "")), UNITS_RULE,
+                          (r"--user stop", (1, "", "")),
+                          (r"list-units", (0, f"{OURS} loaded active running x\n", ""))])
         (self.d.run / steps.SFTP / "sftp-host-key.pub").write_text(f"ssh-ed25519 {SFTP_KEY}\n")
         with self.assertRaises(steps.Interrupted):
             steps.step_3_1(self.d)
@@ -834,8 +847,29 @@ class SftpAndForward(StepHarness):
 
     def test_no_receipt_and_no_unit_left_is_verified(self):
         self.d.sftp_attempted = True
-        self.host([(r"rehearsal_sftp.py stop", (1, "", "")), (r"list-units", (0, "", ""))])
+        self.host([(r"rehearsal_sftp.py stop", (1, "", "")), UNITS_RULE, (r"list-units", (0, "", ""))])
         self.assertTrue(self.d.cleanup())
+
+    def test_units_left_without_a_receipt_are_stopped_by_this_runs_names(self):
+        self.d.sftp_attempted = True
+        state = {"stopped": False}
+
+        def stop(argv):
+            state["stopped"] = True
+            return 0, "", ""
+        fake = self.host([(r"rehearsal_sftp.py stop", (1, "", "")), UNITS_RULE, (r"--user stop", stop),
+                          (r"list-units", lambda argv: (0, "" if state["stopped"] else f"{OURS} loaded active running x\n{OURS_WATCH} loaded active running x\n", ""))])
+        self.assertTrue(self.d.cleanup(), self.d.cleanup_failures)
+        self.assertEqual(fake.ran(r"--user stop")[0][-2:], [OURS, OURS_WATCH])
+
+    def test_another_runs_units_are_never_stopped(self):
+        self.d.sftp_attempted = True
+        other = "terrace-lease-sftp-fedcba9876543210.service"
+        fake = self.host([(r"rehearsal_sftp.py stop", (1, "", "")), UNITS_RULE, (r"--user stop", (0, "", "")),
+                          (r"list-units", (0, f"{other} loaded active running x\n", ""))])
+        self.assertTrue(self.d.cleanup())
+        self.assertEqual(fake.ran(r"--user stop"), [])
+        self.assertNotIn(other, " ".join(fake.ran(r"list-units")[-1][:-2]))
 
     def test_a_failed_stop_or_listing_is_not_verified(self):
         for stop, listing in (((1, "", ""), (0, "", "")), ((0, "", ""), (1, "", ""))):
@@ -843,7 +877,7 @@ class SftpAndForward(StepHarness):
                 self.setUp()
                 self.d.sftp_attempted = True
                 (self.d.run / steps.SFTP / "sftp-listener.json").write_text("{}")
-                self.host([(r"rehearsal_sftp.py stop", stop), (r"list-units", listing)])
+                self.host([(r"rehearsal_sftp.py stop", stop), UNITS_RULE, (r"list-units", listing)])
                 self.assertFalse(self.d.cleanup())
 
     def forward(self, option, listen):
@@ -1055,7 +1089,7 @@ class Guards(StepHarness):
 
     def test_one_failing_clean_up_item_does_not_skip_the_rest(self):
         self.d.sftp_attempted = True
-        fake = self.host([(r"rehearsal_sftp.py stop", (0, "", "")), (r"list-units", (0, "", ""))])
+        fake = self.host([(r"rehearsal_sftp.py stop", (0, "", "")), UNITS_RULE, (r"list-units", (0, "", ""))])
         self.d.processes["reverse-forward"] = (mock.MagicMock(), None)
         with mock.patch.object(self.d, "stop_background", side_effect=OSError("boom")):
             self.assertFalse(self.d.cleanup())
@@ -1207,6 +1241,328 @@ print(sys.argv[-1] + ":" + "E" * 86 + "==", end="") if "generate-secret" in sys.
         code, _, err = quiet(steps.main, argv)
         self.assertEqual(code, steps.EXIT_INTERRUPTED, err)
         self.assertFalse([p for p in run.iterdir() if p.name.startswith("tls-")], "the CA and leaf keys are wiped")
+
+
+# ---- Every remaining step body, scripted (review round 2) -----------------------------------------------------------
+
+def table(rules):
+    """A root()/ssh() stand-in: the first (pattern, answer) whose pattern matches the command answers; an answer is a
+    Result, a (code, out) pair or a callable taking the command."""
+    def answer(command, *args, ok=(0,), **kwargs):
+        for pattern, value in rules:
+            if re.search(pattern, command):
+                value = value(command) if callable(value) else value
+                result = value if isinstance(value, steps.Result) else steps.Result(value[0], value[1], "", 0.1)
+                if ok is not None and result.code not in ok:
+                    raise steps.Failed(f"exit {result.code}: {command}")
+                return result
+        raise AssertionError("unexpected command: " + command)
+    return answer
+
+
+class Steps(StepHarness):
+    PREVIOUS = json.loads(steps.PREVIOUS_RELEASE.read_text())
+    NEXT = json.loads(steps.NEXT_RELEASE.read_text())
+
+    def patch(self, **methods):
+        for name, value in methods.items():
+            target = steps if name in ("update_guard", "restic_offhost", "start_record") else self.d
+            effect = callable(value) or isinstance(value, BaseException)
+            patch = mock.patch.object(target, name, **({"side_effect": value} if effect else {"return_value": value}))
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def broken(self, step, cases, scenario):
+        """Each case changes one thing in the good transcript; the step must fail on it."""
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                scenario(**change)
+                self.fails(step, self.d)
+
+    # 3.2
+    def push(self, out="Installed 12 encrypted secrets.\nHost state: not adopted\n", unstaged=True,
+             verify="PASS 11 secrets\n", sops="success"):
+        stage = self.d.run / steps.STAGE
+        stage.mkdir(mode=0o700, exist_ok=True)
+        (stage / "ssh_host_ed25519_key").write_text("k")
+
+        def unstage(_argv):
+            if unstaged:
+                shutil.rmtree(stage)
+            return 0, "Removed the staged host key for app.\n", ""
+        self.host([(r" push app --address 127\.0\.0\.1 --port 2222 --identity", (0, out, "")),
+                   (r"host unstage app --stage", unstage), (r"terrace-secrets verify", (0, verify, "")),
+                   (r"sops-install-secrets.service", (0, "Id=sops-install-secrets.service\nActiveState=active\n"
+                                                      f"Result={sops}\nConditionResult=yes\n", ""))])
+
+    def test_3_2(self):
+        self.push()
+        self.assertEqual(steps.step_3_2(self.d)["secrets"], 12)
+        self.broken(steps.step_3_2, {"no Installed line": {"out": "Host state: not adopted\n"},
+                                     "adopted": {"out": "Installed 12 encrypted secrets.\nHost state: adopted\n"},
+                                     "stage kept": {"unstaged": False}, "verify fails": {"verify": "FAIL tls/key\n"},
+                                     "sops failed": {"sops": "exit-code"}}, self.push)
+
+    # 3.3
+    def adopt(self, adopt="Adopted: the writers start now and at every boot.\n",
+              status="adopted 2026-11-27T10:00:00Z\nactive\ndeploy path: on, 2 trusted deploy key(s)\n"):
+        self.patch(require_forward=None, settled={})
+        self.host([(r"terrace-production adopt --new", (0, adopt, "")), (r"terrace-production status", (0, status, ""))])
+
+    def test_3_3(self):
+        self.adopt()
+        steps.step_3_3(self.d)
+        self.broken(steps.step_3_3, {"not adopted": {"adopt": "terrace-production: not adopted yet\n"},
+                                     "target inactive": {"status": "adopted 2026-11-27T10:00:00Z\ninactive\ndeploy path: on\n"}},
+                    self.adopt)
+
+    # 3.4
+    def first_release(self, marker=None, ledger=None, result="success", snapshots=1):
+        marker = marker or self.PREVIOUS["revision"]
+        ledger = ledger if ledger is not None else self.PREVIOUS["migrations"]
+        self.patch(require_forward=None, settled={}, restic_offhost={"checkReadData": True, "snapshots": 1})
+        self.patch(root=table([(r"migrated-revision", (0, marker + "\n")), (r"payload_migrations", (0, "\n".join(ledger) + "\n")),
+                               (r"terrace-backup.service -p Result", (0, result + "\n")),
+                               (r"snapshots --json", (0, json.dumps([{"hostname": "app", "short_id": "ab12cd34"}] * snapshots))),
+                               (r".", (0, ""))]))
+
+    def test_3_4(self):
+        self.first_release()
+        self.assertEqual(steps.step_3_4(self.d)["snapshots"], ["ab12cd34"])
+        self.broken(steps.step_3_4, {"marker": {"marker": self.NEXT["revision"]}, "ledger": {"ledger": self.NEXT["migrations"]},
+                                     "backup failed": {"result": "exit-code"}, "two snapshots": {"snapshots": 2}},
+                    self.first_release)
+
+    def test_3_4_needs_the_off_host_check(self):
+        self.first_release()
+        with mock.patch.object(steps, "restic_offhost", side_effect=steps.Failed("restic check --read-data found errors")):
+            self.fails(steps.step_3_4, self.d, text="read-data")
+
+    # 3.5
+    def test_3_5_is_the_https_check(self):
+        self.patch(https={"issuer": steps.ISSUER})
+        self.assertEqual(steps.step_3_5(self.d), {"issuer": steps.ISSUER})
+        self.d.https.assert_called_once_with("3.5")
+
+    # 4.1 (reboot's own wait for `running`)
+    def test_a_reboot_must_reach_running(self):
+        clock = iter(range(0, 10_000_000, 50))
+        connection = mock.MagicMock()
+        connection.__enter__.return_value.recv.return_value = b"SSH-2.0-OpenSSH"
+        for patch in (mock.patch.object(steps.time, "monotonic", side_effect=lambda: next(clock)),
+                      mock.patch.object(steps.socket, "create_connection", return_value=connection)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        state = {"rebooted": False}
+
+        def boot(_argv):
+            return 0, (BOOT_B if state["rebooted"] else BOOT_A) + "\n", ""
+
+        def reboot(_argv):
+            state["rebooted"] = True
+            return 255, "", ""
+        self.host([(r"systemctl show -p ActiveState", (0, "ActiveState=inactive\n" * 5, "")), (r"list-jobs", (0, "", "")),
+                   (r"boot_id", boot), (r"systemctl reboot", reboot), (r"is-system-running --wait", (1, "degraded\n", ""))])
+        self.fails(self.d.reboot, "t", text="reached running (degraded)")
+
+    # 5.1
+    def plain_switch(self, record=None, rollback=None, after_rollback=None, marker_gone=0):
+        v = self.d.variants
+        records = iter([[{"phase": "started"}, dict({"phase": "finished", "result": "success", "to": v["v1"]}, **(record or {}))],
+                        [{"phase": "started"}, dict({"phase": "finished", "result": "success", "action": "rollback",
+                                                     "to": v["v0"]}, **(rollback or {}))]])
+        systems = iter([{"current": v["v1"]}, after_rollback or {"current": v["v0"]}])
+        self.patch(update_guard=None, start_record={}, deploy={"signedBy": [steps.DEPLOY_KEY]}, quiesce=None,
+                   stop_timers_again=None, restart_after_quiesce=None, settled={}, no_warning="",
+                   activate=lambda *a, **k: steps.Result(0, "Checks passed" if "--dry-run" in a else "Running generation 2", "", 1),
+                   records=lambda: next(records), systems=lambda: next(systems),
+                   ssh=table([(r"cat /etc/terrace-lease-variant", (0, "v1\n")),
+                              (r"test ! -e /etc/terrace-lease-variant", (marker_gone, ""))]))
+
+    def test_5_1(self):
+        self.plain_switch()
+        self.assertEqual(steps.step_5_1(self.d)["rollback"]["to"], self.d.variants["v0"])
+        self.broken(steps.step_5_1, {"activate failed": {"record": {"result": "failed (exit 4)"}},
+                                     "rollback not recorded": {"rollback": {"action": "activate"}},
+                                     "rollback to another": {"rollback": {"to": self.d.variants["v1"]}},
+                                     "V1 still runs": {"after_rollback": {"current": self.d.variants["v1"]}},
+                                     "marker kept": {"marker_gone": 1}}, self.plain_switch)
+
+    # 5.2
+    def release_change(self, first=None, snapshots=2, record=None, ledger_after=None, second_ledger=None, marker=None):
+        v = self.d.variants
+        ledger_after = ledger_after if ledger_after is not None else self.NEXT["migrations"]
+        ledgers = iter([self.PREVIOUS["migrations"], ledger_after, second_ledger if second_ledger is not None else ledger_after])
+        good = {"phase": "finished", "result": "switched; down until the CMS migration: terrace-cms.service terrace-web.service",
+                "failedUnits": ["terrace-web.service", "terrace-cms.service"], "unexpectedUnits": [], "notStartedUnits": [],
+                "waitTimedOut": False}
+
+        def activate(*args, ok=(0,), timeout=1200):
+            if "--dry-run" in args and ok == (3,):
+                return first or steps.Result(3, "Every other check passed; ...\nterrace-production: dry run NOT READY: ...", "", 1)
+            if "--dry-run" in args:
+                return steps.Result(0, "Checks passed; activate ...", "", 1)
+            return steps.Result(0, "THE SITE IS DOWN until the CMS migration: ...", "", 1)
+        self.patch(update_guard=None, start_record={}, deploy={"signedBy": [steps.DEPLOY_KEY]}, require_forward=None,
+                   quiesce=None, stop_timers_again=None, settled={}, https={}, failed_units=[""], activate=activate,
+                   records=lambda: [{"phase": "started"}, dict(good, **(record or {}))], ledger=lambda: next(ledgers),
+                   marker=marker or self.NEXT["revision"], ssh=table([(r".", (0, "active\n"))]),
+                   root=table([(r"terrace-backup.service -p Result", (0, "success\n")),
+                               (r"snapshots --json", (0, json.dumps([{"hostname": "app"}] * snapshots))),
+                               (r"terrace-secrets verify", (0, "PASS\n")), (r".", (0, ""))]))
+
+    def test_5_2(self):
+        self.release_change()
+        self.assertEqual(steps.step_5_2(self.d)["ledgerAfter"], self.NEXT["migrations"])
+        self.broken(steps.step_5_2, {
+            "dry run not NOT READY": {"first": steps.Result(3, "Checks passed", "", 1)},
+            "backup missing": {"snapshots": 1},
+            "plain success": {"record": {"result": "success"}},
+            "an unexpected unit": {"record": {"unexpectedUnits": ["nginx.service"]}},
+            "wait timed out": {"record": {"waitTimedOut": True}},
+            "ledger not the pin's": {"ledger_after": self.PREVIOUS["migrations"]},
+            "second run changed it": {"second_ledger": self.NEXT["migrations"] + ["extra"]},
+            "marker old": {"marker": self.PREVIOUS["revision"]}}, self.release_change)
+
+    # 5.3
+    def initrd_change(self, refusal="initrd differ(s) from the booted system; repeat with --boot", booted=None,
+                      initrd=None, warning="WARNING: the boot default, generation 4"):
+        v = self.d.variants
+        before = {"current": v["release"], "booted": v["release"], "bootDefault": v["release"]}
+        after = booted or {"current": v["v2"], "booted": v["v2"], "bootDefault": v["v2"]}
+        systems = iter([before, before, after])
+
+        def activate(*args, ok=(0,), timeout=1200):
+            if "--boot" not in args:
+                return steps.Result(1, f"terrace-production: nothing changed: {refusal} (docs)", "", 1)
+            return steps.Result(0, "Generation 4 is the boot default.\nReboot to run it, or cancel it with rollback.", "", 1)
+        self.patch(update_guard=None, deploy={"signedBy": [steps.SPARE_KEY]}, activate=activate, systems=lambda: next(systems),
+                   records=lambda: [{"phase": "started"}, {"phase": "finished", "result": "success", "mode": "boot"}],
+                   status=f"adopted 2026-11-27T10:00:00Z\nactive\n{warning}\ndeploy path: on\n", reboot={}, no_warning="",
+                   settled={}, reopen_forward={},
+                   root=table([(r"readlink /nix/var/nix/profiles/system", (0, "system-3-link\n")), (r".", (0, "1\n"))]),
+                   ssh=table([(r"readlink -f /run/booted-system/initrd", (0, initrd or "/nix/store/i-initrd\n/nix/store/i-initrd\n")),
+                              (r"cat /etc/terrace-lease-variant", (0, "v2\n")), (r"df ", (0, "1 2 3\n"))]))
+
+    def test_5_3(self):
+        self.initrd_change()
+        steps.step_5_3(self.d)
+        self.broken(steps.step_5_3, {"other refusal": {"refusal": "is already the running system"},
+                                     "booted V0": {"booted": {"current": self.d.variants["v2"], "booted": self.d.variants["v0"]}},
+                                     "another initrd": {"initrd": "/nix/store/a-initrd\n/nix/store/b-initrd\n"},
+                                     "no warning": {"warning": "previous generation: 3"}}, self.initrd_change)
+
+    # 5.4
+    def sshd_change(self, record=None, reconnect=0, loglevel="loglevel VERBOSE"):
+        v = self.d.variants
+
+        def background(name, argv, output=None):
+            Path(output).write_text("1\n2\n3\n")
+        self.patch(update_guard=None, deploy={"signedBy": [steps.DEPLOY_KEY]}, start_background=background,
+                   alive=True, forward_answers=True, stop_background=True, reopen_forward={}, no_warning="",
+                   activate=lambda *a, **k: steps.Result(0, "Running generation 5", "", 1),
+                   records=lambda: [{"phase": "started"}, dict({"phase": "finished", "result": "success", "to": v["v3"]},
+                                                               **(record or {}))],
+                   ssh=table([(r"systemctl show sshd.service", (0, "101\naaaa\n")), (r"^true$", (reconnect, ""))]),
+                   root=table([(r"sshd -T", (0, loglevel + "\n")), (r"journalctl", (0, "restarting the following units: sshd.service\n"))]))
+
+    def test_5_4(self):
+        self.sshd_change()
+        observed = steps.step_5_4(self.d)["observed"]
+        self.assertTrue(observed["sameKeyReconnects"])
+        self.broken(steps.step_5_4, {"switch failed": {"record": {"result": "failed (exit 4)"}},
+                                     "no reconnect": {"reconnect": 255}, "old sshd setting": {"loglevel": "loglevel INFO"}},
+                    self.sshd_change)
+
+    # 6
+    def final(self, offhost=None):
+        self.patch(failed_units=[""], status="adopted x\n", restic_offhost=offhost or {"checkReadData": True, "snapshots": 2},
+                   root=table([(r"deployments.log", (0, json.dumps({"phase": "finished"}) + "\n")), (r".", (0, "x\n"))]),
+                   ssh=table([(r"path-info -S", (0, "/run/current-system 123\n")), (r".", (0, "x\n"))]))
+
+    def test_6(self):
+        self.final()
+        self.assertEqual(steps.step_6(self.d)["snapshotsOffHost"]["snapshots"], 2)
+        self.setUp()
+        self.final(offhost=steps.Failed("2 snapshot(s) of host app"))
+        self.fails(steps.step_6, self.d)
+
+
+class ClaimedBehaviours(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dir = RunDirectory(self.tmp)
+
+    def test_a_store_that_cannot_be_loaded_fails_the_run(self):
+        self.dir.sops.write_text("#!/bin/sh\nexit 1\n")
+        with mock.patch.dict(steps.STEP_FUNCTIONS, {"2.1": lambda d: {}}), \
+                mock.patch.object(steps.Driver, "cleanup", return_value=True):
+            code, _, _ = quiet(steps.main, self.dir.argv("--steps", "2.1"))
+        self.assertEqual(code, steps.EXIT_STEP_FAILED)
+        self.assertEqual(json.loads((self.dir.evidence / "summary.json").read_text())["failedStep"], "redactor")
+        self.assertFalse((self.dir.evidence / "receipts" / "2.1.json").exists(), "no step ran")
+
+    def test_the_first_signal_interrupts_and_later_ones_are_ignored(self):
+        saved = {sig: signal.getsignal(sig) for sig in steps.SIGNALS}
+        self.addCleanup(lambda: [signal.signal(sig, handler) for sig, handler in saved.items()])
+        for sig in steps.SIGNALS:
+            signal.signal(sig, steps.interrupt_once)
+        with self.assertRaises(steps.Interrupted):
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(1)
+        self.assertTrue(all(signal.getsignal(sig) == signal.SIG_IGN for sig in steps.SIGNALS))
+        os.kill(os.getpid(), signal.SIGTERM)  # ignored now
+
+    def test_run_and_prepare_install_that_handler(self):
+        seen = {}
+
+        def capture(d):
+            seen["run"] = signal.getsignal(signal.SIGTERM)
+            return {}
+        with mock.patch.dict(steps.STEP_FUNCTIONS, {"2.1": capture}), mock.patch.object(steps.Driver, "cleanup", return_value=True):
+            quiet(steps.main, self.dir.argv("--steps", "2.1"))
+        self.assertIs(seen["run"], steps.interrupt_once)
+
+    def test_stop_group_never_reports_a_child_that_stays(self):
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        process.pid = 999999999
+        process.wait.side_effect = subprocess.TimeoutExpired("x", 1)
+        with mock.patch.object(steps.os, "killpg"):
+            self.assertFalse(steps.stop_group(process, grace=0))
+
+    def test_stop_group_sends_int_then_term_then_kill(self):
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired("x", 1)
+        with mock.patch.object(steps.os, "killpg") as killpg:
+            steps.stop_group(process, grace=0)
+        self.assertEqual([call.args[1] for call in killpg.call_args_list], [signal.SIGINT, signal.SIGTERM, signal.SIGKILL])
+
+    def test_status_needs_its_deploy_path_line(self):
+        StepHarness.setUp(self)
+        self.addCleanup(lambda: self.d.evidence.close_step())
+        with mock.patch.object(self.d, "execute", side_effect=Fake([(r"terrace-production status", (0, "adopted 2026-11-27T10:00:00Z\nactive\n", ""))])):
+            with self.assertRaises(steps.Failed):
+                self.d.status()
+
+    def test_a_release_record_that_is_not_an_object_is_refused(self):
+        bad = Path(self.tmp) / "release.json"
+        bad.write_text("[]")
+        with mock.patch.object(steps, "PREVIOUS_RELEASE", bad), mock.patch.object(steps, "ROOT", Path(self.tmp)):
+            code, _, err = quiet(steps.main, self.dir.argv("--dry-run"))
+        self.assertEqual(code, steps.EXIT_INPUTS)
+        self.assertIn("is not a release record", err)
+
+    def test_prepare_returns_3_when_a_scratch_file_stays(self):
+        with mock.patch.object(steps, "wipe_scratch", return_value=["tls-x/ca-key.pem"]):
+            where = Path(self.tmp) / "p"
+            where.mkdir()
+            _, code, _, err = stub_prepare(str(where))
+        self.assertEqual(code, steps.EXIT_CLEANUP, err)
+        self.assertIn("tls-x/ca-key.pem", err)
 
 
 if __name__ == "__main__":

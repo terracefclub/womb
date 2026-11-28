@@ -11,11 +11,12 @@ directory is written; the unit has a hard runtime limit.
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -245,6 +246,25 @@ def check_namespace(pid, directory, proc=PROC):
         raise lease.Rejected("sandbox layout check failed")
 
 
+def unit_names(directory):
+    """This run's two unit names, derived from its run directory: a caller that knows only the directory (no receipt,
+    for example after an interrupted `start`) can stop exactly these and never another run's."""
+    tag = hashlib.sha256(os.path.realpath(directory).encode()).hexdigest()[:16]
+    return f"terrace-lease-sftp-{tag}.service", f"terrace-lease-sftp-{tag}-watch.service"
+
+
+def stop_on_signal(_signum, _frame):
+    raise KeyboardInterrupt
+
+
+def install_signal_handlers():
+    """SIGTERM and SIGHUP end this process like SIGINT does, so an interrupted `start` still runs its clean-up (its
+    `except BaseException` stops whatever it launched). Without this a TERM ends the process at once, the units it
+    launched run on to their runtime limit, and with no receipt yet `stop` cannot name them."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop_on_signal)
+
+
 def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB, max_entries=DEFAULT_MAX_ENTRIES):
     if not RCLONE.fullmatch(str(rclone)) or not rclone.is_file():
         raise lease.Rejected("pinned rclone required")
@@ -262,8 +282,7 @@ def start(directory, rclone, seconds, port=None, limit_mib=DEFAULT_LIMIT_MIB, ma
     port = free_port() if port is None else port
     if not 1024 <= port <= 65535 or banner(port, 0.5) is not None:
         raise lease.Rejected("port unavailable")
-    unit = "terrace-lease-sftp-" + secrets.token_hex(8) + ".service"
-    watcher = unit[:-len(".service")] + "-watch.service"
+    unit, watcher = unit_names(directory)
     if properties(unit, ["LoadState"]).get("LoadState") != "not-found":
         raise lease.Rejected("unit name in use")
     limit_bytes = limit_mib * 1024 * 1024
@@ -377,7 +396,7 @@ def forward_option(directory, host_port=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "start", "status", "stop", "forward", "watch"))
+    parser.add_argument("action", choices=("prepare", "start", "status", "stop", "forward", "watch", "units"))
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--ssh-keygen", type=Path)
     parser.add_argument("--rclone", type=Path)
@@ -392,6 +411,7 @@ def main():
     parser.add_argument("--host-port", type=int, help="loopback port on the lease host for `forward` (default: same as --port)")
     args = parser.parse_args()
     os.umask(0o077)
+    install_signal_handlers()
     try:
         directory = lease.private_directory(args.directory)
         if args.action == "prepare" and args.ssh_keygen and args.client_public_key:
@@ -407,10 +427,16 @@ def main():
             print("Throwaway SFTP endpoint stopped; unit, processes and listener verified gone.")
         elif args.action == "watch" and args.unit and args.limit_bytes:
             watch(directory, args.unit, args.limit_bytes, args.max_entries, args.interval)
+        elif args.action == "units":
+            unit, watcher = unit_names(directory)
+            print(json.dumps({"unit": unit, "watcher": watcher}, sort_keys=True))
         elif args.action == "forward":
             print(forward_option(directory, args.host_port))
         else:
             raise lease.Rejected("required arguments missing")
+    except KeyboardInterrupt:
+        print("Throwaway SFTP operation interrupted; what it had started was stopped.", file=sys.stderr)
+        return 130
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
         print("Throwaway SFTP operation rejected. Private output suppressed.", file=sys.stderr)
         return 1

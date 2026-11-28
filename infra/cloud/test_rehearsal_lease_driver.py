@@ -1076,6 +1076,21 @@ class Refusals(Harness):
         self.refused(r": V0 system \(install\) .*; Disko script \(install\) ")
         del self.tools.fail["plan-store-validity"], self.tools.overrides["plan-store-validity-path"]
         self.refused("is not called nix-store", self.config(nix_store=str(self.bin / "nix")))
+        # The set check fails but every single path checks out: still refused, and the singles ran with the bound tool.
+        self.tools.fail["plan-store-validity"] = 1
+        self.tools.overrides["plan-store-validity-path"] = lambda argv: (0, b"")
+        self.refused(r"G6: .*none singly; the set check failed")
+        singles = [argv for label, argv in self.tools.calls if label == "plan-store-validity-path"]
+        self.assertTrue(singles and all(argv[0] == str(self.bin / "nix-store") and argv[1] == "--check-validity"
+                                        for argv in singles))
+        del self.tools.fail["plan-store-validity"], self.tools.overrides["plan-store-validity-path"]
+
+    def test_a_link_named_nix_store_to_the_multicall_binary_is_accepted(self):
+        links = self.tmp / "links"
+        links.mkdir()
+        (links / "nix-store").symlink_to(self.bin / "nix")
+        plan = driver.make_plan(self.config(nix_store=str(links / "nix-store")), self.tools, FIXED)
+        self.assertEqual(plan["inputs"]["tools"]["nix_store"]["path"], str(links / "nix-store"))
         self.tools.overrides["plan-store-roots"] = lambda argv: (0, b"/elsewhere -> x\n")
         self.refused("G6: lease is not a GC root")
         del self.tools.overrides["plan-store-roots"]

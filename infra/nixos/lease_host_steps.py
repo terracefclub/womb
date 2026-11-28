@@ -104,25 +104,20 @@ class Leak(Failed):
 
 
 def stop_group(process, grace=TERM_GRACE):
-    """Stop a child's process group: SIGTERM, up to GRACE seconds for its own clean-up (the SFTP helper stops its
-    units on SIGTERM), then SIGKILL. True when the child has exited."""
-    if process.poll() is not None:
-        return True
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
+    """Stop a child's process group: SIGINT (a Python tool runs its `except` clean-up on it; the SFTP helper also
+    treats TERM and HUP that way), then SIGTERM, then SIGKILL, each after up to GRACE seconds. True only when the
+    child has exited."""
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        if process.poll() is not None:
+            return True
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, sig)
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=grace if sig != signal.SIGKILL else 10)
         except subprocess.TimeoutExpired:
-            return False
+            continue
     return process.poll() is not None
 
 
@@ -884,14 +879,34 @@ class Driver:
 
     # -- clean-up: only what this driver started or created --
     def sftp_units(self):
-        """The helper's user units still loaded (its unit names, `terrace-lease-sftp-<16 hex>[-watch]`); None if the
-        listing failed."""
+        """This run's helper units still loaded, by their exact names (rehearsal_sftp.py units: derived from this
+        run's SFTP directory, so another run's units are never seen or stopped); None if that cannot be read."""
+        code, out, _, _ = self.execute([self.tools.python, "-B", str(SFTP_TOOL), "units", "--directory",
+                                        str(self.run / SFTP)], 30)
+        try:
+            names = list(json.loads(out.decode()).values()) if code == 0 else None
+        except ValueError:
+            names = None
+        if not names or not all(re.fullmatch(r"terrace-lease-sftp-[0-9a-f]{16}(-watch)?\.service", n) for n in names):
+            return None, []
         systemctl = SYSTEMCTL if os.path.exists(SYSTEMCTL) else "systemctl"
-        code, out, _, _ = self.execute([systemctl, "--user", "list-units", "--all", "--plain", "--no-legend",
-                                        "terrace-lease-sftp-*"], 30)
+        code, out, _, _ = self.execute([systemctl, "--user", "list-units", "--all", "--plain", "--no-legend", *names], 30)
         if code != 0:
-            return None
-        return [line.split()[0] for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+            return None, names
+        loaded = [line.split()[0] for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+        return [name for name in loaded if name in names], names
+
+    def stop_sftp(self):
+        result = self.command([self.tools.python, "-B", str(SFTP_TOOL), "stop", "--directory", str(self.run / SFTP)],
+                              120, ok=None)
+        left, names = self.sftp_units()
+        if left:
+            # A start interrupted before its receipt: `stop` cannot name the units, this run's names can.
+            systemctl = SYSTEMCTL if os.path.exists(SYSTEMCTL) else "systemctl"
+            self.command([systemctl, "--user", "stop", *left], 60, ok=None)
+            left, names = self.sftp_units()
+        self.note(f"SFTP stop exit {result.code}; this run's helper units still loaded: {left}")
+        return left == [] and (result.code == 0 or not (self.run / SFTP / "sftp-listener.json").exists())
 
     def cleanup(self):
         """Every action runs whatever the others did; each failure is recorded; any unverified item means exit 3."""
@@ -907,15 +922,7 @@ class Driver:
         for name in list(self.processes):
             attempt(f"{name} not verified gone", lambda name=name: self.stop_background(name))
         if self.sftp_attempted:
-            def sftp():
-                result = self.command([self.tools.python, "-B", str(SFTP_TOOL), "stop", "--directory",
-                                       str(self.run / SFTP)], 120, ok=None)
-                left = self.sftp_units()
-                self.note(f"SFTP stop exit {result.code}; helper units still loaded: {left}")
-                # With no receipt (`start` interrupted before writing it) `stop` cannot name the units: the listing
-                # decides. Anything left, or a listing that failed, is not verified.
-                return left == [] and (result.code == 0 or not (self.run / SFTP / "sftp-listener.json").exists())
-            attempt("the SFTP endpoint not verified stopped", sftp)
+            attempt("the SFTP endpoint not verified stopped", self.stop_sftp)
         for name in ("repository-password", "heartbeat.out", "wrong-known-hosts"):
             attempt(f"{name} not removed", lambda name=name: (remove_file(self.work / name),
                                                               not os.path.lexists(self.work / name))[1])
@@ -1418,6 +1425,9 @@ def check_tools(tools, sftp_seconds):
             raise Refused(f"{path.relative_to(ROOT)} is missing from this tree")
     for path in (PREVIOUS_RELEASE, NEXT_RELEASE):
         release = json.loads(path.read_text())
+        if not isinstance(release, dict) or not isinstance(release.get("revision"), str) \
+                or not isinstance(release.get("migrations"), list):
+            raise Refused(f"{path.relative_to(ROOT)} is not a release record (revision and migration list)")
         if not re.fullmatch(r"[0-9a-f]{40}", release.get("revision", "")) or not release.get("migrations"):
             raise Refused(f"{path.relative_to(ROOT)} names no revision and migration list")
 
@@ -1431,6 +1441,17 @@ def ssh_public(keygen, path):
         return None
     fields = result.stdout.decode("ascii", "replace").split()
     return " ".join(fields[:2]) if result.returncode == 0 and fields[:1] == ["ssh-ed25519"] else None
+
+
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def interrupt_once(_signum, _frame):
+    """The first INT, TERM or HUP interrupts; from then on all three are ignored, so the clean-up and the evidence (or
+    prepare's wipe) cannot be cut short by a second one."""
+    for sig in SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted()
 
 
 def store_path_exists(path):
@@ -1553,15 +1574,8 @@ def cmd_run(args):
         return EXIT_INPUTS
     driver = Driver(run=run, address=address, port=args.port, evidence=evidence, tools=tools, variants=variants,
                     inputs=inputs, sftp_seconds=args.sftp_seconds)
-    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-
-    def stop(_signum, _frame):
-        # The first signal interrupts; from then on every signal is ignored until the evidence is complete.
-        for sig in signals:
-            signal.signal(sig, signal.SIG_IGN)
-        raise Interrupted()
-
-    previous = {sig: signal.signal(sig, stop) for sig in signals}
+    signals = SIGNALS
+    previous = {sig: signal.signal(sig, interrupt_once) for sig in signals}
     failed = redactor = None
     interrupted = False
     clean = False
@@ -1651,16 +1665,10 @@ def cmd_prepare(args):
         return result.stdout
 
     scratch = None
-    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-
-    def stop(_signum, _frame):
-        for sig in signals:
-            signal.signal(sig, signal.SIG_IGN)
-        raise Interrupted()
-
+    signals = SIGNALS
     # A signal must not skip the wipe of the run CA key and the leaf files (the default action of TERM and HUP ends
     # the process without running `finally`).
-    previous = {sig: signal.signal(sig, stop) for sig in signals}
+    previous = {sig: signal.signal(sig, interrupt_once) for sig in signals}
     code = EXIT_PASS
     try:
         call([args.ssh_keygen, "-q", "-t", "ed25519", "-N", "", "-C", f"terrace-lease-operator-{tag}", "-f",

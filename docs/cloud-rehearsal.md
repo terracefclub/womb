@@ -404,7 +404,10 @@ it.
 Before the first step it decrypts the run's store in memory (through a pipe, never a
 file) and gives the redactor every value of 16 characters or more, except the public
 TLS certificate. Every generated value is far longer; a shorter one would be named in
-`summary.json` and not matched.
+`summary.json` and not matched. A value of the store that is not secret and is 16
+characters or more would make a step fail closed if a command printed it; today the
+store holds no such value besides the excluded certificate (the app's store has
+generated hex values, the SFTP client's private key, the TLS key and the certificate).
 
 Then it runs one step at a time. It stops at the first non-zero exit or failed guard
 with no retry (G1). A reverse forward that died is a failed step, except right after
@@ -412,10 +415,15 @@ a reboot (4.1, 5.3, 5.5) or the sshd restart (5.4): there it is opened again and
 receipt says so. After the steps it runs only its own clean-up, every item whatever
 the others did:
 - the reverse forward, the HTTPS forward and the second session, by recorded PID
-  (SIGTERM, a grace period, then SIGKILL);
-- `rehearsal_sftp.py stop` whenever a start was attempted, then a listing that no
-  `terrace-lease-sftp-*` user unit is left (a start interrupted before its receipt
-  is covered by the listing);
+  (SIGINT, SIGTERM, then SIGKILL, each after a grace period);
+- `rehearsal_sftp.py stop` whenever a start was attempted. The helper's unit names
+  are derived from this run's SFTP directory (`rehearsal_sftp.py units`), so the
+  driver then lists exactly this run's two units; any still loaded (a `start`
+  interrupted before it wrote its receipt, which `stop` needs) it stops itself by
+  those exact names with `systemctl --user stop` and lists them again. Another run's
+  units are never listed or stopped. Still loaded after that, or a listing that
+  fails: exit 3. The helper itself treats TERM and HUP like INT, so an interrupted
+  `start` stops what it launched before it exits;
 - the repository password file and its scratch `host-steps/`, each verified gone.
 
 A first signal interrupts the running step (it gets a receipt saying so); later
@@ -450,9 +458,19 @@ The evidence directory holds:
 
 SSH is always pinned: `StrictHostKeyChecking=yes`, no global known hosts, `BatchMode`,
 `IdentitiesOnly`, ed25519 host keys only, and no agent. Unit tests (CI):
-`python3 -B infra/nixos/test_lease_host_steps.py -v`; they drive each step's safety
-checks with a scripted host. Mutation check (any machine, a few minutes; every mutant
-must be killed): `python3 -B infra/nixos/host_steps_mutants.py`.
+`python3 -B infra/nixos/test_lease_host_steps.py -v`; they drive every step's body
+with a scripted host (a good transcript passes; each named assertion broken in turn
+fails the step). Mutation check (any machine, a few minutes; every mutant must be
+killed): `python3 -B infra/nixos/host_steps_mutants.py`.
+
+Asserted only by the VM rehearsal, not by a unit test: that the real hosts and tools
+answer as the scripted transcripts do. Among them: the installed sshd's refusals and
+its per-source penalties; the listeners and DHCP facts; the signatures read on the
+host; what `activate`, `rollback` and the boot loader really do for V1 to V5; the real
+reboots; restic against the real repository; TLS through the forward; sshd's restart
+in 5.4 and what the sessions see; that the pinned OpenSSH accepts `ssh-keygen -y -P ""`
+on the unencrypted installed host key (step 3.2's push uses it); and the SFTP helper and
+`systemctl --user` under interruption.
 
 What each step does, by the documented operator commands
 ([host updates](host-updates.md), [production profile](production-profile.md#cold-start-of-a-new-deployment)):
@@ -667,8 +685,10 @@ minutes, and the client key is only as safe as the time it is live. `forward` pr
 host, for example `-R 127.0.0.1:<port>:127.0.0.1:<port>`: it binds on the host's loopback only and ends at the
 endpoint's loopback port; the helper never opens it. Run the probe against the started endpoint before the real
 backup. `stop` stops both units and verifies that they are inactive, no process remains and the listener refuses
-connections; if it is forgotten the runtime limit ends the units. If `start` is killed between starting the units
-and writing the receipt, stop `terrace-lease-sftp-*` by exact unit name with `systemctl --user stop`.
+connections; if it is forgotten the runtime limit ends the units. The two unit names are derived from the run
+directory (`rehearsal_sftp.py units --directory RUN` prints them), and SIGTERM and SIGHUP end the helper like SIGINT,
+so an interrupted `start` stops what it launched. Only if it was killed outright (SIGKILL) between starting the units
+and writing the receipt: stop those two names with `systemctl --user stop`.
 
 **After `stop`, delete `RUN`** (it holds the private host key, the repository data and the log) **and the client
 private key**, by exact path, and verify both are gone (`test ! -e RUN`, `test ! -e CLIENT_PRIVATE_KEY`). Nothing is

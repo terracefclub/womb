@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import signal
+import subprocess
+import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -377,6 +381,57 @@ class StartTest(unittest.TestCase):
                 sftp.start(root, RCLONE, 600)
             self.assertIn("still running", str(caught.exception))
             self.assertFalse((root / sftp.RECEIPT).exists())
+
+
+class SignalTest(unittest.TestCase):
+    """An interrupted `start` must stop what it launched: TERM and HUP behave like INT (a real signal)."""
+
+    def test_term_and_hup_reach_the_clean_up(self):
+        child = textwrap.dedent(f"""
+            import sys, time
+            sys.path.insert(0, {str(Path(sftp.__file__).parent)!r})
+            import rehearsal_sftp as s
+            s.install_signal_handlers()
+            print("ready", flush=True)
+            try:
+                time.sleep(30)
+            except BaseException:
+                print("clean-up ran", flush=True)
+                sys.exit(7)
+        """)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                process = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True)
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                process.send_signal(sig)
+                out, _ = process.communicate(timeout=20)
+                self.assertEqual((process.returncode, out.strip()), (7, "clean-up ran"))
+
+    def test_an_interrupted_start_stops_both_units(self):
+        holder, root = StartTest.prepared(self)
+        with holder:
+            StartTest.run_start(self, root)
+
+            def interrupted(*_):
+                raise KeyboardInterrupt
+            with patch.object(sftp, "banner", side_effect=[None, KeyboardInterrupt()]):
+                with self.assertRaises(KeyboardInterrupt):
+                    sftp.start(root, RCLONE, 600)
+            unit, watcher = sftp.unit_names(root)
+            sftp.systemctl.assert_called_with("stop", unit, watcher, allow_inactive=True)
+            self.assertFalse((root / sftp.RECEIPT).exists())
+
+
+class UnitNameTest(unittest.TestCase):
+    def test_names_belong_to_one_run_directory(self):
+        holder_a, a = run_directory()
+        holder_b, b = run_directory()
+        with holder_a, holder_b:
+            ua, wa = sftp.unit_names(a)
+            ub, wb = sftp.unit_names(b)
+            self.assertEqual(sftp.unit_names(a), (ua, wa))
+            self.assertNotEqual(ua, ub)
+            self.assertTrue(sftp.UNIT.fullmatch(ua) and sftp.UNIT.fullmatch(wa) and wa == ua[:-8] + "-watch.service")
 
 
 class StopTest(unittest.TestCase):
