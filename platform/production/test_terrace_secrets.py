@@ -65,17 +65,23 @@ FAKES = {
     ''',
     "ssh-keygen": r'''
         path = sys.argv[sys.argv.index("-f") + 1]
+        if "-y" in sys.argv:
+            # The public key from the private key: this fake keeps it beside the private file.
+            print(open(path + ".fake-public").read().strip())
+            sys.exit(0)
         comment = sys.argv[sys.argv.index("-C") + 1]
         with open(path, "w") as handle:
             handle.write("-----BEGIN OPENSSH " + "PRIVATE KEY-----\n" + base64.b64encode(b"openssh-key-v1\0" + os.urandom(33)).decode() + "\n-----END OPENSSH " + "PRIVATE KEY-----\n")
         public = base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00 " + os.urandom(32)).decode()
         with open(path + ".pub", "w") as handle:
             handle.write(f"ssh-ed25519 {public} {comment}\n")
+        with open(path + ".fake-public", "w") as handle:
+            handle.write(f"ssh-ed25519 {public}\n")
     ''',
     "ssh-to-age": r'''
         if "-private-key" in sys.argv:
             path = sys.argv[sys.argv.index("-i") + 1]
-            print("AGE-SECRET-KEY-1SSH" + open(path + ".pub").read().split()[1])
+            print("AGE-SECRET-KEY-1SSH" + open(path + ".fake-public").read().split()[1])
         else:
             print(recipient(sys.stdin.read().split()[1]))
     ''',
@@ -596,6 +602,21 @@ class HostTest(Fixture):
         self.assertIn("Installed 12 encrypted secrets", self.ok("install", stdin=data))
         self.assertEqual(self.host_file.read_bytes(), data)
         self.assertEqual(stat.S_IMODE(self.host_file.stat().st_mode), 0o600)
+
+    def test_install_without_the_public_key_file(self):
+        """An installed host has only the private host key (the Rescue installer writes nothing else)."""
+        public = Path(str(tool.HOST_KEY) + ".pub")
+        public.unlink()
+        data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.assertIn("Installed 12 encrypted secrets", self.ok("install", stdin=data))
+        self.assertIn('/ssh-keygen", "-y", "-f", "' + str(tool.HOST_KEY) + '"]', self.argv_log())
+
+    def test_install_refuses_a_public_key_file_for_another_key(self):
+        public = Path(str(tool.HOST_KEY) + ".pub")
+        public.write_text("ssh-ed25519 " + "B" * 68 + " other\n")
+        data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.assertIn("does not match the host key", self.refused("install", stdin=data))
+        self.assertFalse(self.host_file.exists())
 
     def test_install_refusals_leave_the_host_file_alone(self):
         good = (self.store / "hosts/app/secrets.sops.json").read_bytes()
