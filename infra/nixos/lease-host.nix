@@ -1,7 +1,7 @@
 # One leased production app host on Hetzner Cloud (docs/cloud-rehearsal.md, "Production lease host"): the
 # production app role at `instance = "rehearsal"` with synthetic `.invalid` names, manual TLS from a run CA, the
 # Hetzner hardware module and the signed deploy path. It builds what `rescue_install.py` installs (generation V0,
-# described by `install`) and the update variants the lease activates (V1 to V4 and the release change), all from
+# described by `install`) and the update variants the lease activates (V1 to V5 and the release change), all from
 # run inputs passed on the command line and never committed: operator and deploy PUBLIC keys, the escrow
 # recipient, the run CA certificate and the throwaway backup endpoint's host key.
 {
@@ -138,6 +138,14 @@
           };
         };
       }
+    ];
+    # V5: a switch that fails at the boot loader step, before it switches anything (the boot loader is installed
+    # first), so the boot default would name a system that never ran: `activate` sets it back to the running system
+    # by itself (automatic revert, owner decision 2026-11-26). V4 cannot show that: its switch does switch (exit 4)
+    # and the new system runs. Extends V3, the system the lease runs again after rolling V4 back.
+    v5 = extend v3 [
+      (marker "v5")
+      {boot.loader.systemd-boot.extraInstallCommands = "echo 'terrace-lease V5: the boot loader step fails by design' >&2; exit 1";}
     ];
   };
   built = system: system.config.system.build;

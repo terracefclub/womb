@@ -783,19 +783,26 @@ in
     && !c.boot.loader.efi.canTouchEfiVariables
     && !c.boot.loader.grub.enable
     && c.disko.devices.disk.system.device == "/dev/sda") "Hetzner hardware module: DHCP, virtio drivers, boot loader or disk differ";
-  # The lease host: V0 to V3 hold every invariant; V4 breaks exactly one, its failing unit.
-  assert lib.assertMsg (lib.all (name: leaseViolations.${name} == []) ["v0" "v1" "release" "v2" "v3"]) "Lease host violations: ${builtins.toJSON leaseViolations}";
+  # The lease host: V0 to V3 and V5 hold every invariant; V4 breaks exactly one, its failing unit.
+  assert lib.assertMsg (lib.all (name: leaseViolations.${name} == []) ["v0" "v1" "release" "v2" "v3" "v5"]) "Lease host violations: ${builtins.toJSON leaseViolations}";
   assert lib.assertMsg (leaseViolations.v4 == ["boot services: terrace-lease-broken"]) "Lease V4 violations: ${toString leaseViolations.v4}";
   # Each variant changes only what its lease step exercises.
   assert lib.assertMsg (let
     p = lib.mapAttrs (_: bootParts) leaseSystems;
   in
-    p.v1 == p.v0 && p.release == p.v0 && p.v2.kernel == p.v0.kernel && p.v2.modules == p.v0.modules && p.v2.initrd != p.v0.initrd && p.v3 == p.v2 && p.v4 == p.v2) "Lease variants: kernel, initrd or modules differ unexpectedly";
+    p.v1 == p.v0 && p.release == p.v0 && p.v2.kernel == p.v0.kernel && p.v2.modules == p.v0.modules && p.v2.initrd != p.v0.initrd && p.v3 == p.v2 && p.v4 == p.v2 && p.v5 == p.v2) "Lease variants: kernel, initrd or modules differ unexpectedly";
   assert lib.assertMsg (let
     s = lib.mapAttrs (_: sshdConfig) leaseSystems;
   in
-    s.v1 == s.v0 && s.release == s.v0 && s.v2 == s.v0 && s.v3 != s.v2 && s.v4 == s.v3) "Lease variants: sshd configuration changes elsewhere than V3";
-  assert lib.assertMsg (lib.length (lib.unique (lib.mapAttrsToList (_: system: system.config.system.build.toplevel.drvPath) leaseSystems)) == 6) "Lease variants are not six distinct systems";
+    s.v1 == s.v0 && s.release == s.v0 && s.v2 == s.v0 && s.v3 != s.v2 && s.v4 == s.v3 && s.v5 == s.v3) "Lease variants: sshd configuration changes elsewhere than V3";
+  assert lib.assertMsg (lib.length (lib.unique (lib.mapAttrsToList (_: system: system.config.system.build.toplevel.drvPath) leaseSystems)) == 7) "Lease variants are not seven distinct systems";
+  # Only V5's boot loader step fails (its extra install command), and the others add none.
+  assert lib.assertMsg (lib.mapAttrs (_: system: system.config.boot.loader.systemd-boot.extraInstallCommands) leaseSystems
+    == lib.mapAttrs (name: _:
+      if name == "v5"
+      then "echo 'terrace-lease V5: the boot loader step fails by design' >&2; exit 1"
+      else "")
+    leaseSystems) "Lease variants: a boot loader install command other than V5's";
   assert lib.assertMsg (lib.all (name: let
     m = leaseManifest name;
     r =
@@ -819,4 +826,4 @@ in
   in
     t.repository == "sftp:terrace@127.0.0.1:app" && t.sftp.port == 22433 && c.environment.etc."terrace/backup/primary-known-hosts".text == "[127.0.0.1]:22433 ${operatorKey}\n") "Lease backup repository";
   assert lib.assertMsg (lease.installOutputs.device == "/dev/sda" && lease.installOutputs.role == "app" && toString lease.installOutputs.system == toString leaseSystems.v0.config.system.build.toplevel) "Lease install outputs";
-  assert lib.all lib.id negatives; "PASS: production app, static-network app, Hetzner-hardware app, relay and rehearsal instance (app, relay and rehearsal also with ACME) hold every invariant; the lease host and its variants V1 to V3 and the release change too, V4 fails only for its broken unit; ${toString (builtins.length negatives)} rejected variants"
+  assert lib.all lib.id negatives; "PASS: production app, static-network app, Hetzner-hardware app, relay and rehearsal instance (app, relay and rehearsal also with ACME) hold every invariant; the lease host and its variants V1 to V3, V5 and the release change too, V4 fails only for its broken unit; ${toString (builtins.length negatives)} rejected variants"
