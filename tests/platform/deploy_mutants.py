@@ -54,7 +54,7 @@ MUTANTS = [
     ("lock file made root-only in place", PRODUCTION, '  chmod 0600 "$lock"\n', "\n"),
     ("the switch's line is read by its exact text", PRODUCTION, "line=$(grep -m 1 '^warning: the following units failed: '", "line=$(grep -m 1 '^warning: the following units have failed: '"),
     ("the record waits for the gated units to settle", PRODUCTION, "    settle\n    if [[ $rc == 4 ]]", "    if [[ $rc == 4 ]]"),
-    ("the wait counts queued start jobs", PRODUCTION, '    elif [[ -n $jobs ]]; then\n      still_moving+=("jobs:', '    elif false; then\n      still_moving+=("jobs:'),
+    ("the wait counts queued start jobs", PRODUCTION, '    elif [[ -n $jobs ]]; then\n      # The unit column', '    elif false; then\n      # The unit column'),
     ("an unlistable job queue counts as queued", PRODUCTION, '      still_moving+=("jobs:unlistable")', "      :"),
     ("a release switch with the gate closed is always judged", PRODUCTION, "then gate_closed=1; fi", "then gate_closed=0; fi"),
     ("gated units not started fail the switch", PRODUCTION, 'elif [[ $state == inactive ]]; then not_started+=("$unit")', 'elif false; then not_started+=("$unit")'),
@@ -136,6 +136,10 @@ def main():
     for name, outcome in results:
         print(f"{outcome:9} {name}")
     survivors = [name for name, outcome in results if outcome != "killed"]
+    broken = [name for name, outcome in results if outcome.startswith("BROKEN")]
+    if broken:
+        # A mutant whose text is gone tests nothing: re-target it at the code that replaced the guard.
+        print(f"BROKEN mutants (their text no longer occurs exactly once; this run is a failure): {', '.join(broken)}")
     print(f"{len(results) - len(survivors)} of {len(results)} mutants killed")
     return 1 if survivors else 0
 
