@@ -42,6 +42,12 @@ case "$1" in
       "-p ConditionResult --value") echo no ;;
       "-p MainPID -p NRestarts --value") printf '1\n0\n' ;;
       "-p Result --value") echo success ;;
+      # A unit's invocation: by default a new one after every switch (the switch ran it, so a failed unit listed after a
+      # switch counts as one the switch broke); constant for a unit in $FAKE_DIR/untouched (failed before, left alone).
+      "-p InvocationID --value")
+        if [[ -e $FAKE_DIR/invocation-$unit ]]; then cat "$FAKE_DIR/invocation-$unit"
+        elif grep -qsxF "$unit" "$FAKE_DIR/untouched"; then echo invocation-0
+        else echo "invocation-$(cat "$FAKE_DIR/switch-count" 2>/dev/null || echo 0)"; fi ;;
       *) exit 99 ;;
     esac ;;
   is-failed) [[ $2 == --quiet && $(state "$3") == failed ]] ;;
@@ -99,6 +105,8 @@ class Harness(unittest.TestCase):
             "terrace-secrets": '[[ $1 == verify ]] && echo "terrace-secrets verify: PASS"\n',
             # No waiting; a test can make time pass by changing unit states at each sleep ($FAKE_DIR/on-sleep).
             "sleep": 'if [[ -e $FAKE_DIR/on-sleep ]]; then . "$FAKE_DIR/on-sleep"; fi\nexit 0\n',
+            # Not among the host tool's runtime inputs (base.nix): inside the terrace-switch unit it is not on PATH.
+            "awk": 'echo "awk: not a runtime input of terrace-production" >&2\nexit 127\n',
             # cut is used by the stub only.
             "cut": f'exec {shutil.which("cut") or "/usr/bin/cut"} "$@"\n',
         }
@@ -283,7 +291,7 @@ exit $rc
 case $3 in
   --set) n=0; for l in "$profile"-*-link; do [[ -L $l ]] || continue; k=${l%-link}; k=${k##*-}; (( k > n )) && n=$k; done; n=$((n + 1))
          ln -s "$4" "$profile-$n-link"; ln -sfn "${profile##*/}-$n-link" "$profile" ;;
-  --switch-generation) [[ -L $profile-$4-link ]] || exit 1; ln -sfn "${profile##*/}-$4-link" "$profile" ;;
+  --switch-generation) [[ -L $profile-$4-link && ! -e $FAKE_DIR/switch-generation-fails ]] || exit 1; ln -sfn "${profile##*/}-$4-link" "$profile" ;;
   *) exit 99 ;;
 esac
 """,
@@ -299,6 +307,14 @@ except OSError:
 if [[ -e $FAKE_DIR/race ]]; then ln -sfn "$(cat "$FAKE_DIR/race")" "$FAKE_DIR/current-system"; fi
 while [[ $1 != -- ]]; do shift; done
 shift
+# A unit stopped in the middle of its switch (`systemctl stop terrace-switch.service`): systemd counts the SIGTERM as a
+# clean exit, so `systemd-run --wait` returns 0 (seen in the update drill). The switch stub sends the signal.
+if [[ -e $FAKE_DIR/stop-mid-switch ]]; then
+  "$BASH_BIN" -euo pipefail "$@" &
+  echo $! >"$FAKE_DIR/unit.pid"
+  wait $! || true
+  exit 0
+fi
 exec "$BASH_BIN" -euo pipefail "$@"
 """,
     # psql as postgres: the CMS database exists while $FAKE_DIR/ledger does; its lines are the ledger.
@@ -347,6 +363,8 @@ class DeployPath(Harness):
             (path / "bin").mkdir()
             (path / "bin" / "switch-to-configuration").write_text(
                 f"#!{BASH}\necho \"{name} $1\" >>\"$FAKE_DIR/switch.log\"\n"
+                + "echo $(( $(cat \"$FAKE_DIR/switch-count\" 2>/dev/null || echo 0) + 1 )) >\"$FAKE_DIR/switch-count\"\n"
+                + "if [[ -e $FAKE_DIR/stop-mid-switch ]]; then kill -TERM \"$(cat \"$FAKE_DIR/unit.pid\")\"; sleep 1; fi\n"
                 # The gated CMS and website the switch starts (through terrace-production.target): refused by their gate (failed)
                 # when the marker exists and is not this system's revision; otherwise left as they were (a running unit is
                 # not modelled). Off with $FAKE_DIR/no-gate-emulation, for tests that set unit states themselves.
@@ -534,12 +552,48 @@ class DeployPath(Harness):
         result = self.run_tool("activate", str(broken))
         self.assertEqual(result.returncode, 1)
         self.assertIn("activate FAILED (exit 1)", result.stderr)
-        self.assertEqual(self.records()[-1]["result"], "failed (exit 1)")
-        # As with nixos-rebuild, the generation is registered before the switch: the boot default moved.
-        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-2-link", str(self.old)))
+        record = self.records()[-1]
+        self.assertEqual(record["result"], "failed (exit 1)")
+        # The generation was registered before the switch (as nixos-rebuild does), and the switch failed before the new
+        # system ran: the command made the running system the boot default again, in the same unit, and recorded it.
+        self.assertEqual((record["generationAfter"], record["revert"], record["bootDefaultAfter"]), ("2", {"from": "2", "to": "1", "result": "success"}, "1"))
+        self.assertEqual((self.generation(), os.readlink(self.current)), ("system-1-link", str(self.old)))
+        self.assertTrue((self.profiles / "system-2-link").is_symlink(), "the failed generation stays in the list")
+        self.assertEqual((self.dir / "switch.log").read_text(), "broken switch\nold boot\n")
+        self.assertIn("the boot default was set back to generation 1, the running system; generation 2 stays in the list, recorded as failed", result.stderr)
         status = self.accepted("status").stdout
-        self.assertIn(f"WARNING: the boot default, generation 2 ({broken}), is not the running system: a reboot boots generation 2.", status)
+        self.assertNotIn("WARNING", status)
         self.assertIn('"result":"failed (exit 1)"', status)
+        # Never in boot mode: a pending boot default is what --boot asks for, also when its boot step fails.
+        boot = self.system("broken-boot", website=NEW_REV, migrations=M_NEW, switch_rc=1)
+        result = self.run_tool("activate", str(boot), "--boot")
+        self.assertEqual((result.returncode, self.records()[-1]["revert"], self.generation()), (1, None, "system-3-link"))
+        self.assertIn(f"WARNING: the boot default, generation 3 ({boot}), is not the running system", self.accepted("status").stdout)
+
+    def test_a_revert_that_fails_is_recorded_and_left_to_the_operator(self):
+        broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
+        # The running system's own boot step fails too (the boot loader cause is still there).
+        (self.dir / "on-switch").write_text("if [[ $1 == boot ]]; then exit 7; fi\n")
+        result = self.run_tool("activate", str(broken))
+        record = self.records()[-1]
+        self.assertEqual((result.returncode, record["result"], record["revert"]), (1, "failed (exit 1)", {"from": "2", "to": "1", "result": "failed (exit 7)"}))
+        self.assertIn("WARNING: setting the boot default back to the running system did not work (failed (exit 7))", result.stderr)
+        self.assertIn("the boot menu may still default to generation 2", result.stderr)
+        self.assertEqual((self.dir / "switch.log").read_text(), "broken switch\nold boot\n", "one attempt, no loop")
+        self.assertIn("WARNING: the last switch failed and setting the boot default back to the running system did not work", self.accepted("status").stdout)
+        # The profile step failing instead: the boot default stays the failed generation; once the cause is fixed, the
+        # manual fallback (rollback, which cancels a pending boot default) works.
+        (self.dir / "on-switch").unlink()
+        (self.dir / "switch-generation-fails").touch()
+        again = self.system("broken-again", website=NEW_REV, migrations=M_NEW, switch_rc=1)
+        result = self.run_tool("activate", str(again))
+        self.assertEqual((result.returncode, self.records()[-1]["revert"]["result"], self.generation()), (1, "failed (exit 1)", "system-3-link"))
+        self.assertIn("the boot default is still generation 3, which a reboot would boot", result.stderr)
+        status = self.accepted("status").stdout
+        self.assertIn("WARNING: the boot default, generation 3", status)
+        (self.dir / "switch-generation-fails").unlink()
+        self.assertIn("the boot default goes back to generation 1", self.accepted("rollback").stdout)
+        self.assertEqual(self.generation(), "system-1-link")
 
     def test_a_release_switch_with_the_gate_closed(self):
         # switch-to-configuration exits 4 when units failed: here the CMS and the website, both refused by their migration
@@ -660,6 +714,46 @@ class DeployPath(Harness):
         self.accepted("activate", str(gated))
         self.assertEqual((self.records()[-1]["result"], self.records()[-1]["unexpectedUnits"]), ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", []))
 
+    def test_a_failed_migration_unit_is_reset_before_a_switch(self):
+        # Left failed by a failed or timed-out migration: recorded in failedBefore and reset, so the corrected build's
+        # activation (fixing forward) is not judged by it.
+        self.set_unit("terrace-cms-migrate.service", "failed")
+        (self.dir / "failed-units").write_text("terrace-cms-migrate.service loaded failed failed migration\n")
+        corrected = self.system("corrected", website=NEW_REV, migrations=M_NEW, switch_rc=4)
+        self.accepted("activate", str(corrected))
+        started, finished = self.records()[-2:]
+        self.assertEqual(started["failedBefore"], ["terrace-cms-migrate.service"])
+        self.assertEqual((finished["result"], finished["unexpectedUnits"], finished["preexistingFailedUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", [], []))
+        self.assertIn("terrace-cms-migrate.service", (self.dir / "reset-failed.log").read_text())
+
+    def test_units_failed_before_the_switch_and_left_alone_are_a_warning(self):
+        # nginx failed before the switch; the switch did not run it again (same invocation): exit 4 is explained by it.
+        (self.dir / "failed-units").write_text("nginx.service loaded failed failed nginx\n")
+        (self.dir / "untouched").write_text("nginx.service\n")
+        same = self.system("same", switch_rc=4, reported="nginx.service")
+        result = self.accepted("activate", str(same))
+        record = self.records()[-1]
+        self.assertEqual((record["result"], record["switchExit"], record["unexpectedUnits"], record["preexistingFailedUnits"]), ("success", 4, [], ["nginx.service"]))
+        self.assertIn("WARNING: already failed before this switch and left untouched by it, so not counted against it: nginx.service", result.stderr)
+        # With the gate closed too: switched with the CMS and website down, nginx a warning.
+        gated = self.system("gated", website=NEW_REV, migrations=M_NEW, switch_rc=4, reported="terrace-cms.service, nginx.service")
+        self.accepted("activate", str(gated))
+        self.assertEqual((self.records()[-1]["result"], self.records()[-1]["preexistingFailedUnits"]),
+                         ("switched; down until the CMS migration: terrace-cms.service terrace-web.service", ["nginx.service"]))
+        self.accepted("activate", str(self.old))
+        # Control: the same unit run again by the switch (a new invocation) and failed again: a failed switch.
+        (self.dir / "untouched").unlink()
+        again = self.system("again", switch_rc=4, reported="nginx.service")
+        result = self.run_tool("activate", str(again))
+        self.assertEqual((result.returncode, self.records()[-1]["result"], self.records()[-1]["unexpectedUnits"], self.records()[-1]["preexistingFailedUnits"]),
+                         (1, "failed (exit 4)", ["nginx.service"], []))
+        # Exit 4 with nothing failed at all is still not explained.
+        (self.dir / "failed-units").write_text("")
+        self.accepted("activate", str(self.old))
+        bare = self.system("bare", switch_rc=4)
+        self.assertEqual((self.run_tool("activate", str(bare)).returncode, self.records()[-1]["result"]), (1, "failed (exit 4)"))
+
     def test_one_command_at_a_time(self):
         lock = self.state / "deploy.lock"
         lock.touch(mode=0o600)
@@ -698,10 +792,9 @@ class DeployPath(Harness):
         self.assertEqual((self.records()[-1]["action"], self.records()[-1]["mode"], self.records()[-1]["result"]), ("cancel", "boot", "success"))
         self.assertNotIn("WARNING", self.accepted("status").stdout)
         # The same after a switch that failed after registering its generation.
+        # After a switch that failed after registering its generation, the command itself set the boot default back.
         broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
         self.assertEqual(self.run_tool("activate", str(broken)).returncode, 1)
-        self.assertEqual(self.generation(), "system-3-link")
-        self.accepted("rollback")
         self.assertEqual((self.generation(), os.readlink(self.current)), ("system-1-link", str(self.old)))
         self.assertNotIn("WARNING", self.accepted("status").stdout)
 
@@ -744,10 +837,10 @@ class DeployPath(Harness):
         self.assertEqual(oct((self.state / "deploy.lock").stat().st_mode & 0o777), "0o600")
 
     def test_rollback_skips_a_failed_attempts_generation(self):
-        # activate X fails after registering generation 2; rollback cancels it; activate Y makes generation 3.
+        # activate X fails after registering generation 2 (the boot default is set back at once); activate Y makes generation 3.
         broken = self.system("broken", website=NEW_REV, migrations=M_NEW, switch_rc=1)
         self.assertEqual(self.run_tool("activate", str(broken)).returncode, 1)
-        self.accepted("rollback")
+        self.assertEqual(self.generation(), "system-1-link")
         self.accepted("activate", str(self.new))
         self.assertEqual(self.generation(), "system-3-link")
         status = self.accepted("status").stdout
@@ -813,6 +906,25 @@ class DeployPath(Harness):
         self.assertIn(f"Checks passed; rollback {self.new} (", out)
         result = self.accepted("rollback", "--generation", "3", "--dry-run")
         self.assertIn("WARNING: generation 3 was chosen explicitly; its last record: unfinished (started", result.stderr)
+
+    def test_a_switch_unit_stopped_mid_switch_is_not_a_success(self):
+        # `systemctl stop terrace-switch.service` mid-switch: systemd-run --wait returns 0, and only the missing finished
+        # record shows that the switch never ended (update drill, platform/production/update-drill-test.nix).
+        (self.dir / "stop-mid-switch").touch()
+        result = self.run_tool("activate", str(self.new))
+        self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
+        self.assertIn("the terrace-switch unit ended without writing its finished record (stopped or killed mid-switch)", result.stderr)
+        self.assertIn("terrace-production: activate FAILED (exit 1).", result.stderr)
+        self.assertNotIn("Running generation", result.stdout)
+        self.assertEqual([record["phase"] for record in self.records()], ["started"])
+        self.assertIn('"phase":"started"', result.stdout, "the client prints the started record it found")
+        status = self.accepted("status").stdout
+        self.assertIn("WARNING: the last activation started at", status)
+        # Control: the same activation, not stopped, succeeds.
+        (self.dir / "stop-mid-switch").unlink()
+        self.current.unlink()
+        self.current.symlink_to(self.old)
+        self.accepted("activate", str(self.new))
 
     def test_rollback_generation_only_goes_back(self):
         self.accepted("activate", str(self.new))

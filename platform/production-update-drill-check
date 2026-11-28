@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Run the production update drill on the x86_64 Linux builder.' >&2; exit 1; }
+: "${BUILD_LOCK:?set the shared build lock path}"
+[[ $# == 5 && -f $1 && -f $2 && -d $3 && -f $4 && -f $5 ]] || { echo 'usage: platform/production-update-drill-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE PREVIOUS_WEB_ARCHIVE PREVIOUS_CMS_ARCHIVE' >&2; exit 2; }
+web_archive=$(realpath "$1")
+cms_archive=$(realpath "$2")
+tfc_source=$(realpath "$3")
+previous_web=$(realpath "$4")
+previous_cms=$(realpath "$5")
+cd "$(dirname "$0")"
+exec ./run-check --impure --file production-update-drill-check.nix \
+  --argstr webArchive "$web_archive" --argstr cmsArchive "$cms_archive" --argstr tfcSource "$tfc_source" \
+  --argstr previousWebArchive "$previous_web" --argstr previousCmsArchive "$previous_cms"

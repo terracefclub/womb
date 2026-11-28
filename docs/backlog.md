@@ -533,12 +533,12 @@ From the written [host updates](host-updates.md) procedure. None is done in that
 pull request; the deploy path pull request (2026-11-24) closes or narrows the items
 marked so.
 
-- Decide (owner, before any production install): how a new system closure reaches
-  an installed production host. **Narrowed 2026-11-24**: option 1 (a signing key
-  trusted by the host) now exists as an opt-in, `terrace.production.deploy.trustedKeys`
-  ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)),
-  VM-proven on the app role; the owner has not chosen it, and the decision stays
-  open. SSH accepts only `operator` (`AllowUsers operator`,
+- Decided by the owner on 2026-11-26: a new system closure reaches an installed
+  production host by the signed deploy path (option 1: a signing key trusted by the
+  host, `terrace.production.deploy.trustedKeys`,
+  [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+  It stays a setting that the module a host is installed with must carry, and it has
+  run only in VMs. History: built 2026-11-24 as an opt-in, then not chosen. SSH accepts only `operator` (`AllowUsers operator`,
   `PermitRootLogin no`, `platform/production/base.nix`), `operator` is not a trusted
   Nix user and signatures are required (nixpkgs defaults, unchanged by the
   production modules), and nothing in the repository copies or activates a closure
@@ -598,8 +598,28 @@ marked so.
   a failed attempt (so no generation's gate opens), and whether 180 s is right for
   real data (measured only on empty or small synthetic databases). **Narrowed
   2026-11-24**: `terrace-production rollback` refuses, with no flag, when the ledger
-  holds a migration the target lacks while the marker holds the target's revision
-  (unit test); a migration killed before it recorded anything is not detected.
+  holds a migration the target lacks while the marker holds the target's revision.
+  **Ran in a VM 2026-11-27** (update drill, one release pair, synthetic data): a
+  migration that failed on a conflicting object and one killed at its limit before
+  its commit left the ledger and schema unchanged (Payload commits each migration in
+  its own transaction), and the tool then allows a plain `rollback` (nothing in the
+  database shows a change; the fix-forward or restore decision stays the owner's); one
+  killed after its commit (H9, reached by holding the commit on an absent synchronous
+  standby) left the migration in the ledger and the old marker, and every way back to
+  the old release was refused with no flag. Still open: a migration that leaves a
+  half-applied change inside one transaction is impossible by this mechanism, but a
+  release with a non-transactional step is not covered; the 180 s limit on real data.
+- Gap in the website release, found by the update drill (2026-11-27), not fixed in
+  Womb: a CMS migration that fails writes nothing to `terrace-cms-migrate.service`'s
+  journal. In the pinned bundle Payload's migration runner logs through the Payload
+  logger and calls `process.exit(1)` itself
+  (`node_modules/@payloadcms/drizzle/dist/migrate.js`); website
+  `cms/tools/release-migrate.ts` (`dd1aef7`) sets that logger to `silent`, so its own
+  `CMS release migration failed; ...` line never runs. The operator sees only the
+  unit's `Result=exit-code`, `ExecMainStatus=1`. Fixed in the website at tfc-website dev `57b4649`
+  (tfc-website #26: one redacted stderr line `CMS release migration <name> failed
+  (<ErrorClass> <SQLSTATE>): <reason>.`); it reaches hosts when Womb's pin moves past
+  it, which then flips the update drill's A1 assertion (no line today).
 - Not determined, needs a test: what sops-nix does at activation when the new
   manifest declares a name the delivered ciphertext lacks (expected failure of
   `sops-install-secrets`; whether the previous secrets stay), and whether a push's
@@ -608,23 +628,60 @@ marked so.
 - Drill: the 16 items in the document's "Drills to add". **Narrowed 2026-11-24**:
   the deploy VM rehearsal covers drills 2, 3 (one release pair, small synthetic
   data), 4 (without the sweep and tool refusals), 5, 6 (without H1) and 15, and drill
-  1 for the app role without backup, realm and secrets steps. Open: the rest.
+  1 for the app role without backup, realm and secrets steps. **Narrowed 2026-11-27**:
+  the update drill covers drill 7 (a failed and a timed-out migration, with the limit
+  lowered to 60 s in the failing build) and drill 12 without peers. Open: the rest.
 - Drill: a reboot into a new generation and `activate --boot` (kernel change). A
   NixOS test VM boots its first system directly, not through the boot loader, so
   the deploy proof cannot show it; it needs a VM with `useBootLoader` or a lease.
   The kernel guard is unit-tested only.
-- Drill: the relay's update through the deploy path, with Headscale peers
-  reconnecting (the deploy proof only builds the relay's closure to show `activate`
-  refuses it on the app).
+- Drill: the relay's update through the deploy path. **Ran in a VM 2026-11-27**
+  (update drill): signed copy, dry run, activation over SSH, record and `status`,
+  Headscale restarted with its keys and users unchanged, HTTPS health, a broken-unit
+  switch recorded `failed (exit 4)`, two real rollbacks. Open: Headscale peers
+  reconnecting (no clients in that drill), a Headscale version change.
+- Docs/procedure, found by the update drill (2026-11-27): every `activate` and
+  `rollback` starts `terrace-production.target` again (nixpkgs' switch restarts every
+  active target), which starts the timers step 6 stopped. The document now says to
+  stop them again after each; whether the command should keep stopped timers stopped
+  is a design question, not settled.
+- Upstream behaviour met by the update drill (2026-11-27): a switch started while
+  `operator`'s systemd user manager is stopping (about 10 s after the last SSH
+  session) fails its user activation and exits 4 with no failed unit; the command
+  records `failed (exit 4)`. Not reproduced on purpose; the drill waits for the user
+  manager to stop before its switches.
 - Drill: the bootstrap route for a host installed without a deploy key (export,
   `sudo nix-store --import`, the raw step 7 commands), and key rotation with two
   trusted keys ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   written, not run.
-- Decide (reviewer, then owner): whether `terrace-production activate` should set the
-  system profile back to the previous generation when `switch-to-configuration`
-  fails (today it leaves the failed generation as the boot default, as
-  `nixos-rebuild` does; `status` warns, and the host updates document gives the
-  manual commands, not run).
+- Done 2026-11-26 (the owner decided on 2026-11-26 that it should be automatic): when
+  `terrace-production activate` or `rollback` in `switch` mode ends neither as success
+  nor as a gated switch while the profile is not `/run/current-system` (the running
+  system was not replaced), the command makes the running system the boot default
+  again, inside the same unit, once, and records it (`revert`, `bootDefaultAfter`);
+  never after a success or a gated switch, never with `--boot`
+  ([host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)).
+  It sets the boot default back and undoes nothing else an aborted activation already
+  changed (stopped units, files under `/etc`). A switch unit stopped mid-switch is only
+  reported (`rollback` cancels by hand). No reboot after the revert is verified.
+- Open defect found in review of PR 87 (READ, not reproduced): `untouched()` in
+  `terrace-production.sh` counts a unit as untouched when it was failed before the
+  switch and is still failed with the same `InvocationID`, or with an empty one before
+  and after, including when the switch did try to start it and the start job failed
+  without creating a new invocation (a failed dependency, a failed assert). An exit-4
+  switch can then be recorded `success` with only the `preexistingFailedUnits`
+  warning, and its generation stays eligible for `rollback`. Intended fix: an empty
+  `InvocationID` is never "untouched"; a unit that the switch's own "the following
+  units failed" line names is judged by more than its invocation; unit tests for both
+  (the test stub always prints an invocation). To be fixed together with the next
+  change to the script (the website pin move, which reruns the drills anyway).
+- Notes from the same review, for that change: tighten the client's revert sentence
+  ("the switch failed before the new system ran" is looser than the test); `status`
+  prints a misleading revert warning if the last record line is torn; the migration
+  unit's failure is cleared from `systemctl --failed` by any later switch and survives
+  only as `failedBefore` in the started record; tests wanted for a failure after `/etc`
+  is rewritten but before `/run/current-system` moves; and the H10 question, whether
+  `activate` and `rollback` should keep stopped timers stopped.
 - Done 2026-11-25 (deploy path follow-ups, found in review round 2 of the deploy
   path pull request; [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)):
   `rollback` passes over a generation whose last finished record is a failure
@@ -653,9 +710,12 @@ marked so.
   - A slow start job for any writer under the target, not only the CMS or website,
     holds the wait for up to 300 s, and the attempt then ends as a named timeout
     failure (`waitTimedOut`, `stillStarting`).
-- Decide (owner): whether to keep an offline spare deploy key trusted from the
-  first install ([secrets](secrets.md#deploy-signing-key)); without it, a lost key
-  means the manual bootstrap route.
+- Decided by the owner on 2026-11-26: keep an offline spare deploy key, trusted by
+  every host from its first install (two public keys in `deploy.trustedKeys`;
+  [secrets](secrets.md#deploy-signing-key)). Losing the working key is then not an
+  outage; the manual bootstrap route remains only for losing both. A build signed by
+  the second key only is activated in the update drill (VM); the spare's custody and
+  a real loss are not exercised.
 - Docs: the owner runbook's 9.7 is labelled TESTED IN CODE ONLY while G-37 calls
   9.7 NOT YET BUILT; 6.15 ("Deploy a release") is labelled PROVEN IN VM REHEARSAL
   but its evidence migrates and starts a host built with the release, not a release

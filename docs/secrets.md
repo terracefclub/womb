@@ -361,8 +361,9 @@ the new key and `push`.
 
 ## Deploy signing key
 
-Only when the opt-in deploy path is used ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in);
-the owner has not chosen it). It is a new secret, separate from every value above:
+For the signed deploy path ([host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)),
+which the owner chose on 2026-11-26 as the way builds reach the hosts; it is still a
+setting a host must have, and has run only in VMs. It is a new secret, separate from every value above:
 the host never receives it and `terrace-secrets` does not manage it. Written
 procedure, NOT RUN outside the VM proof (which makes its keys at build time).
 
@@ -378,11 +379,18 @@ procedure, NOT RUN outside the VM proof (which makes its keys at build time).
   group or others can read.
 - **Who may sign**: `nix store sign` writes into the build machine's store, so the
   user must be root or trusted by its Nix daemon.
-- **Backup**: none of the secret half. Instead keep a **second, offline key** (same
-  commands on an offline machine, stored with the escrow key) and trust both public
-  halves from the first install; the spare signs only when the main key is lost.
-  Whether to keep a spare is the owner's choice; without one, a lost key means the
-  manual bootstrap route of the host updates document.
+- **Backup**: none of the secret half. Instead a **second, offline key**: the owner
+  decided on 2026-11-26 to keep one, trusted by every host from its first install.
+  In practice: generate two keys (the second with the same commands on an offline
+  machine, numbered `-2`, stored with the escrow key), put **both** public halves in
+  `terrace.production.deploy.trustedKeys` of every host module before the host is
+  installed, and sign only with the working key. Losing the working key is then not
+  an outage: sign with the spare and rotate ("Loss" below). The manual bootstrap
+  route of the host updates document remains only for losing both. Evidence: the
+  update drill (`platform/production/update-drill-test.nix`, VM, synthetic data)
+  activates on a host trusting two deploy keys a build signed by the second one
+  only; the spare's offline custody and its use after a real loss are written, not
+  run.
 - **Loss, leak and rotation**: [host updates, section 1.5](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in),
   "Losing or replacing the signing key". A leaked key alone does not reach a host:
   copying still needs the `operator` login and activation needs `sudo`.

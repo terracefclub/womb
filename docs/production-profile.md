@@ -340,9 +340,16 @@ procedure (G-22); this rehearsal is its technical basis.
 - Runtime behaviour after adoption: the 15-second stability window runs at
   adopt time only. A writer that fails after a later reboot shows in
   `systemctl --failed` and nowhere else until alerting exists (G-23).
-- The relay role's replacement and its reboot are not exercised in the VM (only
-  its first boot, delivery, adoption, listeners and a backup); the app role's
-  are.
+- The relay role's replacement and its reboot are not exercised by this VM proof
+  (only its first boot, delivery, adoption, listeners and a backup). The restore
+  promotion drill (`platform/production-promotion-check`, PR 81, five passes of
+  five at `f5fd61c`, 2026-11-25) does exercise them in a VM: the relay lost with
+  its disk, re-keyed, restored, its Headscale keys, database and users checked,
+  a failed then resumed `adopt --restored`, its held timers across a reboot, a
+  first backup and `arm-timers` (synthetic data, no Headscale clients; see
+  [restore promotion](restore-promotion.md#5-the-promotion-drill)). Its update to
+  a new system through the deploy path is in the update drill
+  (`platform/production-update-drill-check`, [host updates](host-updates.md)).
 
 ## Building a host
 
@@ -416,6 +423,11 @@ create` made. See [cloud rehearsal](cloud-rehearsal.md#production-lease-host-pre
   `python3 -B tests/platform/test_terrace_deploy.py -v`; mutation check (any
   machine, several minutes): `python3 -B tests/platform/deploy_mutants.py`. What it
   proves: [host updates](host-updates.md#15-the-deploy-path-option-1-of-u0-opt-in)
+- Update drill (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-update-drill-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE PREVIOUS_WEB_ARCHIVE PREVIOUS_CMS_ARCHIVE`,
+  the same five inputs as the deploy check: the relay's update and rollbacks, rollbacks
+  past failed and unfinished generations, a failed switch set back automatically, failed
+  and timed-out migrations and fixing forward
+  ([host updates, section 1.6](host-updates.md#16-the-update-drill-what-ran-and-what-it-changed-here)); run by hand, not in CI
 - Restore promotion drill (builder): `BUILD_LOCK=/path/to/shared-heavy.lock platform/production-promotion-check WEB_ARCHIVE CMS_ARCHIVE TFC_SOURCE`,
   the written [restore promotion](restore-promotion.md#5-the-promotion-drill)
   procedure run with its own commands on both roles; unit test (CI):
@@ -441,9 +453,11 @@ with 199 assertions, including the 198 shared protocol assertions, the
 unchanged original and replacement lifecycle steps and one boot of the
 production relay role; the cloud rehearsal check still passes. The
 all-services rehearsal passed at `2ce39bb`, after which no shared module
-changed. The relay role has been booted only in that VM proof (secrets, an
+changed. The relay role was then booted only in that VM proof (secrets, an
 unreachable-repository refusal and the named override, adoption, Headscale,
-HTTPS, redirect, backup), never on a provider. Not proven: a real provider
+HTTPS, redirect, backup); since then the restore promotion drill (2026-11-25)
+also replaced and rebooted it in a VM, and the update drill updated and rolled
+it back in a VM. It has never run on a provider. Not proven: a real provider
 host, real DNS and certificates, real secret values or an escrow retrieval with
 the owner. Since `bb0d526` (a test-only fix, PR 55) the production VM proof has
 200 assertions; the figure above is the dated run at `cbf129f`. The VM proofs
