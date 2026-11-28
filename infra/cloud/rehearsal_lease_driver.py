@@ -860,10 +860,26 @@ def check_inputs(cfg, runner, *, at_run=False):
     if (not isinstance(variants, dict) or set(variants) != set(names) or variants["v0"] != outputs["system"]
             or not all(isinstance(v, str) and rescue_install.STORE.fullmatch(v) for v in variants.values())):
         raise Refused("G6: variants are not lease-host.nix's `variants` for this install")
-    paths = [outputs["system"], outputs["disko"], outputs["installer"], *(variants[n] for n in names[1:])]
+    labelled = [("V0 system (install)", outputs["system"]), ("Disko script (install)", outputs["disko"]),
+                ("installer (install)", outputs["installer"]), *((f"variant {n}", variants[n]) for n in names[1:])]
+    paths = [path for _, path in labelled]
+    # Nix picks the command by the name it is called by: the resolved `nix` binary given as --nix-store is `nix`,
+    # which has no --check-validity (seen in the integration check, 2026-11-28).
+    if Path(cfg.nix_store).name != "nix-store":
+        raise Refused(f"--nix-store {cfg.nix_store} is not called nix-store: give the nix-store link itself (Nix selects "
+                      "the command by the name it is called by), not the path it resolves to")
     code, _ = runner.run([cfg.nix_store, "--check-validity", *paths], 120, label="plan-store-validity", env=env, cwd=str(R))
     if code:
-        raise Refused("G6: a prestaged store path is missing (a build would be needed inside the lease)")
+        missing = []
+        for role, path in labelled:
+            single, _ = runner.run([cfg.nix_store, "--check-validity", path], 60, label="plan-store-validity-path",
+                                   env=env, cwd=str(R))[:2]
+            if single:
+                missing.append(f"{role} {path}")
+        raise Refused("G6: prestaged store paths missing or not valid on this machine (a build would be needed inside "
+                      "the lease): " + ("; ".join(missing) if missing else "none singly; the set check failed (is "
+                                        "--nix-store working?)") + ". Build `install` and `variants` of "
+                      "lease-host.nix as the out-links RUN/lease and RUN/variants (step 0.7)")
     for link in (cfg.install_outputs, cfg.variants):
         code, output = runner.run([cfg.nix_store, "--query", "--roots", os.path.realpath(link)], 120,
                                   label="plan-store-roots", env=env, cwd=str(R))
@@ -925,6 +941,28 @@ def make_plan(cfg, runner, start, *, at_run=False):
                        "plannedEnd": stamp(end), "expiresAt": stamp(start + PRE_ARM_SECONDS + LEASE_SECONDS),
                        "forbidden": [SWEEP[2], BLOCK[2]]},
             "checks": checks}
+
+
+def changed_tools(approved, current):
+    """Which tools' bindings changed, and in what (field names only). A reboot or a system switch of the build machine
+    rebuilds /run/wrappers, so a setuid wrapper bound by its attributes changes device, inode and mtime: make and
+    approve the plan again."""
+    before = approved.get("inputs", {}).get("tools", {})
+    after = current.get("inputs", {}).get("tools", {})
+    parts = []
+    for name in sorted(set(before) | set(after)):
+        old, new = before.get(name, {}), after.get(name, {})
+        if old == new:
+            continue
+        fields = sorted(key for key in set(old) | set(new) if key != "attributes" and old.get(key) != new.get(key))
+        if "attributes" in old or "attributes" in new:
+            a, b = old.get("attributes") or {}, new.get("attributes") or {}
+            fields += sorted(f"attributes.{key}" for key in set(a) | set(b) if a.get(key) != b.get(key))
+        parts.append(f"{name} ({', '.join(fields) or 'binding'})")
+    if not parts:
+        return ""
+    return ("; tools whose binding changed: " + "; ".join(parts) + ". A reboot or system update of the build machine "
+            "rebuilds the setuid wrappers: make and approve the plan again")
 
 
 def approval_view(plan):
@@ -1286,7 +1324,8 @@ class Driver:
         approved = json.loads(data)
         current = make_plan(self.cfg, self.runner, self.now())
         if approval_view(current) != approval_view(approved):
-            raise Refused("inputs, tools, steps or teardown changed since the plan was approved")
+            raise Refused("inputs, tools, steps or teardown changed since the plan was approved"
+                          + changed_tools(approved, current))
         return current
 
     def armed(self):

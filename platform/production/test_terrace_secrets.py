@@ -66,7 +66,10 @@ FAKES = {
     "ssh-keygen": r'''
         path = sys.argv[sys.argv.index("-f") + 1]
         if "-y" in sys.argv:
-            # The public key from the private key: this fake keeps it beside the private file.
+            # The public key from the private key: this fake keeps it beside the private file. A key marked
+            # protected fails as ssh-keygen does with an empty passphrase (-P "").
+            if os.path.exists(path + ".protected"):
+                sys.exit(255 if "-P" in sys.argv else 99)
             print(open(path + ".fake-public").read().strip())
             sys.exit(0)
         comment = sys.argv[sys.argv.index("-C") + 1]
@@ -609,13 +612,21 @@ class HostTest(Fixture):
         public.unlink()
         data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
         self.assertIn("Installed 12 encrypted secrets", self.ok("install", stdin=data))
-        self.assertIn('/ssh-keygen", "-y", "-f", "' + str(tool.HOST_KEY) + '"]', self.argv_log())
+        self.assertIn('/ssh-keygen", "-y", "-P", "", "-f", "' + str(tool.HOST_KEY) + '"]', self.argv_log())
+
+    def test_a_protected_host_key_fails_at_once_without_a_prompt(self):
+        Path(str(tool.HOST_KEY) + ".protected").write_text("")
+        data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
+        self.assertIn("ssh-keygen -y failed (exit 255)", self.refused("install", stdin=data))
+        self.assertFalse(self.host_file.exists())
 
     def test_install_refuses_a_public_key_file_for_another_key(self):
         public = Path(str(tool.HOST_KEY) + ".pub")
         public.write_text("ssh-ed25519 " + "B" * 68 + " other\n")
         data = (self.store / "hosts/app/secrets.sops.json").read_bytes()
-        self.assertIn("does not match the host key", self.refused("install", stdin=data))
+        err = self.refused("install", stdin=data)
+        self.assertIn("does not match the host key", err)
+        self.assertIn(f"remove or replace the stale {public}", err)
         self.assertFalse(self.host_file.exists())
 
     def test_install_refusals_leave_the_host_file_alone(self):

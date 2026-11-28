@@ -1069,8 +1069,13 @@ class Refusals(Harness):
 
     def test_store_path_refusals(self):
         self.tools.fail["plan-store-validity"] = 1
-        self.refused("G6: a prestaged store path is missing")
-        del self.tools.fail["plan-store-validity"]
+        self.tools.overrides["plan-store-validity-path"] = lambda argv: (1 if argv[-1] == VARIANTS["v3"] else 0, b"")
+        self.refused(r"G6: prestaged store paths missing or not valid .*: variant v3 " + re.escape(VARIANTS["v3"])
+                     + r"\. Build `install` and `variants`")
+        self.tools.overrides["plan-store-validity-path"] = lambda argv: (1 if argv[-1] in (SYSTEM, DISKO) else 0, b"")
+        self.refused(r": V0 system \(install\) .*; Disko script \(install\) ")
+        del self.tools.fail["plan-store-validity"], self.tools.overrides["plan-store-validity-path"]
+        self.refused("is not called nix-store", self.config(nix_store=str(self.bin / "nix")))
         self.tools.overrides["plan-store-roots"] = lambda argv: (0, b"/elsewhere -> x\n")
         self.refused("G6: lease is not a GC root")
         del self.tools.overrides["plan-store-roots"]
@@ -1499,6 +1504,43 @@ class UnreadableTools(Harness):
         with self.assertRaises(driver.Refused) as caught:
             driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
         self.assertIn(f"the directory {sbin} on its resolved path", str(caught.exception))
+
+    def test_a_bad_grandparent_or_world_writable_directory_refuses(self):
+        for which, mode in (("grandparent", 0o40755), ("grandparent", 0o40757), ("parent", 0o40757)):
+            with self.subTest(directory=which, mode=oct(mode)):
+                self.setUp()
+                sbin = Path(os.path.realpath(self.sbin))
+                bad = sbin.parent if which == "grandparent" else sbin
+                uid = 1000 if mode == 0o40755 else 0
+                self.unreadable(directory_stat=lambda path, bad=bad, mode=mode, uid=uid:
+                                FakeStat(uid=uid, mode=mode) if Path(os.path.realpath(path)) == bad else FakeStat(mode=0o40755))
+                with self.assertRaises(driver.Refused) as caught:
+                    driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+                self.assertIn(f"the directory {bad} on its resolved path", str(caught.exception))
+
+    def test_a_world_writable_unreadable_file_refuses(self):
+        self.unreadable(file_stat=FakeStat(mode=0o104517))
+        with self.assertRaises(driver.Refused):
+            driver.resolve_tool(str(self.sbin / "sudo"), str(self.tmp / "store"))
+
+    def test_only_permission_denied_selects_the_attribute_form(self):
+        sudo = os.path.realpath(self.sbin / "sudo")
+
+        def missing(path):
+            raise FileNotFoundError(2, "gone")
+        with mock.patch.object(driver, "sha256_file", side_effect=missing), \
+                mock.patch.object(driver, "file_status", return_value=FakeStat()):
+            with self.assertRaises(FileNotFoundError):
+                driver.resolve_tool(sudo, str(self.tmp / "store"))
+
+    def test_a_changed_binding_is_named_in_the_refusal(self):
+        stats = self.unreadable()
+        digest = self.plan(self.config())
+        stats["file"].st_ino = 99
+        d = driver.Driver(self.config(), self.tools, out=self.out, err=self.err, now=lambda: FIXED)
+        self.assertEqual(d.run(digest), driver.EXIT_INPUTS)
+        self.assertIn("tools whose binding changed: sudo (attributes.inode)", self.err.getvalue())
+        self.assertIn("make and approve the plan again", self.err.getvalue())
 
     def test_a_directory_owned_by_another_user_refuses(self):
         self.unreadable(directory_stat=lambda path: FakeStat(uid=1000, mode=0o40755))
